@@ -217,6 +217,11 @@ const NOTHING_TO_SEND: Record<Extract<Settlement, { action: "none" }>["why"], st
   unexpected_ruling: "the ruling is not a value the settlement knows: a person reads it",
 };
 
+const FINAL_TIE = "the court finalised a tie: the escrow waits for the expiry, then --claim-refund";
+
+/** The statuses at which a settlement reads the ruling when the row holds none. */
+const UNREAD_STATUSES: ReadonlySet<string> = new Set(["filed", "evidence_unknown", "ruled"]);
+
 async function settle(
   ctx: PilotContext,
   deps: PilotSettlementDeps,
@@ -226,7 +231,21 @@ async function settle(
   const mode = ctx.cfg.pilot?.mode;
   if (o.script !== undefined && mode !== "rehearsal")
     refuse(`--script is accepted in rehearsal mode only, and this box is in ${mode} mode`);
-  // In a rehearsal the re-read comes from a fresh fake, so it answers the verdict at once.
+  // A rehearsal case that holds a read is settled from it. One with none yet is read once, from
+  // a fresh fake that answers its script's verdict at once, so the script must be the filing's.
+  const row = ctx.cases.find(caseId);
+  if (
+    row !== undefined &&
+    row.mode === "rehearsal" &&
+    row.klerosChain === "fake" &&
+    row.rulingReadAt === null &&
+    UNREAD_STATUSES.has(row.status) &&
+    !o.claimRefundOnly &&
+    o.script === undefined
+  )
+    refuse(
+      `case ${caseId} has no ruling read yet: pass --script with the script the case was filed with`,
+    );
   const stage = deps.buildStage(ctx.cfg, {
     script: o.script ?? DEFAULT_SCRIPT,
     readsUntilAppeal: 1,
@@ -242,10 +261,15 @@ async function settle(
     caseId,
     { send: o.yes, acceptRound: o.acceptRound, claimRefundOnly: o.claimRefundOnly },
   );
-  const row = ctx.cases.find(caseId);
-  const base = { caseId, mode: row?.mode, settlement: r.settlement, status: row?.status };
+  const after = ctx.cases.find(caseId);
+  const base = { caseId, mode: after?.mode, settlement: r.settlement, status: after?.status };
   if (r.settlement.action === "none") {
-    print({ ...base, next: `nothing to send: ${NOTHING_TO_SEND[r.settlement.why]}` });
+    // A tie read at Executed is final: no appeal period is left for it to resolve in.
+    const why =
+      r.settlement.why === "tied" && after?.rulingStatus === "Executed"
+        ? FINAL_TIE
+        : NOTHING_TO_SEND[r.settlement.why];
+    print({ ...base, next: `nothing to send: ${why}` });
     return;
   }
   if (!o.yes) {
@@ -306,7 +330,7 @@ export function registerPilotSettlementCommands(
     .option("--accept-round <n>", "act on an appealed case's ruling when round <n> is the one read")
     .option(
       "--script <name>",
-      `rehearsal mode only: the fake's script for a ruling re-read, the one the case was filed with (default ${DEFAULT_SCRIPT})`,
+      "rehearsal mode only: the script the case was filed with, needed when the case holds no ruling read yet",
     )
     .option("--yes", "confirm: send the transaction")
     .action(

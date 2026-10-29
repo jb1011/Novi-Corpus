@@ -1,4 +1,4 @@
-import { type Hex, toHex } from "viem";
+import { type Hex, TransactionReceiptNotFoundError, toHex } from "viem";
 import type { JobAdapter } from "../adapters/arc/jobAdapter";
 import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { ChainTxRevertedError, ChainTxUnconfirmedError } from "../errors";
@@ -153,8 +153,16 @@ function refuse(message: string): never {
   throw new Error(`refusing: ${message}; nothing was sent`);
 }
 
-/** The ruling of a row at `ruled`: final by construction, its options checked when it was read. */
-function rulingOfRuledRow(row: PilotCaseRecord): RulingOutcome {
+/** The periods before the first round's verdict. */
+const PRE_RULING = new Set(["Evidence", "Commit", "Vote"]);
+
+/**
+ * The ruling the row's stored read gives. At `ruled` it is final by construction, its options
+ * checked when it was read. In a rehearsal it is the only read there is: the fake that answered
+ * it is gone with its process, and a fresh one would answer its script, not the case.
+ */
+function rulingOfStoredRead(row: PilotCaseRecord): RulingOutcome {
+  if (row.rulingStatus !== null && PRE_RULING.has(row.rulingStatus)) return { kind: "pending" };
   if (row.rulingRoundCount !== null && row.rulingRoundCount > 1)
     return {
       kind: "appealed",
@@ -178,16 +186,14 @@ function rulingOfAction(action: PilotCaseRecord["settleAction"]): RulingOutcome 
   return { kind: "pending" };
 }
 
-/** The row's stored hash when its transaction is mined and succeeded; null otherwise, which says
- *  another transaction moved the escrow. */
-async function landedHash(d: SettleDeps, row: PilotCaseRecord): Promise<Hex | null> {
-  if (row.settleTxHash === null) return null;
-  const hash = row.settleTxHash as Hex;
+/** The receipt's status, or null while the node has none: the transaction is pending, or was
+ *  dropped. Any other failure of the read escapes. */
+async function receiptStatus(d: SettleDeps, hash: Hex): Promise<"success" | "reverted" | null> {
   try {
-    const receipt = await d.chain.publicClient.getTransactionReceipt({ hash });
-    return receipt.status === "success" ? hash : null;
-  } catch {
-    return null;
+    return (await d.chain.publicClient.getTransactionReceipt({ hash })).status;
+  } catch (e) {
+    if (e instanceof TransactionReceiptNotFoundError) return null;
+    throw e;
   }
 }
 
@@ -218,10 +224,11 @@ function settledLine(
  * settling (action, reason) before the transaction, then to settled with the hash.
  *
  * A row of another mode than the stage's, or at a status no settlement starts from, is refused
- * before any read. A row at `settling` is decided again from the action it chose: an escrow the
- * chain shows settled is recorded with the stored hash when that transaction succeeded (null when
- * another one moved it), and a Submitted one is sent again. An escrow settled elsewhere is
- * recorded settled with no action of ours. With `send` false only the ruling read writes.
+ * before any read. A row at `settling` with a stored hash reads that transaction's receipt first:
+ * none yet is refused, a success is recorded settled with that hash, and a revert lets the row be
+ * decided again from the action it chose, against the chain. An escrow settled elsewhere is
+ * recorded settled with no action of ours. A rehearsal row that holds a read is decided from it,
+ * whatever its age. With `send` false only the ruling read writes.
  */
 export async function settleCase(
   d: SettleDeps,
@@ -241,17 +248,32 @@ export async function settleCase(
   if (row.jobId === null) refuse(`case ${caseId} has no job id`);
   const jobId = BigInt(row.jobId);
 
+  // Our earlier send is resolved before anything else: a second transaction while the first may
+  // still land is the one thing the adapter says not to do.
+  let landed: Hex | null = null;
+  if (row.status === "settling" && row.settleTxHash !== null) {
+    const hash = row.settleTxHash as Hex;
+    const receipt = await receiptStatus(d, hash);
+    if (receipt === null)
+      refuse(
+        `case ${caseId}'s ${row.settleAction} ${hash} has no receipt yet; wait until it is mined or dropped, then run again`,
+      );
+    if (receipt === "success") landed = hash;
+  }
+
   let ruling: RulingOutcome;
   if (row.status === "settling" || row.status === "settled")
     ruling = rulingOfAction(row.settleAction);
   // The expiry path does not depend on the ruling, so a Kleros outage does not hold it up.
   else if (opts.claimRefundOnly) ruling = { kind: "pending" };
+  else if (row.klerosChain === "fake" && row.rulingReadAt !== null)
+    ruling = rulingOfStoredRead(row);
   else if (
     row.status === "ruled" &&
     row.rulingReadAt !== null &&
     nowSec() - row.rulingReadAt < RULING_FRESH_SECONDS
   )
-    ruling = rulingOfRuledRow(row);
+    ruling = rulingOfStoredRead(row);
   else {
     ruling = (
       await pollOnce({ stage: d.stage, cases: d.cases, expected: d.expected, now: nowMs }, caseId)
@@ -266,6 +288,10 @@ export async function settleCase(
     coreDisputeId: row.coreDisputeId ?? undefined,
   });
 
+  if (landed !== null && settlement.action !== "none")
+    refuse(
+      `case ${caseId}'s ${row.settleAction} ${landed} succeeded but the chain shows job ${jobId} at status ${escrow.status}; read the chain before acting`,
+    );
   if (row.status === "settled") {
     if (settlement.action !== "none")
       refuse(
@@ -278,20 +304,24 @@ export async function settleCase(
   if (settlement.action === "none") {
     if (settlement.why !== "released_elsewhere" && settlement.why !== "refunded_elsewhere")
       return { settlement };
-    return recordElsewhere(d, row, escrow, settlement, nowSec());
+    return recordElsewhere(d, row, escrow, settlement, nowSec(), landed);
   }
+  const referee = d.chain.addresses.referee;
+  if (escrow.evaluator.toLowerCase() !== referee.toLowerCase())
+    refuse(`job ${jobId}'s evaluator is ${escrow.evaluator} and the referee is ${referee}`);
   return send(d, row, jobId, settlement, nowSec);
 }
 
-/** The escrow is settled on chain: the row follows it, with our hash only if ours did it. */
-async function recordElsewhere(
+/** The escrow is settled on chain: the row follows it, with our hash only when its receipt
+ *  says our transaction succeeded. */
+function recordElsewhere(
   d: SettleDeps,
   row: PilotCaseRecord,
   escrow: EscrowState,
   settlement: NoAction,
   at: number,
-): Promise<{ settlement: Settlement }> {
-  const hash = row.status === "settling" ? await landedHash(d, row) : null;
+  hash: Hex | null,
+): { settlement: Settlement } {
   const action = hash === null ? "none" : row.settleAction;
   d.cases.transaction(() => {
     const moved = d.cases.advance(row.caseId, row.status, "settled", {
@@ -306,7 +336,7 @@ async function recordElsewhere(
       "settle",
       "chain",
       hash,
-      `the chain shows the job ${STATUS_NAME[escrow.status] ?? escrow.status}${hash === null ? ", moved by another transaction" : ""}`,
+      `the chain shows the job ${STATUS_NAME[escrow.status] ?? escrow.status}${hash === null ? ", moved by a transaction whose hash this row does not hold; the hash of our own send may be unknown" : ""}`,
     );
   });
   settledLine(row, action, hash);
@@ -348,7 +378,8 @@ async function send(
     const sent =
       e instanceof ChainTxRevertedError || e instanceof ChainTxUnconfirmedError ? e.txHash : null;
     d.cases.transaction(() => {
-      if (sent !== null) d.cases.patch(caseId, { settleTxHash: sent });
+      // Only while the row is still ours to write: a concurrent run may have settled it.
+      if (sent !== null) d.cases.advance(caseId, "settling", "settling", { settleTxHash: sent });
       d.cases.recordEvent(
         caseId,
         "settle",
@@ -369,13 +400,22 @@ async function send(
       settledAt: nowSec(),
       escrowOutcome: settlement.outcome,
     });
-    if (!moved)
-      throw new Error(
-        `pilot case ${caseId} left settling while ${action} ${txHash} was sent; read the chain before acting`,
-      );
-    d.cases.recordEvent(caseId, "settle", "ok", txHash, action);
+    if (moved) d.cases.recordEvent(caseId, "settle", "ok", txHash, action);
     return moved;
   });
+  if (!settled) {
+    // The transaction succeeded: its hash stays on the trail even though the row moved away.
+    d.cases.recordEvent(
+      caseId,
+      "settle",
+      "sent",
+      txHash,
+      `${action} succeeded after the row left settling`,
+    );
+    throw new Error(
+      `pilot case ${caseId} left settling while ${action} ${txHash} was sent; read the chain before acting`,
+    );
+  }
   settledLine(settled, action, txHash);
   return { settlement, txHash };
 }

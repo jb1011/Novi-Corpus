@@ -65,6 +65,7 @@ function makeFake(o: { chainStatus?: number; mode?: PilotMode } = {}) {
   const chain = {
     job,
     wallets: { referee: { name: "referee" } },
+    addresses: { referee: "0x0000000000000000000000000000000000000003" },
   } as unknown as PilotChain;
   const fake = new FakeDisputeService({
     script: "pay",
@@ -148,7 +149,7 @@ describe("pilot:settle", () => {
   test("without --yes it prints the decision and sends nothing", async () => {
     const f = makeFake();
     const caseId = seed(f);
-    const [out] = await f.run(["pilot:settle", "--case", caseId]);
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--script", "pay"]);
     expect(out).toMatchObject({
       dryRun: true,
       caseId,
@@ -163,7 +164,7 @@ describe("pilot:settle", () => {
   test("with --yes it sends the decision and prints the hash", async () => {
     const f = makeFake();
     const caseId = seed(f);
-    const outs = await f.run(["pilot:settle", "--case", caseId, "--yes"]);
+    const outs = await f.run(["pilot:settle", "--case", caseId, "--script", "pay", "--yes"]);
     const out = outs.find((o) => o.opslog === undefined);
     expect(out).toMatchObject({
       caseId,
@@ -186,10 +187,7 @@ describe("pilot:settle", () => {
 
   test("--accept-round acts on the appealed round it names", async () => {
     const f = makeFake();
-    const caseId = seed(f, {
-      status: "filed",
-      patch: { rulingReadAt: NOW },
-    });
+    const caseId = seed(f, { status: "filed" });
     // A read of a second round: the fake answers round one, so the stage is a stub here.
     const stub = {
       deployment: "testnet",
@@ -209,8 +207,9 @@ describe("pilot:settle", () => {
       }),
     };
     (f.fake as unknown as { getDispute: unknown }).getDispute = stub.getDispute;
-    const [held] = await f.run(["pilot:settle", "--case", caseId]);
+    const [held] = await f.run(["pilot:settle", "--case", caseId, "--script", "pay"]);
     expect(held).toMatchObject({ settlement: { action: "none", why: "appealed" } });
+    // The rehearsal row now holds the appealed read, so the second run decides from it.
     const [taken] = await f.run(["pilot:settle", "--case", caseId, "--accept-round", "2"]);
     expect(taken).toMatchObject({ settlement: { action: "reject" } });
   });
@@ -230,6 +229,43 @@ describe("pilot:settle", () => {
     await expect(f.run(argv)).rejects.toThrow(message);
     expect(f.opened()).toBe(0);
     expect(f.sent).toEqual([]);
+  });
+
+  test("a rehearsal case with no ruling read yet needs --script, and nothing is read without it", async () => {
+    const f = makeFake();
+    const caseId = seed(f);
+    await expect(f.run(["pilot:settle", "--case", caseId])).rejects.toThrow(
+      /--script.*the case was filed with/,
+    );
+    expect(f.fake.calls).toEqual([]);
+    expect(f.closed()).toBe(1);
+  });
+
+  test("a rehearsal case holding a read settles from it without --script", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "ruled",
+      patch: { rulingValue: "2", rulingTied: 0, rulingRoundCount: 1, rulingReadAt: NOW - 3600 },
+    });
+    const [out] = await f.run(["pilot:settle", "--case", caseId]);
+    expect(out).toMatchObject({ settlement: { action: "reject" } });
+    expect(f.fake.calls).toEqual([]);
+  });
+
+  test("a tie the court finalised waits for the expiry; a tie in the appeal period polls again", async () => {
+    const f = makeFake();
+    const tie = { rulingValue: "0", rulingTied: 1, rulingRoundCount: 1, rulingReadAt: NOW };
+    const final = seed(f, { status: "ruled", patch: { ...tie, rulingStatus: "Executed" } });
+    const [a] = await f.run(["pilot:settle", "--case", final]);
+    expect(a).toMatchObject({ settlement: { why: "tied" } });
+    expect(String(a!.next)).toMatch(/the court finalised a tie: the escrow waits for the expiry/);
+    expect(String(a!.next)).toMatch(/--claim-refund/);
+    const open = seed(f, {
+      status: "filed",
+      patch: { ...tie, rulingStatus: "Appeal", jobId: "8" },
+    });
+    const [b] = await f.run(["pilot:settle", "--case", open]);
+    expect(String(b!.next)).toMatch(/poll again/);
   });
 
   test("a case of another mode is refused, and the context is closed", async () => {
