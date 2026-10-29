@@ -16,6 +16,7 @@ import {
   pollUntilRuled,
 } from "../pilot/ruling";
 import { publicErrorMessage } from "../workflow/publicError";
+import { parseCaseId, refuse } from "./pilot";
 
 /**
  * THE PILOT'S SETTLEMENT COMMANDS: reading a filed case's ruling from Kleros.
@@ -63,24 +64,14 @@ function parseScript(value: string | undefined): FakeScript | undefined {
   return value as FakeScript;
 }
 
-const CASE_ID = /^pc_[0-9a-f]{12}$/;
 const DEFAULT_MAX_MINUTES = 180;
-/** Three digits of minutes: a watch of at most about a week. */
+/** Up to four digits of minutes: a watch of at most 9999 minutes, about a week. */
 const MAX_MINUTES = /^[1-9][0-9]{0,3}$/;
 /** What the settlement step will decide from the outcome; this command decides nothing. */
 const SETTLEMENT = "decided by pilot:settle";
 
-function refuse(message: string): never {
-  throw new Error(`refusing: ${message}`);
-}
-
 function print(output: Record<string, unknown>): void {
   console.log(JSON.stringify(output, null, 2));
-}
-
-function parseCaseId(value: string): string {
-  if (!CASE_ID.test(value)) refuse("--case must be a pilot case id (pc_ and 12 hex digits)");
-  return value;
 }
 
 function parseMaxMinutes(value: string | undefined, watch: boolean): number {
@@ -179,7 +170,7 @@ export function registerPilotSettlementCommands(
     .action(
       async (opts: { case: string; watch?: boolean; maxMinutes?: string; script?: string }) => {
         // Options are parsed before the context opens, so a bad one never opens the database.
-        const caseId = parseCaseId(opts.case);
+        const caseId = parseCaseId("--case", opts.case);
         const maxMinutes = parseMaxMinutes(opts.maxMinutes, !!opts.watch);
         const script = parseScript(opts.script);
         const ctx = deps.open();

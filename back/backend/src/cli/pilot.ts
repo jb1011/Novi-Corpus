@@ -107,7 +107,7 @@ const UINT256_MAX = (1n << 256n) - 1n;
 /** At least one whole byte of hex. */
 const WHOLE_BYTES_HEX = /^0x(?:[0-9a-fA-F]{2})+$/;
 
-function refuse(message: string): never {
+export function refuse(message: string): never {
   throw new Error(`refusing: ${message}`);
 }
 
@@ -473,7 +473,7 @@ function parseTxHash(option: string, value: string): Hex {
   return value.toLowerCase() as Hex;
 }
 
-function parseCaseId(option: string, value: string): string {
+export function parseCaseId(option: string, value: string): string {
   if (!CASE_ID.test(value)) refuse(`${option} must be a pilot case id (pc_ and 12 hex digits)`);
   return value;
 }
