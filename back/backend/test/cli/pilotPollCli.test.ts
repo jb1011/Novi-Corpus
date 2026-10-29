@@ -14,8 +14,9 @@ import { registerPilotSettlementCommands } from "../../src/cli/pilotSettlement";
 import type { Config } from "../../src/config/env";
 import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
-import type { KlerosStage } from "../../src/pilot/composition";
+import type { KlerosStage, PilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
+import { reasonFor } from "../../src/pilot/settlement";
 import type { KlerosChainOnRow, PilotCaseRecord, PilotMode } from "../../src/pilot/types";
 
 /** Spelled by code point: the repository keeps the character itself out of its sources. */
@@ -83,6 +84,19 @@ async function makeFake(
                 return stage;
               },
             }),
+        // The escrow the settlement line is decided on: a submitted job a week from expiry.
+        buildChain: () =>
+          ({
+            job: {
+              escrowState: async () => ({
+                status: 2,
+                budget: 2_000_000n,
+                expiredAt: BigInt(Math.floor(T0 / 1000) + 7 * 86_400),
+                client: "0x0000000000000000000000000000000000000001",
+                evaluator: "0x0000000000000000000000000000000000000003",
+              }),
+            },
+          }) as unknown as PilotChain,
         now: () => clock.now,
         sleep: async (ms) => {
           clock.now += ms;
@@ -102,6 +116,8 @@ async function makeFake(
   const caseId = seed(cases, { mode, coreDisputeId: created.coreDisputeId });
   return { ...out, caseId };
 }
+
+let jobIds = 0;
 
 function seed(
   cases: SqlitePilotCaseRepository,
@@ -127,6 +143,8 @@ function seed(
     deliverableExtension: null,
   });
   const patch: Partial<PilotCaseRecord> = {
+    // The job id is unique per row; the stub escrow answers the same job for every id.
+    jobId: String(++jobIds),
     klerosChain: o.klerosChain ?? "fake",
     coreDisputeId: o.coreDisputeId,
   };
@@ -137,7 +155,7 @@ function seed(
 const disputeGets = (f: Fake) => f.fake.calls.filter((c) => c.tool === "dispute_get");
 
 describe("pilot:poll: one read", () => {
-  test("prints the read, the outcome, the row's status and the settlement seam", async () => {
+  test("prints the read, the outcome, the row's status and the settlement it would take", async () => {
     const f = await makeFake();
     const [out] = await f.run(["pilot:poll", "--case", f.caseId]);
     expect(out).toMatchObject({
@@ -151,7 +169,7 @@ describe("pilot:poll: one read", () => {
       },
       outcome: { kind: "pending" },
       status: "filed",
-      settlement: "decided by pilot:settle",
+      settlement: { action: "none", why: "ruling_pending" },
     });
     expect((out as { read: { deadline: string } }).read.deadline).toBe(
       new Date(T0 + 10 * 60_000).toISOString(),
@@ -186,7 +204,11 @@ describe("pilot:poll --watch", () => {
       capped: false,
       outcome: { kind: "pay" },
       status: "ruled",
-      settlement: "decided by pilot:settle",
+      settlement: {
+        action: "complete",
+        reason: reasonFor(f.cases.find(f.caseId)!.coreDisputeId!),
+        outcome: "released",
+      },
     });
     expect(f.closed()).toBe(1);
   });
@@ -205,7 +227,7 @@ describe("pilot:poll --watch", () => {
       ["Vote", "period_overdue"],
       ["Vote", "period_overdue"],
     ]);
-    const final = outs.find((o) => (o as { settlement?: string }).settlement !== undefined);
+    const final = outs.find((o) => (o as { settlement?: unknown }).settlement !== undefined);
     expect(final).toMatchObject({
       reads: 5,
       capped: true,

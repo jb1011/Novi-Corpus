@@ -949,6 +949,59 @@ function failCase(
   };
 }
 
+/** A dispute id in decimal, as Kleros numbers it. */
+function parseDisputeId(option: string, value: string): string {
+  if (!CANONICAL_DECIMAL.test(value)) refuse(`${option} must be a dispute id in decimal`);
+  return value;
+}
+
+/**
+ * Records the dispute ids a person read in the Kleros Court interface for a case whose filing
+ * ended in doubt, and moves it from filing or filing_unknown to filed. The evidence may or may not
+ * have reached the dispute, so it is recorded as unknown. The Kleros chain was written when the
+ * case entered filing and is never changed: a row without one never got there and is refused.
+ */
+function setIds(
+  ctx: PilotContext,
+  deps: PilotCommandDeps,
+  caseId: string,
+  ids: { core: string; local: string | undefined },
+  by: string,
+  yes: boolean,
+): Record<string, unknown> {
+  return ctx.cases.transaction(() => {
+    const row = findCase(ctx, caseId);
+    if (row.status !== "filing" && row.status !== "filing_unknown")
+      refuse(`pilot case ${caseId} is at ${row.status}; ids are set at filing or filing_unknown`);
+    if (row.klerosChain === null)
+      refuse(`pilot case ${caseId} has no Kleros chain, so it was never at filing`);
+    if (row.coreDisputeId !== null && row.coreDisputeId !== ids.core)
+      refuse(`pilot case ${caseId} already holds dispute ${row.coreDisputeId}`);
+    const detail = `by ${by}`;
+    if (!yes)
+      return {
+        dryRun: true,
+        caseId,
+        from: row.status,
+        to: "filed",
+        klerosChain: row.klerosChain,
+        coreDisputeId: ids.core,
+        localDisputeId: ids.local ?? null,
+        detail,
+        next: "nothing was changed: run the same command with --yes to record the ids",
+      };
+    const moved = ctx.cases.advance(caseId, row.status, "filed", {
+      coreDisputeId: ids.core,
+      ...(ids.local === undefined ? {} : { localDisputeId: ids.local }),
+      evidenceStatus: "unknown",
+      filedAt: deps.now(),
+    });
+    if (!moved) refuse(`pilot case ${caseId} moved from ${row.status} while this command ran`);
+    ctx.cases.recordEvent(caseId, "set_ids", "ok", ids.core, detail);
+    return { case: moved, courtUrl: courtUrlOf(moved), note: PILOT_NOTE };
+  });
+}
+
 /** The statuses of a funded job before any dispute: the budget sits in the job's escrow. */
 const ESCROWED: ReadonlySet<PilotStatus> = new Set(["funded", "submitted", "contested"]);
 
@@ -1325,7 +1378,9 @@ export function registerPilotCommands(
 
   const cases = program
     .command("pilot:case")
-    .description("the pilot's cases (test data): show, list, record a Court view, mark failed");
+    .description(
+      "the pilot's cases (test data): show, list, record a Court view, set the dispute ids, mark failed",
+    );
 
   cases
     .command("show <caseId>")
@@ -1357,6 +1412,31 @@ export function registerPilotCommands(
         opts.by === undefined ? undefined : checkText("--by", opts.by, { singleLine: true });
       await withPilot(open, async (ctx) => print(seenInCourt(ctx, id, by, !!opts.yes)));
     });
+
+  cases
+    .command("set-ids <caseId>")
+    .description(
+      "record the dispute ids read in the Kleros Court for a case whose filing ended in doubt; it moves to filed with the evidence unknown",
+    )
+    .requiredOption("--core <n>", "the core dispute id, in decimal")
+    .option("--local <n>", "the local dispute id, in decimal")
+    .option("--by <name>", "who read the ids (default operator)")
+    .option("--yes", "confirm: record the ids")
+    .action(
+      async (
+        caseId: string,
+        opts: { core: string; local?: string; by?: string; yes?: boolean },
+      ) => {
+        const id = parseCaseId("the case id", caseId);
+        const core = parseDisputeId("--core", opts.core);
+        const local = opts.local === undefined ? undefined : parseDisputeId("--local", opts.local);
+        const by =
+          opts.by === undefined ? "operator" : checkText("--by", opts.by, { singleLine: true });
+        await withPilot(open, async (ctx) =>
+          print(setIds(ctx, deps, id, { core, local }, by, !!opts.yes)),
+        );
+      },
+    );
 
   cases
     .command("fail <caseId>")
