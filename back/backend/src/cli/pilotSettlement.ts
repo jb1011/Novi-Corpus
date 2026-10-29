@@ -24,7 +24,7 @@ import {
 } from "../pilot/ruling";
 import { type Settlement, decideSettlement, settleCase } from "../pilot/settlement";
 import { publicErrorMessage } from "../workflow/publicError";
-import { parseCaseId, refuse } from "./pilot";
+import { parseCaseId, refuse } from "./pilotArgs";
 
 /**
  * THE PILOT'S SETTLEMENT COMMANDS: reading a filed case's ruling from Kleros, and carrying it

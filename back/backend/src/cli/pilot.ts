@@ -69,6 +69,7 @@ import {
 import { formatUnitsUsd } from "../policy/units";
 import { withDeadline } from "../util/deadline";
 import { publicErrorMessage } from "../workflow/publicError";
+import { parseCaseId, refuse } from "./pilotArgs";
 import { registerPilotSettlementCommands } from "./pilotSettlement";
 
 /**
@@ -106,10 +107,6 @@ const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]{0,77})$/;
 const UINT256_MAX = (1n << 256n) - 1n;
 /** At least one whole byte of hex. */
 const WHOLE_BYTES_HEX = /^0x(?:[0-9a-fA-F]{2})+$/;
-
-export function refuse(message: string): never {
-  throw new Error(`refusing: ${message}`);
-}
 
 function print(output: Record<string, unknown>): void {
   console.log(JSON.stringify(output, null, 2));
@@ -425,7 +422,6 @@ const MAX_LABEL_BYTES = 64;
 const USDC_DECIMALS = 6;
 const DAY_SECONDS = 86_400;
 const DEFAULT_EXPIRY_DAYS = 7;
-const CASE_ID = /^pc_[0-9a-f]{12}$/;
 /** A USDC amount in decimal: whole units, then at most six fraction digits. */
 const USDC_DECIMAL = /^(0|[1-9][0-9]{0,11})(?:\.([0-9]{1,6}))?$/;
 
@@ -471,11 +467,6 @@ function parseTxHash(option: string, value: string): Hex {
   if (!/^0x[0-9a-fA-F]{64}$/.test(value))
     refuse(`${option} must be a transaction hash (0x and 64 hex digits)`);
   return value.toLowerCase() as Hex;
-}
-
-export function parseCaseId(option: string, value: string): string {
-  if (!CASE_ID.test(value)) refuse(`${option} must be a pilot case id (pc_ and 12 hex digits)`);
-  return value;
 }
 
 /** A free text: not blank, at most 4096 bytes, no control character (newline and tab allowed

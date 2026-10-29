@@ -201,14 +201,19 @@ export const MAX_FAILED_READS_IN_A_ROW = 5;
 
 const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-/** Why a watch stopped: a final or non-pending outcome, the time cap, or reads that kept failing. */
-export type PollStop = "outcome" | "max_minutes" | "reads_failing";
+/** Why a watch stopped: a final or non-pending outcome, the time cap, reads that kept failing,
+ *  or the service refusing the key. */
+export type PollStop = "outcome" | "max_minutes" | "reads_failing" | "auth_refused";
+
+/** The HTTP statuses of a missing, unknown or refused key: waiting does not change the answer. */
+const AUTH_REFUSED: ReadonlySet<number> = new Set([401, 403]);
 
 /**
  * Reads until the outcome is anything but `pending`, or until `maxMinutes` have passed on the
  * injected clock, then stops with the last outcome. A transport or HTTP error is written as the
  * ops line `pilot_poll_read_failed` and the watch goes on, up to `MAX_FAILED_READS_IN_A_ROW` in
- * a row; any other error, a refusal included, escapes. A stop at the cap or on failing reads
+ * a row; any other error, a refusal included, escapes. An HTTP 401 or 403 stops the watch at
+ * once with the reason `auth_refused`. A stop at the cap, on failing reads or on a refused key
  * writes the ops line `pilot_poll_capped` with its reason. `reads` counts every request, failed
  * ones included. `onRead` sees every read that answered, as it is taken.
  */
@@ -225,7 +230,7 @@ export async function pollUntilRuled(
   let reads = 0;
   let failedInARow = 0;
   let outcome: RulingOutcome = { kind: "pending" };
-  const capped = (reason: Exclude<PollStop, "outcome">) => {
+  const capped = (reason: Exclude<PollStop, "outcome">, error?: string) => {
     const row = d.cases.find(caseId);
     opsLog("pilot_poll_capped", {
       caseId,
@@ -233,6 +238,7 @@ export async function pollUntilRuled(
       klerosChain: row?.klerosChain,
       reads,
       reason,
+      ...(error === undefined ? {} : { error }),
     });
     return { outcome, reads, stop: reason };
   };
@@ -243,6 +249,8 @@ export async function pollUntilRuled(
       r = await pollOnce(d, caseId);
     } catch (e) {
       if (!(e instanceof KlerosTransportError || e instanceof KlerosHttpError)) throw e;
+      if (e instanceof KlerosHttpError && AUTH_REFUSED.has(e.status))
+        return capped("auth_refused", withoutEmDash(publicErrorMessage(e)));
       failedInARow++;
       opsLog("pilot_poll_read_failed", {
         caseId,

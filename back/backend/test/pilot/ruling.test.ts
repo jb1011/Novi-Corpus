@@ -738,6 +738,31 @@ describe("pollUntilRuled when reads fail", () => {
     await expect(pollUntilRuled(f.deps, other.caseId, {})).rejects.toThrow(/refusing/);
     expect(f.service.reads).toEqual([]);
   });
+
+  test.each([[401], [403]])(
+    "an HTTP %i stops the watch at once as auth_refused, in one ops line",
+    async (status) => {
+      // A refused key does not come back by waiting: every read after it is refused too.
+      const f = failing(() => new KlerosHttpError(status, "no"));
+      const r = await pollUntilRuled(f.deps, f.row.caseId, {});
+      expect(r).toEqual({ outcome: { kind: "pending" }, reads: 1, stop: "auth_refused" });
+      expect(f.logs).toHaveLength(1);
+      expect(f.logs[0]).toMatchObject({
+        opslog: "pilot_poll_capped",
+        caseId: f.row.caseId,
+        reads: 1,
+        reason: "auth_refused",
+        error: `Kleros Dispute Service answered HTTP ${status}`,
+      });
+      expect(f.sleeps).toEqual([]);
+    },
+  );
+
+  test("another HTTP error is ridden out like a transport error", async () => {
+    const f = failing((n) => (n === 1 ? new KlerosHttpError(500, "oops") : {}));
+    const r = await pollUntilRuled(f.deps, f.row.caseId, {});
+    expect(r).toEqual({ outcome: { kind: "pay" }, reads: 2, stop: "outcome" });
+  });
 });
 
 describe("pollOnce with a deadline that does not parse", () => {
