@@ -69,6 +69,7 @@ import {
 import { formatUnitsUsd } from "../policy/units";
 import { withDeadline } from "../util/deadline";
 import { publicErrorMessage } from "../workflow/publicError";
+import { registerPilotSettlementCommands } from "./pilotSettlement";
 
 /**
  * THE PILOT'S OPERATOR COMMANDS (Kleros pilot, test data on Arc testnet).
@@ -1441,4 +1442,6 @@ export function registerPilotCommands(
           `the Kleros check found ${result.problems.length} problem${result.problems.length === 1 ? "" : "s"}: ${result.problems.join("; ")}`,
         );
     });
+
+  registerPilotSettlementCommands(program, { open });
 }
