@@ -615,3 +615,42 @@ describe("pollOnce when the row moves during the read", () => {
     expect(t.cases.events(caseId).filter((e) => e.step === "ruling")).toEqual([]);
   });
 });
+
+describe("readRuling with options the service could not resolve", () => {
+  test.each<DisputeRead["status"]>(["Evidence", "Commit", "Vote"])(
+    "a %s read with no options, listed as unresolved, is pending",
+    (status) => {
+      const r = read({
+        status,
+        ruling: "0",
+        tied: true,
+        rulingOptions: [],
+        unresolvedFields: ["rulingOptions"],
+      });
+      expect(readRuling(r, EXPECTED)).toEqual({ kind: "pending" });
+    },
+  );
+
+  test.each<[string, Partial<DisputeRead>]>([
+    ["at Appeal", { status: "Appeal", ruling: "1" }],
+    ["at Executed", { status: "Executed", ruled: true, ruling: "2" }],
+    ["before Appeal but ruled", { status: "Vote", ruled: true, ruling: "1" }],
+  ])("a read %s with no options is a mismatch even when they are unresolved", (_name, o) => {
+    const r = read({ ...o, rulingOptions: [], unresolvedFields: ["rulingOptions"] });
+    expect(readRuling(r, EXPECTED).kind).toBe("options_mismatch");
+  });
+
+  test("a pending read with no options that are not listed as unresolved is a mismatch", () => {
+    const r = read({ status: "Vote", rulingOptions: [], unresolvedFields: ["deadline"] });
+    expect(readRuling(r, EXPECTED).kind).toBe("options_mismatch");
+  });
+
+  test("a pending read whose options are present and wrong is a mismatch", () => {
+    const r = read({
+      status: "Evidence",
+      rulingOptions: [{ value: "1", title: "Refund the client" }],
+      unresolvedFields: ["rulingOptions"],
+    });
+    expect(readRuling(r, EXPECTED).kind).toBe("options_mismatch");
+  });
+});

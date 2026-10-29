@@ -46,9 +46,15 @@ const REFUND = 2n;
 const titleKey = (t: string) => t.trim().toLowerCase();
 
 export function readRuling(read: DisputeRead, expected: Record<string, string>): RulingOutcome {
+  const pending = PRE_RULING_PERIODS.has(read.status) && !read.ruled;
+  // The service leaves the options out while it cannot resolve them, commonest on the testnet.
+  // Before a verdict that is a state to wait out; a verdict is never read without its options.
+  const unresolved =
+    read.rulingOptions.length === 0 && read.unresolvedFields.includes("rulingOptions");
+  if (pending && unresolved) return { kind: "pending" };
   const mismatch = optionsMismatch(read.rulingOptions, expected);
   if (mismatch !== null) return { kind: "options_mismatch", detail: mismatch };
-  if (PRE_RULING_PERIODS.has(read.status) && !read.ruled) return { kind: "pending" };
+  if (pending) return { kind: "pending" };
   if (read.roundCount > 1)
     return { kind: "appealed", roundCount: read.roundCount, value: read.ruling, tied: read.tied };
   // Before any vote no option leads and the service answers 0 with `tied`: a reader that ignored
