@@ -591,21 +591,22 @@ describe("pollOnce when the row moves during the read", () => {
     ["filed", "failed", { ruling: "1" }],
     ["filed", "failed", { status: "Vote", ruling: "0", tied: true }],
   ])("a %s row moved to %s is left as it is and the poll throws", async (from, to, o) => {
-    let caseId = "";
-    let cases: SqlitePilotCaseRepository | undefined;
+    // The service moves the row, so it needs the table and the id once they exist.
+    const moving: { cases?: SqlitePilotCaseRepository; caseId: string } = { caseId: "" };
     const service = stubService(() => {
-      cases!.advance(caseId, from, to);
+      moving.cases!.advance(moving.caseId, from, to);
       return read(o);
     });
     const t = setup({ stage: testnetStage(service) });
-    cases = t.cases;
+    moving.cases = t.cases;
     const row = seed(t.cases, {
       mode: "testnet",
       status: from,
       klerosChain: "arbitrum-sepolia-testnet",
       coreDisputeId: "186",
     });
-    caseId = row.caseId;
+    const caseId = row.caseId;
+    moving.caseId = caseId;
     await expect(pollOnce(t.deps, caseId)).rejects.toThrow(new RegExp(`from ${from}.*${to}`));
     const after = t.cases.find(caseId)!;
     expect(after.status).toBe(to);
