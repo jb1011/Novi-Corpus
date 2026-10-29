@@ -1,6 +1,11 @@
 import type { Command } from "commander";
+import {
+  FAKE_SCRIPTS,
+  FakeDisputeService,
+  type FakeScript,
+} from "../adapters/kleros/fakeDisputeService";
 import { type Config, DEFAULT_KLEROS_EXPECTED_OPTIONS, parseExpectedOptions } from "../config/env";
-import { type KlerosStage, buildKlerosService } from "../pilot/composition";
+import { DEFAULT_SCRIPT, type KlerosStage, buildKlerosService } from "../pilot/composition";
 import { type PilotContext, openPilotContext } from "../pilot/context";
 import { withoutEmDash } from "../pilot/job";
 import {
@@ -21,8 +26,8 @@ import { publicErrorMessage } from "../workflow/publicError";
  */
 export interface PilotSettlementDeps {
   open: () => PilotContext;
-  /** The Kleros stage the config's mode selects. */
-  buildStage: (cfg: Config) => KlerosStage;
+  /** The Kleros stage the config's mode selects; `script` is the rehearsal fake's. */
+  buildStage: (cfg: Config, o: { script: FakeScript }) => KlerosStage;
   /** Milliseconds. */
   now: () => number;
   sleep: (ms: number) => Promise<void>;
@@ -30,10 +35,33 @@ export interface PilotSettlementDeps {
 
 const defaultDeps: PilotSettlementDeps = {
   open: openPilotContext,
-  buildStage: (cfg) => buildKlerosService(cfg, {}),
+  buildStage: (cfg, o) =>
+    cfg.pilot?.mode === "rehearsal" ? rehearsalStage(o.script) : buildKlerosService(cfg, {}),
   now: Date.now,
   sleep: (ms) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
 };
+
+/**
+ * The rehearsal's fake, built to answer a dispute it did not file: a command runs in its own
+ * process, so the fake that filed the case is gone, and the read walks the named script from
+ * Evidence instead.
+ */
+function rehearsalStage(script: FakeScript): KlerosStage {
+  return {
+    mode: "rehearsal",
+    service: new FakeDisputeService({ script, answerUnknownDisputes: true }),
+    deployment: null,
+    cap: null,
+    flag: null,
+  };
+}
+
+function parseScript(value: string | undefined): FakeScript | undefined {
+  if (value === undefined) return undefined;
+  if (!(FAKE_SCRIPTS as readonly string[]).includes(value))
+    refuse(`--script must be one of ${FAKE_SCRIPTS.join(", ")}`);
+  return value as FakeScript;
+}
 
 const CASE_ID = /^pc_[0-9a-f]{12}$/;
 const DEFAULT_MAX_MINUTES = 180;
@@ -88,9 +116,13 @@ async function poll(
   deps: PilotSettlementDeps,
   caseId: string,
   watch: { maxMinutes: number } | null,
+  script: FakeScript | undefined,
 ): Promise<void> {
+  const mode = ctx.cfg.pilot?.mode;
+  if (script !== undefined && mode !== "rehearsal")
+    refuse(`--script is accepted in rehearsal mode only, and this box is in ${mode} mode`);
   const d: PollDeps = {
-    stage: deps.buildStage(ctx.cfg),
+    stage: deps.buildStage(ctx.cfg, { script: script ?? DEFAULT_SCRIPT }),
     cases: ctx.cases,
     // The rehearsal needs no Kleros key, so the config may carry no Kleros section: the
     // expected options are then the default the config would have parsed.
@@ -140,17 +172,24 @@ export function registerPilotSettlementCommands(
       "--max-minutes <n>",
       `with --watch, stop after this many minutes (default ${DEFAULT_MAX_MINUTES})`,
     )
-    .action(async (opts: { case: string; watch?: boolean; maxMinutes?: string }) => {
-      // Options are parsed before the context opens, so a bad one never opens the database.
-      const caseId = parseCaseId(opts.case);
-      const maxMinutes = parseMaxMinutes(opts.maxMinutes, !!opts.watch);
-      const ctx = deps.open();
-      try {
-        await poll(ctx, deps, caseId, opts.watch ? { maxMinutes } : null);
-      } catch (e) {
-        throw new Error(withoutEmDash(publicErrorMessage(e)));
-      } finally {
-        ctx.close();
-      }
-    });
+    .option(
+      "--script <name>",
+      `rehearsal mode only: the fake's script, which must be the one the case was filed with (default ${DEFAULT_SCRIPT})`,
+    )
+    .action(
+      async (opts: { case: string; watch?: boolean; maxMinutes?: string; script?: string }) => {
+        // Options are parsed before the context opens, so a bad one never opens the database.
+        const caseId = parseCaseId(opts.case);
+        const maxMinutes = parseMaxMinutes(opts.maxMinutes, !!opts.watch);
+        const script = parseScript(opts.script);
+        const ctx = deps.open();
+        try {
+          await poll(ctx, deps, caseId, opts.watch ? { maxMinutes } : null, script);
+        } catch (e) {
+          throw new Error(withoutEmDash(publicErrorMessage(e)));
+        } finally {
+          ctx.close();
+        }
+      },
+    );
 }

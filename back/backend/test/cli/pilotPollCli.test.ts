@@ -38,7 +38,7 @@ interface Fake {
 }
 
 async function makeFake(
-  o: { script?: FakeScript; mode?: PilotMode; stage?: KlerosStage } = {},
+  o: { script?: FakeScript; mode?: PilotMode; stage?: KlerosStage; realStage?: boolean } = {},
 ): Promise<Fake & { caseId: string }> {
   const clock = { now: T0 };
   const fake = new FakeDisputeService({ script: o.script ?? "pay", now: () => clock.now });
@@ -75,10 +75,14 @@ async function makeFake(
           opens++;
           return ctx;
         },
-        buildStage: () => {
-          out.stages++;
-          return stage;
-        },
+        ...(o.realStage
+          ? {}
+          : {
+              buildStage: () => {
+                out.stages++;
+                return stage;
+              },
+            }),
         now: () => clock.now,
         sleep: async (ms) => {
           clock.now += ms;
@@ -386,6 +390,65 @@ describe("pilot:poll --watch when reads keep failing", () => {
       outcome: { kind: "pending" },
       status: "filed",
     });
+    expect(f.closed()).toBe(1);
+  });
+});
+
+describe("pilot:poll --script: a rehearsal poll from a fresh process", () => {
+  test("the command's own fake finds a case it did not file and walks the named script", async () => {
+    const f = await makeFake({ realStage: true });
+    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch", "--script", "refund"]);
+    expect(outs.at(-1)).toMatchObject({
+      reads: 4,
+      stop: "outcome",
+      outcome: { kind: "refund" },
+      status: "ruled",
+    });
+  });
+
+  test("without --script the command's fake walks pay", async () => {
+    const f = await makeFake({ realStage: true });
+    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
+    expect(outs.at(-1)).toMatchObject({ outcome: { kind: "pay" }, status: "ruled" });
+  });
+
+  test("an unknown script is refused before the context opens", async () => {
+    const f = await makeFake({ realStage: true });
+    await expect(f.run(["pilot:poll", "--case", f.caseId, "--script", "refnud"])).rejects.toThrow(
+      /--script/,
+    );
+    expect(f.opened()).toBe(0);
+  });
+
+  test("--script outside rehearsal is refused and nothing is read", async () => {
+    const reads: unknown[] = [];
+    const service = {
+      deployment: "testnet",
+      getDispute: async (p: unknown) => {
+        reads.push(p);
+        throw new Error("must not be read");
+      },
+    } as unknown as KlerosDisputeService;
+    const f = await makeFake({
+      mode: "testnet",
+      stage: {
+        mode: "testnet",
+        service,
+        deployment: deploymentFor("testnet"),
+        cap: 10,
+        flag: "--testnet",
+      },
+    });
+    const row = seed(f.cases, {
+      mode: "testnet",
+      coreDisputeId: "186",
+      klerosChain: "arbitrum-sepolia-testnet",
+    });
+    await expect(f.run(["pilot:poll", "--case", row, "--script", "pay"])).rejects.toThrow(
+      /--script.*rehearsal/,
+    );
+    expect(reads).toEqual([]);
+    expect(f.stages).toBe(0);
     expect(f.closed()).toBe(1);
   });
 });

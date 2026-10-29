@@ -769,3 +769,32 @@ describe("pollOnce with a deadline that does not parse", () => {
     }
   });
 });
+
+describe("a rehearsal poll on a fake that did not file the dispute", () => {
+  test("with answerUnknownDisputes the fake finds the case and follows its script", async () => {
+    const clock = { now: T0 };
+    const fake = new FakeDisputeService({
+      script: "refund",
+      answerUnknownDisputes: true,
+      now: () => clock.now,
+    });
+    const s = setup({ stage: rehearsalStage(fake), clock });
+    const row = seed(s.cases, { coreDisputeId: "1042" });
+    const statuses: string[] = [];
+    const r = await pollUntilRuled(s.deps, row.caseId, {
+      onRead: (x) => statuses.push(x.read.status),
+    });
+    expect(r).toEqual({ outcome: { kind: "refund" }, reads: 4, stop: "outcome" });
+    expect(statuses).toEqual(["Evidence", "Commit", "Vote", "Appeal"]);
+    expect(s.cases.find(row.caseId)!.status).toBe("ruled");
+  });
+
+  test("without it the read still throws, and nothing is written", async () => {
+    const clock = { now: T0 };
+    const fake = new FakeDisputeService({ script: "refund", now: () => clock.now });
+    const s = setup({ stage: rehearsalStage(fake), clock });
+    const row = seed(s.cases, { coreDisputeId: "1042" });
+    await expect(pollOnce(s.deps, row.caseId)).rejects.toThrow(/dispute not found on fake/);
+    expect(s.cases.find(row.caseId)!.rulingReadAt).toBeNull();
+  });
+});
