@@ -65,7 +65,11 @@ function parseMaxMinutes(value: string | undefined, watch: boolean): number {
 
 /** One read as it is printed: the period and its deadline, the ruling fields and the note. */
 function readLine(r: PollResult): Record<string, unknown> {
-  const overdue = r.overdueMs !== undefined && r.overdueMs > PERIOD_OVERDUE_GRACE_MS;
+  const note = r.deadlineUnreadable
+    ? "deadline_unreadable"
+    : r.overdueMs !== undefined && r.overdueMs > PERIOD_OVERDUE_GRACE_MS
+      ? "period_overdue"
+      : null;
   return {
     read: {
       status: r.read.status,
@@ -73,7 +77,7 @@ function readLine(r: PollResult): Record<string, unknown> {
       tied: r.read.tied,
       roundCount: r.read.roundCount,
       deadline: r.read.deadline,
-      note: overdue ? "period_overdue" : null,
+      note,
     },
     outcome: r.outcome,
   };
@@ -112,7 +116,8 @@ async function poll(
   print({
     caseId,
     reads: r.reads,
-    capped: r.outcome.kind === "pending",
+    capped: r.stop !== "outcome",
+    stop: r.stop,
     outcome: r.outcome,
     status: ctx.cases.find(caseId)?.status,
     settlement: SETTLEMENT,

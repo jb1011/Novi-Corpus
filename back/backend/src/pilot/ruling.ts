@@ -1,8 +1,11 @@
 import type { DisputeRead } from "../adapters/kleros/disputeService";
+import { KlerosHttpError, KlerosTransportError } from "../adapters/kleros/errors";
 import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { opsLog } from "../observability/opsLog";
+import { publicErrorMessage } from "../workflow/publicError";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage } from "./composition";
+import { withoutEmDash } from "./job";
 import type { PilotCaseRecord, PilotStatus } from "./types";
 
 /**
@@ -105,6 +108,8 @@ export interface PollResult {
   outcome: RulingOutcome;
   /** How far the read's `deadline` is behind the clock, when it is behind; absent otherwise. */
   overdueMs?: number;
+  /** Set when the read has a `deadline` that is not a date, so its lateness cannot be told. */
+  deadlineUnreadable?: true;
 }
 
 /** The statuses a read is taken on. `ruled` may be read again; it stays `ruled`. */
@@ -182,49 +187,79 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
     }
     if (to !== from) d.cases.recordEvent(caseId, "ruling", outcome.kind, row.coreDisputeId, null);
   });
-  const deadlineMs = read.deadline === null ? Number.NaN : Date.parse(read.deadline);
-  const behind = at - deadlineMs;
-  return Number.isFinite(behind) && behind > 0
-    ? { read, outcome, overdueMs: behind }
-    : { read, outcome };
+  if (read.deadline === null) return { read, outcome };
+  const behind = at - Date.parse(read.deadline);
+  if (Number.isNaN(behind)) return { read, outcome, deadlineUnreadable: true };
+  return behind > 0 ? { read, outcome, overdueMs: behind } : { read, outcome };
 }
 
 const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_MAX_MINUTES = 180;
+/** A watch rides out this many failed reads in a row (an outage of the service or the network,
+ *  answered as a transport or HTTP error) and stops at the next one. */
+export const MAX_FAILED_READS_IN_A_ROW = 5;
 
 const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** Why a watch stopped: a final or non-pending outcome, the time cap, or reads that kept failing. */
+export type PollStop = "outcome" | "max_minutes" | "reads_failing";
+
 /**
  * Reads until the outcome is anything but `pending`, or until `maxMinutes` have passed on the
- * injected clock, then stops with the last outcome; a stop at the cap writes the ops line
- * `pilot_poll_capped`. `onRead` sees every read as it is taken.
+ * injected clock, then stops with the last outcome. A transport or HTTP error is written as the
+ * ops line `pilot_poll_read_failed` and the watch goes on, up to `MAX_FAILED_READS_IN_A_ROW` in
+ * a row; any other error, a refusal included, escapes. A stop at the cap or on failing reads
+ * writes the ops line `pilot_poll_capped` with its reason. `reads` counts every request, failed
+ * ones included. `onRead` sees every read that answered, as it is taken.
  */
 export async function pollUntilRuled(
   d: PollDeps,
   caseId: string,
   opts: { intervalMs?: number; maxMinutes?: number; onRead?: (r: PollResult) => void },
-): Promise<{ outcome: RulingOutcome; reads: number }> {
+): Promise<{ outcome: RulingOutcome; reads: number; stop: PollStop }> {
   const now = d.now ?? Date.now;
   const sleep = d.sleep ?? realSleep;
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
   const capMs = (opts.maxMinutes ?? DEFAULT_MAX_MINUTES) * 60_000;
   const start = now();
   let reads = 0;
+  let failedInARow = 0;
+  let outcome: RulingOutcome = { kind: "pending" };
+  const capped = (reason: Exclude<PollStop, "outcome">) => {
+    const row = d.cases.find(caseId);
+    opsLog("pilot_poll_capped", {
+      caseId,
+      mode: row?.mode,
+      klerosChain: row?.klerosChain,
+      reads,
+      reason,
+    });
+    return { outcome, reads, stop: reason };
+  };
   for (;;) {
-    const r = await pollOnce(d, caseId);
     reads++;
-    opts.onRead?.(r);
-    if (r.outcome.kind !== "pending") return { outcome: r.outcome, reads };
-    if (now() - start >= capMs) {
-      const row = d.cases.find(caseId);
-      opsLog("pilot_poll_capped", {
+    let r: PollResult;
+    try {
+      r = await pollOnce(d, caseId);
+    } catch (e) {
+      if (!(e instanceof KlerosTransportError || e instanceof KlerosHttpError)) throw e;
+      failedInARow++;
+      opsLog("pilot_poll_read_failed", {
         caseId,
-        mode: row?.mode,
-        klerosChain: row?.klerosChain,
         reads,
+        failedInARow,
+        error: withoutEmDash(publicErrorMessage(e)),
       });
-      return { outcome: r.outcome, reads };
+      if (failedInARow > MAX_FAILED_READS_IN_A_ROW) return capped("reads_failing");
+      if (now() - start >= capMs) return capped("max_minutes");
+      await sleep(intervalMs);
+      continue;
     }
+    failedInARow = 0;
+    outcome = r.outcome;
+    opts.onRead?.(r);
+    if (outcome.kind !== "pending") return { outcome, reads, stop: "outcome" };
+    if (now() - start >= capMs) return capped("max_minutes");
     await sleep(intervalMs);
   }
 }

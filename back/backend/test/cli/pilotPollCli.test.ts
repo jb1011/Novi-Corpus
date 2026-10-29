@@ -7,7 +7,8 @@ import Database from "better-sqlite3";
 import { Command } from "commander";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
-import type { KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
+import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
+import { KlerosTransportError } from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import { registerPilotSettlementCommands } from "../../src/cli/pilotSettlement";
 import type { Config } from "../../src/config/env";
@@ -298,6 +299,93 @@ describe("pilot:poll: the flags and refusals", () => {
     expect(err).toBeInstanceOf(Error);
     expect((err as Error).message).toMatch(/did not answer/);
     expect((err as Error).message).not.toContain(EM_DASH);
+    expect(f.closed()).toBe(1);
+  });
+});
+
+/** A testnet fake whose service answers every read with `answer()`, with one filed row on it. */
+async function testnetWith(answer: () => DisputeRead) {
+  const service = {
+    deployment: "testnet",
+    getDispute: async () => answer(),
+  } as unknown as KlerosDisputeService;
+  const f = await makeFake({
+    mode: "testnet",
+    stage: {
+      mode: "testnet",
+      service,
+      deployment: deploymentFor("testnet"),
+      cap: 10,
+      flag: "--testnet",
+    },
+  });
+  const caseId = seed(f.cases, {
+    mode: "testnet",
+    coreDisputeId: "186",
+    klerosChain: "arbitrum-sepolia-testnet",
+  });
+  return { ...f, caseId };
+}
+
+function voteRead(deadline: string | null): DisputeRead {
+  return {
+    status: "Vote",
+    ruling: "0",
+    tied: true,
+    ruled: false,
+    roundCount: 1,
+    rulingOptions: [
+      { value: "0x01", title: "Pay the provider" },
+      { value: "0x02", title: "Refund the client" },
+    ],
+    deadline,
+    unresolvedFields: [],
+    raw: {},
+  };
+}
+
+describe("pilot:poll: the read's note", () => {
+  test.each([
+    [19, null],
+    [20, null],
+    [21, "period_overdue"],
+  ])("a deadline %i minutes behind the clock prints the note %s", async (minutes, note) => {
+    const f = await testnetWith(() => voteRead(new Date(T0 - minutes * 60_000).toISOString()));
+    const [out] = await f.run(["pilot:poll", "--case", f.caseId]);
+    expect(out).toMatchObject({ read: { note }, outcome: { kind: "pending" } });
+  });
+
+  test("a deadline that is not a date prints deadline_unreadable", async () => {
+    const f = await testnetWith(() => voteRead("soon"));
+    const [out] = await f.run(["pilot:poll", "--case", f.caseId]);
+    expect(out).toMatchObject({ read: { deadline: "soon", note: "deadline_unreadable" } });
+  });
+
+  test("no deadline prints no note", async () => {
+    const f = await testnetWith(() => voteRead(null));
+    const [out] = await f.run(["pilot:poll", "--case", f.caseId]);
+    expect(out).toMatchObject({ read: { deadline: null, note: null } });
+  });
+});
+
+describe("pilot:poll --watch when reads keep failing", () => {
+  test("stops after the sixth failure in a row and says why", async () => {
+    const f = await testnetWith(() => {
+      throw new KlerosTransportError("Kleros dispute_get: no answer in time");
+    });
+    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
+    const opslines = outs.filter((o) => (o as { opslog?: string }).opslog !== undefined);
+    expect(
+      opslines.filter((o) => (o as { opslog: string }).opslog === "pilot_poll_read_failed"),
+    ).toHaveLength(6);
+    expect(outs.at(-1)).toMatchObject({
+      caseId: f.caseId,
+      reads: 6,
+      capped: true,
+      stop: "reads_failing",
+      outcome: { kind: "pending" },
+      status: "filed",
+    });
     expect(f.closed()).toBe(1);
   });
 });

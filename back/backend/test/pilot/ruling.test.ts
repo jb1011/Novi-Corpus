@@ -6,6 +6,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
+import { KlerosHttpError, KlerosTransportError } from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
@@ -484,7 +485,7 @@ describe("pollUntilRuled through the fake's scripts", () => {
   test("pay: the fourth read is Appeal with 1, and the row is ruled", async () => {
     const s = await rehearsal("pay");
     const r = await pollUntilRuled(s.deps, s.row.caseId, {});
-    expect(r).toEqual({ outcome: { kind: "pay" }, reads: 4 });
+    expect(r).toEqual({ outcome: { kind: "pay" }, reads: 4, stop: "outcome" });
     expect(s.sleeps).toEqual([30_000, 30_000, 30_000]);
     const row = s.cases.find(s.row.caseId)!;
     expect(row.status).toBe("ruled");
@@ -513,6 +514,7 @@ describe("pollUntilRuled through the fake's scripts", () => {
     expect(await pollUntilRuled(s.deps, s.row.caseId, {})).toEqual({
       outcome: { kind: "refused" },
       reads: 4,
+      stop: "outcome",
     });
     expect(s.cases.find(s.row.caseId)!.status).toBe("ruled");
   });
@@ -522,6 +524,7 @@ describe("pollUntilRuled through the fake's scripts", () => {
     expect(await pollUntilRuled(s.deps, s.row.caseId, {})).toEqual({
       outcome: { kind: "tied" },
       reads: 4,
+      stop: "outcome",
     });
     expect(s.cases.find(s.row.caseId)!.status).toBe("filed");
     const outcomes: string[] = [];
@@ -550,6 +553,7 @@ describe("pollUntilRuled through the fake's scripts", () => {
       mode: "rehearsal",
       klerosChain: "fake",
       reads: 361,
+      reason: "max_minutes",
     });
     const last = await pollOnce(s.deps, s.row.caseId);
     expect(last.outcome).toEqual({ kind: "pending" });
@@ -562,7 +566,7 @@ describe("pollUntilRuled through the fake's scripts", () => {
     const s = await rehearsal("stalled");
     vi.spyOn(console, "log").mockImplementation(() => {});
     const r = await pollUntilRuled(s.deps, s.row.caseId, { intervalMs: 60_000, maxMinutes: 3 });
-    expect(r).toEqual({ outcome: { kind: "pending" }, reads: 4 });
+    expect(r).toEqual({ outcome: { kind: "pending" }, reads: 4, stop: "max_minutes" });
     expect(s.sleeps).toEqual([60_000, 60_000, 60_000]);
   });
 
@@ -652,5 +656,116 @@ describe("readRuling with options the service could not resolve", () => {
       unresolvedFields: ["rulingOptions"],
     });
     expect(readRuling(r, EXPECTED).kind).toBe("options_mismatch");
+  });
+});
+
+describe("pollUntilRuled when reads fail", () => {
+  /** A testnet stage whose service answers read n with `answer(n)`: an error is thrown, a
+   *  partial read is answered over a paying Appeal read. */
+  function failing(answer: (n: number) => Error | Partial<DisputeRead>) {
+    let n = 0;
+    const service = stubService(() => {
+      const a = answer(++n);
+      if (a instanceof Error) throw a;
+      return read({ ruling: "1", ...a });
+    });
+    const t = setup({ stage: testnetStage(service) });
+    const row = seed(t.cases, {
+      mode: "testnet",
+      klerosChain: "arbitrum-sepolia-testnet",
+      coreDisputeId: "186",
+    });
+    const logs: Record<string, unknown>[] = [];
+    vi.spyOn(console, "log").mockImplementation((m) => logs.push(JSON.parse(String(m))));
+    return { ...t, row, service, logs };
+  }
+  const noAnswer = () => new KlerosTransportError("Kleros dispute_get: no answer in time");
+  const pendingRead: Partial<DisputeRead> = { status: "Vote", ruling: "0", tied: true };
+
+  test("five transport or HTTP failures in a row are logged and the watch goes on", async () => {
+    const f = failing((n) =>
+      n > 5 ? {} : n % 2 ? noAnswer() : new KlerosHttpError(429, "slow down"),
+    );
+    const r = await pollUntilRuled(f.deps, f.row.caseId, {});
+    expect(r).toEqual({ outcome: { kind: "pay" }, reads: 6, stop: "outcome" });
+    const failed = f.logs.filter((l) => l.opslog === "pilot_poll_read_failed");
+    expect(failed).toHaveLength(5);
+    expect(failed[0]).toMatchObject({
+      caseId: f.row.caseId,
+      error: "Kleros dispute_get: no answer in time",
+    });
+    expect(failed[1]).toMatchObject({ error: "Kleros Dispute Service answered HTTP 429" });
+    expect(f.logs.filter((l) => l.opslog === "pilot_poll_capped")).toEqual([]);
+    expect(f.cases.find(f.row.caseId)!.status).toBe("ruled");
+  });
+
+  test("a read that succeeds resets the count of failures in a row", async () => {
+    // Three failures, a pending read, five failures, then the verdict: never six in a row.
+    const f = failing((n) => (n === 4 ? pendingRead : n === 10 ? {} : noAnswer()));
+    const r = await pollUntilRuled(f.deps, f.row.caseId, {});
+    expect(r).toEqual({ outcome: { kind: "pay" }, reads: 10, stop: "outcome" });
+    expect(f.logs.filter((l) => l.opslog === "pilot_poll_read_failed")).toHaveLength(8);
+  });
+
+  test("the sixth failure in a row stops the watch as reads_failing", async () => {
+    const f = failing(noAnswer);
+    const r = await pollUntilRuled(f.deps, f.row.caseId, {});
+    expect(r).toEqual({ outcome: { kind: "pending" }, reads: 6, stop: "reads_failing" });
+    expect(f.logs.filter((l) => l.opslog === "pilot_poll_read_failed")).toHaveLength(6);
+    const capped = f.logs.filter((l) => l.opslog === "pilot_poll_capped");
+    expect(capped).toHaveLength(1);
+    expect(capped[0]).toMatchObject({
+      caseId: f.row.caseId,
+      mode: "testnet",
+      klerosChain: "arbitrum-sepolia-testnet",
+      reads: 6,
+      reason: "reads_failing",
+    });
+    expect(f.sleeps).toHaveLength(5);
+    expect(f.cases.find(f.row.caseId)!.rulingReadAt).toBeNull();
+  });
+
+  test("any other error escapes on the first read", async () => {
+    const f = failing(() => new Error("a bug, not an outage"));
+    await expect(pollUntilRuled(f.deps, f.row.caseId, {})).rejects.toThrow(/a bug/);
+    expect(f.service.reads).toHaveLength(1);
+    expect(f.logs).toEqual([]);
+  });
+
+  test("a refusal escapes without a read", async () => {
+    const f = failing(() => ({}));
+    const other = seed(f.cases, { mode: "rehearsal" });
+    await expect(pollUntilRuled(f.deps, other.caseId, {})).rejects.toThrow(/refusing/);
+    expect(f.service.reads).toEqual([]);
+  });
+});
+
+describe("pollOnce with a deadline that does not parse", () => {
+  test("the read is written and flagged as having an unreadable deadline", async () => {
+    const service = stubService(() => read({ status: "Vote", deadline: "next tuesday" }));
+    const t = setup({ stage: testnetStage(service) });
+    const row = seed(t.cases, {
+      mode: "testnet",
+      klerosChain: "arbitrum-sepolia-testnet",
+      coreDisputeId: "186",
+    });
+    const r = await pollOnce(t.deps, row.caseId);
+    expect(r.outcome).toEqual({ kind: "pending" });
+    expect(r.deadlineUnreadable).toBe(true);
+    expect(r.overdueMs).toBeUndefined();
+    expect(t.cases.find(row.caseId)!.rulingDeadline).toBe("next tuesday");
+  });
+
+  test("a readable or absent deadline is not flagged", async () => {
+    for (const deadline of [null, new Date(T0 - 60_000).toISOString()]) {
+      const service = stubService(() => read({ status: "Vote", deadline }));
+      const t = setup({ stage: testnetStage(service) });
+      const row = seed(t.cases, {
+        mode: "testnet",
+        klerosChain: "arbitrum-sepolia-testnet",
+        coreDisputeId: "186",
+      });
+      expect((await pollOnce(t.deps, row.caseId)).deadlineUnreadable).toBeUndefined();
+    }
   });
 });
