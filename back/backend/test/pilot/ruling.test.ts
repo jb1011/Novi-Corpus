@@ -583,3 +583,34 @@ describe("pollUntilRuled through the fake's scripts", () => {
     expect(statuses).toEqual(["Evidence", "Commit", "Vote", "Appeal"]);
   });
 });
+
+describe("pollOnce when the row moves during the read", () => {
+  test.each<[PilotStatus, PilotStatus, Partial<DisputeRead>]>([
+    ["ruled", "settling", { ruling: "1" }],
+    ["ruled", "settled", { ruling: "1" }],
+    ["filed", "failed", { ruling: "1" }],
+    ["filed", "failed", { status: "Vote", ruling: "0", tied: true }],
+  ])("a %s row moved to %s is left as it is and the poll throws", async (from, to, o) => {
+    let caseId = "";
+    let cases: SqlitePilotCaseRepository | undefined;
+    const service = stubService(() => {
+      cases!.advance(caseId, from, to);
+      return read(o);
+    });
+    const t = setup({ stage: testnetStage(service) });
+    cases = t.cases;
+    const row = seed(t.cases, {
+      mode: "testnet",
+      status: from,
+      klerosChain: "arbitrum-sepolia-testnet",
+      coreDisputeId: "186",
+    });
+    caseId = row.caseId;
+    await expect(pollOnce(t.deps, caseId)).rejects.toThrow(new RegExp(`from ${from}.*${to}`));
+    const after = t.cases.find(caseId)!;
+    expect(after.status).toBe(to);
+    expect(after.rulingReadAt).toBeNull();
+    expect(after.rulingStatus).toBeNull();
+    expect(t.cases.events(caseId).filter((e) => e.step === "ruling")).toEqual([]);
+  });
+});

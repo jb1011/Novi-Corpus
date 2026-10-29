@@ -163,17 +163,18 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
     rulingReadAt: Math.floor(at / 1000),
     rulingDeadline: read.deadline,
   };
+  // The compare-and-set is against the status seen before the request went out: a row another
+  // command moved while the read was in flight (to settling, settled or failed) is left as it is.
+  const from = row.status;
+  const to: PilotStatus = isFinal(outcome, read) ? "ruled" : from;
   d.cases.transaction(() => {
-    const current = d.cases.find(caseId);
-    if (current === undefined) throw new Error(`pilot case ${caseId} not found`);
-    if (isFinal(outcome, read) && current.status !== "ruled") {
-      const advanced = d.cases.advance(caseId, current.status, "ruled", patch);
-      if (advanced === undefined)
-        throw new Error(`pilot case ${caseId} moved from ${current.status} during the read`);
-      d.cases.recordEvent(caseId, "ruling", outcome.kind, row.coreDisputeId, null);
-    } else {
-      d.cases.patch(caseId, patch);
+    if (d.cases.advance(caseId, from, to, patch) === undefined) {
+      const found = d.cases.find(caseId)?.status ?? "missing";
+      throw new Error(
+        `pilot case ${caseId} moved from ${from} to ${found} during the read; the read was not written`,
+      );
     }
+    if (to !== from) d.cases.recordEvent(caseId, "ruling", outcome.kind, row.coreDisputeId, null);
   });
   const deadlineMs = read.deadline === null ? Number.NaN : Date.parse(read.deadline);
   const behind = at - deadlineMs;
