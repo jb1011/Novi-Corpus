@@ -377,6 +377,21 @@ function voteRead(deadline: string | null): DisputeRead {
   };
 }
 
+describe("pilot:poll on a real deployment", () => {
+  test("the watch is re-runnable on a testnet case it already ruled", async () => {
+    const f = await testnetWith(() => ({
+      ...voteRead(null),
+      status: "Appeal",
+      ruling: "1",
+      tied: false,
+    }));
+    const first = await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
+    expect(first.at(-1)).toMatchObject({ outcome: { kind: "pay" }, status: "ruled" });
+    const again = await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
+    expect(again.at(-1)).toMatchObject({ reads: 1, outcome: { kind: "pay" }, status: "ruled" });
+  });
+});
+
 describe("pilot:poll: the read's note", () => {
   test.each([
     [19, null],

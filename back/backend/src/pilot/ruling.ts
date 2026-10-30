@@ -188,8 +188,8 @@ function readableRow(
  * One read with the row's `kleros_chain`, never a config value, written to the row's ruling
  * columns with the time of the read. Advances `filed` or `evidence_unknown` to `ruled` when the
  * outcome is final (pay, refund, refused, or a tie at Executed). On a row already ruled, a read
- * that is not final keeps the stored ruling: only the time, the period and the deadline are
- * written, with an event naming the outcome. A rehearsal row at ruled is refused. Refuses,
+ * that is neither final nor an appeal keeps the stored ruling: only the time, the period and the
+ * deadline are written, with an event naming the outcome. An appeal is written in full. A rehearsal row at ruled is refused. Refuses,
  * before any request, a
  * row of another mode than the stage's, a row without a chain or a dispute id, a row at another
  * status, and a row whose chain is not the one the stage's service reads.
@@ -217,9 +217,10 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   const from = row.status;
   const final = isFinal(outcome, read);
   const to: PilotStatus = final ? "ruled" : from;
-  // A ruled case keeps its verdict against a later read that is not one (an options check the
-  // service could not resolve, an appeal, a tie in the appeal period).
-  const keepRuling = from === "ruled" && !final;
+  // A ruled case keeps its verdict against a later read that is not one: options the service
+  // could not resolve, an unexpected value, or a tie in the appeal period. An appeal is written in
+  // full, so a settle sees the new round instead of acting on the first one.
+  const keepRuling = from === "ruled" && !final && outcome.kind !== "appealed";
   const written: Partial<PilotCaseRecord> = keepRuling
     ? {
         rulingStatus: patch.rulingStatus,

@@ -20,7 +20,7 @@ import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
 import { type KlerosStage, type PilotChain, buildPilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
-import type { RulingOutcome } from "../../src/pilot/ruling";
+import { type RulingOutcome, pollOnce } from "../../src/pilot/ruling";
 import {
   EXPIRY_MARGIN_SECONDS,
   type EscrowState,
@@ -758,6 +758,34 @@ describe("settleCase: refusals and the ruling read", () => {
       expect(s.cases.find(caseId)!.status).toBe(status);
     },
   );
+
+  test("a testnet ruled pay row whose re-read showed an appeal settles nothing within ten minutes", async () => {
+    let next = appealRead("1");
+    const service = {
+      deployment: "testnet",
+      getDispute: async (): Promise<DisputeRead> => next,
+    } as unknown as KlerosDisputeService;
+    const s = setup({ service, stageMode: "testnet", deployment: deploymentFor("testnet") });
+    const caseId = seed(s, {
+      mode: "testnet",
+      patch: { klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    const poll = {
+      stage: s.stage,
+      cases: s.cases,
+      expected: EXPECTED,
+      now: () => s.clock.sec * 1000,
+    };
+    await pollOnce(poll, caseId);
+    expect(s.cases.find(caseId)!.status).toBe("ruled");
+    next = { ...appealRead("2"), roundCount: 2 };
+    s.clock.sec += 60;
+    await pollOnce(poll, caseId);
+    s.clock.sec += 60;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement).toEqual({ action: "none", why: "appealed" });
+    expect(s.node.sends).toEqual([]);
+  });
 
   test("a testnet ruled row read ten minutes ago or more is read again on its own chain", async () => {
     const reads: { chain: string; coreDisputeId: string }[] = [];

@@ -396,6 +396,30 @@ describe("pollOnce", () => {
     expect(after.rulingReadAt).toBe(Math.floor(t.clock.now / 1000));
   });
 
+  test("a re-read of a ruled row that shows an appeal writes the new round, so the appeal is not hidden", async () => {
+    let next = read({ ruling: "1" });
+    const service = stubService(() => next);
+    const t = setup({ stage: testnetStage(service) });
+    const row = seed(t.cases, {
+      mode: "testnet",
+      klerosChain: "arbitrum-sepolia-testnet",
+      coreDisputeId: "186",
+    });
+    await pollOnce(t.deps, row.caseId);
+    expect(t.cases.find(row.caseId)).toMatchObject({ status: "ruled", rulingValue: "1" });
+    next = read({ roundCount: 2, ruling: "2", deadline: "2026-11-01T00:00:00.000Z" });
+    t.clock.now += 60_000;
+    expect((await pollOnce(t.deps, row.caseId)).outcome.kind).toBe("appealed");
+    expect(t.cases.find(row.caseId)).toMatchObject({
+      status: "ruled",
+      rulingRoundCount: 2,
+      rulingValue: "2",
+      rulingTied: 0,
+      rulingReadAt: Math.floor(t.clock.now / 1000),
+      rulingDeadline: "2026-11-01T00:00:00.000Z",
+    });
+  });
+
   test("a ruled rehearsal row is refused with zero reads: a fresh fake would replay its script over the ruling", async () => {
     const s = await rehearsal("refund");
     await pollUntilRuled(s.deps, s.row.caseId, {});
@@ -415,7 +439,6 @@ describe("pollOnce", () => {
       { rulingOptions: [{ value: "1", title: "Something else" }] },
       "options_mismatch",
     ],
-    ["an appealed round", { roundCount: 2, ruling: "1" }, "appealed"],
     ["a tie at Appeal", { ruling: "0", tied: true }, "tied"],
   ])(
     "a re-read of a ruled row that is %s keeps the stored ruling and records the outcome",
