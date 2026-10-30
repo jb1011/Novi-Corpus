@@ -378,17 +378,80 @@ describe("pollOnce", () => {
     expect(s.cases.find(s.row.caseId)!.status).toBe("ruled");
   });
 
-  test("a ruled row may be read again and stays ruled", async () => {
-    const s = await rehearsal("pay");
-    await pollUntilRuled(s.deps, s.row.caseId, {});
-    expect(s.cases.find(s.row.caseId)!.status).toBe("ruled");
-    s.clock.now += 60_000;
-    const again = await pollOnce(s.deps, s.row.caseId);
+  test("a ruled row on a real deployment may be read again and stays ruled", async () => {
+    const service = stubService(() => read({ ruling: "1" }));
+    const t = setup({ stage: testnetStage(service) });
+    const row = seed(t.cases, {
+      mode: "testnet",
+      klerosChain: "arbitrum-sepolia-testnet",
+      coreDisputeId: "186",
+    });
+    await pollOnce(t.deps, row.caseId);
+    expect(t.cases.find(row.caseId)!.status).toBe("ruled");
+    t.clock.now += 60_000;
+    const again = await pollOnce(t.deps, row.caseId);
     expect(again.outcome).toEqual({ kind: "pay" });
-    const row = s.cases.find(s.row.caseId)!;
-    expect(row.status).toBe("ruled");
-    expect(row.rulingReadAt).toBe(Math.floor(s.clock.now / 1000));
+    const after = t.cases.find(row.caseId)!;
+    expect(after.status).toBe("ruled");
+    expect(after.rulingReadAt).toBe(Math.floor(t.clock.now / 1000));
   });
+
+  test("a ruled rehearsal row is refused with zero reads: a fresh fake would replay its script over the ruling", async () => {
+    const s = await rehearsal("refund");
+    await pollUntilRuled(s.deps, s.row.caseId, {});
+    const ruled = s.cases.find(s.row.caseId)!;
+    expect(ruled).toMatchObject({ status: "ruled", rulingValue: "2" });
+    const before = s.fake.calls.length;
+    await expect(pollOnce(s.deps, s.row.caseId)).rejects.toThrow(
+      /ruled \(refund\).*rehearsal ruling is final once read/,
+    );
+    expect(s.fake.calls.length).toBe(before);
+    expect(s.cases.find(s.row.caseId)).toEqual(ruled);
+  });
+
+  test.each<[string, Partial<DisputeRead>, string]>([
+    [
+      "an options mismatch",
+      { rulingOptions: [{ value: "1", title: "Something else" }] },
+      "options_mismatch",
+    ],
+    ["an appealed round", { roundCount: 2, ruling: "1" }, "appealed"],
+    ["a tie at Appeal", { ruling: "0", tied: true }, "tied"],
+  ])(
+    "a re-read of a ruled row that is %s keeps the stored ruling and records the outcome",
+    async (_name, o, kind) => {
+      let next = read({ ruling: "2" });
+      const service = stubService(() => next);
+      const t = setup({ stage: testnetStage(service) });
+      const row = seed(t.cases, {
+        mode: "testnet",
+        klerosChain: "arbitrum-sepolia-testnet",
+        coreDisputeId: "186",
+      });
+      await pollOnce(t.deps, row.caseId);
+      const ruled = t.cases.find(row.caseId)!;
+      expect(ruled).toMatchObject({ status: "ruled", rulingValue: "2" });
+      next = read({ deadline: "2026-11-01T00:00:00.000Z", ...o });
+      t.clock.now += 60_000;
+      const r = await pollOnce(t.deps, row.caseId);
+      expect(r.outcome.kind).toBe(kind);
+      const after = t.cases.find(row.caseId)!;
+      expect(after).toMatchObject({
+        status: "ruled",
+        rulingValue: "2",
+        rulingTied: ruled.rulingTied,
+        rulingLabel: ruled.rulingLabel,
+        rulingRoundCount: 1,
+        rulingReadAt: Math.floor(t.clock.now / 1000),
+        rulingDeadline: "2026-11-01T00:00:00.000Z",
+      });
+      expect(t.cases.events(row.caseId).at(-1)).toMatchObject({
+        step: "ruling",
+        status: kind,
+        ref: "186",
+      });
+    },
+  );
 
   test("a tie at Executed is final; a tie at Appeal is not", async () => {
     let next = read({ ruling: "0", tied: true });

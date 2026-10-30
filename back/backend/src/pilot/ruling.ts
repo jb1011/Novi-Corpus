@@ -94,6 +94,36 @@ function optionsMismatch(
   return null;
 }
 
+/**
+ * The ruling the row's stored read gives, rebuilt from its columns. Only a row at `ruled` yields
+ * a verdict to act on: a final read always advances the row to `ruled`, so a row still at filed
+ * or evidence_unknown that holds a pay, refund or refusal value was stopped by the options check,
+ * and that check is what it reports. A stored Evidence, Commit or Vote read is pending.
+ */
+export function rulingOfStoredRead(row: PilotCaseRecord): RulingOutcome {
+  if (
+    row.rulingStatus !== null &&
+    PRE_RULING_PERIODS.has(row.rulingStatus as DisputeRead["status"])
+  )
+    return { kind: "pending" };
+  if (row.rulingRoundCount !== null && row.rulingRoundCount > 1)
+    return {
+      kind: "appealed",
+      roundCount: row.rulingRoundCount,
+      value: row.rulingValue ?? "",
+      tied: row.rulingTied === 1,
+    };
+  if (row.rulingTied === 1) return { kind: "tied" };
+  const value = normaliseRulingValue(row.rulingValue);
+  const verdict = value === REFUSED || value === PAY || value === REFUND;
+  if (verdict && row.status !== "ruled")
+    return { kind: "options_mismatch", detail: "the stored read did not rule the case" };
+  if (value === REFUSED) return { kind: "refused" };
+  if (value === PAY) return { kind: "pay" };
+  if (value === REFUND) return { kind: "refund" };
+  return { kind: "unexpected", value: row.rulingValue ?? "" };
+}
+
 export interface PollDeps {
   stage: KlerosStage;
   cases: PilotCaseRepository;
@@ -143,6 +173,11 @@ function readableRow(
     refuse(`case ${caseId} is ${row.status}; a ruling is read at filed, evidence_unknown or ruled`);
   if (row.klerosChain === null) refuse(`case ${caseId} has no Kleros chain`);
   if (row.coreDisputeId === null) refuse(`case ${caseId} has no dispute id`);
+  // A fresh fake knows nothing of the case and would replay its script over the verdict.
+  if (d.stage.deployment === null && row.status === "ruled")
+    refuse(
+      `case ${caseId} is ruled (${rulingOfStoredRead(row).kind}); a rehearsal ruling is final once read, and a fresh fake can only replay its script: settle it with pilot:settle`,
+    );
   const stageChain = d.stage.deployment === null ? "fake" : d.stage.deployment.chain;
   if (row.klerosChain !== stageChain)
     refuse(`case ${caseId}'s dispute is on ${row.klerosChain} and this stage reads ${stageChain}`);
@@ -152,7 +187,10 @@ function readableRow(
 /**
  * One read with the row's `kleros_chain`, never a config value, written to the row's ruling
  * columns with the time of the read. Advances `filed` or `evidence_unknown` to `ruled` when the
- * outcome is final (pay, refund, refused, or a tie at Executed). Refuses, before any request, a
+ * outcome is final (pay, refund, refused, or a tie at Executed). On a row already ruled, a read
+ * that is not final keeps the stored ruling: only the time, the period and the deadline are
+ * written, with an event naming the outcome. A rehearsal row at ruled is refused. Refuses,
+ * before any request, a
  * row of another mode than the stage's, a row without a chain or a dispute id, a row at another
  * status, and a row whose chain is not the one the stage's service reads.
  */
@@ -177,15 +215,34 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   // The compare-and-set is against the status seen before the request went out: a row another
   // command moved while the read was in flight (to settling, settled or failed) is left as it is.
   const from = row.status;
-  const to: PilotStatus = isFinal(outcome, read) ? "ruled" : from;
+  const final = isFinal(outcome, read);
+  const to: PilotStatus = final ? "ruled" : from;
+  // A ruled case keeps its verdict against a later read that is not one (an options check the
+  // service could not resolve, an appeal, a tie in the appeal period).
+  const keepRuling = from === "ruled" && !final;
+  const written: Partial<PilotCaseRecord> = keepRuling
+    ? {
+        rulingStatus: patch.rulingStatus,
+        rulingReadAt: patch.rulingReadAt,
+        rulingDeadline: patch.rulingDeadline,
+      }
+    : patch;
   d.cases.transaction(() => {
-    if (d.cases.advance(caseId, from, to, patch) === undefined) {
+    if (d.cases.advance(caseId, from, to, written) === undefined) {
       const found = d.cases.find(caseId)?.status ?? "missing";
       throw new Error(
         `pilot case ${caseId} moved from ${from} to ${found} during the read; the read was not written`,
       );
     }
     if (to !== from) d.cases.recordEvent(caseId, "ruling", outcome.kind, row.coreDisputeId, null);
+    if (keepRuling)
+      d.cases.recordEvent(
+        caseId,
+        "ruling",
+        outcome.kind,
+        row.coreDisputeId,
+        "a read of the ruled case was not final; the stored ruling is kept",
+      );
   });
   if (read.deadline === null) return { read, outcome };
   const behind = at - Date.parse(read.deadline);

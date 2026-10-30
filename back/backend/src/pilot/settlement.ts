@@ -8,7 +8,7 @@ import { publicErrorMessage } from "../workflow/publicError";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage, PilotChain } from "./composition";
 import { withoutEmDash } from "./job";
-import { type RulingOutcome, pollOnce } from "./ruling";
+import { type RulingOutcome, pollOnce, rulingOfStoredRead } from "./ruling";
 import type { PilotCaseRecord, PilotStatus } from "./types";
 
 /**
@@ -153,31 +153,6 @@ function refuse(message: string): never {
   throw new Error(`refusing: ${message}; nothing was sent`);
 }
 
-/** The periods before the first round's verdict. */
-const PRE_RULING = new Set(["Evidence", "Commit", "Vote"]);
-
-/**
- * The ruling the row's stored read gives. At `ruled` it is final by construction, its options
- * checked when it was read. In a rehearsal it is the only read there is: the fake that answered
- * it is gone with its process, and a fresh one would answer its script, not the case.
- */
-function rulingOfStoredRead(row: PilotCaseRecord): RulingOutcome {
-  if (row.rulingStatus !== null && PRE_RULING.has(row.rulingStatus)) return { kind: "pending" };
-  if (row.rulingRoundCount !== null && row.rulingRoundCount > 1)
-    return {
-      kind: "appealed",
-      roundCount: row.rulingRoundCount,
-      value: row.rulingValue ?? "",
-      tied: row.rulingTied === 1,
-    };
-  if (row.rulingTied === 1) return { kind: "tied" };
-  const value = normaliseRulingValue(row.rulingValue);
-  if (value === 0n) return { kind: "refused" };
-  if (value === 1n) return { kind: "pay" };
-  if (value === 2n) return { kind: "refund" };
-  return { kind: "unexpected", value: row.rulingValue ?? "" };
-}
-
 /** The ruling a row at `settling` was acting on, from the action it chose: the decision is taken
  *  again against the chain and the clock, never against a new read. */
 function rulingOfAction(action: PilotCaseRecord["settleAction"]): RulingOutcome {
@@ -266,6 +241,8 @@ export async function settleCase(
     ruling = rulingOfAction(row.settleAction);
   // The expiry path does not depend on the ruling, so a Kleros outage does not hold it up.
   else if (opts.claimRefundOnly) ruling = { kind: "pending" };
+  // Never widen this branch beyond the fake: on a real deployment the ruling can still change on
+  // appeal, so its stored read is trusted only while fresh, and read again after that.
   else if (row.klerosChain === "fake" && row.rulingReadAt !== null)
     ruling = rulingOfStoredRead(row);
   else if (

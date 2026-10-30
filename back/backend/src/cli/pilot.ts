@@ -1411,18 +1411,14 @@ export function registerPilotCommands(
     )
     .requiredOption("--core <n>", "the core dispute id, in decimal")
     .option("--local <n>", "the local dispute id, in decimal")
-    .option("--by <name>", "who read the ids (default operator)")
+    .requiredOption("--by <name>", "who read the ids")
     .option("--yes", "confirm: record the ids")
     .action(
-      async (
-        caseId: string,
-        opts: { core: string; local?: string; by?: string; yes?: boolean },
-      ) => {
+      async (caseId: string, opts: { core: string; local?: string; by: string; yes?: boolean }) => {
         const id = parseCaseId("the case id", caseId);
         const core = parseDisputeId("--core", opts.core);
         const local = opts.local === undefined ? undefined : parseDisputeId("--local", opts.local);
-        const by =
-          opts.by === undefined ? "operator" : checkText("--by", opts.by, { singleLine: true });
+        const by = checkText("--by", opts.by, { singleLine: true });
         await withPilot(open, async (ctx) =>
           print(setIds(ctx, deps, id, { core, local }, by, !!opts.yes)),
         );

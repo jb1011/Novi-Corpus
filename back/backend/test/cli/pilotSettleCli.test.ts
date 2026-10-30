@@ -300,7 +300,18 @@ describe("pilot:poll prints the settlement it would take", () => {
   });
 });
 
+/** `--by` is required; a refusal test about another flag still passes one. */
+const withBy = (flags: string[]) => (flags.includes("--by") ? flags : [...flags, "--by", "alex"]);
+
 describe("pilot:case set-ids", () => {
+  test("--by is required, since a person attests the ids, and its absence opens nothing", async () => {
+    const f = makeFake();
+    await expect(
+      f.run(["pilot:case", "set-ids", "pc_000000000000", "--core", "312", "--yes"]),
+    ).rejects.toThrow(/--by/);
+    expect(f.opened()).toBe(0);
+  });
+
   test("moves a filing_unknown case to filed with the ids, the evidence unknown and the operator named", async () => {
     const f = makeFake();
     const caseId = seed(f, {
@@ -334,10 +345,10 @@ describe("pilot:case set-ids", () => {
     );
   });
 
-  test("moves a filing case to filed, naming the default operator", async () => {
+  test("moves a filing case to filed, naming who read the ids", async () => {
     const f = makeFake();
     const caseId = seed(f, { status: "filing", patch: { coreDisputeId: null } });
-    await f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--yes"]);
+    await f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "operator", "--yes"]);
     expect(f.cases.find(caseId)).toMatchObject({
       status: "filed",
       coreDisputeId: "312",
@@ -352,7 +363,7 @@ describe("pilot:case set-ids", () => {
   test("without --yes it changes nothing", async () => {
     const f = makeFake();
     const caseId = seed(f, { status: "filing", patch: { coreDisputeId: null } });
-    const [out] = await f.run(["pilot:case", "set-ids", caseId, "--core", "312"]);
+    const [out] = await f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "alex"]);
     expect(out).toMatchObject({ dryRun: true, from: "filing", to: "filed" });
     expect(f.cases.find(caseId)).toMatchObject({ status: "filing", coreDisputeId: null });
     expect(f.cases.events(caseId)).toEqual([]);
@@ -365,7 +376,7 @@ describe("pilot:case set-ids", () => {
       patch: { coreDisputeId: null, klerosChain: null },
     });
     await expect(
-      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--yes"]),
+      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "alex", "--yes"]),
     ).rejects.toThrow(/never at filing/);
     expect(f.cases.find(caseId)!.status).toBe("filing_unknown");
   });
@@ -376,7 +387,7 @@ describe("pilot:case set-ids", () => {
       const f = makeFake();
       const caseId = seed(f, { status });
       await expect(
-        f.run(["pilot:case", "set-ids", caseId, "--core", "287", "--yes"]),
+        f.run(["pilot:case", "set-ids", caseId, "--core", "287", "--by", "alex", "--yes"]),
       ).rejects.toThrow(/filing or filing_unknown/);
     },
   );
@@ -385,7 +396,7 @@ describe("pilot:case set-ids", () => {
     const f = makeFake();
     const caseId = seed(f, { status: "filing_unknown" });
     await expect(
-      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--yes"]),
+      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "alex", "--yes"]),
     ).rejects.toThrow(/already holds dispute 287/);
     expect(f.cases.find(caseId)!.status).toBe("filing_unknown");
   });
@@ -398,7 +409,7 @@ describe("pilot:case set-ids", () => {
   ])("%j is refused before the context opens", async (flags, message) => {
     const f = makeFake();
     await expect(
-      f.run(["pilot:case", "set-ids", "pc_000000000000", ...flags, "--yes"]),
+      f.run(["pilot:case", "set-ids", "pc_000000000000", ...withBy(flags), "--yes"]),
     ).rejects.toThrow(message);
     expect(f.opened()).toBe(0);
   });

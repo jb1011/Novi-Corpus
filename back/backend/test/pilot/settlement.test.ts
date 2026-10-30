@@ -734,6 +734,31 @@ describe("settleCase: refusals and the ruling read", () => {
     expect(s.fake.calls).toEqual([]);
   });
 
+  test.each<[PilotStatus]>([["filed"], ["evidence_unknown"]])(
+    "a rehearsal row at %s holding a verdict that did not rule the case sends nothing",
+    async (status) => {
+      // What an options mismatch leaves: an Appeal read with a value, and the row not ruled.
+      const s = setup({ script: "pay" });
+      const caseId = seed(s, {
+        status,
+        patch: {
+          rulingStatus: "Appeal",
+          rulingValue: "1",
+          rulingTied: 0,
+          rulingRoundCount: 1,
+          rulingReadAt: NOW - 60,
+        },
+      });
+      for (let run = 0; run < 2; run++) {
+        const r = await settleCase(s.deps, caseId, { send: true });
+        expect(r.settlement).toEqual({ action: "none", why: "options_mismatch" });
+      }
+      expect(s.node.sends).toEqual([]);
+      expect(s.fake.calls).toEqual([]);
+      expect(s.cases.find(caseId)!.status).toBe(status);
+    },
+  );
+
   test("a testnet ruled row read ten minutes ago or more is read again on its own chain", async () => {
     const reads: { chain: string; coreDisputeId: string }[] = [];
     const service = {

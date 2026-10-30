@@ -237,11 +237,18 @@ describe("pilot:poll --watch", () => {
     expect(outs.some((o) => (o as { opslog?: string }).opslog === "pilot_poll_capped")).toBe(true);
   });
 
-  test("the watch is re-runnable on a row it already ruled", async () => {
-    const f = await makeFake();
+  test("a second poll on a ruled rehearsal case is refused and the ruling stays as it was", async () => {
+    const f = await makeFake({ script: "refund" });
     await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
-    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
-    expect(outs.at(-1)).toMatchObject({ reads: 1, outcome: { kind: "pay" }, status: "ruled" });
+    const ruled = f.cases.find(f.caseId)!;
+    expect(ruled).toMatchObject({ status: "ruled", rulingValue: "2" });
+    const reads = disputeGets(f).length;
+    await expect(f.run(["pilot:poll", "--case", f.caseId, "--watch"])).rejects.toThrow(
+      /ruled \(refund\)/,
+    );
+    await expect(f.run(["pilot:poll", "--case", f.caseId])).rejects.toThrow(/ruled \(refund\)/);
+    expect(disputeGets(f)).toHaveLength(reads);
+    expect(f.cases.find(f.caseId)).toEqual(ruled);
   });
 });
 
