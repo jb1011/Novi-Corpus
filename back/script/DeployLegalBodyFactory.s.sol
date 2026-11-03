@@ -52,13 +52,15 @@ contract DeployLegalBodyFactory is Script {
         console2.log("");
         string memory executorLabel = executor == address(0) ? "<executor>" : vm.toString(executor);
         console2.log("ADMIN CEREMONY (in this order; pins BEFORE grants):");
-        bytes4[] memory s = ControllerSelectors.minimalGrants();
+        (bytes4[] memory s, address[] memory t) = ControllerSelectors.minimalPins(address(factory));
         string[2] memory names =
             ["LegalBodyFactory.createLegalBody", "LegalBodyFactory.scheduleOperatingAgreementUpdate"];
         require(s.length == names.length, "label drift");
         for (uint256 i = 0; i < s.length; i++) {
             console2.log(
-                string.concat("  ", vm.toString(i + 1), ". controller.setBoundTarget(<", names[i], ">, factory)")
+                string.concat(
+                    "  ", vm.toString(i + 1), ". controller.setBoundTarget(<", names[i], ">, ", vm.toString(t[i]), ")"
+                )
             );
             console2.logBytes4(s[i]);
         }
