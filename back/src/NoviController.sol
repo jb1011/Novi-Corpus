@@ -38,9 +38,12 @@ contract NoviController is AccessControlDefaultAdminRules, IERC721Receiver {
     ///         that selector.
     /// @dev    M5: the ERC-8004 registry is a third-party UPGRADEABLE proxy whose future ABI could
     ///         grow a selector colliding with one we grant. Pinning `setAgentWallet`/`setMetadata`
-    ///         to the registry address bounds that unknown. Our own audited contracts stay
-    ///         unpinned (coarse-across-targets is the intended platform-operator semantics).
-    ///         `address(0)` means "unpinned", which is why unbinding is a write of `address(0)`.
+    ///         to the registry address bounds that unknown. The registry selectors and the
+    ///         legal-body factory selectors are pinned; full-product selectors on our own
+    ///         contracts are not (coarse-across-targets is the intended platform-operator
+    ///         semantics). `address(0)` means "unpinned", which is why unbinding is a write of
+    ///         `address(0)`. Constructor pins must be contracts, once per selector; `address(0)`
+    ///         is only the admin's unpin.
     mapping(bytes4 => address) public boundTarget;
 
     /// @dev Calldata shorter than 4-byte selector + 20-byte trailing target cannot be a relay.
@@ -63,6 +66,12 @@ contract NoviController is AccessControlDefaultAdminRules, IERC721Receiver {
     /// @dev The constructor's M5 pins are two parallel arrays; a length mismatch means the deploy
     ///      script would silently pin a selector to the wrong target (or drop a pin entirely).
     error PinLengthMismatch();
+    /// @dev `address(0)` means "unpinned" in the relay, so a zero constructor pin would silently
+    ///      leave a selector unbounded; a codeless target would pin it to nothing; a duplicate
+    ///      would let a later entry overwrite an earlier one. All three are deploy-script bugs.
+    error ZeroPinTarget();
+    error PinTargetNotContract(address target);
+    error DuplicatePin(bytes4 selector);
 
     /// @notice Emitted for every relayed call. Monitoring keys off the TARGET's own events
     ///         (design §8); this is the audit trail of who asked.
@@ -104,9 +113,13 @@ contract NoviController is AccessControlDefaultAdminRules, IERC721Receiver {
         if (pins != pinTargets.length) revert PinLengthMismatch();
         for (uint256 i = 0; i < pins; i++) {
             bytes4 selector = pinSelectors[i];
+            address target = pinTargets[i];
             _requireRelayableSelector(selector);
-            boundTarget[selector] = pinTargets[i];
-            emit BoundTargetSet(selector, pinTargets[i]);
+            if (target == address(0)) revert ZeroPinTarget();
+            if (target.code.length == 0) revert PinTargetNotContract(target);
+            if (boundTarget[selector] != address(0)) revert DuplicatePin(selector);
+            boundTarget[selector] = target;
+            emit BoundTargetSet(selector, target);
         }
     }
 
