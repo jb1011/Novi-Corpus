@@ -236,6 +236,42 @@ contract LegalManagerAmendTest is LegalManagerTestBase {
         vm.expectRevert(LegalManager.NotVetoed.selector);
         lm.liftVeto(keccak256("never-vetoed"));
     }
+
+    // --- Event emission: each state change announces itself with the exact topics and data ---
+
+    function test_vetoEmitsAmendmentVetoed() public {
+        bytes32 newHash = keccak256("oa-v2");
+        vm.prank(manager);
+        lm.scheduleOperatingAgreementUpdate(newHash);
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.AmendmentVetoed(newHash);
+        vm.prank(guardian);
+        lm.cancelOperatingAgreementUpdate(newHash);
+    }
+
+    function test_liftVetoEmitsVetoLifted() public {
+        bytes32 newHash = keccak256("oa-v2");
+        vm.prank(guardian);
+        lm.cancelOperatingAgreementUpdate(newHash);
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.VetoLifted(newHash);
+        vm.prank(guardian);
+        lm.liftVeto(newHash);
+    }
+
+    function test_executeEmitsOperatingAgreementUpdated() public {
+        bytes32 newHash = keccak256("oa-v2");
+        vm.prank(manager);
+        lm.scheduleOperatingAgreementUpdate(newHash);
+        vm.warp(block.timestamp + 2 days);
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.OperatingAgreementUpdated(newHash);
+        vm.prank(manager);
+        lm.executeOperatingAgreementUpdate(newHash);
+    }
 }
 
 contract LegalManagerDissolveTest is LegalManagerTestBase {
@@ -271,6 +307,13 @@ contract LegalManagerDissolveTest is LegalManagerTestBase {
         assertEq(uint8(lm.status()), uint8(LegalManager.Status.WindingDown));
         assertEq(lm.dissolutionExecutableAt(), t0 + DELAY);
         assertEq(lm.dissolutionInitiator(), guardian);
+    }
+
+    function test_initiateEmitsDissolutionInitiated() public {
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.DissolutionInitiated(guardian, block.timestamp + DELAY);
+        vm.prank(guardian);
+        lm.initiateDissolution();
     }
 
     function test_managerCanAlsoInitiate() public {
@@ -311,6 +354,17 @@ contract LegalManagerDissolveTest is LegalManagerTestBase {
         assertEq(uint8(lm.status()), uint8(LegalManager.Status.Active));
         assertEq(lm.dissolutionExecutableAt(), 0);
         assertEq(lm.dissolutionInitiator(), address(0));
+    }
+
+    /// The manager cancels a guardian-initiated dissolution, so the cancelling role is the manager.
+    function test_cancelEmitsDissolutionVetoed() public {
+        vm.prank(guardian);
+        lm.initiateDissolution();
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.DissolutionVetoed(manager);
+        vm.prank(manager);
+        lm.cancelDissolution();
     }
 
     function test_guardianVetoesManagerInitiatedDissolution() public {
@@ -405,6 +459,20 @@ contract LegalManagerDissolveTest is LegalManagerTestBase {
         assertEq(eurc.balanceOf(address(lm)), 0);
     }
 
+    function test_sweepEmitsAssetsSweptPerToken() public {
+        _windDown();
+        address[] memory tokens = new address[](2);
+        tokens[0] = address(usdc);
+        tokens[1] = address(eurc);
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.AssetsSwept(address(usdc), treasury, 1_000_000);
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.AssetsSwept(address(eurc), treasury, 2_000_000);
+        vm.prank(manager);
+        lm.sweep(tokens, treasury);
+    }
+
     function test_sweepIsRepeatableBeforeFinalize() public {
         _windDown();
         address[] memory one = new address[](1);
@@ -430,6 +498,16 @@ contract LegalManagerDissolveTest is LegalManagerTestBase {
         lm.sweepNative(treasury);
         assertEq(treasury.balance, 5 ether);
         assertEq(address(lm).balance, 0);
+    }
+
+    function test_sweepNativeEmitsNativeSwept() public {
+        _windDown();
+        vm.deal(address(lm), 5 ether);
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.NativeSwept(treasury, 5 ether);
+        vm.prank(manager);
+        lm.sweepNative(treasury);
     }
 
     function test_strangerCannotSweep() public {
@@ -495,6 +573,14 @@ contract LegalManagerDissolveTest is LegalManagerTestBase {
     }
 
     // --- finalize (after the window) ---
+
+    function test_finalizeEmitsDissolved() public {
+        _windDown();
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.Dissolved();
+        vm.prank(manager);
+        lm.finalizeDissolution();
+    }
 
     function test_finalizeMarksDissolved() public {
         _windDown();

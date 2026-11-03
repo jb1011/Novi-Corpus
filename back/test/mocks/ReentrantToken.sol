@@ -14,10 +14,13 @@ import {AgentTreasury} from "../../src/AgentTreasury.sol";
 ///      The re-entry fires at most once (one-shot) to avoid unbounded recursion,
 ///      and only when called from the vault (to avoid interfering with setup mints).
 contract ReentrantToken is ERC20 {
+    /// @dev Which vault function the token re-enters from its transfer hook.
+    enum Mode { Spend, EmergencyWithdraw, FundOperator }
+
     AgentTreasury public vault;
     address public reentrantTo;
     uint256 public reentrantAmount;
-    bool public useEmergencyWithdraw;
+    Mode public mode;
     bool private _armed;
 
     constructor() ERC20("ReentrantToken", "RENT") {}
@@ -26,20 +29,20 @@ contract ReentrantToken is ERC20 {
         _mint(to, amount);
     }
 
-    /// @param vault_                The AgentTreasury to attack.
-    /// @param reentrantTo_          The `to` address for the re-entrant spend call (ignored for emergencyWithdraw).
-    /// @param reentrantAmount_      The amount for the re-entrant spend call (ignored for emergencyWithdraw).
-    /// @param useEmergencyWithdraw_ If true, re-enter emergencyWithdraw; otherwise re-enter spend.
+    /// @param vault_           The AgentTreasury to attack.
+    /// @param reentrantTo_     The `to` address for the re-entrant spend call (used only by Mode.Spend).
+    /// @param reentrantAmount_ The amount for the re-entrant spend or fundOperator call (ignored for emergencyWithdraw).
+    /// @param mode_            Which vault function to re-enter.
     function arm(
         address vault_,
         address reentrantTo_,
         uint256 reentrantAmount_,
-        bool useEmergencyWithdraw_
+        Mode mode_
     ) external {
         vault = AgentTreasury(vault_);
         reentrantTo = reentrantTo_;
         reentrantAmount = reentrantAmount_;
-        useEmergencyWithdraw = useEmergencyWithdraw_;
+        mode = mode_;
         _armed = true;
     }
 
@@ -47,12 +50,15 @@ contract ReentrantToken is ERC20 {
         super._update(from, to, value);
         // Fire only when:
         //   - armed (one-shot, cleared before the call to prevent unbounded recursion)
-        //   - the transfer originates from the vault (outer spend / emergencyWithdraw)
+        //   - the transfer originates from the vault (outer spend / fundOperator / emergencyWithdraw)
         if (_armed && from == address(vault)) {
             _armed = false; // disarm before re-entering to prevent infinite recursion
-            if (useEmergencyWithdraw) {
+            if (mode == Mode.EmergencyWithdraw) {
                 // msg.sender is this token == vault.guardian(), so onlyGuardian passes
                 vault.emergencyWithdraw();
+            } else if (mode == Mode.FundOperator) {
+                // msg.sender is this token == vault.operator(), so onlyOperator passes
+                vault.fundOperator(reentrantAmount);
             } else {
                 // msg.sender is this token == vault.operator(), so onlyOperator passes
                 vault.spend(reentrantTo, reentrantAmount);

@@ -6,6 +6,7 @@ import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
 import {LegalManager} from "../src/LegalManager.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 import {MockERC1271Wallet} from "./mocks/MockERC1271Wallet.sol";
+import {RevertingInitializer} from "./mocks/RevertingInitializer.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
@@ -163,6 +164,65 @@ contract LegalBodyFactoryConstructionTest is LegalBodyFactoryTestBase {
         vm.prank(next);
         factory.acceptOwnership();
         assertEq(factory.owner(), next);
+    }
+}
+
+/// @dev The constructor refusals, each tested on a fixture that never builds a factory itself.
+///      The shared fixture constructs one in `setUp`, so a broken constructor check would fail
+///      every test there at setup, before any test body that targets it runs.
+contract LegalBodyFactoryConstructorRefusalTest is Test {
+    MockIdentityRegistry internal registry;
+    LegalManager internal impl;
+    address internal novi = makeAddr("novi");
+
+    function setUp() public {
+        registry = new MockIdentityRegistry();
+        impl = new LegalManager();
+    }
+
+    /// @notice Valid input is accepted, so the refusals below cannot be a constructor that
+    ///         refuses everything.
+    function test_constructor_acceptsFreshImplementationAndRegistry() public {
+        LegalBodyFactory f = new LegalBodyFactory(address(impl), address(registry), novi);
+        assertEq(f.implementation(), address(impl));
+        assertEq(address(f.identityRegistry()), address(registry));
+    }
+
+    /// @notice A bad registry alone is refused with that registry's own address, so the
+    ///         registry check cannot be satisfied by the implementation check.
+    function test_constructor_refusesNonContractRegistryAlone() public {
+        vm.expectRevert(abi.encodeWithSelector(LegalBodyFactory.NotContract.selector, address(0xBEEF)));
+        new LegalBodyFactory(address(impl), address(0xBEEF), novi);
+    }
+
+    /// @notice A bad implementation alone is refused with that implementation's own address, so
+    ///         the implementation check cannot be satisfied by the registry check.
+    function test_constructor_refusesNonContractImplementationAlone() public {
+        vm.expectRevert(abi.encodeWithSelector(LegalBodyFactory.NotContract.selector, address(0xBEEF)));
+        new LegalBodyFactory(address(0xBEEF), address(registry), novi);
+    }
+
+    /// @notice A target with an empty `manager` whose `initialize` reverts with any error other
+    ///         than `InvalidInitialization` has not proven its initialisers are locked, so it is
+    ///         refused.
+    function test_constructor_refusesImplementationWhoseInitializeRevertsOtherwise() public {
+        RevertingInitializer bad = new RevertingInitializer();
+        vm.expectRevert(abi.encodeWithSelector(LegalBodyFactory.NotImplementation.selector, address(bad)));
+        new LegalBodyFactory(address(bad), address(registry), novi);
+    }
+
+    /// @notice A locked target that already has a manager is refused on the manager check
+    ///         alone: an initialised beacon proxy passes the initialisation probe (a second
+    ///         `initialize` reverts with `InvalidInitialization`), so only the empty-manager
+    ///         check refuses it.
+    function test_constructor_refusesLockedTargetWithManagerSet() public {
+        UpgradeableBeacon beacon = new UpgradeableBeacon(address(impl), address(this));
+        bytes memory init = abi.encodeCall(
+            LegalManager.initialize, (makeAddr("platform"), makeAddr("fpGuardian"), 1 hours, 7, "", 0, bytes32(0))
+        );
+        address proxy = address(new BeaconProxy(address(beacon), init));
+        vm.expectRevert(abi.encodeWithSelector(LegalBodyFactory.NotImplementation.selector, proxy));
+        new LegalBodyFactory(proxy, address(registry), novi);
     }
 }
 

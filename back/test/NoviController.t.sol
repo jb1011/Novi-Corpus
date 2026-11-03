@@ -1359,3 +1359,143 @@ contract NoviControllerIntegrationTest is ControllerTestBase {
         assertEq(registry.ownerOf(agentId), address(controller));
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+// Constructor input checks
+// ─────────────────────────────────────────────────────────────────────────
+
+/// @dev Each test builds a controller directly, with one argument made invalid at a time, so a
+///      refusal can only come from the check under test.
+contract NoviControllerConstructorTest is ControllerTestBase {
+    /// @dev Replaces the shared fixture, which itself builds a controller through the
+    ///      constructor. Here a broken constructor must fail the test that exercises it, not the
+    ///      setup that every test shares.
+    function setUp() public override {
+        echo = new Echo();
+    }
+
+    function _oneSelector(bytes4 s) internal pure returns (bytes4[] memory out) {
+        out = new bytes4[](1);
+        out[0] = s;
+    }
+
+    /// @notice Selectors to grant with no executor to receive them are refused, so a
+    ///         mis-scripted deployment cannot record a grant that authorizes no one.
+    function test_constructorRejectsZeroExecutorWithSelectors() public {
+        (bytes4[] memory pinSelectors, address[] memory pinTargets) = _noPins();
+        bytes4[] memory granted = _oneSelector(Echo.ping.selector);
+
+        vm.expectRevert(NoviController.ZeroExecutor.selector);
+        new NoviController(ADMIN_DELAY, admin, address(0), granted, pinSelectors, pinTargets);
+    }
+
+    /// @notice The zero-executor refusal only applies when there are selectors to grant: a
+    ///         controller deployed with no executor grants at all is valid.
+    function test_constructorAcceptsZeroExecutorWithNoSelectors() public {
+        (bytes4[] memory pinSelectors, address[] memory pinTargets) = _noPins();
+        bytes4[] memory none = new bytes4[](0);
+
+        NoviController c = new NoviController(ADMIN_DELAY, admin, address(0), none, pinSelectors, pinTargets);
+
+        assertEq(c.defaultAdmin(), admin);
+        assertFalse(c.hasRole(bytes32(Echo.ping.selector), address(0)));
+    }
+
+    /// @notice Valid input is accepted: the executor holds exactly the granted selectors, and
+    ///         the admin and the delay are recorded.
+    function test_constructorGrantsExecutorTheSelectors() public {
+        (bytes4[] memory pinSelectors, address[] memory pinTargets) = _noPins();
+        bytes4[] memory granted = _grantedSelectors();
+
+        NoviController c = new NoviController(ADMIN_DELAY, admin, executor, granted, pinSelectors, pinTargets);
+
+        assertEq(c.defaultAdmin(), admin);
+        for (uint256 i = 0; i < granted.length; i++) {
+            assertTrue(c.hasRole(bytes32(granted[i]), executor));
+        }
+        assertFalse(c.hasRole(bytes32(Echo.ping.selector), executor));
+    }
+
+    /// @notice Pins are two parallel arrays; a mismatch in either direction is refused rather
+    ///         than pinning a selector to the wrong target or dropping a pin.
+    function test_constructorRejectsPinLengthMismatch() public {
+        bytes4[] memory none = new bytes4[](0);
+        bytes4[] memory twoSelectors = new bytes4[](2);
+        twoSelectors[0] = Echo.ping.selector;
+        twoSelectors[1] = Echo.noArgs.selector;
+        address[] memory oneTarget = new address[](1);
+        oneTarget[0] = address(echo);
+
+        vm.expectRevert(NoviController.PinLengthMismatch.selector);
+        new NoviController(ADMIN_DELAY, admin, executor, none, twoSelectors, oneTarget);
+
+        bytes4[] memory oneSelector = _oneSelector(Echo.ping.selector);
+        address[] memory twoTargets = new address[](2);
+        twoTargets[0] = address(echo);
+        twoTargets[1] = address(echo);
+
+        vm.expectRevert(NoviController.PinLengthMismatch.selector);
+        new NoviController(ADMIN_DELAY, admin, executor, none, oneSelector, twoTargets);
+    }
+
+    /// @notice A zero selector would satisfy the admin role check with no grant at all, so the
+    ///         executor grant list refuses it.
+    function test_constructorRejectsZeroSelectorGrant() public {
+        (bytes4[] memory pinSelectors, address[] memory pinTargets) = _noPins();
+        bytes4[] memory granted = _oneSelector(bytes4(0));
+
+        vm.expectRevert(NoviController.InvalidSelector.selector);
+        new NoviController(ADMIN_DELAY, admin, executor, granted, pinSelectors, pinTargets);
+    }
+
+    /// @notice The same zero-selector refusal applies to a pin.
+    function test_constructorRejectsZeroSelectorPin() public {
+        bytes4[] memory none = new bytes4[](0);
+        bytes4[] memory pinSelectors = _oneSelector(bytes4(0));
+        address[] memory pinTargets = new address[](1);
+        pinTargets[0] = address(echo);
+
+        vm.expectRevert(NoviController.InvalidSelector.selector);
+        new NoviController(ADMIN_DELAY, admin, executor, none, pinSelectors, pinTargets);
+    }
+
+    /// @notice A role held by the controller itself is reachable by relaying a call back into
+    ///         its own fallback, so the constructor refuses to grant one even to the address it
+    ///         is about to be deployed at.
+    function test_constructorRejectsSelfAsExecutor() public {
+        (bytes4[] memory pinSelectors, address[] memory pinTargets) = _noPins();
+        bytes4[] memory granted = _oneSelector(Echo.ping.selector);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+
+        vm.expectRevert(NoviController.SelfRoleForbidden.selector);
+        new NoviController(ADMIN_DELAY, admin, predicted, granted, pinSelectors, pinTargets);
+    }
+
+    /// @notice Control for the test above: the predicted address is the one a deployment
+    ///         actually lands on, so that refusal cannot be a miscomputed address.
+    function test_constructorPredictedAddressMatchesDeployment() public {
+        (bytes4[] memory pinSelectors, address[] memory pinTargets) = _noPins();
+        bytes4[] memory none = new bytes4[](0);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+
+        NoviController c = new NoviController(ADMIN_DELAY, admin, executor, none, pinSelectors, pinTargets);
+
+        assertEq(address(c), predicted);
+    }
+
+    /// @notice Every constructor pin announces itself, with its own selector and target.
+    function test_constructorEmitsBoundTargetSetPerPin() public {
+        (bytes4[] memory pinSelectors, address[] memory pinTargets) = _registryPins(address(echo));
+        bytes4[] memory none = new bytes4[](0);
+        address predicted = vm.computeCreateAddress(address(this), vm.getNonce(address(this)));
+
+        vm.expectEmit(true, true, false, true, predicted);
+        emit NoviController.BoundTargetSet(pinSelectors[0], pinTargets[0]);
+        vm.expectEmit(true, true, false, true, predicted);
+        emit NoviController.BoundTargetSet(pinSelectors[1], pinTargets[1]);
+        NoviController c = new NoviController(ADMIN_DELAY, admin, executor, none, pinSelectors, pinTargets);
+
+        assertEq(c.boundTarget(pinSelectors[0]), address(echo));
+        assertEq(c.boundTarget(pinSelectors[1]), address(echo));
+    }
+}
