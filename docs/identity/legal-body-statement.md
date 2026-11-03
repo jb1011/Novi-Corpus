@@ -40,6 +40,10 @@ When several apply, `inactive` comes before `pending`, and `pending` before `unk
 
 An answer whose chain read failed also says `unknown`, with no statement at all: see the answers below.
 
+## Funds
+
+A body can hold stray funds, because it accepts native value and any ERC-20 token. The guardian recovers them by initiating a dissolution, sweeping to an address of their choice once the window has passed, and then cancelling. The statement reads `inactive` during the window. A cancelled dissolution returns the body to Active and the statement to `active` on the next read.
+
 ## Asking
 
 Both routes are public: no account, no key, and any web page may call them (CORS `*`). They are served by the API of a Novi deployment.
