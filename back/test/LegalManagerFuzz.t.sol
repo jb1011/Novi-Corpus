@@ -21,7 +21,7 @@ contract LegalManagerFuzzTest is Test {
     /// The timelock can never be skipped: execution earlier than `delay` always reverts,
     /// and at/after `delay` always succeeds.
     function testFuzz_amendmentRespectsDelay(uint256 delay, uint256 wait, bytes32 newHash) public {
-        delay = bound(delay, 1 hours, 3650 days);
+        delay = bound(delay, 1 hours, 365 days);
         wait = bound(wait, 0, 7300 days);
         LegalManager lm = _deploy(delay);
 
@@ -41,14 +41,18 @@ contract LegalManagerFuzzTest is Test {
         }
     }
 
-    /// initialize must reject any delay below the floor and accept any delay at/above it.
-    function testFuzz_initializeDelayFloor(uint256 delay) public {
+    /// initialize must reject any delay below the floor or above the ceiling and accept any delay
+    /// between them, inclusive.
+    function testFuzz_initializeDelayBounds(uint256 delay) public {
         LegalManager impl = new LegalManager();
         bytes memory data = abi.encodeCall(
             LegalManager.initialize, (manager, guardian, delay, 1, "EIN", 1, bytes32(0))
         );
         if (delay < impl.MIN_AMENDMENT_DELAY()) {
             vm.expectRevert(LegalManager.DelayTooShort.selector);
+            new ERC1967Proxy(address(impl), data);
+        } else if (delay > impl.MAX_AMENDMENT_DELAY()) {
+            vm.expectRevert(LegalManager.DelayTooLong.selector);
             new ERC1967Proxy(address(impl), data);
         } else {
             LegalManager lm = LegalManager(payable(address(new ERC1967Proxy(address(impl), data))));
