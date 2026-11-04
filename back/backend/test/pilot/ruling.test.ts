@@ -420,6 +420,36 @@ describe("pollOnce", () => {
     });
   });
 
+  test("a re-read of a ruled row during an appeal whose options could not be resolved still writes the new round", async () => {
+    let next = read({ ruling: "1" });
+    const service = stubService(() => next);
+    const t = setup({ stage: testnetStage(service) });
+    const row = seed(t.cases, {
+      mode: "testnet",
+      klerosChain: "arbitrum-sepolia-testnet",
+      coreDisputeId: "186",
+    });
+    await pollOnce(t.deps, row.caseId);
+    expect(t.cases.find(row.caseId)).toMatchObject({ status: "ruled", rulingValue: "1" });
+    next = read({
+      roundCount: 2,
+      ruling: "2",
+      rulingOptions: [],
+      unresolvedFields: ["rulingOptions"],
+    });
+    t.clock.now += 60_000;
+    expect((await pollOnce(t.deps, row.caseId)).outcome.kind).toBe("options_mismatch");
+    expect(t.cases.find(row.caseId)).toMatchObject({
+      status: "ruled",
+      rulingRoundCount: 2,
+      rulingValue: "2",
+      rulingReadAt: Math.floor(t.clock.now / 1000),
+    });
+    expect(t.cases.events(row.caseId)).toContainEqual(
+      expect.objectContaining({ step: "ruling", status: "appealed" }),
+    );
+  });
+
   test("a ruled rehearsal row is refused with zero reads: a fresh fake would replay its script over the ruling", async () => {
     const s = await rehearsal("refund");
     await pollUntilRuled(s.deps, s.row.caseId, {});

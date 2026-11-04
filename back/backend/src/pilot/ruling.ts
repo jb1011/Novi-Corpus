@@ -218,9 +218,11 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   const final = isFinal(outcome, read);
   const to: PilotStatus = final ? "ruled" : from;
   // A ruled case keeps its verdict against a later read that is not one: options the service
-  // could not resolve, an unexpected value, or a tie in the appeal period. An appeal is written in
-  // full, so a settle sees the new round instead of acting on the first one.
-  const keepRuling = from === "ruled" && !final && outcome.kind !== "appealed";
+  // could not resolve, an unexpected value, or a tie in the appeal period. A read of a later
+  // round is never kept, whatever the options check made of it: it is written in full, so a
+  // settle sees the new round instead of acting on the first one.
+  const appeal = read.roundCount > 1;
+  const keepRuling = from === "ruled" && !final && !appeal;
   const written: Partial<PilotCaseRecord> = keepRuling
     ? {
         rulingStatus: patch.rulingStatus,
@@ -236,6 +238,14 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
       );
     }
     if (to !== from) d.cases.recordEvent(caseId, "ruling", outcome.kind, row.coreDisputeId, null);
+    if (appeal && from === "ruled" && !final)
+      d.cases.recordEvent(
+        caseId,
+        "ruling",
+        "appealed",
+        row.coreDisputeId,
+        `a read of the ruled case shows round ${read.roundCount}; the read is written in full (${outcome.kind})`,
+      );
     if (keepRuling)
       d.cases.recordEvent(
         caseId,
