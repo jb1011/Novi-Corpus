@@ -258,7 +258,9 @@ export async function settleCase(
     row = d.cases.find(caseId) as PilotCaseRecord;
   }
 
+  await checkOwnJob(d, row);
   const escrow = await d.chain.job.escrowState(jobId);
+  checkEscrowIsOwn(row, jobId, escrow);
   const settlement = decideSettlement(ruling, escrow, nowSec(), {
     acceptRound: opts.acceptRound,
     claimRefundOnly: opts.claimRefundOnly,
@@ -286,7 +288,46 @@ export async function settleCase(
   const referee = d.chain.addresses.referee;
   if (escrow.evaluator.toLowerCase() !== referee.toLowerCase())
     refuse(`job ${jobId}'s evaluator is ${escrow.evaluator} and the referee is ${referee}`);
+  // The referee signs the transaction and pays its gas: found out here, nothing has moved yet.
+  let gas: bigint;
+  try {
+    gas = await d.chain.publicClient.getBalance({ address: referee });
+  } catch (e) {
+    refuse(`the referee's gas balance could not be read: ${publicErrorMessage(e)}`);
+  }
+  if (gas === 0n) refuse(`the referee's address ${referee} holds no gas to send its transaction`);
   return send(d, row, jobId, settlement, nowSec);
+}
+
+const sameAddress = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** The chain this process is connected to and the job contract it is configured with are the
+ *  row's own: a row never settles a job read from another deployment. */
+async function checkOwnJob(d: SettleDeps, row: PilotCaseRecord): Promise<void> {
+  const connected = await d.chain.publicClient.getChainId();
+  if (connected !== row.chainId)
+    refuse(
+      `case ${row.caseId} is on chain id ${row.chainId} and the connected chain is ${connected}`,
+    );
+  if (!sameAddress(d.chain.jobContract, row.jobContract))
+    refuse(
+      `case ${row.caseId}'s job contract is ${row.jobContract} and the configured job contract is ${d.chain.jobContract}`,
+    );
+}
+
+/** The job read from the chain is the one the case was made for: its buyer, its evaluator and
+ *  its expiry are the row's. */
+function checkEscrowIsOwn(row: PilotCaseRecord, jobId: bigint, escrow: EscrowState): void {
+  if (!sameAddress(escrow.client, row.buyerAddress))
+    refuse(`job ${jobId}'s client is ${escrow.client} and the case's buyer is ${row.buyerAddress}`);
+  if (!sameAddress(escrow.evaluator, row.refereeAddress))
+    refuse(
+      `job ${jobId}'s evaluator is ${escrow.evaluator} and the case's referee is ${row.refereeAddress}`,
+    );
+  if (escrow.expiredAt !== BigInt(row.expiredAt))
+    refuse(
+      `job ${jobId}'s expiredAt is ${escrow.expiredAt} and the case's expiredAt is ${row.expiredAt}`,
+    );
 }
 
 /** The escrow is settled on chain: the row follows it, with our hash only when its receipt
