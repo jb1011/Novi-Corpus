@@ -4,8 +4,10 @@ pragma solidity ^0.8.24;
 import {Test} from "forge-std/Test.sol";
 import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {ReentrancyGuardUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ReentrancyGuardUpgradeable.sol";
 import {LegalManager} from "../src/LegalManager.sol";
 import {MockUSDC} from "./mocks/MockUSDC.sol";
+import {ReentrantGuardianToken, ReentrantGuardianPayee} from "./mocks/ReentrantLegalManagerActor.sol";
 
 /// @dev Rejects native value (no receive / payable fallback) so sweepNative's call fails.
 contract NativeRejector {}
@@ -87,8 +89,11 @@ contract LegalManagerSecurityTest is Test {
         lm.sweepNative(address(rejector));
     }
 
-    // --- security: a malicious token cannot re-enter sweep ---
-    function test_reentrantTokenCannotReenterSweep() public {
+    // --- security: a token that is not an authorized role cannot sweep through re-entry ---
+    // This proves the role check. The revert holds whether or not the reentrancy guard is in
+    // place, because the token holds neither role; the guard itself is pinned by the two
+    // guardian-actor tests below.
+    function test_strangerTokenCannotSweep() public {
         ReentrantToken evil = new ReentrantToken();
         evil.mint(address(lm), 1_000);
         evil.arm(address(lm));
@@ -104,6 +109,55 @@ contract LegalManagerSecurityTest is Test {
 
         assertEq(evil.balanceOf(treasury), 0); // nothing leaked
         assertEq(evil.balanceOf(address(lm)), 1_000); // balance untouched (whole tx reverted)
+    }
+
+    /// @dev Deploys a LegalManager whose guardian is `guardian_`, already past its dissolution
+    ///      timelock so sweeps are allowed.
+    function _deployDissolvingWithGuardian(address guardian_) internal returns (LegalManager body) {
+        LegalManager impl = new LegalManager();
+        bytes memory data = abi.encodeCall(
+            LegalManager.initialize, (manager, guardian_, 2 days, 1, "EIN", 1, keccak256("oa"))
+        );
+        body = LegalManager(payable(address(new ERC1967Proxy(address(impl), data))));
+        vm.prank(manager);
+        body.initiateDissolution();
+        vm.warp(block.timestamp + 2 days);
+    }
+
+    // --- security: an authorized token is stopped by the reentrancy guard on sweep ---
+    function test_reentrantGuardianTokenCannotReenterSweep() public {
+        ReentrantGuardianToken evil = new ReentrantGuardianToken();
+        LegalManager body = _deployDissolvingWithGuardian(address(evil));
+        evil.mint(address(body), 1_000);
+        evil.arm(address(body));
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(evil);
+
+        // The token is the guardian, so the re-entrant sweep passes the role check and only the
+        // guard can refuse it.
+        vm.prank(address(evil));
+        vm.expectRevert(ReentrancyGuardUpgradeable.ReentrancyGuardReentrantCall.selector);
+        body.sweep(tokens, treasury);
+
+        assertEq(evil.balanceOf(treasury), 0);
+        assertEq(evil.balanceOf(address(body)), 1_000); // whole tx reverted
+    }
+
+    // --- security: an authorized payee is stopped by the reentrancy guard on sweepNative ---
+    function test_reentrantGuardianPayeeCannotReenterSweepNative() public {
+        ReentrantGuardianPayee evil = new ReentrantGuardianPayee();
+        LegalManager body = _deployDissolvingWithGuardian(address(evil));
+        evil.arm(address(body));
+        vm.deal(address(body), 1 ether);
+
+        // The re-entrant call inside `receive` reverts on the guard, which fails the payment.
+        vm.prank(manager);
+        vm.expectRevert(LegalManager.NativeSweepFailed.selector);
+        body.sweepNative(address(evil));
+
+        assertEq(address(evil).balance, 0);
+        assertEq(address(body).balance, 1 ether); // whole tx reverted
     }
 
     // --- branch: sweepNative rejects a caller who is neither manager nor guardian ---
