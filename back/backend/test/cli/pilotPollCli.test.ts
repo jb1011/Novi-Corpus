@@ -157,7 +157,7 @@ const disputeGets = (f: Fake) => f.fake.calls.filter((c) => c.tool === "dispute_
 describe("pilot:poll: one read", () => {
   test("prints the read, the outcome, the row's status and the settlement it would take", async () => {
     const f = await makeFake();
-    const [out] = await f.run(["pilot:poll", "--case", f.caseId]);
+    const [out] = await f.run(["pilot:poll", "--case", f.caseId, "--script", "pay"]);
     expect(out).toMatchObject({
       caseId: f.caseId,
       read: {
@@ -181,7 +181,7 @@ describe("pilot:poll: one read", () => {
 
   test("without --watch it reads once even when the outcome is pending", async () => {
     const f = await makeFake({ script: "stalled" });
-    const outs = await f.run(["pilot:poll", "--case", f.caseId]);
+    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--script", "stalled"]);
     expect(outs).toHaveLength(1);
     expect(disputeGets(f)).toHaveLength(1);
   });
@@ -190,7 +190,7 @@ describe("pilot:poll: one read", () => {
 describe("pilot:poll --watch", () => {
   test("prints each read, then the outcome with the row ruled", async () => {
     const f = await makeFake();
-    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
+    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch", "--script", "pay"]);
     expect(outs).toHaveLength(5);
     expect(outs.slice(0, 4).map((o) => (o as { read: { status: string } }).read.status)).toEqual([
       "Evidence",
@@ -215,7 +215,16 @@ describe("pilot:poll --watch", () => {
 
   test("a stalled case caps out at --max-minutes as pending with period_overdue", async () => {
     const f = await makeFake({ script: "stalled" });
-    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch", "--max-minutes", "2"]);
+    const outs = await f.run([
+      "pilot:poll",
+      "--case",
+      f.caseId,
+      "--watch",
+      "--max-minutes",
+      "2",
+      "--script",
+      "stalled",
+    ]);
     const reads = outs.filter((o) => (o as { read?: unknown }).read !== undefined) as {
       read: { status: string; note: string | null };
     }[];
@@ -239,14 +248,16 @@ describe("pilot:poll --watch", () => {
 
   test("a second poll on a ruled rehearsal case is refused and the ruling stays as it was", async () => {
     const f = await makeFake({ script: "refund" });
-    await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
+    await f.run(["pilot:poll", "--case", f.caseId, "--watch", "--script", "refund"]);
     const ruled = f.cases.find(f.caseId)!;
     expect(ruled).toMatchObject({ status: "ruled", rulingValue: "2" });
     const reads = disputeGets(f).length;
-    await expect(f.run(["pilot:poll", "--case", f.caseId, "--watch"])).rejects.toThrow(
+    await expect(
+      f.run(["pilot:poll", "--case", f.caseId, "--watch", "--script", "refund"]),
+    ).rejects.toThrow(/ruled \(refund\)/);
+    await expect(f.run(["pilot:poll", "--case", f.caseId, "--script", "refund"])).rejects.toThrow(
       /ruled \(refund\)/,
     );
-    await expect(f.run(["pilot:poll", "--case", f.caseId])).rejects.toThrow(/ruled \(refund\)/);
     expect(disputeGets(f)).toHaveLength(reads);
     expect(f.cases.find(f.caseId)).toEqual(ruled);
   });
@@ -271,9 +282,9 @@ describe("pilot:poll: the flags and refusals", () => {
 
   test("an unknown case is refused and the context is closed", async () => {
     const f = await makeFake();
-    await expect(f.run(["pilot:poll", "--case", "pc_000000000000"])).rejects.toThrow(
-      /no pilot case/,
-    );
+    await expect(
+      f.run(["pilot:poll", "--case", "pc_000000000000", "--script", "pay"]),
+    ).rejects.toThrow(/no pilot case/);
     expect(f.closed()).toBe(1);
     expect(disputeGets(f)).toEqual([]);
   });
@@ -450,11 +461,18 @@ describe("pilot:poll --script: a rehearsal poll from a fresh process", () => {
     });
   });
 
-  test("without --script the command's fake walks pay", async () => {
-    const f = await makeFake({ realStage: true });
-    const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch"]);
-    expect(outs.at(-1)).toMatchObject({ outcome: { kind: "pay" }, status: "ruled" });
-  });
+  test.each([[[]], [["--watch"]]])(
+    "a rehearsal poll without --script is refused, naming the flag and the scripts, and reads nothing",
+    async (extra) => {
+      const f = await makeFake({ realStage: true });
+      await expect(f.run(["pilot:poll", "--case", f.caseId, ...extra])).rejects.toThrow(
+        /--script.*one of pay, refund/,
+      );
+      expect(disputeGets(f)).toEqual([]);
+      expect(f.cases.find(f.caseId)!.status).toBe("filed");
+      expect(f.closed()).toBe(1);
+    },
+  );
 
   test("an unknown script is refused before the context opens", async () => {
     const f = await makeFake({ realStage: true });

@@ -162,6 +162,12 @@ async function poll(
   const mode = ctx.cfg.pilot?.mode;
   if (script !== undefined && mode !== "rehearsal")
     refuse(`--script is accepted in rehearsal mode only, and this box is in ${mode} mode`);
+  // The rehearsal's fake is built fresh for this process and walks the script it is given: a
+  // default would read a verdict the case was never filed with.
+  if (mode === "rehearsal" && script === undefined)
+    refuse(
+      `--script is required in rehearsal mode: the script the case was filed with, one of ${FAKE_SCRIPTS.join(", ")}`,
+    );
   const d: PollDeps = {
     stage: deps.buildStage(ctx.cfg, { script: script ?? DEFAULT_SCRIPT }),
     cases: ctx.cases,
@@ -301,7 +307,7 @@ export function registerPilotSettlementCommands(
     )
     .option(
       "--script <name>",
-      `rehearsal mode only: the fake's script, which must be the one the case was filed with (default ${DEFAULT_SCRIPT})`,
+      "rehearsal mode only, and required there: the fake's script, which must be the one the case was filed with",
     )
     .action(
       async (opts: { case: string; watch?: boolean; maxMinutes?: string; script?: string }) => {
