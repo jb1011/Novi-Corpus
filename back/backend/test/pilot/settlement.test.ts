@@ -260,6 +260,8 @@ function setup(
     revertComplete?: boolean;
     withholdReceipt?: "complete" | "reject" | "claimRefund";
     evaluator?: Address;
+    /** The referee's native balance; "unreadable" makes the balance read fail. Default funded. */
+    refereeGas?: bigint | "unreadable";
     service?: KlerosDisputeService;
     deployment?: KlerosStage["deployment"];
   } = {},
@@ -274,6 +276,10 @@ function setup(
     revertReject: o.revertReject,
     revertComplete: o.revertComplete,
     withholdReceipt: o.withholdReceipt,
+    nativeBalanceOf: () => {
+      if (o.refereeGas === "unreadable") throw new Error("the node could not read the balance");
+      return o.refereeGas ?? 1_000_000_000_000_000_000n;
+    },
   });
   node.mint(BUYER, 10_000_000n);
   const expiredAt = o.expiredAt ?? EXPIRES;
@@ -346,7 +352,13 @@ type Setup = ReturnType<typeof setup>;
 /** A case on job 7 at `status`, seeded by hand: the earlier steps are other modules'. */
 function seed(
   s: Setup,
-  o: { status?: PilotStatus; mode?: PilotMode; patch?: Partial<PilotCaseRecord> } = {},
+  o: {
+    status?: PilotStatus;
+    mode?: PilotMode;
+    patch?: Partial<PilotCaseRecord>;
+    /** Columns the row is inserted with instead of the ones that match the chain's job. */
+    insert?: Partial<Parameters<Setup["cases"]["insert"]>[0]>;
+  } = {},
 ): string {
   const caseId = newCaseId();
   s.cases.insert({
@@ -366,6 +378,7 @@ function seed(
     deliverablePath: null,
     deliverableHash: null,
     deliverableExtension: null,
+    ...o.insert,
   });
   s.cases.advance(caseId, "created", o.status ?? "filed", {
     jobId: "7",
@@ -520,6 +533,69 @@ describe("settleCase: once only", () => {
     });
     expect(s.node.sends).toHaveLength(1);
     expect(s.cases.find(caseId)!.status).toBe("settled");
+  });
+
+  test("two settles after one success send exactly one transaction across all three calls", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s);
+    const first = await settleCase(s.deps, caseId, { send: true });
+    expect(first.txHash).toBe(s.node.sends[0]!.hash);
+    for (let again = 0; again < 2; again++) {
+      const r = await settleCase(s.deps, caseId, { send: true });
+      expect(r.settlement.action).toBe("none");
+      expect(r.txHash).toBeUndefined();
+    }
+    expect(s.node.sends).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settled", settleTxHash: first.txHash });
+  });
+
+  test("two settles started together cannot both send: the second finds the row moved and refuses", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s);
+    const results = await Promise.allSettled([
+      settleCase(s.deps, caseId, { send: true }),
+      settleCase(s.deps, caseId, { send: true }),
+    ]);
+    expect(s.node.sends).toHaveLength(1);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason)).toMatch(/moved from|left settling|refusing/);
+    expect(s.cases.find(caseId)!.status).toBe("settled");
+  });
+
+  test("a second settle while the first transaction has no receipt sees settling with its hash and sends nothing", async () => {
+    const s = setup({ script: "pay", withholdReceipt: "complete" });
+    const caseId = seed(s);
+    await settleCase(s.deps, caseId, { send: true }).catch(() => undefined);
+    const hash = s.node.sends[0]!.hash;
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: hash });
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(`${hash}.*has no receipt yet`),
+    );
+    expect(s.node.sends).toHaveLength(1);
+  });
+
+  describe("the fake node's complete follows the contract", () => {
+    test("a complete from an address that is not the job's evaluator reverts and moves nothing", async () => {
+      const s = setup({ script: "pay", evaluator: SELLER });
+      const err = await s.deps.chain.job.complete(7n, reasonFor(DISPUTE)).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ChainTxRevertedError);
+      expect(s.node.chainJob(7n)!.status).toBe(2);
+      expect(s.node.balanceOf(SELLER)).toBe(0n);
+    });
+
+    test.each([[0], [1], [3], [4], [5]])(
+      "a complete on a job at status %i reverts and moves nothing",
+      async (status) => {
+        const s = setup({ script: "pay", chainStatus: status });
+        const err = await s.deps.chain.job
+          .complete(7n, reasonFor(DISPUTE))
+          .catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(ChainTxRevertedError);
+        expect(s.node.chainJob(7n)!.status).toBe(status);
+        expect(s.node.balanceOf(SELLER)).toBe(0n);
+      },
+    );
   });
 
   test("a dry run decides and sends nothing, and the row keeps its status", async () => {
@@ -787,6 +863,40 @@ describe("settleCase: refusals and the ruling read", () => {
     expect(s.node.sends).toEqual([]);
   });
 
+  test("a testnet ruled pay row whose re-read showed an appeal with unresolved options settles nothing within ten minutes", async () => {
+    let next = appealRead("1");
+    const service = {
+      deployment: "testnet",
+      getDispute: async (): Promise<DisputeRead> => next,
+    } as unknown as KlerosDisputeService;
+    const s = setup({ service, stageMode: "testnet", deployment: deploymentFor("testnet") });
+    const caseId = seed(s, {
+      mode: "testnet",
+      patch: { klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    const poll = {
+      stage: s.stage,
+      cases: s.cases,
+      expected: EXPECTED,
+      now: () => s.clock.sec * 1000,
+    };
+    await pollOnce(poll, caseId);
+    expect(s.cases.find(caseId)!.rulingValue).toBe("1");
+    next = {
+      ...appealRead("2"),
+      roundCount: 2,
+      rulingOptions: [],
+      unresolvedFields: ["rulingOptions"],
+    };
+    s.clock.sec += 60;
+    await pollOnce(poll, caseId);
+    expect(s.cases.find(caseId)!.rulingRoundCount).toBe(2);
+    s.clock.sec += 60;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement).toEqual({ action: "none", why: "appealed" });
+    expect(s.node.sends).toEqual([]);
+  });
+
   test("a testnet ruled row read ten minutes ago or more is read again on its own chain", async () => {
     const reads: { chain: string; coreDisputeId: string }[] = [];
     const service = {
@@ -836,6 +946,102 @@ describe("settleCase: refusals and the ruling read", () => {
     );
     expect(s.node.sends).toEqual([]);
     expect(s.cases.find(caseId)!.status).toBe("ruled");
+  });
+
+  describe("a job that is not the case's own is refused before anything is sent", () => {
+    const OTHER = "0x00000000000000000000000000000000000000f1" as Address;
+    test.each<[string, Parameters<typeof seed>[1] & object, RegExp]>([
+      [
+        "chain id",
+        { insert: { chainId: 5_042_002 } },
+        /is on chain id 5042002 and the connected chain is 31337/,
+      ],
+      [
+        "job contract",
+        { insert: { jobContract: OTHER } },
+        /job contract is 0x0{38}f1 and the configured job contract is 0x/i,
+      ],
+      [
+        "client",
+        { insert: { buyerAddress: OTHER } },
+        /client is 0x.* and the case's buyer is 0x0{38}f1/i,
+      ],
+      [
+        "evaluator",
+        { insert: { refereeAddress: OTHER } },
+        /evaluator is 0x.* and the case's referee is 0x0{38}f1/i,
+      ],
+      [
+        "expiry",
+        { insert: { expiredAt: EXPIRES + 1 } },
+        new RegExp(`expiredAt is ${EXPIRES} and the case's expiredAt is ${EXPIRES + 1}`),
+      ],
+    ])("a different %s sends nothing and leaves the row", async (_field, o, message) => {
+      const s = setup({ script: "pay" });
+      const caseId = seed(s, o);
+      await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(message);
+      expect(s.node.sends).toEqual([]);
+      expect(["filed", "ruled"]).toContain(s.cases.find(caseId)!.status);
+    });
+
+    test("a job whose evaluator is the case's referee but not the referee wallet is still refused", async () => {
+      const s = setup({ script: "pay", evaluator: SELLER });
+      const caseId = seed(s, { insert: { refereeAddress: SELLER } });
+      await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+        new RegExp(`evaluator is ${SELLER}.*referee is ${REFEREE}`, "i"),
+      );
+      expect(s.node.sends).toEqual([]);
+    });
+
+    test("a dry run refuses a different job too", async () => {
+      const s = setup({ script: "pay" });
+      const caseId = seed(s, { insert: { buyerAddress: OTHER } });
+      await expect(settleCase(s.deps, caseId, { send: false })).rejects.toThrow(/refusing/);
+      expect(s.node.sends).toEqual([]);
+    });
+
+    test("when every field matches the send goes through", async () => {
+      const s = setup({ script: "pay" });
+      const caseId = seed(s);
+      await settleCase(s.deps, caseId, { send: true });
+      expect(s.node.sends).toHaveLength(1);
+    });
+  });
+
+  describe("the referee's gas is checked before the transaction", () => {
+    test("a referee with no gas sends nothing, names its address and leaves the row", async () => {
+      const s = setup({ script: "pay", refereeGas: 0n });
+      const caseId = seed(s);
+      await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+        new RegExp(`referee's address ${REFEREE}.*no gas`),
+      );
+      expect(s.node.sends).toEqual([]);
+      expect(s.cases.find(caseId)!.status).toBe("ruled");
+    });
+
+    test("a balance that cannot be read sends nothing and gives the public error message", async () => {
+      const s = setup({ script: "pay", refereeGas: "unreadable" });
+      const caseId = seed(s);
+      await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+        /referee's gas balance could not be read/,
+      );
+      expect(s.node.sends).toEqual([]);
+      expect(s.cases.find(caseId)!.status).toBe("ruled");
+    });
+
+    test("a funded referee sends", async () => {
+      const s = setup({ script: "pay", refereeGas: 1n });
+      const caseId = seed(s);
+      await settleCase(s.deps, caseId, { send: true });
+      expect(s.node.sends).toHaveLength(1);
+    });
+
+    test("a dry run does not read the balance", async () => {
+      const s = setup({ script: "pay", refereeGas: "unreadable" });
+      const caseId = seed(s);
+      const r = await settleCase(s.deps, caseId, { send: false });
+      expect(r.settlement.action).toBe("complete");
+    });
   });
 
   test("a settled write that misses after the send keeps the hash on the trail", async () => {

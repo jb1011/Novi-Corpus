@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 import { Command } from "commander";
 import type { Hex } from "viem";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { klerosCaseUrl } from "../../src/adapters/kleros/deployments";
 import { FakeDisputeService } from "../../src/adapters/kleros/fakeDisputeService";
 import { registerPilotCommands } from "../../src/cli/pilot";
 import { registerPilotSettlementCommands } from "../../src/cli/pilotSettlement";
@@ -64,6 +65,8 @@ function makeFake(o: { chainStatus?: number; mode?: PilotMode } = {}) {
   };
   const chain = {
     job,
+    publicClient: { getChainId: async () => 5042002, getBalance: async () => 1n },
+    jobContract: "0x0000000000000000000000000000000000000b0b",
     wallets: { referee: { name: "referee" } },
     addresses: { referee: "0x0000000000000000000000000000000000000003" },
   } as unknown as PilotChain;
@@ -283,7 +286,7 @@ describe("pilot:poll prints the settlement it would take", () => {
   test("a pay ruling on a submitted job reads as complete", async () => {
     const f = makeFake();
     const caseId = seed(f);
-    const [out] = await f.run(["pilot:poll", "--case", caseId]);
+    const [out] = await f.run(["pilot:poll", "--case", caseId, "--script", "pay"]);
     expect(out).toMatchObject({
       outcome: { kind: "pay" },
       status: "ruled",
@@ -295,13 +298,14 @@ describe("pilot:poll prints the settlement it would take", () => {
   test("a case without a job says the settlement cannot be decided", async () => {
     const f = makeFake();
     const caseId = seed(f, { patch: { jobId: null } });
-    const [out] = await f.run(["pilot:poll", "--case", caseId]);
+    const [out] = await f.run(["pilot:poll", "--case", caseId, "--script", "pay"]);
     expect(out).toMatchObject({ settlement: { unavailable: "the case has no job id" } });
   });
 });
 
 /** `--by` is required; a refusal test about another flag still passes one. */
-const withBy = (flags: string[]) => (flags.includes("--by") ? flags : [...flags, "--by", "alex"]);
+const withBy = (flags: string[]) =>
+  flags.includes("--by") ? flags : [...flags, "--by", "an operator"];
 
 describe("pilot:case set-ids", () => {
   test("--by is required, since a person attests the ids, and its absence opens nothing", async () => {
@@ -328,7 +332,7 @@ describe("pilot:case set-ids", () => {
       "--local",
       "44",
       "--by",
-      "alex",
+      "an operator",
       "--yes",
     ]);
     expect(out).toMatchObject({ case: { status: "filed" } });
@@ -341,7 +345,12 @@ describe("pilot:case set-ids", () => {
       filedAt: NOW,
     });
     expect(f.cases.events(caseId)).toContainEqual(
-      expect.objectContaining({ step: "set_ids", status: "ok", ref: "312", detail: "by alex" }),
+      expect.objectContaining({
+        step: "set_ids",
+        status: "ok",
+        ref: "312",
+        detail: "by an operator",
+      }),
     );
   });
 
@@ -363,7 +372,15 @@ describe("pilot:case set-ids", () => {
   test("without --yes it changes nothing", async () => {
     const f = makeFake();
     const caseId = seed(f, { status: "filing", patch: { coreDisputeId: null } });
-    const [out] = await f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "alex"]);
+    const [out] = await f.run([
+      "pilot:case",
+      "set-ids",
+      caseId,
+      "--core",
+      "312",
+      "--by",
+      "an operator",
+    ]);
     expect(out).toMatchObject({ dryRun: true, from: "filing", to: "filed" });
     expect(f.cases.find(caseId)).toMatchObject({ status: "filing", coreDisputeId: null });
     expect(f.cases.events(caseId)).toEqual([]);
@@ -376,7 +393,7 @@ describe("pilot:case set-ids", () => {
       patch: { coreDisputeId: null, klerosChain: null },
     });
     await expect(
-      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "alex", "--yes"]),
+      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "an operator", "--yes"]),
     ).rejects.toThrow(/never at filing/);
     expect(f.cases.find(caseId)!.status).toBe("filing_unknown");
   });
@@ -387,7 +404,7 @@ describe("pilot:case set-ids", () => {
       const f = makeFake();
       const caseId = seed(f, { status });
       await expect(
-        f.run(["pilot:case", "set-ids", caseId, "--core", "287", "--by", "alex", "--yes"]),
+        f.run(["pilot:case", "set-ids", caseId, "--core", "287", "--by", "an operator", "--yes"]),
       ).rejects.toThrow(/filing or filing_unknown/);
     },
   );
@@ -396,9 +413,130 @@ describe("pilot:case set-ids", () => {
     const f = makeFake();
     const caseId = seed(f, { status: "filing_unknown" });
     await expect(
-      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "alex", "--yes"]),
+      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "an operator", "--yes"]),
     ).rejects.toThrow(/already holds dispute 287/);
     expect(f.cases.find(caseId)!.status).toBe("filing_unknown");
+  });
+
+  test("refuses while the filing may still be landing, naming the minutes left", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "filing_unknown",
+      patch: { coreDisputeId: null, filingStartedAt: NOW - 10 * 60 },
+    });
+    for (const yes of [[], ["--yes"]])
+      await expect(
+        f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "an operator", ...yes]),
+      ).rejects.toThrow(/filing started 10 minutes ago.*wait 20 more minutes/);
+    expect(f.cases.find(caseId)!.status).toBe("filing_unknown");
+  });
+
+  test("accepts a filing that started 30 minutes ago", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "filing_unknown",
+      patch: { coreDisputeId: null, filingStartedAt: NOW - 30 * 60 },
+    });
+    await f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "an operator", "--yes"]);
+    expect(f.cases.find(caseId)!.status).toBe("filed");
+  });
+
+  test("refuses a dispute id another case holds on the same Kleros chain", async () => {
+    const f = makeFake();
+    seed(f, {
+      status: "filed",
+      patch: { jobId: "8", coreDisputeId: "312", klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    const caseId = seed(f, {
+      status: "filing_unknown",
+      patch: { coreDisputeId: null, klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    await expect(
+      f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "an operator", "--yes"]),
+    ).rejects.toThrow(/dispute 312 on arbitrum-sepolia-testnet.*pc_/);
+    expect(f.cases.find(caseId)!.status).toBe("filing_unknown");
+  });
+
+  test("accepts the same dispute id when the other case is on another Kleros chain", async () => {
+    const f = makeFake();
+    seed(f, {
+      status: "filed",
+      patch: { jobId: "8", coreDisputeId: "312", klerosChain: "arbitrum-one" },
+    });
+    const caseId = seed(f, {
+      status: "filing_unknown",
+      patch: { coreDisputeId: null, klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    await f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "an operator", "--yes"]);
+    expect(f.cases.find(caseId)!.status).toBe("filed");
+  });
+
+  test("a case may hold its own dispute id", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "filing_unknown",
+      patch: { coreDisputeId: "312", klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    await f.run(["pilot:case", "set-ids", caseId, "--core", "312", "--by", "an operator", "--yes"]);
+    expect(f.cases.find(caseId)!.status).toBe("filed");
+  });
+
+  test("the dry run shows the Court link and both parties", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "filing_unknown",
+      patch: { coreDisputeId: null, klerosChain: "arbitrum-sepolia-testnet" },
+      mode: "testnet",
+    });
+    const [out] = await f.run([
+      "pilot:case",
+      "set-ids",
+      caseId,
+      "--core",
+      "312",
+      "--by",
+      "an operator",
+    ]);
+    expect(out).toMatchObject({
+      dryRun: true,
+      courtUrl: klerosCaseUrl("arbitrum-sepolia-testnet", "312"),
+      buyerAddress: "0x0000000000000000000000000000000000000001",
+      sellerAddress: "0x0000000000000000000000000000000000000002",
+    });
+  });
+
+  test("the dry run of a fake-chain case has no Court link", async () => {
+    const f = makeFake();
+    const caseId = seed(f, { status: "filing", patch: { coreDisputeId: null } });
+    const [out] = await f.run([
+      "pilot:case",
+      "set-ids",
+      caseId,
+      "--core",
+      "312",
+      "--by",
+      "an operator",
+    ]);
+    expect(out).toMatchObject({ dryRun: true, courtUrl: null });
+  });
+
+  test.each([
+    [["--core", "0"], /--core/],
+    [["--core", (2n ** 256n).toString()], /--core/],
+  ])("%j is refused before the context opens", async (flags, message) => {
+    const f = makeFake();
+    await expect(
+      f.run(["pilot:case", "set-ids", "pc_000000000000", ...withBy(flags), "--yes"]),
+    ).rejects.toThrow(message);
+    expect(f.opened()).toBe(0);
+  });
+
+  test("accepts the largest 256-bit dispute id", async () => {
+    const f = makeFake();
+    const caseId = seed(f, { status: "filing", patch: { coreDisputeId: null } });
+    const max = (2n ** 256n - 1n).toString();
+    await f.run(["pilot:case", "set-ids", caseId, "--core", max, "--by", "an operator", "--yes"]);
+    expect(f.cases.find(caseId)!.coreDisputeId).toBe(max);
   });
 
   test.each([
