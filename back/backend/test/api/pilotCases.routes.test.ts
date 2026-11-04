@@ -501,7 +501,8 @@ describe("the stored files: the pilot's own, found by their file name in the sto
     const app = makeApp();
     const absolute = await getJson(app, `/pilot/cases/${row.caseId}`);
     expect(absolute.res.status).toBe(200);
-    expect(absolute.body).toEqual(flat.body);
+    // The patch that re-pointed the files moved the row's own clock; everything else is equal.
+    expect(absolute.body).toEqual({ ...flat.body, updatedAt: absolute.body.updatedAt });
     const list = (await getJson(app, "/pilot/cases")).body;
     expect(list.cases).toEqual([viewOf(cases.find(row.caseId) as PilotCaseRecord, RECORDS)]);
     for (const answer of [absolute.body, list])
