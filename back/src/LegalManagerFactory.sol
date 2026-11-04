@@ -68,7 +68,7 @@ contract LegalManagerFactory is IERC721Receiver, Ownable2Step {
 
     /// @notice Registers an agent identity, deploys its LegalManager proxy and its immutable
     ///         AgentTreasury, and records both. Atomic and platform-gated (onlyOwner).
-    /// @param  operator the agent's non-custodial spending key (e.g. Turnkey EOA) — the treasury's bounded operator
+    /// @param  operator the agent's spending key (e.g. Turnkey EOA) — the treasury's bounded operator
     /// @param  tcfg     the AgentTreasury wiring (USDC, payout, cap, period, allowlist flag)
     /// @return agentId  the ERC-8004 identity id minted for the agent
     /// @return proxy    the per-agent LegalManager beacon proxy
