@@ -16,6 +16,8 @@ export interface PilotCaseRepository {
   insert(c: NewPilotCase): PilotCaseRecord;
   find(caseId: string): PilotCaseRecord | undefined;
   findByJobId(jobId: string): PilotCaseRecord | undefined;
+  /** Every case that holds this dispute id on this Kleros deployment, oldest first. */
+  findByDisputeId(klerosChain: string, coreDisputeId: string): PilotCaseRecord[];
   /** Newest first. */
   list(filter?: { mode?: PilotMode }): PilotCaseRecord[];
   /** Compare-and-set on status. Returns the row, or undefined only for a plain "not at `from`" miss.
@@ -183,6 +185,9 @@ export class SqlitePilotCaseRepository implements PilotCaseRepository {
       ),
       find: db.prepare("SELECT * FROM pilot_cases WHERE case_id = ?"),
       findByJobId: db.prepare("SELECT * FROM pilot_cases WHERE job_id = ?"),
+      findByDisputeId: db.prepare(
+        "SELECT * FROM pilot_cases WHERE kleros_chain = ? AND core_dispute_id = ? ORDER BY created_at, rowid",
+      ),
       // created_at has one-second resolution; rowid breaks the tie in insertion order.
       listAll: db.prepare("SELECT * FROM pilot_cases ORDER BY created_at DESC, rowid DESC"),
       listByMode: db.prepare(
@@ -240,6 +245,11 @@ export class SqlitePilotCaseRepository implements PilotCaseRepository {
   findByJobId(jobId: string): PilotCaseRecord | undefined {
     const r = this.stmts.findByJobId.get(jobId) as Row | undefined;
     return r ? toRecord(r) : undefined;
+  }
+
+  findByDisputeId(klerosChain: string, coreDisputeId: string): PilotCaseRecord[] {
+    const rows = this.stmts.findByDisputeId.all(klerosChain, coreDisputeId) as Row[];
+    return rows.map(toRecord);
   }
 
   list(filter?: { mode?: PilotMode }): PilotCaseRecord[] {

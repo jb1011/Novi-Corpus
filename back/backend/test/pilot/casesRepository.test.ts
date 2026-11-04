@@ -68,6 +68,17 @@ describe("insert and find", () => {
     repo.patch(rec.caseId, { jobId: "42" });
     expect(repo.findByJobId("42")?.caseId).toBe(rec.caseId);
   });
+
+  test("findByDisputeId matches the Kleros chain and the dispute id together", () => {
+    const a = repo.insert(newCase());
+    const b = repo.insert(newCase());
+    repo.patch(a.caseId, { klerosChain: "arbitrum-sepolia-testnet", coreDisputeId: "312" });
+    repo.patch(b.caseId, { klerosChain: "arbitrum-one", coreDisputeId: "312" });
+    expect(repo.findByDisputeId("arbitrum-sepolia-testnet", "312").map((r) => r.caseId)).toEqual([
+      a.caseId,
+    ]);
+    expect(repo.findByDisputeId("arbitrum-one", "313")).toEqual([]);
+  });
 });
 
 describe("list", () => {

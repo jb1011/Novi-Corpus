@@ -943,8 +943,14 @@ function failCase(
 /** A dispute id in decimal, as Kleros numbers it. */
 function parseDisputeId(option: string, value: string): string {
   if (!CANONICAL_DECIMAL.test(value)) refuse(`${option} must be a dispute id in decimal`);
+  // Kleros numbers disputes from 1, and an id is a 256-bit number.
+  if (BigInt(value) === 0n || BigInt(value) >= 2n ** 256n)
+    refuse(`${option} must be between 1 and 2^256 - 1`);
   return value;
 }
+
+/** How long after a filing started its transaction may still be landing. */
+const FILING_SETTLE_SECONDS = 30 * 60;
 
 /**
  * Records the dispute ids a person read in the Kleros Court interface for a case whose filing
@@ -968,6 +974,20 @@ function setIds(
       refuse(`pilot case ${caseId} has no Kleros chain, so it was never at filing`);
     if (row.coreDisputeId !== null && row.coreDisputeId !== ids.core)
       refuse(`pilot case ${caseId} already holds dispute ${row.coreDisputeId}`);
+    if (row.filingStartedAt !== null) {
+      const age = deps.now() - row.filingStartedAt;
+      if (age < FILING_SETTLE_SECONDS) {
+        const left = Math.ceil((FILING_SETTLE_SECONDS - age) / 60);
+        refuse(
+          `pilot case ${caseId}'s filing started ${Math.floor(Math.max(age, 0) / 60)} minutes ago and may still be landing; wait ${left} more minutes, then read the Court again`,
+        );
+      }
+    }
+    const holder = ctx.cases
+      .findByDisputeId(row.klerosChain, ids.core)
+      .find((other) => other.caseId !== caseId);
+    if (holder)
+      refuse(`dispute ${ids.core} on ${row.klerosChain} is already held by case ${holder.caseId}`);
     const detail = `by ${by}`;
     if (!yes)
       return {
@@ -978,6 +998,9 @@ function setIds(
         klerosChain: row.klerosChain,
         coreDisputeId: ids.core,
         localDisputeId: ids.local ?? null,
+        courtUrl: courtUrlOf({ ...row, coreDisputeId: ids.core }),
+        buyerAddress: row.buyerAddress,
+        sellerAddress: row.sellerAddress,
         detail,
         next: "nothing was changed: run the same command with --yes to record the ids",
       };
