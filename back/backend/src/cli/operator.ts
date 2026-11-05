@@ -84,3 +84,21 @@ export function withDatabase<T>(
     db.close();
   }
 }
+
+/**
+ * `withDatabase` for a command whose work is asynchronous: the database is closed once `fn`'s
+ * promise settles, never while it is still running (`withDatabase` would close it as soon as `fn`
+ * returned its promise).
+ */
+export async function withDatabaseAsync<T>(
+  fn: (db: Database.Database, docStoreDir: string, cfg: Config) => Promise<T>,
+): Promise<T> {
+  loadDotenv();
+  const cfg = loadConfig();
+  const db = openDatabase(cfg.dbPath);
+  try {
+    return await fn(db, cfg.docStoreDir, cfg);
+  } finally {
+    db.close();
+  }
+}

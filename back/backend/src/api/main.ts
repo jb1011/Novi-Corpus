@@ -108,6 +108,8 @@ import { SqliteWorldStore } from "../persistence/worldStore";
 import { SqlitePilotCaseRepository } from "../pilot/casesRepository";
 import { pilotExplorerBase, pilotLookupBase } from "../pilot/views";
 import { usdToUnits } from "../policy/units";
+import { buildScheduledJobs } from "../scheduler/jobs";
+import { Scheduler } from "../scheduler/scheduler";
 import { externalRecordDeps } from "../trackRecord/sources";
 import type { Address } from "../types";
 import { TaskTracker } from "../util/taskTracker";
@@ -875,6 +877,16 @@ async function main() {
       })
     : undefined;
 
+  /**
+   * THE IN-PROCESS SCHEDULER (src/scheduler): named periodic jobs, run inside this process so the
+   * box needs no cron line. Built only when the deployment registers at least one job; the
+   * identity sweep is registered only where the PII key is set, so the testnet box, which cannot
+   * hold the key, starts none.
+   */
+  const scheduledJobs = buildScheduledJobs(db, cfg);
+  const scheduler = scheduledJobs.length > 0 ? new Scheduler({}) : undefined;
+  for (const job of scheduledJobs) scheduler?.register(job);
+
   const jobDeps = buildJobDeps(cfg, db, repo, docStore, circleApi);
   // Credential-less boot: a deployment with no JOB_CLIENT_PRIVATE_KEY still starts, and jobs are
   // simply unavailable. Said out loud here because there is no jobs enable flag to hang a boot
@@ -1280,6 +1292,14 @@ async function main() {
     legalBodySweeper.start();
     console.log(`Legal-body sweeper started (every ${legalBodySweepMs}ms)`);
   }
+  // The scheduler after them: each job's first run starts 30 seconds after this, never on the
+  // boot path.
+  if (scheduler) {
+    scheduler.start();
+    console.log(
+      `Scheduler started: ${scheduledJobs.map((j) => `${j.name} every ${j.everyMs}ms`).join(", ")}`,
+    );
+  }
 
   // ── Unresolved TREASURY TRANSFERS at boot (gate N2), after the socket for the reason C4 gives.
   //
@@ -1320,7 +1340,10 @@ async function main() {
   if (shouldInstallSignalHandlers())
     installShutdownHandlers({
       sweeper: formationSweeper,
-      sweepers: legalBodySweeper ? [legalBodySweeper] : [],
+      sweepers: [
+        ...(legalBodySweeper ? [legalBodySweeper] : []),
+        ...(scheduler ? [scheduler] : []),
+      ],
       tasks: doolaTasks,
       server,
     });
