@@ -44,6 +44,7 @@ import {
   ANVIL_ACCOUNT_4,
   APPROVED,
   CHAIN_ID,
+  DECLARANT_OF_RECORD,
   FACTORY,
   FORMATION_PROVIDER,
   SANDBOX_TYPED,
@@ -68,9 +69,9 @@ const STATEMENT_MESSAGE = "/companies/customer/statement-message";
 const CREATE = "/companies/customer";
 const abandonPath = (companyId: string) => `/companies/${companyId}/abandon`;
 
-/** A declaration as a production caller types it. */
+/** A declaration as a production caller types it: the declarant's title, never the name, which the
+ *  door writes from the guardian's identity record. */
 const TYPED = {
-  declarantName: "Ada Example",
   declarantTitle: "Authorised Signatory",
   companyName: "Example Holdings LLC",
   filingNumber: "TEST-0001",
@@ -357,7 +358,12 @@ describe("asking for the statement, signing it and creating the company", () => 
     expect(served.wordingVersion).toBe(APPROVED.version);
     expect(served.textStatus).toBe("approved");
     // Exactly what the wallet is asked to sign, written out here on its own.
-    const fields: StatementFields = { ...TYPED, jurisdiction: "WY", guardian: owner.address };
+    const fields: StatementFields = {
+      ...TYPED,
+      declarantName: DECLARANT_OF_RECORD,
+      jurisdiction: "WY",
+      guardian: owner.address,
+    };
     expect(served.typedData).toEqual({
       domain: {
         name: "Novi Corpus Statement of Authority",
@@ -588,7 +594,7 @@ describe("the company view", () => {
       reasonCode: null,
     });
     const printed = JSON.stringify(view);
-    for (const personal of [TYPED.declarantName, TYPED.declarantTitle, "declarant"])
+    for (const personal of [DECLARANT_OF_RECORD, TYPED.declarantTitle, "declarant"])
       expect(printed).not.toContain(personal);
 
     // The list row carries the same three keys.

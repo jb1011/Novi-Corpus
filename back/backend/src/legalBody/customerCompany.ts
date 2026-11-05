@@ -2,6 +2,8 @@ import type { Address, Hex } from "viem";
 import { type WorldIdDeps, assertRealHuman } from "../api/routes/worldId";
 import { ApiError } from "../errors";
 import { NAME_CHARSET_SOURCE } from "../formation/intake";
+import { composeDeclarantName } from "../identity/names";
+import { type IdentityDeps, assertIdentityVerified, namesOfRecord } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import {
@@ -9,6 +11,7 @@ import {
   filingKeyOf,
 } from "../persistence/companyDeclarationRepository";
 import type { CompanyRepository } from "../persistence/companyRepository";
+import type { GuardianIdentityCheck } from "../persistence/identityRepository";
 import type { GuardianVerification } from "../persistence/worldStore";
 import { sqliteUtcTimestamp } from "../util/sqliteTime";
 import { CUSTOMER_PROVIDER } from "./provider";
@@ -31,10 +34,15 @@ import type { StatementFields } from "./texts/statementOfAuthority";
  *
  * The create runs its checks in this order, and writes nothing until every one has passed:
  *  1. a real human: a verified credential, never a waiver, whatever the enforcement switch says;
+ *  1b. on production, a verified guardian identity record (`assertIdentityVerified`): World ID
+ *     proves one real person; the identity check says who;
  *  2. the wording can be served: a production deployment refuses a draft;
+ *  2b. on production, no typed declarant name: the name is written from the identity record, so a
+ *     body that carries `declarantName` is refused, never silently ignored or overwritten;
  *  3. the synthetic rule: a production declaration is never synthetic and a sandbox one always is,
  *     and on a sandbox the declarant is a fixture, never a name the caller typed;
- *  4. the field rules, and the shape of `issuedAt` and of the signature;
+ *  4. the field rules, and the shape of `issuedAt` and of the signature; on production the
+ *     declarant's name is the identity record's first and last names, held to the same rule;
  *  4a. the same statement with the same signature, already used by this tenant, is answered with
  *     its company before any cap: a client that retries after a lost response must not be refused
  *     by the cap its own first request filled;
@@ -78,6 +86,10 @@ export interface CustomerCompanyDeps {
   /** The deployment's legal-body factory: the `verifyingContract` of the statement's domain. */
   factory: Address;
   environment: "sandbox" | "production";
+  /** The guardian identity record. Production requires a verified one and writes the declarant's
+   *  name from it (absent there, every door answers 503 `identity_unavailable`); a sandbox never
+   *  reads it. */
+  identity: IdentityDeps | undefined;
   /** The wording new declarations are made under: the composition passes STATEMENT_OF_AUTHORITY.
    *  Every step reads this one, never the constant. */
   text: LegalText<StatementFields>;
@@ -92,8 +104,10 @@ export interface CustomerCompanyDeps {
 }
 
 export interface CustomerStatementInput {
-  /** Typed by a production caller. A sandbox refuses both and uses SYNTHETIC_DECLARANT. */
+  /** Never typed: production writes it from the verified identity record and refuses a body that
+   *  carries it; a sandbox refuses it too and uses SYNTHETIC_DECLARANT. */
   declarantName?: string;
+  /** Typed by a production caller. A sandbox refuses it and uses SYNTHETIC_DECLARANT. */
   declarantTitle?: string;
   companyName: string;
   filingNumber: string;
@@ -238,6 +252,12 @@ function readSignedPart(
   return { issuedAt: BigInt(issuedAt), signature: signature as Hex };
 }
 
+/** The declarant's name of record: the first name, a space, the last name. */
+function writtenDeclarantName(identity: IdentityDeps, record: GuardianIdentityCheck): string {
+  const { first, last } = namesOfRecord(identity, record);
+  return composeDeclarantName(first, last);
+}
+
 /**
  * Steps 1 to 4. `readMore` runs after the field rules, so the problems it records come after
  * theirs, and both are answered as one refusal.
@@ -251,15 +271,31 @@ function prepare<T>(
   // 1. A real human, and the row whose nullifier the declaration will name.
   const verification = assertRealHuman(deps.world, tenantId, deps.environment);
 
+  // 1b. On production, a verified guardian identity record: the record whose names the declaration
+  //     will carry. A sandbox reads nothing here and gets undefined.
+  const record = assertIdentityVerified(deps.identity, deps.world, tenantId, deps.environment);
+
   // 2. Throws LegalTextNotApprovedError; the doors answer it as `legal_text_not_approved`.
   assertTextsServable(deps.environment, [deps.text]);
 
   // A body that is not an object carries no field at all.
   const body: Body = typeof input === "object" && input !== null ? input : {};
 
-  // 3. The synthetic rule, keyed on the deployment. Only a sandbox is sandbox: any other value is
-  //    held to the production rule, as the two checks above hold it.
+  // Only a sandbox is sandbox: any other value is held to the production rule, as the checks
+  // above hold it.
   const sandbox = deps.environment === "sandbox";
+
+  // 2b. On production the declarant's name is written from the identity record, never typed: a
+  //     body that carries one (whatever its value) is refused, so an old client or an agent learns
+  //     it, rather than signing a name it did not send.
+  if (!sandbox && body.declarantName !== undefined)
+    throw new ApiError(
+      "declarant_name_is_written_by_novi",
+      400,
+      "the declarant's name is written from the verified identity record: leave out declarantName",
+    );
+
+  // 3. The synthetic rule, keyed on the deployment.
   if (sandbox) {
     if (body.synthetic !== true)
       throw new ApiError(
@@ -281,11 +317,19 @@ function prepare<T>(
     );
   }
 
-  // 4. The field rules. Every bad field is named once, in this order.
+  // 4. The field rules. Every bad field is named once, in this order. On production the declarant's
+  //    name is the record's first and last names: they passed this rule when the record was
+  //    verified, and they go through it again, so a name that cannot pass reads as a field
+  //    problem rather than a crash. Step 1b returned the record there, so both are defined.
   const problems: FieldProblem[] = [];
   const declarantName = sandbox
     ? SYNTHETIC_DECLARANT.name
-    : applyTextRule("declarantName", body.declarantName, DECLARANT_NAME, problems);
+    : applyTextRule(
+        "declarantName",
+        writtenDeclarantName(deps.identity!, record!),
+        DECLARANT_NAME,
+        problems,
+      );
   const declarantTitle = sandbox
     ? SYNTHETIC_DECLARANT.title
     : applyTextRule("declarantTitle", body.declarantTitle, DECLARANT_TITLE, problems);
@@ -354,9 +398,9 @@ function assertSandboxNumberFree(
   ]);
 }
 
-/** Steps 1 to 4, then 4b: the human, the texts, the synthetic rule, the fields, and on a sandbox
- *  the test number. The statement door; the create door runs the same steps, 4b after its
- *  replay lookup. */
+/** Steps 1 to 4, then 4b: the human, on production the identity record, the texts, the synthetic
+ *  rule, the fields, and on a sandbox the test number. The statement door; the create door runs
+ *  the same steps, 4b after its replay lookup. */
 export function prepareCustomerStatement(
   deps: CustomerCompanyDeps,
   tenantId: Address,

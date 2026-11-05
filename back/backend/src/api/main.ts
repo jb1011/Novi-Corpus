@@ -697,6 +697,9 @@ async function main() {
           // deployment is worth nothing on another.
           factory: cfg.legalBodyFactory,
           environment: legalBodyEnvironment(cfg),
+          // The guardian identity record built above: on production the doors require a verified
+          // one and write the declarant's name from it; a sandbox never reads it.
+          identity,
           text: STATEMENT_OF_AUTHORITY,
           maxOpenPerTenant: cfg.formation?.byoMaxOpenPerTenant ?? DEFAULT_BYO_MAX_OPEN_PER_TENANT,
           // The switch of the payment config built above: charging, a new company lands `draft`.
