@@ -75,7 +75,7 @@ export function shareOnX(pageUrl: string): string {
   const url = new URL("https://x.com/intent/post");
   url.searchParams.set(
     "text",
-    "I applied to the Novi Corpus Founding 5. Five builders get a company for their agent.",
+    "I applied for the Novi Corpus Arc mainnet beta. Agents with a Novi legal body, invite only.",
   );
   url.searchParams.set("url", pageUrl);
   return url.toString();

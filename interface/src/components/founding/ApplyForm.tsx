@@ -10,7 +10,6 @@ import {
   validateApplication,
   type ApplyErrors,
   type ApplyFields,
-  formatFoundingWhen,
 } from "@/lib/founding/apply";
 
 type Phase = "idle" | "submitting" | "success" | "duplicate" | "closed" | "limited" | "error";
@@ -22,13 +21,7 @@ const EMPTY: ApplyFields = {
   description: "",
 };
 
-export function ApplyForm({
-  open,
-  picksAt,
-}: {
-  open: boolean;
-  picksAt: number | null;
-}) {
+export function ApplyForm({ open }: { open: boolean }) {
   const [fields, setFields] = useState<ApplyFields>(EMPTY);
   const [honeypot, setHoneypot] = useState("");
   const [errors, setErrors] = useState<ApplyErrors>({});
@@ -38,7 +31,6 @@ export function ApplyForm({
     [],
   );
 
-  const picksLabel = formatFoundingWhen(picksAt);
   const shareHref =
     typeof window === "undefined"
       ? "https://x.com/intent/post"
@@ -104,9 +96,7 @@ export function ApplyForm({
       <div className="rounded-2xl border hairline bg-paper-2 px-6 py-8">
         <h3 className="text-[22px] font-medium tracking-[-0.01em]">You&rsquo;re in.</h3>
         <p className="mt-3 text-[15px] leading-[1.6] text-muted">
-          {picksLabel
-            ? `We announce the Founding 5 on ${picksLabel} UTC.`
-            : "We will announce the Founding 5 when we pick them."}
+          We will contact you about the Arc mainnet beta. We do not promise a filing date.
         </p>
         <a
           href={shareHref}
