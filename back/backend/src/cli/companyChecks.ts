@@ -26,7 +26,16 @@ import { SqliteDocumentIndexRepository } from "../persistence/documentIndexRepos
 import { type DocumentStore, FileDocumentStore } from "../persistence/documentStore";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { isCalendarDate, wyomingDate } from "../util/wyomingCalendar";
-import { OPERATOR_NAME, osUser, print, refuse, withDatabase } from "./operator";
+import {
+  OPERATOR_NAME,
+  osUser,
+  parseExpectLatest,
+  parseOperator,
+  parseReason,
+  print,
+  refuse,
+  withDatabase,
+} from "./operator";
 
 /**
  * THE OPERATOR'S COMMANDS over a customer's declaration: see it, record the check of it (passed or
@@ -56,14 +65,10 @@ const EXPECT_LATEST_HELP =
 /** What `company:check` adds to it: a sandbox declaration is checked at once, so `none` is stale. */
 const CHECK_EXPECT_LATEST_HELP = `${EXPECT_LATEST_HELP}; on a sandbox deployment the latest check is the automatic one`;
 
-const CHECK_ID = /^[1-9][0-9]{0,15}$/;
 /** The filing-number rule a declaration's filing number was held to. */
 const FILING_NUMBER = /^[0-9A-Za-z-]{4,32}$/;
 /** A sha256 as an operator may paste it: with or without 0x, in either case. */
 const SHA256_TYPED = /^(?:0[xX])?([0-9a-fA-F]{64})$/;
-const MAX_REASON_CODE_POINTS = 300;
-/** Control, format and other invisible characters, as the check rows refuse them. */
-const OTHER_CHARACTER = /\p{C}/u;
 /** A space other than the plain one (a non-breaking space, a thin space, a line separator). The
  *  check rows admit it, but the company-name key collapses plain spaces only, so a registry text
  *  pasted with one would never match what it says. */
@@ -116,32 +121,9 @@ export function companyNameKeyOf(name: string): string {
     .replace(/^ +| +$/g, "");
 }
 
-/** An operator's name. The sandbox's automatic check has a name of its own, which no operator
- *  may type: a row under it would read as a check nobody made. */
-function parseOperator(value: string): string {
-  if (!OPERATOR_NAME.test(value)) refuse(`--operator must match ${OPERATOR_NAME.source}`);
-  if (value === SANDBOX_AUTOMATIC_OPERATOR)
-    refuse(`--operator ${SANDBOX_AUTOMATIC_OPERATOR} is reserved for the sandbox's own check`);
-  return value;
-}
-
-/** A check id, or null for `none` when `none` is allowed. */
-function parseExpectLatest(value: string, allowNone: boolean): number | null {
-  if (allowNone && value === "none") return null;
-  if (!CHECK_ID.test(value))
-    refuse(`--expect-latest must be a check id${allowNone ? " or none" : ""}`);
-  return Number(value);
-}
-
-/** Text of 1 to 300 code points with no control or invisible character. */
-function parseReason(value: string): string {
-  if (value.length === 0) refuse("--reason must not be empty");
-  if ([...value].length > MAX_REASON_CODE_POINTS)
-    refuse(`--reason must be at most ${MAX_REASON_CODE_POINTS} characters`);
-  if (OTHER_CHARACTER.test(value))
-    refuse("--reason must not hold a control, format or other invisible character");
-  return value;
-}
+/** The sandbox's automatic check has a name of its own, which no operator may type: a row under
+ *  it would read as a check nobody made. */
+const RESERVED_OPERATOR = { name: SANDBOX_AUTOMATIC_OPERATOR, purpose: "the sandbox's own check" };
 
 /** The sha256 in the one spelling the check rows and the upload index keep: 0x, lower case. */
 function parseSha256(option: string, value: string): Hex {
@@ -435,7 +417,7 @@ function checkCompany(companyId: string, opts: CheckOptions): void {
   if (opts.result !== "passed" && opts.result !== "failed")
     refuse("--result must be passed or failed (a revocation is company:revoke)");
   const passed = opts.result === "passed";
-  const operator = parseOperator(opts.operator);
+  const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
   const expected = parseExpectLatest(opts.expectLatest, true);
   const [own, other] = passed
     ? [PASSED_ONLY, FAILED_ONLY]
@@ -567,7 +549,7 @@ function revokeOrReinstate(
   companyId: string,
   opts: StateChangeOptions,
 ): void {
-  const operator = parseOperator(opts.operator);
+  const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
   // A reinstatement follows a revocation, so there is always a check to name.
   const expected = parseExpectLatest(opts.expectLatest, result === "revoked");
   const row: NewCompanyCheck = {
@@ -641,7 +623,7 @@ function automaticPassAgain(s: Stores, company: CompanyRecord): NewCompanyCheck 
 // ── legal-body:revoke ────────────────────────────────────────────────────────────────────────
 
 function revokeLegalBody(legalBodyId: string, opts: Omit<StateChangeOptions, "expectLatest">) {
-  const operator = parseOperator(opts.operator);
+  const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
   const reason = parseReason(opts.reason);
   const actor = `operator:${operator}` as const;
   withDatabase((db) => {

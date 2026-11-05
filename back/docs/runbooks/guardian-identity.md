@@ -50,7 +50,9 @@ document_unverified_other"), never a person's name, address, email or document n
    | the selfie check `verified`    | `--liveness passed`                                            |
 
    A `verified` session implies a document in date: Stripe fails an expired document itself, so
-   `--document-expired` is for a document you can see is out of date and nothing else.
+   `--document-expired` is for a document you can see is out of date and nothing else. On
+   production a pass needs the face match and the sanctions search: `--liveness passed`, and
+   `--watchlist clear` or `hit` (never `not_run`).
 
    A name printed in capitals (`DUPONT`) is stored as a person writes it (`Dupont`); a mixed-case
    name is stored as typed. Type it as the session shows it.
@@ -84,13 +86,21 @@ document_unverified_other"), never a person's name, address, email or document n
    ```bash
    npm run cli -- identity:record <tenantId> \
      --provider stripe --provider-ref vs_… --result failed \
-     --reason-code other --reason 'stripe requires_input: selfie_face_mismatch' \
+     --reason-code selfie_mismatch --reason 'stripe requires_input: selfie_face_mismatch' \
      --operator <your operator name> --expect-latest <id> --yes
    ```
 
-   A failed check keeps no name: the name flags are refused with it. Use `--reason-code
-   document_expired` for Stripe's `document_expired`, and `other` with Stripe's code in the reason
-   for anything else.
+   A failed check keeps no name: the name flags are refused with it. Its `--reason-code` comes
+   from its own list, Stripe's error code going in the reason:
+
+   | Stripe's `last_error.code`                                                    | `--reason-code`       |
+   | ----------------------------------------------------------------------------- | --------------------- |
+   | `document_unverified_other`, `document_type_not_supported`                    | `document_unverified` |
+   | `document_expired`                                                            | `document_expired`    |
+   | `selfie_face_mismatch`, `selfie_document_missing_photo`, `selfie_manipulated`, `selfie_unverified_other` | `selfie_mismatch` |
+   | `consent_declined`                                                            | `consent_declined`    |
+   | `abandoned`, or a session the person never finished                           | `abandoned`           |
+   | anything else                                                                 | `other`               |
 
 6. **Check it.** `identity:show <tenantId>` reads `verified`, or `needs_review` with its reasons.
 
@@ -108,7 +118,9 @@ document_unverified_other"), never a person's name, address, email or document n
   first (`identity:revoke`) when a new check is really needed.
 - `FORMATION_PII_KEY` missing: the names are encrypted under it. `identity:show`, `identity:accept`
   and `identity:correct-name` refuse for the same reason.
+- On production, `--result passed` without `--liveness passed`, or with `--watchlist not_run`.
 - `--provider sandbox` on production.
+- `--operator system`: the sweep writes its erasures under that name, and every command refuses it.
 
 ## 2. Why a passed session lands in review
 
@@ -127,7 +139,7 @@ review reason on the row:
 To see who holds a duplicate, read the tenant of each listed check, then show it:
 
 ```bash
-sqlite3 "$DATA_DIR/legalbody.db" \
+sqlite3 -readonly -cmd ".timeout 5000" "$DATA_DIR/legalbody.db" \
   "SELECT check_id, tenant_id, status FROM guardian_identity_checks WHERE check_id IN (<ids>);"
 npm run cli -- identity:show <that tenantId>
 ```
@@ -139,19 +151,28 @@ from its closed list, a `--reason`, and `--yes`. Each appends a new row; nothing
 deleted.
 
 - `identity:accept <tenantId>`: the review was fine. A passed row with the review's facts and its
-  names (sealed again under the current key, the name digest computed again under it).
+  names (sealed again under the current key, the name digest computed again under it). It is
+  refused while another account's current passed check holds the same name and document country,
+  however the review began: the refusal lists those checks. Refuse this one with
+  `duplicate_identity`, or revoke the other first.
 - `identity:refuse <tenantId>`: it was not. A failed row without names. Also for an attempt that
   never completed.
 
-| Decision code              | Use it when                                                              |
+Each decision takes only its own codes, `other` in both:
+
+| `identity:accept`          | Use it when                                                              |
 | -------------------------- | ------------------------------------------------------------------------ |
-| `provider_flag_cleared`    | accept: your second look found nothing wrong.                            |
-| `watchlist_false_positive` | accept: the possible match is someone else (another birth date, another country). |
-| `watchlist_confirmed`      | refuse: the match is the guardian.                                       |
-| `country_blocked`          | refuse: the document's country is blocked.                               |
-| `document_expired`         | refuse: the document is out of date.                                     |
-| `duplicate_identity`       | refuse: the person already holds a verified record under another account. |
-| `name_rule_failed`         | refuse: no usable name of record (prefer `identity:correct-name` when the document shows one). |
+| `provider_flag_cleared`    | your second look found nothing wrong.                                    |
+| `watchlist_false_positive` | the possible match is someone else (another birth date, another country). |
+| `other`                    | anything else; say what in the reason, without a name.                  |
+
+| `identity:refuse`          | Use it when                                                              |
+| -------------------------- | ------------------------------------------------------------------------ |
+| `watchlist_confirmed`      | the match is the guardian.                                               |
+| `country_blocked`          | the document's country is blocked.                                       |
+| `document_expired`         | the document is out of date.                                             |
+| `duplicate_identity`       | the person already holds a verified record under another account.        |
+| `name_rule_failed`         | no usable name of record (prefer `identity:correct-name` when the document shows one). |
 | `other`                    | anything else; say what in the reason, without a name.                  |
 
 `identity:revoke <tenantId>` revokes a passed check (`fraud`, `watchlist_confirmed`, `court_order`,
@@ -161,11 +182,16 @@ company is revoked with `company:revoke`, by its own decision.
 ## 4. When a name looks wrong
 
 `identity:correct-name <tenantId> --name-first … --name-last … [--name-full …]` writes the name of
-record again, for a passed check or a review. The new name must pass the name rule. The row passes
-when the review had no reason other than `name_rule_failed`, and it lands in review again when the
-new name matches another guardian's current passed check (`duplicate_identity`).
+record again, for a passed check or a review. The new name must pass the name rule. Without
+`--name-full` the record keeps no full name: the old one is never carried over a correction. The
+row passes when the review had no reason other than `name_rule_failed`, and it lands in review
+again when the new name matches another guardian's current passed check (`duplicate_identity`).
 
-Before correcting, compare:
+Before correcting, search the corrected name on OpenSanctions, as for a new check: the search was
+made on the old name. On a hit, do not correct: refuse the review (`watchlist_confirmed` once you
+have confirmed it), or revoke a passed check.
+
+Then compare:
 
 - the name Stripe extracted with the name printed on the document image in the session;
 - for a passport, the Latin form in the machine-readable zone (the two lines at the bottom of the
@@ -189,13 +215,14 @@ The names of a check are erased, the rest of the row kept, when:
   `IDENTITY_UNUSED_RETENTION_DAYS` (default 365). That guardian then reads `expired` and verifies
   again before using a door, even inside the three years.
 
-A guardian with a live company keeps every row, and a review is never erased: it waits for your
-decision.
+A guardian with a live company keeps the names on every row, and a review is never erased: it
+waits for your decision.
 
 The scheduler runs the sweep daily inside the API (`job_ran` in the ops log, `name: identity_sweep`).
 To see what is due, `npm run cli -- identity:sweep` (it erases nothing without `--yes`). For a manual
 run, `npm run cli -- scheduler:run identity_sweep --yes`. Each erasure is a `names_erased` event by
-`system`, and one ops line, `identity_names_erased { count, rules }`, holds no name.
+`system`. Every run with `--yes`, none erased included, writes one ops line,
+`identity_names_erased { count, rules }`, which holds no name.
 
 ## 6. Disclosure
 

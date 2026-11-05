@@ -39,6 +39,14 @@ export type ReviewDecisionCode =
   | "duplicate_identity"
   | "name_rule_failed"
   | "other";
+/** Why a check the provider did not pass failed, as the operator records it. */
+export type FailureReasonCode =
+  | "document_unverified"
+  | "document_expired"
+  | "selfie_mismatch"
+  | "consent_declined"
+  | "abandoned"
+  | "other";
 /** Why a passed record was revoked. */
 export type RevokeReasonCode =
   | "fraud"
@@ -54,8 +62,9 @@ export type NameCorrectionCode =
   | "rule_failed"
   | "other";
 
-// The four closed lists, for the validation and for the operator commands' --help. Each entry is
+// The closed lists, for the validation and for the operator commands' --help. Each entry is
 // checked against its type; the type and the list are written side by side so they stay one list.
+// An acceptance and a refusal each take their own part of the decision codes, `other` in both.
 export const REVIEW_REASON_CODES: readonly string[] = [
   "provider_flag",
   "watchlist_hit",
@@ -74,6 +83,29 @@ export const REVIEW_DECISION_CODES: readonly string[] = [
   "name_rule_failed",
   "other",
 ] satisfies readonly ReviewDecisionCode[];
+/** The decision codes of an acceptance: what the operator found that clears the review. */
+export const ACCEPT_DECISION_CODES: readonly string[] = [
+  "provider_flag_cleared",
+  "watchlist_false_positive",
+  "other",
+] satisfies readonly ReviewDecisionCode[];
+/** The decision codes of a refusal: what the operator found that fails the check. */
+export const REFUSE_DECISION_CODES: readonly string[] = [
+  "watchlist_confirmed",
+  "country_blocked",
+  "document_expired",
+  "duplicate_identity",
+  "name_rule_failed",
+  "other",
+] satisfies readonly ReviewDecisionCode[];
+export const FAILURE_REASON_CODES: readonly string[] = [
+  "document_unverified",
+  "document_expired",
+  "selfie_mismatch",
+  "consent_declined",
+  "abandoned",
+  "other",
+] satisfies readonly FailureReasonCode[];
 export const REVOKE_REASON_CODES: readonly string[] = [
   "fraud",
   "watchlist_confirmed",

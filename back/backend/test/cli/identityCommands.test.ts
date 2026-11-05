@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { recordIdentity, showIdentity, sweepIdentityNames } from "../../src/cli/identity";
 import { buildCli } from "../../src/cli/index";
 import { type Config, loadConfig } from "../../src/config/env";
+import { nameHmac, parsePiiKey } from "../../src/formation/pii";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
   type GuardianIdentityCheck,
@@ -41,6 +42,10 @@ const LAST = "Dupont";
 /** The surname in any case: no ops line may hold it. */
 const SURNAME = /dupont/i;
 const PII_KEY = Buffer.alloc(32, 7).toString("base64");
+/** The key a rotation moves to; `PII_KEY` is then the previous one. */
+const NEW_PII_KEY = Buffer.alloc(32, 9).toString("base64");
+const RESERVED_SYSTEM =
+  "refusing: --operator system is reserved for the retention sweep's own erasures";
 
 /** anvil's published accounts #2, #3 and #4: test keys, never real wallets. */
 const guardian = ANVIL_ACCOUNT_2.address;
@@ -579,6 +584,79 @@ describe("identity:record", () => {
     });
   });
 
+  test("on production a passed check needs the sanctions search and the face match; a review does not", () => {
+    human(guardian, "1001");
+    const production = config({ arcNetwork: "mainnet" });
+    const NEEDS_SEARCH =
+      "refusing: on production a passed check needs the sanctions search: --watchlist clear or hit";
+    const NEEDS_LIVENESS = "refusing: on production a passed check needs --liveness passed";
+
+    expect(
+      thrownBy(() =>
+        recordIdentity(db, production, guardian, recordOpts({ watchlist: "not_run" })),
+      ),
+    ).toBe(NEEDS_SEARCH);
+    for (const liveness of [undefined, "failed", "not_run"])
+      expect(
+        thrownBy(() => recordIdentity(db, production, guardian, recordOpts({ liveness }))),
+      ).toBe(NEEDS_LIVENESS);
+    expect(repo.list(guardian)).toEqual([]);
+
+    recordIdentity(
+      db,
+      production,
+      guardian,
+      recordOpts({ result: "needs_review", liveness: "not_run", watchlist: "not_run" }),
+    );
+    expect(latestOf(guardian)).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["provider_flag"],
+    });
+  });
+
+  test("on a sandbox deployment a passed check needs neither", async () => {
+    human(guardian, "1001");
+
+    const output = await recorded(guardian, { "--liveness": null, "--watchlist": "not_run" });
+
+    expect(output).toMatchObject({ status: "passed", reviewReasons: [] });
+  });
+
+  test("record failed takes only a failure reason code", async () => {
+    human(guardian, "1001");
+    const failedLine = (reasonCode: string) =>
+      recordLine(guardian, {
+        "--result": "failed",
+        "--name-first": null,
+        "--name-last": null,
+        "--reason-code": reasonCode,
+        "--reason": "stripe requires_input: selfie_face_mismatch",
+      });
+
+    expect(await refusal(failedLine("watchlist_confirmed"))).toBe(
+      "refusing: --reason-code must be one of document_unverified, document_expired, selfie_mismatch, consent_declined, abandoned, other",
+    );
+    await run(failedLine("selfie_mismatch"));
+
+    expect(repo.events(latestOf(guardian).checkId)).toMatchObject([
+      { kind: "recorded", reasonCode: "selfie_mismatch" },
+    ]);
+  });
+
+  test("no operator may write under the name the sweep writes under", async () => {
+    human(guardian, "1001");
+
+    expect(await refusal(recordLine(guardian, { "--operator": "system" }))).toBe(RESERVED_SYSTEM);
+    const review = await recorded(guardian, { "--watchlist": "hit" });
+    expect(
+      await refusal(
+        decisionLine("identity:refuse", guardian, review.checkId, "watchlist_confirmed", {
+          "--operator": "system",
+        }),
+      ),
+    ).toBe(RESERVED_SYSTEM);
+  });
+
   test("every command that encrypts or decrypts refuses without FORMATION_PII_KEY", async () => {
     human(guardian, "1001");
     await recorded(guardian, { "--watchlist": "hit" });
@@ -673,6 +751,72 @@ describe("the decisions", () => {
     ).toBe(
       `refusing: the latest identity check of ${guardian} is passed: only a needs_review check is accepted`,
     );
+  });
+
+  test("accept is refused while another account's passed check holds the same name and document country", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const review = await recorded(guardian, { "--watchlist": "hit" });
+    // A review is no one's verified identity, so the second account passes clean.
+    const clean = await recorded(second, { "--provider-ref": "vs_test_0002" });
+    expect(clean.status).toBe("passed");
+
+    const refused = await refusal(
+      decisionLine("identity:accept", guardian, review.checkId, "watchlist_false_positive"),
+    );
+
+    expect(refused).toBe(
+      `refusing: another account holds a verified identity with the same name and document country (checks ${clean.checkId}): refuse this one with duplicate_identity, or revoke the other first`,
+    );
+    expect(refused).not.toMatch(SURNAME);
+    expect(latestOf(guardian).checkId).toBe(review.checkId);
+    await run(decisionLine("identity:refuse", guardian, review.checkId, "duplicate_identity"));
+    expect(latestOf(guardian).status).toBe("failed");
+  });
+
+  test("accept and refuse each take only their own decision codes", async () => {
+    human(guardian, "1001");
+    const review = await recorded(guardian, { "--watchlist": "hit" });
+
+    expect(
+      await refusal(
+        decisionLine("identity:accept", guardian, review.checkId, "watchlist_confirmed"),
+      ),
+    ).toBe(
+      "refusing: --reason-code must be one of provider_flag_cleared, watchlist_false_positive, other",
+    );
+    expect(
+      await refusal(
+        decisionLine("identity:refuse", guardian, review.checkId, "watchlist_false_positive"),
+      ),
+    ).toBe(
+      "refusing: --reason-code must be one of watchlist_confirmed, country_blocked, document_expired, duplicate_identity, name_rule_failed, other",
+    );
+    expect(repo.list(guardian)).toHaveLength(1);
+  });
+
+  test("accept after a key rotation seals the names under the new key and computes the hmac again under it", async () => {
+    human(guardian, "1001");
+    const review = await recorded(guardian, { "--watchlist": "hit" });
+    const before = latestOf(guardian);
+    const oldKey = parsePiiKey(PII_KEY, "FORMATION_PII_KEY");
+    const newKey = parsePiiKey(NEW_PII_KEY, "FORMATION_PII_KEY");
+    expect(before.names?.keyId).toBe(oldKey.id);
+    process.env.FORMATION_PII_KEY = NEW_PII_KEY;
+    process.env.FORMATION_PII_KEY_PREVIOUS = PII_KEY;
+
+    await run(
+      decisionLine("identity:accept", guardian, review.checkId, "watchlist_false_positive"),
+    );
+
+    const row = latestOf(guardian);
+    expect(row.names?.keyId).toBe(newKey.id);
+    expect(row.nameHmac).toBe(nameHmac({ current: newKey }, FIRST, LAST));
+    expect(row.nameHmac).not.toBe(before.nameHmac);
+    expect((await run<Shown>(["identity:show", guardian])).output).toMatchObject({
+      state: "verified",
+      latest: { names: { first: FIRST, last: LAST, full: null } },
+    });
   });
 
   test("refuse appends failed without names", async () => {
@@ -814,6 +958,24 @@ describe("identity:correct-name", () => {
     expect(output).toMatchObject({ status: "needs_review", reviewReasons: ["duplicate_identity"] });
   });
 
+  test("correct-name without --name-full keeps no full name", async () => {
+    human(guardian, "1001");
+    const passed = await recorded(guardian, { "--name-full": "JEAN PIERRE DUPONT" });
+
+    await run(
+      decisionLine("identity:correct-name", guardian, passed.checkId, "transliteration", {
+        "--name-first": "Jean-Pierre",
+        "--name-last": LAST,
+      }),
+    );
+
+    expect((await run<Shown>(["identity:show", guardian])).output.latest?.names).toEqual({
+      first: "Jean-Pierre",
+      last: LAST,
+      full: null,
+    });
+  });
+
   test("correct-name refuses a check whose names were erased", async () => {
     human(guardian, "1001");
     const passed = await recorded(guardian);
@@ -893,14 +1055,28 @@ describe("identity:sweep", () => {
     expect(showIdentity(db, config(), guardian)).toMatchObject({ state: "verified" });
   });
 
-  test("the exported sweep reads the clock it is handed, as the scheduler hands it", async () => {
+  test("the exported sweep reads the clock it is handed, as the scheduler hands it, and logs every run", async () => {
     human(guardian, "1001");
     const review = await recorded(guardian, { "--watchlist": "hit" });
     await run(decisionLine("identity:refuse", guardian, review.checkId, "watchlist_confirmed"));
 
+    const from = printed.length;
     expect(sweepIdentityNames(db, config(), { yes: true, nowMs: Date.now() + DAY })).toMatchObject({
       count: 0,
     });
+    // A run with --yes says it ran, none erased included.
+    expect(
+      printed
+        .slice(from)
+        .filter(isOpsLine)
+        .map((line) => JSON.parse(line)),
+    ).toEqual([
+      expect.objectContaining({
+        opslog: "identity_names_erased",
+        count: 0,
+        rules: { superseded: 0, abandoned: 0, unused: 0 },
+      }),
+    ]);
     expect(
       sweepIdentityNames(db, config(), { yes: true, nowMs: Date.now() + 31 * DAY }),
     ).toMatchObject({ erased: true, count: 1, rules: { superseded: 1 } });
@@ -911,9 +1087,11 @@ describe("identity:sweep", () => {
 // ── personal data ─────────────────────────────────────────────────────────────────────────────
 
 test("no ops line of any command contains the name", async () => {
-  human(guardian, "1001");
-  human(second, "1002");
-  human(third, "1003");
+  // Nullifiers no timestamp or id could contain, so a match is a leak.
+  const nullifiers = ["0x5eed00a1", "0x5eed00b2", "0x5eed00c3"] as const;
+  human(guardian, nullifiers[0]);
+  human(second, nullifiers[1]);
+  human(third, nullifiers[2]);
   // A review accepted, then its name corrected, then revoked.
   const review = await recorded(guardian, { "--watchlist": "hit" });
   await run(decisionLine("identity:accept", guardian, review.checkId, "watchlist_false_positive"));
@@ -943,13 +1121,11 @@ test("no ops line of any command contains the name", async () => {
     "identity_refused",
     "identity_names_erased",
   ]);
-  for (const line of ops) {
-    expect(line).not.toMatch(SURNAME);
-    expect(line).not.toMatch(new RegExp(FIRST));
-    expect(line).not.toContain("1001");
-  }
   // Nor any event the commands wrote.
-  expect(JSON.stringify(db.prepare("SELECT * FROM identity_check_events").all())).not.toMatch(
-    SURNAME,
-  );
+  const events = JSON.stringify(db.prepare("SELECT * FROM identity_check_events").all());
+  for (const text of [...ops, events]) {
+    expect(text).not.toMatch(SURNAME);
+    expect(text).not.toMatch(new RegExp(FIRST));
+    for (const nullifier of nullifiers) expect(text).not.toContain(nullifier);
+  }
 });
