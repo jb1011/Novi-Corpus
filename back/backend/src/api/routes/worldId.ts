@@ -10,6 +10,7 @@ import {
   verifyProof,
 } from "../../adapters/worldid/guardianGate";
 import { type AuthVars, requireAuth } from "../../auth/middleware";
+import { identityView } from "../../identity/state";
 import type { GuardianVerification, WorldStore } from "../../persistence/worldStore";
 import type { ApiDeps } from "../app";
 import { ApiError } from "../errors";
@@ -420,11 +421,17 @@ export function mountWorldIdRoutes(app: Hono<{ Variables: AuthVars }>, deps: Api
     // `realHuman`: whether the legal-body doors' real-human gate accepts this row, by that gate's
     // own predicate on those doors' environment, so a browser can tell before it spends a door.
     // Absent where neither of those doors is mounted: the predicate then guards nothing.
+    // `identity`: where the guardian's identity check stands, under the same condition. Only the
+    // state, whether it is required and, once verified, the first and last names and the dates:
+    // never the full name, the provider or the country (`identityView`).
     const environment = deps.legalBodyOrders?.environment ?? deps.customerCompanies?.environment;
     const gate =
       environment === undefined
         ? {}
-        : { realHuman: realHumanState(world, tenantId, environment).ok };
+        : {
+            realHuman: realHumanState(world, tenantId, environment).ok,
+            identity: identityView(deps.identity, world, tenantId, environment),
+          };
     const v = world.store.findByTenant(tenantId, world.cfg.action);
     if (!v)
       return c.json({ verified: false, required: world.requireGuardian, attestAvailable, ...gate });

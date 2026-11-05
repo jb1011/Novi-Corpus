@@ -55,6 +55,7 @@ import { createCompany } from "../formation/company";
 import { newChainHeadCache } from "../formation/payment";
 import { formationSummary } from "../formation/status";
 import { HederaMirror } from "../hedera/mirror";
+import type { IdentityDeps } from "../identity/state";
 import { buildJobDeps } from "../jobs/composition";
 import { expireStaleCustomerCompanies } from "../legalBody/customerCompany";
 import { expireEvidenceBytes } from "../legalBody/evidence";
@@ -92,6 +93,7 @@ import { SqliteEntityRepository } from "../persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
+import { SqliteIdentityRepository } from "../persistence/identityRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
 import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
@@ -438,6 +440,18 @@ async function main() {
     console.warn(
       `⚠ Identity attestation step-up ENABLED (action ${worldId.cfg.attestAction}, min age ${worldId.attestMinAge})`,
     );
+  // The guardian identity record: World ID proves one real person; the identity check says who.
+  // Built wherever the PII key is set, since the names of record are encrypted under it. The
+  // testnet box cannot hold the key, so it has none: its `/world-id/me` answers the block with
+  // state `none`, and its doors are sandbox, where the check is skipped.
+  const identity: IdentityDeps | undefined = cfg.pii
+    ? {
+        repo: new SqliteIdentityRepository(db),
+        pii: cfg.pii,
+        reverifyYears: cfg.identity.reverifyYears,
+        blockedCountries: cfg.identity.blockedCountries,
+      }
+    : undefined;
   // A customer company door needs a verified human behind the guardian. On testnet nothing else
   // stops the doors being mounted with no World block, and then every one of them refuses.
   if (cfg.legalBodyFactory && !cfg.world && legalBodyEnvironment(cfg) === "sandbox")
@@ -1219,6 +1233,7 @@ async function main() {
     x402Demo,
     ens,
     worldId,
+    identity,
     agentBook,
     /**
      * The public legal-body lookup, `GET /legal-bodies/:address` (design 2026-09-10 D3).

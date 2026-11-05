@@ -207,15 +207,17 @@ describe("/config.legalBodies", () => {
       factory: ORDERS_FACTORY,
       gasSeedOffered: false,
       paymentRequired: false,
+      identityRequired: false,
       linkTtl: { min: 600, max: 85_800, default: 3_600 },
     });
   });
 
-  test("the environment is the order deps' own", async () => {
+  test("the environment is the order deps' own, and production requires the identity check", async () => {
     const { body } = await configOf({
       legalBodyOrders: orderDeps({ environment: "production" }),
     });
     expect(body.legalBodies.environment).toBe("production");
+    expect(body.legalBodies.identityRequired).toBe(true);
   });
 
   test("with customer doors that charge: declarations and paymentRequired", async () => {
@@ -260,7 +262,7 @@ describe("/config.legalBodies", () => {
     );
   });
 
-  test("the offered answer has exactly the ten keys of its type, and the link window exactly three", async () => {
+  test("the offered answer has exactly the eleven keys of its type, and the link window exactly three", async () => {
     const orders = orderDeps();
     const { body } = await configOf({
       legalBodyOrders: orders,
@@ -280,10 +282,11 @@ describe("/config.legalBodies", () => {
         factory: true,
         gasSeedOffered: true,
         paymentRequired: true,
+        identityRequired: true,
         linkTtl: true,
       }),
     );
-    expect(keys).toHaveLength(10);
+    expect(keys).toHaveLength(11);
     expect(Object.keys(body.legalBodies.linkTtl).sort()).toEqual(
       keysOf<OfferedConfig["linkTtl"]>({ min: true, max: true, default: true }),
     );

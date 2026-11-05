@@ -1210,6 +1210,9 @@ export type LegalBodyConfig =
       gasSeedOffered: boolean;
       /** A new customer company lands `draft` and owes a payment. */
       paymentRequired: boolean;
+      /** The guardian must pass the identity check first (production). Absent from a backend
+       *  before PR 1, read as false. */
+      identityRequired?: boolean;
       /** The link window a client may ask for, in seconds, counted from the chain's clock. */
       linkTtl: { min: number; max: number; default: number };
     };
@@ -1224,6 +1227,7 @@ export const LEGAL_BODY_CONFIG_KEYS = [
   "factory",
   "gasSeedOffered",
   "paymentRequired",
+  "identityRequired",
   "linkTtl",
 ] as const satisfies readonly (keyof Extract<LegalBodyConfig, { available: true }>)[];
 
