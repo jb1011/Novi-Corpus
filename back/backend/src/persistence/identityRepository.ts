@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { getAddress } from "viem";
 import {
   type DocumentType,
   type IdentityProvider,
@@ -32,6 +33,7 @@ export interface GuardianIdentityCheck {
   checkId: number;
   /** The guardian action nullifier of the tenant's World row; null once World ID is optional. */
   nullifier: string | null;
+  /** The account, EIP-55 checksummed as the session spells it; another spelling is refused. */
   tenantId: string;
   provider: IdentityProvider;
   /** The provider's own id of the attempt. */
@@ -272,6 +274,22 @@ function refuse(field: string, rule: string): never {
   throw new Error(`identity check: ${field} ${rule}`);
 }
 
+/**
+ * A tenant id in the one spelling the session gives it (`auth/session.ts`): an EIP-55 checksummed
+ * address. The erasure guard and the duplicate check join on it as text, so a second spelling of
+ * the same account would read as another tenant, one whose live company protects nothing.
+ */
+function tenantIdShape(field: string, value: unknown): string {
+  let canonical = false;
+  try {
+    canonical = typeof value === "string" && getAddress(value) === value;
+  } catch {
+    // Not an address at all: refused below.
+  }
+  if (!canonical) refuse(field, "must be an EIP-55 checksummed address");
+  return value as string;
+}
+
 function requiredText(field: string, value: unknown): string {
   const text = optionalText(field, value);
   if (text === null) refuse(field, "is required");
@@ -378,7 +396,7 @@ export function validateIdentityCheck(c: NewGuardianIdentityCheck): NewGuardianI
 
   const v: NewGuardianIdentityCheck = {
     nullifier: optionalText("nullifier", c.nullifier),
-    tenantId: requiredText("tenantId", c.tenantId),
+    tenantId: tenantIdShape("tenantId", c.tenantId),
     provider: oneOf("provider", c.provider, PROVIDERS),
     providerRef: requiredText("providerRef", c.providerRef),
     subject: optionalText("subject", c.subject),
@@ -488,8 +506,8 @@ export class SqliteIdentityRepository implements IdentityRepository {
       // Identity design 9, over the rows whose names are not erased yet:
       //  - superseded: not its tenant's latest, still holding names, written (`created_at`) before
       //    the failed window;
-      //  - abandoned: the latest, `started`, begun (`started_at`) before the failed window, whether
-      //    or not it holds names: its erasure is then the record that the attempt was swept;
+      //  - abandoned: the latest, `started`, still holding names, begun (`started_at`) before the
+      //    failed window; an attempt that never held names has nothing to erase, and no event;
       //  - unused: the latest, `passed`, holding names, completed before the unused window.
       // Over all three, the rule that outranks them: no row of a tenant with a live company. A
       // needs_review row is never a candidate: it waits for the operator, whose refusal appends a
@@ -504,7 +522,7 @@ export class SqliteIdentityRepository implements IdentityRepository {
          UNION ALL
          SELECT g.check_id, 'abandoned' FROM guardian_identity_checks g
           WHERE ${IS_LATEST}
-            AND g.status = 'started' AND g.names_erased_at IS NULL
+            AND g.status = 'started' AND g.names_erased_at IS NULL AND ${HOLDS_NAMES}
             AND g.started_at < @failed_before_ms
             AND ${NO_LIVE_COMPANY}
          UNION ALL
@@ -557,12 +575,12 @@ export class SqliteIdentityRepository implements IdentityRepository {
   }
 
   latest(tenantId: string): GuardianIdentityCheck | undefined {
-    const r = this.stmts.latest.get(tenantId) as Row | undefined;
+    const r = this.stmts.latest.get(tenantIdShape("tenantId", tenantId)) as Row | undefined;
     return r ? toCheck(r) : undefined;
   }
 
   list(tenantId: string): GuardianIdentityCheck[] {
-    return (this.stmts.list.all(tenantId) as Row[]).map(toCheck);
+    return (this.stmts.list.all(tenantIdShape("tenantId", tenantId)) as Row[]).map(toCheck);
   }
 
   events(checkId: number): IdentityEvent[] {
@@ -579,7 +597,7 @@ export class SqliteIdentityRepository implements IdentityRepository {
       this.stmts.passedElsewhere.all({
         name_hmac: nameHmac,
         document_country: documentCountry,
-        except_tenant_id: exceptTenantId,
+        except_tenant_id: tenantIdShape("exceptTenantId", exceptTenantId),
       }) as { check_id: number }[]
     ).map((r) => r.check_id);
   }

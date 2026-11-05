@@ -99,6 +99,12 @@ test("the names are erased once, and the erasure changes no fact the record comp
   expect(() => erase(", name_hmac = 'cd'")).toThrow(/only the erasure/);
   expect(() => erase(", document_country = 'DEU'")).toThrow(/only the erasure/);
   expect(() => erase(", tenant_id = '0xdef'")).toThrow(/only the erasure/);
+  // Every other column is pinned too: who wrote the row, what it decided on, what it was.
+  expect(() => erase(", operator = 'someone.else'")).toThrow(/only the erasure/);
+  expect(() => erase(", supersedes_check_id = 1")).toThrow(/only the erasure/);
+  expect(() => erase(", synthetic = 0")).toThrow(/only the erasure/);
+  expect(() => erase(", name_key_id = NULL")).toThrow(/only the erasure/);
+  expect(() => erase(", created_at = NULL")).toThrow(/only the erasure/);
   expect(erase().changes).toBe(1);
   expect(() => erase()).toThrow(/only the erasure/); // once
   expect(() =>

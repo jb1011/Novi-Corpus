@@ -1161,10 +1161,12 @@ const COMPANY_CHECKS_DDL = `
  * no-replace and next-id triggers are those of `company_checks`, and the no-replace guard relies
  * on `CHECK (check_id > 0)` for the reason given there; `check_id` is the rowid and no other index
  * is unique. The one UPDATE allowed is the erasure of the names (retention, identity design 9):
- * the three ciphertexts set to NULL and `names_erased_at` set, once, with the row's ids, provider,
- * status and dates and the facts a later check compares (the hmac, the country, the watchlist
- * result, the environment) unchanged. So an erased row still says what was checked, when, with
- * what result, and still counts in the duplicate check; it no longer says who.
+ * the three ciphertexts set to NULL and `names_erased_at` set, once, on a row not erased yet, with
+ * every other column unchanged (the rowid, the IVs and the key id included), as
+ * `trg_company_declarations_erase_only` has it. Every other UPDATE aborts, one that changes nothing
+ * included, and a NULL compares as a change too, so `UPDATE OR REPLACE` cannot swap a column's
+ * default in for it. So an erased row still says what was checked, when, by whom and with what
+ * result, and still counts in the duplicate check; it no longer says who was checked.
  *
  * A passed row carries the facts a gate reads, and its names unless they were erased; a failed or
  * revoked row keeps no names; a row that completed says when (CHECKs).
@@ -1227,13 +1229,28 @@ const GUARDIAN_IDENTITY_CHECKS_DDL = `
     AND NEW.tenant_id IS OLD.tenant_id
     AND NEW.provider IS OLD.provider
     AND NEW.provider_ref IS OLD.provider_ref
+    AND NEW.subject IS OLD.subject
     AND NEW.status IS OLD.status
+    AND NEW.supersedes_check_id IS OLD.supersedes_check_id
+    AND NEW.started_at IS OLD.started_at
     AND NEW.completed_at IS OLD.completed_at
     AND NEW.expires_at IS OLD.expires_at
+    AND NEW.name_first_iv IS OLD.name_first_iv
+    AND NEW.name_last_iv IS OLD.name_last_iv
+    AND NEW.name_full_iv IS OLD.name_full_iv
+    AND NEW.name_key_id IS OLD.name_key_id
     AND NEW.name_hmac IS OLD.name_hmac
     AND NEW.document_country IS OLD.document_country
+    AND NEW.document_type IS OLD.document_type
+    AND NEW.document_expired IS OLD.document_expired
+    AND NEW.liveness IS OLD.liveness
     AND NEW.watchlist IS OLD.watchlist
-    AND NEW.environment IS OLD.environment)
+    AND NEW.review_reasons IS OLD.review_reasons
+    AND NEW.environment IS OLD.environment
+    AND NEW.synthetic IS OLD.synthetic
+    AND NEW.operator IS OLD.operator
+    AND NEW.operator_os_user IS OLD.operator_os_user
+    AND NEW.created_at IS OLD.created_at)
   BEGIN
     SELECT RAISE(ABORT, 'guardian_identity_checks: only the erasure of names may update a row');
   END;

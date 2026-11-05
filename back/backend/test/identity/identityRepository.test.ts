@@ -19,7 +19,8 @@ const T0 = Date.UTC(2026, 10, 10, 12);
 const THREE_YEARS = Date.UTC(2029, 10, 10, 12) - T0;
 const HMAC_A = "a".repeat(64);
 const HMAC_B = "b".repeat(64);
-const tenant = (n: number) => `0x${n.toString(16).padStart(40, "0")}`;
+/** A tenant id as the session spells it: EIP-55 checksummed, with letters for the checksum to case. */
+const tenant = (n: number) => getAddress(`0x${"ab".repeat(18)}${n.toString(16).padStart(4, "0")}`);
 
 /** Ciphertext and IV bytes only: no fixture here holds a readable name. */
 const sealed = (byte: number): EncryptedName => ({
@@ -262,6 +263,8 @@ describe("SqliteIdentityRepository", () => {
     // The same for an abandoned attempt.
     repo.append(row(tenant(7), "started", { startedAt: real - 400 * DAY }), recorded); // 9
     company(tenant(7));
+    // An abandoned attempt that never held names has nothing to erase.
+    repo.append(row(tenant(8), "started", { startedAt: real - 400 * DAY, names: null }), recorded); // 10
 
     expect(repo.erasureCandidates(later, 30 * DAY, 365 * DAY)).toEqual([
       { checkId: 1, rule: "superseded" },
@@ -284,7 +287,7 @@ describe("SqliteIdentityRepository", () => {
 
   test("erasureCandidates: a declaration not yet erased holds its tenant's rows, and stops once erased", () => {
     const real = Date.now();
-    const owner = getAddress(tenant(1));
+    const owner = tenant(1);
     repo.append(
       row(owner, "passed", { startedAt: real - 400 * DAY, completedAt: real - 400 * DAY }),
       event("recorded"),
@@ -336,6 +339,23 @@ describe("SqliteIdentityRepository", () => {
       /^identity check: failedAfterMs must be a whole number of milliseconds, at least one day/,
     );
     expect(() => repo.erasureCandidates(Date.now(), 30 * DAY, 365)).toThrow(/unusedAfterMs/);
+  });
+
+  test("a tenant id is refused unless spelled as the session spells it, checksummed", () => {
+    const lower = tenant(1).toLowerCase();
+    expect(lower).not.toBe(tenant(1)); // the fixture's checksum cases at least one letter
+    repo.append(row(tenant(1), "passed"), event("recorded"));
+
+    const checksummed = /^identity check: tenantId must be an EIP-55 checksummed address$/;
+    expect(() => repo.append(row(lower, "passed"), event("recorded"))).toThrow(checksummed);
+    expect(() => repo.latest(lower)).toThrow(checksummed);
+    expect(() => repo.list(lower)).toThrow(checksummed);
+    expect(() => repo.passedElsewhere(HMAC_A, "FRA", lower)).toThrow(
+      /^identity check: exceptTenantId must be an EIP-55 checksummed address$/,
+    );
+    expect(() => repo.latest("not an address")).toThrow(checksummed);
+    expect(count("guardian_identity_checks")).toBe(1);
+    expect(repo.latest(tenant(1))?.checkId).toBe(1);
   });
 
   test("validateIdentityCheck refuses a passed row without a country, a failed row with names, a lower-case country, a status outside the union", () => {
@@ -394,7 +414,7 @@ describe("SqliteIdentityRepository", () => {
       names: { ...NAMES, first: { ciphertext: Buffer.alloc(8), iv: Buffer.alloc(8) } },
     }).toThrow(/names.first.iv must be 12 bytes/);
     refused({ operator: "Ops Example" }).toThrow(/operator must match/);
-    refused({ tenantId: "" }).toThrow(/tenantId must not be empty/);
+    refused({ tenantId: "" }).toThrow(/tenantId must be an EIP-55 checksummed address/);
     refused({ environment: "staging" as "sandbox" }).toThrow(/environment must be one of/);
 
     // What the table allows, the validation allows: a started row with no completion or names.
