@@ -131,7 +131,7 @@ const OTHER_SPACE = /(?! )\p{Z}/u;
 const SPACES_AT_THE_ENDS = /^ +| +$/g;
 const SPACE_RUNS = / {2,}/g;
 
-interface TextRule {
+export interface TextRule {
   /** Inclusive, in code points, after the spaces are normalised. */
   min: number;
   max: number;
@@ -142,7 +142,7 @@ interface TextRule {
   also?: { pattern: RegExp; problem: string };
 }
 
-const DECLARANT_NAME: TextRule = {
+export const DECLARANT_NAME: TextRule = {
   min: 2,
   max: 120,
   chars: /^[\p{L}\p{M} '.-]+$/u,
@@ -191,7 +191,7 @@ const SANDBOX_FILING_NUMBER: TextRule = {
  * and runs of them collapsed to one; then the length, in code points, and the characters.
  * Returns the normalised value, or records the problem and returns undefined.
  */
-function applyTextRule(
+export function applyTextRule(
   field: string,
   raw: unknown,
   rule: TextRule,
