@@ -35,10 +35,14 @@ export function composeDeclarantName(first: string, last: string): string {
 }
 
 /**
- * The composed name through the declared door's own rule (`DECLARANT_NAME`), then through a
- * Latin-script check. Returns the problem, which names the rule and never the value, or null.
+ * Both names present, then the composed name through the declared door's own rule
+ * (`DECLARANT_NAME`), then through a Latin-script check. Returns the problem, which names the rule
+ * and never the value, or null.
  */
 export function nameRuleProblem(first: string, last: string): string | null {
+  // A document without one of the two leaves the composed name looking whole: " Dupont" passes
+  // the declarant rule once trimmed. The record needs both, or an operator's decision.
+  if (first.trim() === "" || last.trim() === "") return "name needs both a first and a last name";
   const problems: Array<{ field: string; problem: string }> = [];
   const value = applyTextRule("name", composeDeclarantName(first, last), DECLARANT_NAME, problems);
   if (value === undefined) return `name ${problems[0]?.problem ?? "breaks the declarant rule"}`;

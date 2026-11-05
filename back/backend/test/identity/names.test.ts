@@ -68,6 +68,12 @@ test("the declarant rule still applies: a character it refuses fails", () => {
   expect(typeof nameRuleProblem("Jean", 'Du"pont')).toBe("string");
 });
 
+test("an empty first or last name fails the rule, so a record without one lands in review", () => {
+  expect(typeof nameRuleProblem("", "Dupont")).toBe("string");
+  expect(typeof nameRuleProblem("Jean", "")).toBe("string");
+  expect(typeof nameRuleProblem(nameOfRecord("   "), "Dupont")).toBe("string");
+});
+
 test("the AAD binds the tenant id and the field", () => {
   expect(IDENTITY_AAD("0xAbC", "first")).toBe("identity|0xAbC|first");
   expect(IDENTITY_AAD("0xAbC", "full")).toBe("identity|0xAbC|full");

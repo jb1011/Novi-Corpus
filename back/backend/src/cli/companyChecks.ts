@@ -1,11 +1,9 @@
 import { createHash } from "node:crypto";
-import { userInfo } from "node:os";
 import { resolve } from "node:path";
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
-import { config as loadDotenv } from "dotenv";
 import type { Hex } from "viem";
-import { type Config, legalBodyEnvironment, loadConfig } from "../config/env";
+import { legalBodyEnvironment } from "../config/env";
 import { dueDates } from "../legalBody/filings";
 import { CUSTOMER_PROVIDER } from "../legalBody/provider";
 import { SANDBOX_AUTOMATIC_OPERATOR, automaticSandboxCheck } from "../legalBody/sandboxCheck";
@@ -24,11 +22,11 @@ import {
   filingKeyOf,
 } from "../persistence/companyDeclarationRepository";
 import { type CompanyRecord, SqliteCompanyRepository } from "../persistence/companyRepository";
-import { openDatabase } from "../persistence/db";
 import { SqliteDocumentIndexRepository } from "../persistence/documentIndexRepository";
 import { type DocumentStore, FileDocumentStore } from "../persistence/documentStore";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { isCalendarDate, wyomingDate } from "../util/wyomingCalendar";
+import { OPERATOR_NAME, osUser, print, refuse, withDatabase } from "./operator";
 
 /**
  * THE OPERATOR'S COMMANDS over a customer's declaration: see it, record the check of it (passed or
@@ -58,7 +56,6 @@ const EXPECT_LATEST_HELP =
 /** What `company:check` adds to it: a sandbox declaration is checked at once, so `none` is stale. */
 const CHECK_EXPECT_LATEST_HELP = `${EXPECT_LATEST_HELP}; on a sandbox deployment the latest check is the automatic one`;
 
-const OPERATOR_NAME = /^[a-z0-9._-]{2,40}$/;
 const CHECK_ID = /^[1-9][0-9]{0,15}$/;
 /** The filing-number rule a declaration's filing number was held to. */
 const FILING_NUMBER = /^[0-9A-Za-z-]{4,32}$/;
@@ -119,10 +116,6 @@ export function companyNameKeyOf(name: string): string {
     .replace(/^ +| +$/g, "");
 }
 
-function refuse(message: string): never {
-  throw new Error(`refusing: ${message}`);
-}
-
 /** An operator's name. The sandbox's automatic check has a name of its own, which no operator
  *  may type: a row under it would read as a check nobody made. */
 function parseOperator(value: string): string {
@@ -161,24 +154,7 @@ function sha256Of(bytes: Uint8Array): Hex {
   return `0x${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-/** The OS user running the command, recorded on every check beside the operator's name. */
-function osUser(): string {
-  try {
-    const name = userInfo().username;
-    if (name) return name;
-  } catch {
-    // No passwd entry for this uid: fall back to the login environment below.
-  }
-  const fromEnv = process.env.USER ?? process.env.LOGNAME;
-  if (fromEnv) return fromEnv;
-  refuse("the OS user running this command cannot be read, and every check records it");
-}
-
 const nowSeconds = (): number => Math.floor(Date.now() / 1000);
-
-function print(output: Record<string, unknown>): void {
-  console.log(JSON.stringify(output, null, 2));
-}
 
 interface Stores {
   db: Database.Database;
@@ -186,22 +162,6 @@ interface Stores {
   declarations: SqliteCompanyDeclarationRepository;
   checks: SqliteCompanyCheckRepository;
   documents: SqliteDocumentIndexRepository;
-}
-
-/**
- * Opens the database the configuration names (never a path of its own: an operator who moved the
- * data directory must not open a different, empty database), runs `fn`, and closes it. `fn` is
- * handed the configuration too, for what the deployment decides.
- */
-function withDatabase<T>(fn: (db: Database.Database, docStoreDir: string, cfg: Config) => T): T {
-  loadDotenv();
-  const cfg = loadConfig();
-  const db = openDatabase(cfg.dbPath);
-  try {
-    return fn(db, cfg.docStoreDir, cfg);
-  } finally {
-    db.close();
-  }
 }
 
 function storesOf(db: Database.Database): Stores {

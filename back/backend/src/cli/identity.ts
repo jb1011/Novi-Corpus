@@ -1,0 +1,1015 @@
+import type Database from "better-sqlite3";
+import type { Command } from "commander";
+import { getAddress } from "viem";
+import { type WorldIdDeps, buildWorldIdDeps, realHumanState } from "../api/routes/worldId";
+import { type Config, legalBodyEnvironment } from "../config/env";
+import { type PiiKeyring, encryptText, nameHmac } from "../formation/pii";
+import { IDENTITY_AAD, nameOfRecord, nameRuleProblem } from "../identity/names";
+import { type IdentityDeps, identityState, namesOfRecord } from "../identity/state";
+import {
+  type DocumentType,
+  type IdentityProvider,
+  type IdentityRowStatus,
+  type Liveness,
+  NAME_CORRECTION_CODES,
+  REVIEW_DECISION_CODES,
+  REVOKE_REASON_CODES,
+  type ReviewReasonCode,
+  type Watchlist,
+} from "../identity/types";
+import { opsLog } from "../observability/opsLog";
+import {
+  type ErasureRule,
+  type GuardianIdentityCheck,
+  type NewGuardianIdentityCheck,
+  SqliteIdentityRepository,
+  validateIdentityCheck,
+} from "../persistence/identityRepository";
+import { SqliteWorldStore } from "../persistence/worldStore";
+import { OPERATOR_NAME, osUser, print, refuse, withDatabase } from "./operator";
+
+/**
+ * THE OPERATOR'S COMMANDS over the guardian's identity record (slice I-0: the operator reads the
+ * provider's dashboard and records what it shows, from the box): show a tenant's record, record a
+ * check, decide a review (accept or refuse it), revoke a passed check, correct the name of record,
+ * and erase the names the retention rules say are due.
+ *
+ * World ID proves one real person; the identity check says who.
+ *
+ * Every command opens the database itself, through the configuration, prints ONE JSON object on
+ * success and throws on a refusal (the entry point prints the message and exits non-zero).
+ *
+ * The writing commands share the rules of `company:check` (`cli/companyChecks.ts`):
+ *  - without `--yes` they print what they would write and write nothing;
+ *  - `--expect-latest` names the tenant's latest check (or `none`), so a command typed against a
+ *    view another operator has since changed, or replayed from the shell history, is refused;
+ *  - the rules and the write run in ONE immediate transaction, so nothing lands between them;
+ *  - each row written has one ops line, which carries ids, states, codes and the operator: never a
+ *    name, the nullifier or a reason's text. `identity:show` writes no ops line at all, and is the
+ *    only command that prints a name.
+ *
+ * Rows and events are kept for ever: a reason must hold no personal data, a name above all.
+ */
+
+const REASON_HELP =
+  "why, at most 300 characters; kept for ever, so no personal data and never a name";
+const EXPECT_LATEST_HELP =
+  "the tenant's latest identity check id, as identity:show prints it, or none when it has none";
+const EXPECT_CHECK_HELP = "the tenant's latest identity check id, as identity:show prints it";
+const NEXT = "nothing was written: run the same command with --yes to record this";
+const TENANT_HELP = "the guardian's account: its wallet address";
+
+const CHECK_ID = /^[1-9][0-9]{0,15}$/;
+const COUNTRY = /^[A-Za-z]{3}$/;
+/** An ISO-8601 time with its zone, so its reading never depends on the box's own zone. */
+const INSTANT =
+  /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const MAX_REASON_CODE_POINTS = 300;
+/** Control, format and other invisible characters, as the rows refuse them. */
+const OTHER_CHARACTER = /\p{C}/u;
+const DAY_MS = 86_400_000;
+
+// The values the record's columns take, as the operator types them (`identityRepository.ts`
+// holds the same lists for the shape check).
+const PROVIDERS = [
+  "stripe",
+  "persona",
+  "sumsub",
+  "sandbox",
+] as const satisfies readonly IdentityProvider[];
+const RESULTS = [
+  "passed",
+  "failed",
+  "needs_review",
+] as const satisfies readonly IdentityRowStatus[];
+const DOCUMENT_TYPES = [
+  "passport",
+  "identity_card",
+  "driving_licence",
+] as const satisfies readonly DocumentType[];
+const LIVENESS = ["passed", "failed", "not_run"] as const satisfies readonly Liveness[];
+const WATCHLIST = ["clear", "hit", "not_run"] as const satisfies readonly Watchlist[];
+
+// ── parsing ──────────────────────────────────────────────────────────────────────────────────
+
+/** The tenant in the one spelling its rows are kept under: EIP-55 checksummed. */
+function parseTenant(value: string): string {
+  try {
+    return getAddress(value);
+  } catch {
+    return refuse("<tenantId> must be a wallet address");
+  }
+}
+
+function parseOperator(value: string): string {
+  if (!OPERATOR_NAME.test(value)) refuse(`--operator must match ${OPERATOR_NAME.source}`);
+  return value;
+}
+
+/** A check id, or null for `none` when `none` is allowed. */
+function parseExpectLatest(value: string, allowNone: boolean): number | null {
+  if (allowNone && value === "none") return null;
+  if (!CHECK_ID.test(value))
+    refuse(`--expect-latest must be a check id${allowNone ? " or none" : ""}`);
+  return Number(value);
+}
+
+/** Text of 1 to 300 code points with no control or invisible character. */
+function parseReason(value: string | undefined): string {
+  if (value === undefined || value.length === 0) refuse("--reason must not be empty");
+  if ([...value].length > MAX_REASON_CODE_POINTS)
+    refuse(`--reason must be at most ${MAX_REASON_CODE_POINTS} characters`);
+  if (OTHER_CHARACTER.test(value))
+    refuse("--reason must not hold a control, format or other invisible character");
+  return value;
+}
+
+function oneOf<T extends string>(
+  flag: string,
+  value: string | undefined,
+  allowed: readonly T[],
+): T {
+  if (value === undefined || !(allowed as readonly string[]).includes(value))
+    refuse(`${flag} must be one of ${allowed.join(", ")}`);
+  return value as T;
+}
+
+function optionalOneOf<T extends string>(
+  flag: string,
+  value: string | undefined,
+  allowed: readonly T[],
+): T | null {
+  return value === undefined ? null : oneOf(flag, value, allowed);
+}
+
+/** ISO 3166-1 alpha-3, kept in upper case. */
+function parseCountry(value: string): string {
+  if (!COUNTRY.test(value))
+    refuse("--country must be an ISO 3166-1 alpha-3 code, three letters (FRA, not FR)");
+  return value.toUpperCase();
+}
+
+/** The time the provider shows the check completed: a real calendar date, not after now. */
+function parseCompletedAt(value: string, nowMs: number): number {
+  const parts = INSTANT.exec(value);
+  const ms = parts === null ? Number.NaN : Date.parse(value);
+  const [year, month, day] = (parts ?? []).slice(1, 4).map(Number) as [number, number, number];
+  // Date.parse rolls 30 February over into March; a date that does not round-trip is a typo.
+  const calendar = parts !== null && new Date(Date.UTC(year, month - 1, day)).getUTCDate() === day;
+  if (!Number.isFinite(ms) || !calendar)
+    refuse(
+      "--completed-at must be an ISO-8601 time with its zone, such as 2026-11-10T12:00:00Z, on a real calendar date",
+    );
+  if (ms > nowMs)
+    refuse("--completed-at is in the future: copy the time the provider shows the check completed");
+  return ms;
+}
+
+/** The PII keyring, which every command that encrypts or decrypts a name needs. */
+function requirePii(cfg: Config): PiiKeyring {
+  if (cfg.pii === undefined) refuse("FORMATION_PII_KEY is not set on this deployment");
+  return cfg.pii;
+}
+
+// ── shared rules ─────────────────────────────────────────────────────────────────────────────
+
+/** `completedAt` plus whole UTC calendar years: 10 November stays 10 November. */
+function addUtcYears(ms: number, years: number): number {
+  const date = new Date(ms);
+  date.setUTCFullYear(date.getUTCFullYear() + years);
+  return date.getTime();
+}
+
+const isoDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+
+interface Names {
+  first: string;
+  last: string;
+  full: string | null;
+}
+
+/** The three names sealed under the current key, each bound to the tenant and its field. */
+function sealNames(
+  pii: PiiKeyring,
+  tenantId: string,
+  names: Names,
+): NonNullable<NewGuardianIdentityCheck["names"]> {
+  const seal = (field: "first" | "last" | "full", value: string) => {
+    const { ciphertext, iv } = encryptText(pii, value, IDENTITY_AAD(tenantId, field));
+    return { ciphertext, iv };
+  };
+  return {
+    first: seal("first", names.first),
+    last: seal("last", names.last),
+    full: names.full === null ? null : seal("full", names.full),
+    keyId: pii.current.id,
+  };
+}
+
+function identityDeps(cfg: Config, repo: SqliteIdentityRepository, pii: PiiKeyring): IdentityDeps {
+  return {
+    repo,
+    pii,
+    reverifyYears: cfg.identity.reverifyYears,
+    blockedCountries: cfg.identity.blockedCountries,
+  };
+}
+
+const holdsNames = (row: GuardianIdentityCheck): boolean =>
+  row.names !== null && row.namesErasedAt === null;
+
+/** The row's names, decrypted; refused once they were erased, as nothing is left to carry on. */
+function heldNames(deps: IdentityDeps, row: GuardianIdentityCheck): Names {
+  if (!holdsNames(row))
+    refuse(`the names of check ${row.checkId} were erased: record a new check instead`);
+  return namesOfRecord(deps, row);
+}
+
+function assertExpectedLatest(
+  tenantId: string,
+  latest: GuardianIdentityCheck | undefined,
+  expected: number | null,
+): void {
+  const actual = latest?.checkId ?? null;
+  if (actual !== expected)
+    refuse(
+      `the latest identity check of ${tenantId} is ${actual ?? "none"}, not ${expected ?? "none"}: another operator has written since, or this command came from the shell history. Run identity:show ${tenantId} and decide again`,
+    );
+}
+
+/** The repository's shape check, as a refusal: a dry run refuses whatever the append would. */
+function shapeChecked(row: NewGuardianIdentityCheck): NewGuardianIdentityCheck {
+  try {
+    return validateIdentityCheck(row);
+  } catch (err) {
+    return refuse(err instanceof Error ? err.message : String(err));
+  }
+}
+
+/** What a row would hold, for the dry run: never a name, the hmac or the nullifier. */
+function planOf(row: NewGuardianIdentityCheck): Record<string, unknown> {
+  return {
+    tenantId: row.tenantId,
+    status: row.status,
+    supersedesCheckId: row.supersedesCheckId,
+    reviewReasons: row.reviewReasons,
+    provider: row.provider,
+    providerRef: row.providerRef,
+    completedAt: row.completedAt,
+    expiresAt: row.expiresAt,
+    documentCountry: row.documentCountry,
+    documentType: row.documentType,
+    documentExpired: row.documentExpired,
+    liveness: row.liveness,
+    watchlist: row.watchlist,
+    keepsNames: row.names !== null,
+    environment: row.environment,
+    synthetic: row.synthetic,
+    operator: row.operator,
+  };
+}
+
+/** What a written row is reported as. */
+function writtenOf(row: GuardianIdentityCheck): Record<string, unknown> {
+  return {
+    recorded: true,
+    checkId: row.checkId,
+    tenantId: row.tenantId,
+    status: row.status,
+    supersedesCheckId: row.supersedesCheckId,
+    reviewReasons: row.reviewReasons,
+    expiresAt: row.expiresAt,
+  };
+}
+
+/**
+ * The guardian's World row for the guardian action, whose nullifier the record copies. On
+ * production it must be a real human's (`realHumanState`: an accepted credential, recorded under
+ * World's production environment); a sandbox deployment takes any row, a waiver among them.
+ */
+function guardianNullifier(
+  world: WorldIdDeps | undefined,
+  tenantId: string,
+  environment: "sandbox" | "production",
+): string {
+  if (environment === "production") {
+    const state = realHumanState(world, tenantId, environment);
+    if (!state.ok) refuse("the account has no production World ID verification");
+    return state.verification.nullifier;
+  }
+  if (world === undefined)
+    refuse(
+      "World ID is not configured on this deployment, and the record copies the guardian's World ID verification",
+    );
+  const row = world.store.findByTenant(tenantId, world.cfg.action);
+  if (row === undefined) refuse("the account has no World ID verification");
+  return row.nullifier;
+}
+
+// ── identity:record ──────────────────────────────────────────────────────────────────────────
+
+export interface RecordOptions {
+  provider: string;
+  providerRef: string;
+  result: string;
+  nameFirst?: string;
+  nameLast?: string;
+  nameFull?: string;
+  country?: string;
+  documentType?: string;
+  documentExpired?: boolean;
+  liveness?: string;
+  watchlist?: string;
+  completedAt?: string;
+  reasonCode?: string;
+  reason?: string;
+  operator: string;
+  expectLatest: string;
+  yes?: boolean;
+}
+
+type OptionTable = readonly (readonly [keyof RecordOptions, string])[];
+/** What a check that keeps names needs, and what a failed one refuses. */
+const NAME_FLAGS: OptionTable = [
+  ["nameFirst", "--name-first"],
+  ["nameLast", "--name-last"],
+  ["nameFull", "--name-full"],
+];
+const KEPT_NEEDS: OptionTable = [
+  ["nameFirst", "--name-first"],
+  ["nameLast", "--name-last"],
+  ["country", "--country"],
+  ["watchlist", "--watchlist"],
+];
+const REASON_FLAGS: OptionTable = [
+  ["reasonCode", "--reason-code"],
+  ["reason", "--reason"],
+];
+
+/**
+ * Records one check the operator read in the provider's dashboard. A passed result is stored as
+ * `needs_review`, with its reasons, when the watchlist search hit, the document was out of date,
+ * its country is blocked, the name breaks the name rule, or another tenant's current passed check
+ * holds the same name and country (the other check ids are printed, never the name). A provider's
+ * own review (`--result needs_review`) carries `provider_flag` first.
+ */
+export function recordIdentity(
+  db: Database.Database,
+  cfg: Config,
+  tenantArg: string,
+  opts: RecordOptions,
+): Record<string, unknown> {
+  const tenantId = parseTenant(tenantArg);
+  const pii = requirePii(cfg);
+  const operator = parseOperator(opts.operator);
+  const expected = parseExpectLatest(opts.expectLatest, true);
+  const environment = legalBodyEnvironment(cfg);
+  const provider = oneOf("--provider", opts.provider, PROVIDERS);
+  if (environment === "production" && provider === "sandbox")
+    refuse("--provider sandbox is not taken on production");
+  const result = oneOf("--result", opts.result, RESULTS);
+  const failed = result === "failed";
+  const [needs, refused] = failed ? [REASON_FLAGS, NAME_FLAGS] : [KEPT_NEEDS, REASON_FLAGS];
+  for (const [key, flag] of refused)
+    if (opts[key] !== undefined)
+      refuse(
+        failed
+          ? `${flag} is not taken with --result failed: a failed check keeps no name`
+          : `${flag} is taken only with --result failed`,
+      );
+  const missing = needs.filter(([key]) => opts[key] === undefined).map(([, flag]) => flag);
+  if (missing.length > 0) refuse(`--result ${result} needs ${missing.join(", ")}`);
+
+  const nowMs = Date.now();
+  const completedAt =
+    opts.completedAt === undefined ? nowMs : parseCompletedAt(opts.completedAt, nowMs);
+  const country = opts.country === undefined ? null : parseCountry(opts.country);
+  const documentType = optionalOneOf("--document-type", opts.documentType, DOCUMENT_TYPES);
+  const liveness = optionalOneOf("--liveness", opts.liveness, LIVENESS);
+  const watchlist = optionalOneOf("--watchlist", opts.watchlist, WATCHLIST);
+  const documentExpired = opts.documentExpired === true;
+  const reasonCode = failed ? oneOf("--reason-code", opts.reasonCode, REVIEW_DECISION_CODES) : null;
+  const reason = failed ? parseReason(opts.reason) : null;
+  const names: Names | null = failed
+    ? null
+    : {
+        first: nameOfRecord(opts.nameFirst as string),
+        last: nameOfRecord(opts.nameLast as string),
+        full: opts.nameFull === undefined ? null : nameOfRecord(opts.nameFull),
+      };
+  const hmac = names === null ? null : nameHmac(pii, names.first, names.last);
+  // The reasons the flags alone decide, in the record's order; the duplicate is read below.
+  const flagged: ReviewReasonCode[] = [];
+  if (names !== null) {
+    if (result === "needs_review") flagged.push("provider_flag");
+    if (watchlist === "hit") flagged.push("watchlist_hit");
+    if (documentExpired) flagged.push("document_expired");
+    if (country !== null && cfg.identity.blockedCountries.has(country))
+      flagged.push("country_blocked");
+    if (nameRuleProblem(names.first, names.last) !== null) flagged.push("name_rule_failed");
+  }
+  const operatorOsUser = osUser();
+  const repo = new SqliteIdentityRepository(db);
+  const world = cfg.world ? buildWorldIdDeps(cfg.world, new SqliteWorldStore(db)) : undefined;
+
+  const found = repo.transaction(() => {
+    const nullifier = guardianNullifier(world, tenantId, environment);
+    const latest = repo.latest(tenantId);
+    assertExpectedLatest(tenantId, latest, expected);
+    // The latest row decides the state: a new check on top of a valid pass would lock a verified
+    // guardian out of every production door until it is decided.
+    if (latest !== undefined && identityState(repo, tenantId, nowMs) === "verified")
+      refuse(
+        `the guardian is verified until ${isoDate(latest.expiresAt as number)}; use identity:correct-name for a name, or identity:revoke first for a new check`,
+      );
+    const duplicateOf =
+      hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId) : [];
+    const reviewReasons: ReviewReasonCode[] =
+      duplicateOf.length > 0 ? [...flagged, "duplicate_identity"] : flagged;
+    const row = shapeChecked({
+      nullifier,
+      tenantId,
+      provider,
+      providerRef: opts.providerRef,
+      subject: null,
+      status: failed ? "failed" : reviewReasons.length > 0 ? "needs_review" : "passed",
+      supersedesCheckId: null,
+      // The operator records a completed attempt: as far as the record knows, it began then.
+      startedAt: completedAt,
+      completedAt,
+      expiresAt: failed ? null : addUtcYears(completedAt, cfg.identity.reverifyYears),
+      names: names === null ? null : sealNames(pii, tenantId, names),
+      nameHmac: hmac,
+      documentCountry: country,
+      documentType,
+      documentExpired,
+      liveness,
+      watchlist,
+      reviewReasons,
+      environment,
+      synthetic: environment === "sandbox",
+      operator,
+      operatorOsUser,
+    });
+    if (opts.yes !== true) return { latest, duplicateOf, row, check: undefined };
+    const check = repo.append(row, {
+      kind: "recorded",
+      at: nowMs,
+      actor: operator,
+      actorOsUser: operatorOsUser,
+      reasonCode,
+      reason,
+    });
+    return { latest, duplicateOf, row, check };
+  });
+
+  const duplicates = found.duplicateOf.length > 0 ? { duplicateOf: found.duplicateOf } : {};
+  if (found.check === undefined)
+    return {
+      recorded: false,
+      tenantId,
+      latestCheckId: found.latest?.checkId ?? null,
+      wouldRecord: planOf(found.row),
+      ...duplicates,
+      next: NEXT,
+    };
+  const check = found.check;
+  opsLog("identity_recorded", {
+    checkId: check.checkId,
+    tenant: tenantId.slice(0, 10),
+    provider: check.provider,
+    status: check.status,
+    watchlist: check.watchlist,
+    country: check.documentCountry,
+    operator,
+  });
+  return {
+    recorded: true,
+    checkId: check.checkId,
+    tenantId,
+    status: check.status,
+    reviewReasons: check.reviewReasons,
+    expiresAt: check.expiresAt,
+    ...duplicates,
+  };
+}
+
+// ── the decisions: accept, refuse, revoke, correct the name ──────────────────────────────────
+
+export interface DecisionOptions {
+  operator: string;
+  expectLatest: string;
+  reasonCode: string;
+  reason: string;
+  yes?: boolean;
+}
+
+export interface CorrectNameOptions extends DecisionOptions {
+  nameFirst: string;
+  nameLast: string;
+  nameFull?: string;
+}
+
+/** What a decision row carries over from the row it decides: everything but the status, the
+ *  expiry, the names and the review reasons. */
+type Carried = Omit<
+  NewGuardianIdentityCheck,
+  "status" | "expiresAt" | "names" | "nameHmac" | "reviewReasons"
+>;
+
+function carriedFrom(
+  latest: GuardianIdentityCheck,
+  operator: string,
+  operatorOsUser: string,
+): Carried {
+  return {
+    nullifier: latest.nullifier,
+    tenantId: latest.tenantId,
+    provider: latest.provider,
+    providerRef: latest.providerRef,
+    subject: latest.subject,
+    supersedesCheckId: latest.checkId,
+    startedAt: latest.startedAt,
+    completedAt: latest.completedAt,
+    documentCountry: latest.documentCountry,
+    documentType: latest.documentType,
+    documentExpired: latest.documentExpired,
+    liveness: latest.liveness,
+    watchlist: latest.watchlist,
+    environment: latest.environment,
+    synthetic: latest.synthetic,
+    operator,
+    operatorOsUser,
+  };
+}
+
+interface Decision {
+  kind: "accepted" | "refused" | "revoked" | "name_corrected";
+  /** The ops line of a row written, spelled out so a grep finds its writer. */
+  opsEvent: string;
+  codes: readonly string[];
+  /** The statuses the latest row may have, and the refusal of any other. */
+  from: readonly IdentityRowStatus[];
+  onlyFrom: string;
+  /** The row appended over the latest, inside the transaction. May refuse. */
+  build: (
+    latest: GuardianIdentityCheck,
+    carried: Carried,
+    repo: SqliteIdentityRepository,
+    nowMs: number,
+  ) => NewGuardianIdentityCheck;
+}
+
+/**
+ * The shared body of the four decisions: in ONE immediate transaction, the latest row against
+ * `--expect-latest`, its status against the decision's, the new row, and (with `--yes`) its append
+ * with the decision's event. Then one ops line and the output.
+ */
+function decide(
+  db: Database.Database,
+  tenantId: string,
+  opts: DecisionOptions,
+  d: Decision,
+): Record<string, unknown> {
+  const operator = parseOperator(opts.operator);
+  const expected = parseExpectLatest(opts.expectLatest, false);
+  const reasonCode = oneOf("--reason-code", opts.reasonCode, d.codes);
+  const reason = parseReason(opts.reason);
+  const operatorOsUser = osUser();
+  const nowMs = Date.now();
+  const repo = new SqliteIdentityRepository(db);
+
+  const found = repo.transaction(() => {
+    const latest = repo.latest(tenantId);
+    assertExpectedLatest(tenantId, latest, expected);
+    if (latest === undefined || !d.from.includes(latest.status))
+      refuse(
+        `the latest identity check of ${tenantId} is ${latest?.status ?? "none"}: ${d.onlyFrom}`,
+      );
+    const row = shapeChecked(
+      d.build(latest, carriedFrom(latest, operator, operatorOsUser), repo, nowMs),
+    );
+    if (opts.yes !== true) return { latest, row, check: undefined };
+    const check = repo.append(row, {
+      kind: d.kind,
+      at: nowMs,
+      actor: operator,
+      actorOsUser: operatorOsUser,
+      reasonCode,
+      reason,
+    });
+    return { latest, row, check };
+  });
+
+  if (found.check === undefined)
+    return {
+      recorded: false,
+      tenantId,
+      latestCheckId: found.latest.checkId,
+      wouldRecord: planOf(found.row),
+      next: NEXT,
+    };
+  opsLog(d.opsEvent, {
+    checkId: found.check.checkId,
+    supersedes: found.latest.checkId,
+    tenant: tenantId.slice(0, 10),
+    status: found.check.status,
+    reasonCode,
+    operator,
+  });
+  return writtenOf(found.check);
+}
+
+/**
+ * The operator's decision on a review. `accept` appends a passed row carrying the review's facts
+ * and its names, sealed again under the current key, with the name hmac computed again under it,
+ * so a duplicate is still found after a key rotation. `refuse` appends a failed row without names,
+ * over a review or an attempt that never completed.
+ */
+export function reviewIdentity(
+  db: Database.Database,
+  cfg: Config,
+  decision: "accept" | "refuse",
+  tenantArg: string,
+  opts: DecisionOptions,
+): Record<string, unknown> {
+  const tenantId = parseTenant(tenantArg);
+  if (decision === "refuse")
+    return decide(db, tenantId, opts, {
+      kind: "refused",
+      opsEvent: "identity_refused",
+      codes: REVIEW_DECISION_CODES,
+      from: ["needs_review", "started"],
+      onlyFrom: "only a needs_review or started check is refused",
+      build: (latest, carried, _repo, nowMs) => ({
+        ...carried,
+        status: "failed",
+        // An attempt that never completed is refused now.
+        completedAt: latest.completedAt ?? nowMs,
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+        reviewReasons: [],
+      }),
+    });
+  const pii = requirePii(cfg);
+  return decide(db, tenantId, opts, {
+    kind: "accepted",
+    opsEvent: "identity_accepted",
+    codes: REVIEW_DECISION_CODES,
+    from: ["needs_review"],
+    onlyFrom: "only a needs_review check is accepted",
+    build: (latest, carried, repo) => {
+      const names = heldNames(identityDeps(cfg, repo, pii), latest);
+      return {
+        ...carried,
+        status: "passed",
+        expiresAt: latest.expiresAt,
+        names: sealNames(pii, tenantId, names),
+        nameHmac: nameHmac(pii, names.first, names.last),
+        reviewReasons: [],
+      };
+    },
+  });
+}
+
+/**
+ * Revokes a passed check: a revoked row without names. The identity side only: a live company
+ * stays the company's to revoke (`company:revoke`).
+ */
+export function revokeIdentity(
+  db: Database.Database,
+  _cfg: Config,
+  tenantArg: string,
+  opts: DecisionOptions,
+): Record<string, unknown> {
+  return decide(db, parseTenant(tenantArg), opts, {
+    kind: "revoked",
+    opsEvent: "identity_revoked",
+    codes: REVOKE_REASON_CODES,
+    from: ["passed"],
+    onlyFrom: "only a passed check is revoked",
+    build: (_latest, carried) => ({
+      ...carried,
+      status: "revoked",
+      expiresAt: null,
+      names: null,
+      nameHmac: null,
+      reviewReasons: [],
+    }),
+  });
+}
+
+/**
+ * Corrects the name of record of a passed check or a review: the new names through `nameOfRecord`
+ * and the name rule (refused when they break it), the full name kept unless a new one is given,
+ * all sealed under the current key with a new hmac. The row passes when the review's reasons other
+ * than `name_rule_failed` are none; since the name changed, another tenant's current passed check
+ * holding the new name and country adds `duplicate_identity`, as `identity:record` would.
+ */
+export function correctIdentityName(
+  db: Database.Database,
+  cfg: Config,
+  tenantArg: string,
+  opts: CorrectNameOptions,
+): Record<string, unknown> {
+  const tenantId = parseTenant(tenantArg);
+  const pii = requirePii(cfg);
+  const first = nameOfRecord(opts.nameFirst);
+  const last = nameOfRecord(opts.nameLast);
+  const problem = nameRuleProblem(first, last);
+  if (problem !== null) refuse(`the corrected name breaks the name rule: ${problem}`);
+  return decide(db, tenantId, opts, {
+    kind: "name_corrected",
+    opsEvent: "identity_name_corrected",
+    codes: NAME_CORRECTION_CODES,
+    from: ["passed", "needs_review"],
+    onlyFrom: "only a passed or needs_review check has its name corrected",
+    build: (latest, carried, repo) => {
+      const held = heldNames(identityDeps(cfg, repo, pii), latest);
+      const names: Names = {
+        first,
+        last,
+        full: opts.nameFull === undefined ? held.full : nameOfRecord(opts.nameFull),
+      };
+      const hmac = nameHmac(pii, first, last);
+      const remaining = latest.reviewReasons.filter((code) => code !== "name_rule_failed");
+      const duplicate =
+        latest.documentCountry !== null &&
+        !remaining.includes("duplicate_identity") &&
+        repo.passedElsewhere(hmac, latest.documentCountry, tenantId).length > 0;
+      const reviewReasons: ReviewReasonCode[] = duplicate
+        ? [...remaining, "duplicate_identity"]
+        : remaining;
+      return {
+        ...carried,
+        status: reviewReasons.length === 0 ? "passed" : "needs_review",
+        expiresAt: latest.expiresAt,
+        names: sealNames(pii, tenantId, names),
+        nameHmac: hmac,
+        reviewReasons,
+      };
+    },
+  });
+}
+
+// ── identity:show ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The tenant's current state, its latest row with the names of record decrypted (the only output
+ * that holds a name), and every row with its events. Writes nothing, and no ops line.
+ */
+export function showIdentity(
+  db: Database.Database,
+  cfg: Config,
+  tenantArg: string,
+): Record<string, unknown> {
+  const tenantId = parseTenant(tenantArg);
+  const pii = requirePii(cfg);
+  const repo = new SqliteIdentityRepository(db);
+  const rows = repo.list(tenantId);
+  const latest = rows.at(-1);
+  return {
+    tenantId,
+    state: identityState(repo, tenantId, Date.now()),
+    latestCheckId: latest?.checkId ?? null,
+    /** What the next writing command takes as `--expect-latest`. */
+    expectLatest: latest === undefined ? "none" : String(latest.checkId),
+    latest:
+      latest === undefined
+        ? null
+        : {
+            checkId: latest.checkId,
+            status: latest.status,
+            supersedesCheckId: latest.supersedesCheckId,
+            reviewReasons: latest.reviewReasons,
+            names: holdsNames(latest) ? namesOfRecord(identityDeps(cfg, repo, pii), latest) : null,
+            namesErasedAt: latest.namesErasedAt,
+            provider: latest.provider,
+            providerRef: latest.providerRef,
+            completedAt: latest.completedAt,
+            expiresAt: latest.expiresAt,
+            documentCountry: latest.documentCountry,
+            documentType: latest.documentType,
+            documentExpired: latest.documentExpired,
+            liveness: latest.liveness,
+            watchlist: latest.watchlist,
+            environment: latest.environment,
+            synthetic: latest.synthetic,
+            operator: latest.operator,
+            operatorOsUser: latest.operatorOsUser,
+          },
+    history: rows.map((row) => ({
+      checkId: row.checkId,
+      status: row.status,
+      supersedesCheckId: row.supersedesCheckId,
+      reviewReasons: row.reviewReasons,
+      completedAt: row.completedAt,
+      expiresAt: row.expiresAt,
+      namesErasedAt: row.namesErasedAt,
+      operator: row.operator,
+      events: repo.events(row.checkId).map((e) => ({
+        eventId: e.eventId,
+        kind: e.kind,
+        at: e.at,
+        actor: e.actor,
+        reasonCode: e.reasonCode,
+        reason: e.reason,
+      })),
+    })),
+  };
+}
+
+// ── identity:sweep ───────────────────────────────────────────────────────────────────────────
+
+export interface SweepOptions {
+  yes?: boolean;
+  /** Unix milliseconds; `Date.now()` when absent. The scheduler hands its own clock. */
+  nowMs?: number;
+}
+
+/** What a sweep found (and, with `yes`, erased): the count per rule is what the scheduler logs. */
+export type SweepResult = {
+  erased: boolean;
+  count: number;
+  rules: Record<ErasureRule, number>;
+  checkIds: number[];
+  next?: string;
+};
+
+/** The OS user, when it can be read: the daily run must not fail for want of it. */
+function osUserIfReadable(): string | null {
+  try {
+    return osUser();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The names due for erasure under the retention rules (`erasureCandidates`: superseded or
+ * abandoned after `IDENTITY_FAILED_RETENTION_DAYS`, a passed check unused after
+ * `IDENTITY_UNUSED_RETENTION_DAYS`, never a tenant with a live company, never a review), and with
+ * `yes` their erasure, each with a `names_erased` event by `system`, in ONE immediate transaction.
+ * The scheduler runs it daily; `identity:sweep` is the manual path.
+ */
+export function sweepIdentityNames(
+  db: Database.Database,
+  cfg: Config,
+  opts: SweepOptions,
+): SweepResult {
+  const nowMs = opts.nowMs ?? Date.now();
+  const yes = opts.yes === true;
+  const repo = new SqliteIdentityRepository(db);
+  const actorOsUser = osUserIfReadable();
+  const swept = repo.transaction(() => {
+    const due = repo.erasureCandidates(
+      nowMs,
+      cfg.identity.failedRetentionDays * DAY_MS,
+      cfg.identity.unusedRetentionDays * DAY_MS,
+    );
+    if (!yes) return due;
+    const erased: typeof due = [];
+    for (const c of due) {
+      const done = repo.eraseNames(c.checkId, nowMs, {
+        kind: "names_erased",
+        at: nowMs,
+        actor: "system",
+        actorOsUser,
+        reasonCode: c.rule,
+        reason: null,
+      });
+      // False only for a row erased since the candidates were read: none, inside this transaction.
+      if (done) erased.push(c);
+    }
+    return erased;
+  });
+  const rules: Record<ErasureRule, number> = { superseded: 0, abandoned: 0, unused: 0 };
+  for (const c of swept) rules[c.rule] += 1;
+  const result: SweepResult = {
+    erased: yes,
+    count: swept.length,
+    rules,
+    checkIds: swept.map((c) => c.checkId),
+  };
+  if (!yes)
+    return { ...result, next: "nothing was erased: run identity:sweep --yes to erase these names" };
+  if (result.count > 0) opsLog("identity_names_erased", { count: result.count, rules });
+  return result;
+}
+
+// ── Registration ─────────────────────────────────────────────────────────────────────────────
+
+const codesHelp = (codes: readonly string[]): string => codes.join(", ");
+
+export function registerIdentityCommands(program: Command): void {
+  program
+    .command("identity:show")
+    .argument("<tenantId>", TENANT_HELP)
+    .description(
+      "show a guardian's identity state, the latest check with its names (the only command that prints a name), and every check with its events. Writes no ops line",
+    )
+    .action((tenantId: string) =>
+      withDatabase((db, _docStoreDir, cfg) => print(showIdentity(db, cfg, tenantId))),
+    );
+
+  program
+    .command("identity:record")
+    .argument("<tenantId>", TENANT_HELP)
+    .description(
+      "record an identity check read in the provider's dashboard. Rows are kept for ever: no personal data in a reason",
+    )
+    .requiredOption("--provider <stripe|persona|sumsub|sandbox>", "the provider that ran the check")
+    .requiredOption("--provider-ref <id>", "the provider's id of the check, such as vs_…")
+    .requiredOption("--result <passed|failed|needs_review>", "what the provider shows")
+    .option("--name-first <text>", "passed, needs_review: the first name as the document prints it")
+    .option("--name-last <text>", "passed, needs_review: the last name as the document prints it")
+    .option("--name-full <text>", "passed, needs_review, optional: the full name as printed")
+    .option("--country <ISO-3>", "the document's issuing country, ISO 3166-1 alpha-3 (FRA)")
+    .option("--document-type <passport|identity_card|driving_licence>", "the document checked")
+    .option("--document-expired", "the document was out of date")
+    .option("--liveness <passed|failed|not_run>", "the selfie check")
+    .option("--watchlist <clear|hit|not_run>", "passed, needs_review: your sanctions search")
+    .option(
+      "--completed-at <ISO-8601>",
+      "when the provider shows the check completed, with its zone; default now",
+    )
+    .option("--reason-code <code>", `failed: ${codesHelp(REVIEW_DECISION_CODES)}`)
+    .option("--reason <text>", `failed: ${REASON_HELP}`)
+    .requiredOption("--operator <name>", `who records: ${OPERATOR_NAME.source}`)
+    .requiredOption("--expect-latest <checkId|none>", EXPECT_LATEST_HELP)
+    .option("--yes", "confirm: record the check")
+    .action((tenantId: string, opts: RecordOptions) =>
+      withDatabase((db, _docStoreDir, cfg) => print(recordIdentity(db, cfg, tenantId, opts))),
+    );
+
+  const decision = (
+    name: string,
+    description: string,
+    codes: readonly string[],
+    confirm: string,
+  ): Command =>
+    program
+      .command(name)
+      .argument("<tenantId>", TENANT_HELP)
+      .description(`${description}. Rows are kept for ever: no personal data in the reason`)
+      .requiredOption("--reason-code <code>", codesHelp(codes))
+      .requiredOption("--reason <text>", REASON_HELP)
+      .requiredOption("--operator <name>", `who decides: ${OPERATOR_NAME.source}`)
+      .requiredOption("--expect-latest <checkId>", EXPECT_CHECK_HELP)
+      .option("--yes", `confirm: ${confirm}`);
+
+  decision(
+    "identity:accept",
+    "accept a check in review: a passed row with its names",
+    REVIEW_DECISION_CODES,
+    "record the acceptance",
+  ).action((tenantId: string, opts: DecisionOptions) =>
+    withDatabase((db, _docStoreDir, cfg) =>
+      print(reviewIdentity(db, cfg, "accept", tenantId, opts)),
+    ),
+  );
+
+  decision(
+    "identity:refuse",
+    "refuse a check in review, or an attempt that never completed: a failed row without names",
+    REVIEW_DECISION_CODES,
+    "record the refusal",
+  ).action((tenantId: string, opts: DecisionOptions) =>
+    withDatabase((db, _docStoreDir, cfg) =>
+      print(reviewIdentity(db, cfg, "refuse", tenantId, opts)),
+    ),
+  );
+
+  decision(
+    "identity:revoke",
+    "revoke a passed check: a revoked row without names. The identity side only: a live company is revoked with company:revoke",
+    REVOKE_REASON_CODES,
+    "record the revocation",
+  ).action((tenantId: string, opts: DecisionOptions) =>
+    withDatabase((db, _docStoreDir, cfg) => print(revokeIdentity(db, cfg, tenantId, opts))),
+  );
+
+  decision(
+    "identity:correct-name",
+    "correct the name of record of a passed check or a review: a new row with the new names",
+    NAME_CORRECTION_CODES,
+    "record the correction",
+  )
+    .requiredOption("--name-first <text>", "the first name of record, Latin script")
+    .requiredOption("--name-last <text>", "the last name of record, Latin script")
+    .option("--name-full <text>", "optional: the full name; the current one is kept without it")
+    .action((tenantId: string, opts: CorrectNameOptions) =>
+      withDatabase((db, _docStoreDir, cfg) => print(correctIdentityName(db, cfg, tenantId, opts))),
+    );
+
+  program
+    .command("identity:sweep")
+    .description(
+      "erase the names the retention rules say are due (the scheduler runs this daily); without --yes, count them",
+    )
+    .option("--yes", "confirm: erase the names")
+    .action((opts: { yes?: boolean }) =>
+      withDatabase((db, _docStoreDir, cfg) => print(sweepIdentityNames(db, cfg, opts))),
+    );
+}
