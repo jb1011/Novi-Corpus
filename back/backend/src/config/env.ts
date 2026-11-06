@@ -3,6 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import { arcTestnet } from "../chains";
+import { SVIX_MIN_KEY_BYTES, decodeSvixSecret } from "../email/svix";
 import { type PiiKeyring, parseNameHmacKey, parsePiiKey } from "../formation/pii";
 import { usdToUnits } from "../policy/units";
 import type { Address, Hex } from "../types";
@@ -475,8 +476,9 @@ const EnvSchema = z.object({
       )
       .optional(),
   ),
-  /** The signing secret of the provider's delivery webhook, `whsec_` and the base64 secret. A
-   *  secret: masked by redact(). Required with EMAIL_PROVIDER=resend. */
+  /** The signing secret of the provider's delivery webhook, `whsec_` and the base64 secret, whose
+   *  key decodes to at least 16 bytes (`decodeSvixSecret`, the route's own reading). A secret:
+   *  masked by redact(), and never echoed by a refusal. Required with EMAIL_PROVIDER=resend. */
   RESEND_WEBHOOK_SECRET: z.preprocess(
     blankAsUnset,
     z
@@ -485,6 +487,10 @@ const EnvSchema = z.object({
       .regex(
         /^whsec_[A-Za-z0-9+/]+={0,2}$/,
         "must be the webhook signing secret: the whsec prefix, an underscore, then base64",
+      )
+      .refine(
+        (v) => decodeSvixSecret(v) !== undefined,
+        `must be the webhook signing secret: its base64 key must decode to at least ${SVIX_MIN_KEY_BYTES} bytes`,
       )
       .optional(),
   ),

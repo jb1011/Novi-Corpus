@@ -353,6 +353,57 @@ describe("recordDelivery", () => {
   });
 });
 
+describe("recordDelivery orders events by their own time", () => {
+  /** One sent invite per case, with its own provider id. */
+  const sentInvite = (id: string) => {
+    const a = invite(`invite:${id}`);
+    sendRow(a.emailId, id);
+    return a.emailId;
+  };
+
+  test("an event at the same time as the recorded one is ignored: a redelivered event changes nothing", () => {
+    const emailId = sentInvite("msg_a");
+    expect(outbox.recordDelivery("msg_a", "bounced", T0 + 2 * MINUTE)).toBe(true);
+    expect(outbox.recordDelivery("msg_a", "bounced", T0 + 2 * MINUTE)).toBe(false);
+    expect(outbox.recordDelivery("msg_a", "delivered", T0 + 2 * MINUTE)).toBe(false);
+    expect(raw(emailId)).toMatchObject({
+      delivery_state: "bounced",
+      delivery_at: T0 + 2 * MINUTE,
+    });
+  });
+
+  test("a newer final state overwrites an older one; an older one is ignored", () => {
+    const emailId = sentInvite("msg_a");
+    expect(outbox.recordDelivery("msg_a", "delivered", T0 + 2 * MINUTE)).toBe(true);
+    expect(outbox.recordDelivery("msg_a", "bounced", T0 + MINUTE)).toBe(false);
+    expect(raw(emailId)).toMatchObject({ delivery_state: "delivered" });
+    expect(outbox.recordDelivery("msg_a", "bounced", T0 + 3 * MINUTE)).toBe(true);
+    expect(raw(emailId)).toMatchObject({
+      delivery_state: "bounced",
+      delivery_at: T0 + 3 * MINUTE,
+    });
+  });
+
+  test("delayed never overwrites a final state, even when it is newer; it does overwrite an older delayed", () => {
+    for (const final of ["delivered", "bounced", "complained", "failed", "suppressed"] as const) {
+      const id = `msg_${final}`;
+      const emailId = sentInvite(id);
+      expect(outbox.recordDelivery(id, "delayed", T0 + MINUTE), final).toBe(true);
+      expect(outbox.recordDelivery(id, "delayed", T0 + 2 * MINUTE), final).toBe(true);
+      expect(raw(emailId), final).toMatchObject({
+        delivery_state: "delayed",
+        delivery_at: T0 + 2 * MINUTE,
+      });
+      expect(outbox.recordDelivery(id, final, T0 + 3 * MINUTE), final).toBe(true);
+      expect(outbox.recordDelivery(id, "delayed", T0 + 4 * MINUTE), final).toBe(false);
+      expect(raw(emailId), final).toMatchObject({
+        delivery_state: final,
+        delivery_at: T0 + 3 * MINUTE,
+      });
+    }
+  });
+});
+
 describe("findSent", () => {
   test("answers the public row of the sent email a provider id names; never a pending row, a contact write or an unknown id", () => {
     const a = invite("invite:hash-0001");

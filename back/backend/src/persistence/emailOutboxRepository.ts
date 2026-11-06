@@ -173,12 +173,19 @@ export class SqliteEmailOutboxRepository {
            last_error = @lastError
          WHERE email_id = @emailId AND status = 'pending'`,
       ),
-      // A contact write's id names a contact, not an email: no delivery event is about it. An
-      // event older than the one recorded leaves the row as it is.
+      // A contact write's id names a contact, not an email: no delivery event is about it. `@at`
+      // is the event's own time, and the row keeps the newest event:
+      //  - an event older than the one recorded, or AT THE SAME TIME, leaves the row as it is (a
+      //    redelivered event changes nothing, so its route writes no second line);
+      //  - `delayed` never overwrites a final state (delivered, bounced, complained, failed,
+      //    suppressed), even when it is newer: a delay reported after the outcome is stale news.
       recordDelivery: db.prepare(
         `UPDATE email_outbox SET delivery_state = @state, delivery_at = @at
          WHERE provider_message_id = @providerMessageId AND status = 'sent'
-           AND kind != 'contact_upsert' AND (delivery_at IS NULL OR delivery_at <= @at)`,
+           AND kind != 'contact_upsert'
+           AND (delivery_at IS NULL OR delivery_at < @at)
+           AND NOT (@state = 'delayed' AND delivery_state IS NOT NULL
+                    AND delivery_state != 'delayed')`,
       ),
       // The same rows `recordDelivery` writes: a sent email, never a contact write.
       findSent: db.prepare(
@@ -230,6 +237,8 @@ export class SqliteEmailOutboxRepository {
     return this.stmts.markFailed.run({ emailId, attempts, lastError }).changes === 1;
   }
 
+  /** False when nothing was written: no sent email has the id, a newer or same-time event is
+   *  recorded, or the event is `delayed` and the row holds a final state. */
   recordDelivery(providerMessageId: string, state: DeliveryState, at: number): boolean {
     return this.stmts.recordDelivery.run({ providerMessageId, state, at }).changes > 0;
   }

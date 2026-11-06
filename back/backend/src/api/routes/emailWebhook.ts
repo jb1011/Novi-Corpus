@@ -27,10 +27,15 @@ import { readCappedBody } from "../cappedBody";
  *     never sent: an event we do not record, an id no sent email carries, or a body we cannot
  *     read is answered 200 and written nowhere.
  *
- * The six delivery events record their state on the row (`RESEND_DELIVERY_EVENTS`); a bounce and
- * a complaint also write the `email_bounced` WARN line, so an operator looks the same day: a
- * bounced filing email means the customer has no way back, and the runbook says to reach them
- * another way. Every line carries ids, the kind, the state and codes; never the body (it holds the
+ * The six delivery events record their state on the row (`RESEND_DELIVERY_EVENTS`) at the
+ * EVENT'S OWN TIME, the signed body's top-level `created_at` (`eventTimeMs`): never the
+ * `svix-timestamp`, which is re-signed on every retry, so a retried old event would pass for a new
+ * one. The outbox keeps the newest event and never lets `delayed` overwrite an outcome
+ * (`recordDelivery`). Every state but `delivered` and `delayed` (a bounce, a complaint, a failure,
+ * a suppression) also writes the `email_bounced` WARN line when it is recorded, so an operator
+ * looks the same day: an undelivered filing email means the customer has no way back, and the
+ * runbook says to reach them another way; an event the outbox ignores (older, or redelivered)
+ * writes none. Every line carries ids, the kind, the state and codes; never the body (it holds the
  * recipient's address and the subject), an address, a signature or the secret, and an identity
  * link's subject (a tenant id) is cut to its first ten characters, as the outbox's own lines do.
  *
@@ -59,8 +64,29 @@ export const RESEND_DELIVERY_EVENTS: ReadonlyMap<string, DeliveryState> = new Ma
   ["email.suppressed", "suppressed"],
 ]);
 
-/** The states an operator must act on the same day. */
-const WARN_STATES: ReadonlySet<DeliveryState> = new Set(["bounced", "complained"]);
+/** The states an operator must act on the same day: the email did not reach the customer, or the
+ *  customer refused it. */
+const WARN_STATES: ReadonlySet<DeliveryState> = new Set([
+  "bounced",
+  "complained",
+  "failed",
+  "suppressed",
+]);
+
+/** An ISO 8601 date and time, as the provider writes `created_at`; checked before `Date.parse`,
+ *  which also reads a bare "7" as a date in 2001. */
+const ISO_DATE_TIME = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
+
+/**
+ * The time an event is recorded at: its own `created_at`, when it reads as an ISO date and time;
+ * otherwise now. A time ahead of now (a skewed clock, ours or theirs) is clamped to now, so an
+ * event cannot reserve the row against the events that follow it.
+ */
+export function eventTimeMs(createdAt: string | null, nowMs: number): number {
+  const t =
+    createdAt !== null && ISO_DATE_TIME.test(createdAt) ? Date.parse(createdAt) : Number.NaN;
+  return Number.isFinite(t) ? Math.min(t, nowMs) : nowMs;
+}
 
 /** The longest provider id we read: the provider's are UUIDs. */
 const MAX_EMAIL_ID_LENGTH = 256;
@@ -70,14 +96,15 @@ const TOO_LARGE_BODY = { error: { code: "payload_too_large", message: "payload t
 const OK_BODY = { ok: true };
 
 /**
- * The two things this route reads out of a VERIFIED body: the event's type and, for a delivery
- * event, the provider's id of the email. `undefined` when the body is not an event; `emailId` null
- * when the event carries no usable id. Nothing else is read: the rest of the body is the
- * recipient's address, the subject and the provider's own text.
+ * The three things this route reads out of a VERIFIED body: the event's type, its own time (the
+ * top-level `created_at`; `data.created_at` is the email's, the same for all its events) and, for
+ * a delivery event, the provider's id of the email. `undefined` when the body is not an event;
+ * `emailId` or `createdAt` null when the event carries no usable one. Nothing else is read: the
+ * rest of the body is the recipient's address, the subject and the provider's own text.
  */
 export function parseResendEvent(
   rawBody: string,
-): { type: string; emailId: string | null } | undefined {
+): { type: string; emailId: string | null; createdAt: string | null } | undefined {
   let parsed: unknown;
   try {
     parsed = JSON.parse(rawBody);
@@ -94,7 +121,8 @@ export function parseResendEvent(
     typeof id === "string" && id.trim().length > 0 && id.length <= MAX_EMAIL_ID_LENGTH
       ? id.trim()
       : null;
-  return { type: e.type, emailId };
+  const createdAt = typeof e.created_at === "string" ? e.created_at : null;
+  return { type: e.type, emailId, createdAt };
 }
 
 /**
@@ -163,8 +191,14 @@ export function mountEmailWebhookRoutes(
       });
       return c.json(OK_BODY, 200);
     }
-    email.outbox.recordDelivery(event.emailId, state, now());
-    if (WARN_STATES.has(state))
+    // Only an event the outbox recorded warns: an older one, or the same one redelivered, is not
+    // news to the operator.
+    const recorded = email.outbox.recordDelivery(
+      event.emailId,
+      state,
+      eventTimeMs(event.createdAt, now()),
+    );
+    if (recorded && WARN_STATES.has(state))
       opsLog("email_bounced", {
         level: "warn",
         severity: "WARN",

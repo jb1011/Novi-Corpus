@@ -23,6 +23,8 @@ import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 
 const NOW = Date.UTC(2026, 10, 10, 12);
+/** When the provider says an event happened: the time a delivery state is recorded at. */
+const EVENT_AT = NOW - 5000;
 const MINUTE = 60_000;
 const SECRET = `whsec_${Buffer.from("a-test-signing-secret-of-32-bytes").toString("base64")}`;
 const OTHER_SECRET = `whsec_${Buffer.from("not-the-configured-secret").toString("base64")}`;
@@ -97,12 +99,18 @@ const row = (emailId: string) =>
     .prepare("SELECT delivery_state, delivery_at FROM email_outbox WHERE email_id = ?")
     .get(emailId) as { delivery_state: string | null; delivery_at: number | null };
 
-/** A Resend event, as the provider sends it: the address and the subject are in it. */
-const event = (type: string, emailId: string | null = "re_msg_1") =>
+/** A Resend event, as the provider sends it: the address and the subject are in it. Its
+ *  `created_at` is the event's own time (null leaves it out); `data.created_at` is the email's. */
+const event = (
+  type: string,
+  emailId: string | null = "re_msg_1",
+  createdAt: string | null = new Date(EVENT_AT).toISOString(),
+) =>
   JSON.stringify({
     type,
-    created_at: new Date(NOW - 5000).toISOString(),
+    ...(createdAt === null ? {} : { created_at: createdAt }),
     data: {
+      created_at: new Date(NOW - 60 * MINUTE).toISOString(),
       ...(emailId === null ? {} : { email_id: emailId }),
       from: "Novi Corpus <filings@example.org>",
       to: [ADDRESS],
@@ -172,7 +180,7 @@ describe("a correctly signed event", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("no-store");
-    expect(row(emailId)).toEqual({ delivery_state: "bounced", delivery_at: NOW });
+    expect(row(emailId)).toEqual({ delivery_state: "bounced", delivery_at: EVENT_AT });
     const [warn, ...more] = lines("email_bounced");
     expect(more).toEqual([]);
     expect(warn).toMatchObject({
@@ -204,7 +212,7 @@ describe("a correctly signed event", () => {
     expectNothingPrivatePrinted();
   });
 
-  test("each of the six delivery events records its state; only a bounce and a complaint write the WARN line", async () => {
+  test("each of the six delivery events records its state; every state but delivered and delayed writes the WARN line", async () => {
     const cases = [
       ["email.delivered", "delivered"],
       ["email.delivery_delayed", "delayed"],
@@ -218,9 +226,9 @@ describe("a correctly signed event", () => {
       const emailId = sentEmail(`re_${state}`);
       const res = await post(event(type, `re_${state}`));
       expect(res.status, type).toBe(200);
-      expect(row(emailId), type).toEqual({ delivery_state: state, delivery_at: NOW });
+      expect(row(emailId), type).toEqual({ delivery_state: state, delivery_at: EVENT_AT });
       expect(lines("email_bounced").length, type).toBe(
-        state === "bounced" || state === "complained" ? 1 : 0,
+        state === "delivered" || state === "delayed" ? 0 : 1,
       );
     }
   });
@@ -297,6 +305,67 @@ describe("a correctly signed event", () => {
   });
 });
 
+describe("events are ordered by the provider's own time, the body's created_at", () => {
+  const at = (ms: number) => new Date(ms).toISOString();
+
+  test("a late delivery_delayed after delivered leaves delivered, older or newer", async () => {
+    const emailId = sentEmail("re_msg_1");
+    expect((await post(event("email.delivered", "re_msg_1", at(NOW - MINUTE)))).status).toBe(200);
+    for (const t of [NOW - 2 * MINUTE, NOW - 30_000]) {
+      expect((await post(event("email.delivery_delayed", "re_msg_1", at(t)))).status).toBe(200);
+      expect(row(emailId)).toEqual({ delivery_state: "delivered", delivery_at: NOW - MINUTE });
+    }
+  });
+
+  test("an older bounced after a newer delivered is ignored, and writes no WARN line", async () => {
+    const emailId = sentEmail("re_msg_1");
+    await post(event("email.delivered", "re_msg_1", at(NOW - MINUTE)));
+    const res = await post(event("email.bounced", "re_msg_1", at(NOW - 2 * MINUTE)));
+    expect(res.status).toBe(200);
+    expect(row(emailId)).toEqual({ delivery_state: "delivered", delivery_at: NOW - MINUTE });
+    expect(lines("email_bounced")).toEqual([]);
+  });
+
+  test("a newer bounced after delivered is recorded, with its WARN line", async () => {
+    const emailId = sentEmail("re_msg_1");
+    await post(event("email.delivered", "re_msg_1", at(NOW - 2 * MINUTE)));
+    await post(event("email.bounced", "re_msg_1", at(NOW - MINUTE)));
+    expect(row(emailId)).toEqual({ delivery_state: "bounced", delivery_at: NOW - MINUTE });
+    expect(lines("email_bounced")).toEqual([
+      expect.objectContaining({ emailId, state: "bounced" }),
+    ]);
+  });
+
+  test("a redelivered bounce (the same event time) is recorded once, with one WARN line", async () => {
+    const emailId = sentEmail("re_msg_1");
+    const body = event("email.bounced", "re_msg_1", at(NOW - MINUTE));
+    expect((await post(body)).status).toBe(200);
+    // The provider's retry: a new svix-id and timestamp, the same body.
+    expect((await post(body, { id: "msg_svix_2", timestampMs: NOW - 2000 })).status).toBe(200);
+    expect(row(emailId)).toEqual({ delivery_state: "bounced", delivery_at: NOW - MINUTE });
+    expect(lines("email_bounced")).toHaveLength(1);
+  });
+
+  test("a missing or unreadable created_at is recorded at now, a future one is clamped to now, and the svix timestamp is never used", async () => {
+    const cases: [string, string | null][] = [
+      ["missing", null],
+      ["not a date", "not a date"],
+      ["a bare number", "7"],
+      ["an hour ahead", at(NOW + 60 * MINUTE)],
+    ];
+    for (const [name, createdAt] of cases) {
+      const id = `re_${name.replace(/ /g, "_")}`;
+      const emailId = sentEmail(id);
+      // A retry re-signed four minutes after the event: its svix timestamp is not the event time.
+      const res = await post(event("email.delivered", id, createdAt), {
+        timestampMs: NOW - 4 * MINUTE,
+      });
+      expect(res.status, name).toBe(200);
+      expect(row(emailId), name).toEqual({ delivery_state: "delivered", delivery_at: NOW });
+    }
+  });
+});
+
 describe("a refused signature answers 401 and writes nothing", () => {
   test("a bad signature", async () => {
     const emailId = sentEmail("re_msg_1");
@@ -360,6 +429,20 @@ test("a second, valid candidate in the signature header is accepted", async () =
   const res = await post(body, { signature: both });
   expect(res.status).toBe(200);
   expect(row(emailId).delivery_state).toBe("delivered");
+});
+
+test("an answer that fails inside the route is a 500, and still no-store", async () => {
+  vi.spyOn(console, "error").mockImplementation(() => {});
+  const failing = emailDeps({
+    outbox: {
+      findSent: () => {
+        throw new Error("database unavailable");
+      },
+    } as never,
+  });
+  const res = await post(event("email.bounced"), { email: failing });
+  expect(res.status).toBe(500);
+  expect(res.headers.get("cache-control")).toBe("no-store");
 });
 
 describe("the body is capped at 16 KiB", () => {

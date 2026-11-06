@@ -35,16 +35,32 @@ const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 /** Whole seconds, no sign, no exponent, no space. */
 const WHOLE_SECONDS = /^[0-9]{1,15}$/;
 
+/** The shortest signing key accepted, in bytes: a shorter one is truncated or guessable. */
+export const SVIX_MIN_KEY_BYTES = 16;
+
 /**
- * The HMAC key of a `whsec_` secret: the base64 after the prefix, decoded. Throws on any other
- * form; the boot already refuses one (RESEND_WEBHOOK_SECRET's own check), so this is the second
- * guard, at the route's mount, never per request. The message never quotes the secret.
+ * The HMAC key of a `whsec_` secret, the base64 after the prefix decoded; undefined when the
+ * secret has another form or its key is under 16 bytes. The boot's check of
+ * RESEND_WEBHOOK_SECRET and `svixSigningKey` both read it, so the two cannot disagree.
+ */
+export function decodeSvixSecret(secret: string): Buffer | undefined {
+  const b64 = secret.startsWith(SECRET_PREFIX) ? secret.slice(SECRET_PREFIX.length) : "";
+  if (!BASE64.test(b64)) return undefined;
+  const key = Buffer.from(b64, "base64");
+  return key.length >= SVIX_MIN_KEY_BYTES ? key : undefined;
+}
+
+/**
+ * The HMAC key of a `whsec_` secret. Throws on any other form or a key under 16 bytes; the boot
+ * already refuses both (RESEND_WEBHOOK_SECRET's own check), so this is the second guard, at the
+ * route's mount, never per request. The message never quotes the secret.
  */
 export function svixSigningKey(secret: string): Buffer {
-  const b64 = secret.startsWith(SECRET_PREFIX) ? secret.slice(SECRET_PREFIX.length) : "";
-  const key = BASE64.test(b64) ? Buffer.from(b64, "base64") : Buffer.alloc(0);
-  if (key.length === 0)
-    throw new Error("svix: the signing secret must be whsec_ followed by a base64 key");
+  const key = decodeSvixSecret(secret);
+  if (key === undefined)
+    throw new Error(
+      "svix: the signing secret must be whsec_ followed by a base64 key of at least 16 bytes",
+    );
   return key;
 }
 
