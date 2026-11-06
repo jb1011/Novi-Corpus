@@ -25,6 +25,7 @@ import { mountConnectionRoutes } from "./routes/connection";
 import { mountCustomerCompanyRoutes } from "./routes/customerCompanies";
 import { mountDocumentRoutes } from "./routes/documents";
 import { type DoolaWebhookDeps, mountDoolaWebhookRoutes } from "./routes/doolaWebhook";
+import { mountEmailWebhookRoutes } from "./routes/emailWebhook";
 import { mountEnsGatewayRoutes } from "./routes/ensGateway";
 import { type ExternalRecordDeps, mountExternalRecordRoutes } from "./routes/externalRecord";
 import { mountFormationRulesRoutes } from "./routes/formationRules";
@@ -513,6 +514,17 @@ export function buildApiApp(deps: ApiDeps) {
   // Mounted BEFORE the /entities auth middleware for the same reason every other public route is,
   // and gated on the credentials that make verification possible at all.
   if (deps.doola) mountDoolaWebhookRoutes(app, { ...deps, doola: deps.doola });
+  // PUBLIC for the same reason: the email provider signs its delivery events (Svix), and the
+  // signature is the authentication. Mounted only where the email system is wired with the
+  // provider's sender, which is what carries the webhook secret: a console box has no secret (the
+  // boot refuses one there) and a box with no email system (the testnet box) has neither, so on
+  // both the path is not mounted and answers 404.
+  if (deps.email?.webhookSecret)
+    mountEmailWebhookRoutes(
+      app,
+      { ...deps.email, webhookSecret: deps.email.webhookSecret },
+      deps.now ?? Date.now,
+    );
   mountMetadataRoutes(app, deps);
   // The HCS-11 profile beside the metadata it cross-links, public for the same reason: it is what
   // a Hedera account's `hcs-11:` memo points at, read by agents holding no key of ours (task 11).

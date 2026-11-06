@@ -1,10 +1,10 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
-import type { Context, Hono } from "hono";
+import type { Hono } from "hono";
 import type { AuthVars } from "../../auth/middleware";
 import { opsLog } from "../../observability/opsLog";
-import { readCappedText } from "../../util/readStreamCapped";
 import type { DoolaWakeUp } from "../../workflow/formationProcessor";
 import type { ApiDeps } from "../app";
+import { readCappedBody } from "../cappedBody";
 
 /**
  * `POST /webhooks/doola/{sandbox|production}` — the first INBOUND webhook in the codebase
@@ -174,35 +174,6 @@ export function parseEnvelope(rawBody: string): DoolaEnvelope | null {
   if (!eventId || !eventName) return null;
   const ts = typeof e.timestamp === "number" && Number.isFinite(e.timestamp) ? e.timestamp : null;
   return { eventId, eventName, timestamp: ts, providerRef: providerRefOf(e.eventPayload) };
-}
-
-/** The receiver's own overflow signal. Never leaves this module: the route turns it into a 413. */
-class WebhookTooLargeError extends Error {}
-
-/**
- * Read the body under a running byte cap, on the shared capped reader (M4).
- *
- * Read as TEXT, before any JSON parse: the signature covers the RAW bytes, so re-serializing a
- * parsed object would verify a different string than the one doola signed. Returns `undefined`
- * when the cap is exceeded — a size refusal is a 413 here, not a signature verdict.
- */
-async function readCappedBody(c: Context, max: number): Promise<string | undefined> {
-  try {
-    return await readCappedText(
-      {
-        body: c.req.raw.body as ReadableStream<Uint8Array> | null | undefined,
-        contentLength: c.req.header("content-length"),
-        // No stream (an empty body, or a hand-rolled Request in a test): there is nothing to
-        // meter, so read it and let the shared reader check the result.
-        readAll: async () => Buffer.from(await c.req.text(), "utf8"),
-      },
-      max,
-      { declared: () => new WebhookTooLargeError(), streamed: () => new WebhookTooLargeError() },
-    );
-  } catch (e) {
-    if (e instanceof WebhookTooLargeError) return undefined;
-    throw e;
-  }
 }
 
 /**

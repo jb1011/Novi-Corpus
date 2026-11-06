@@ -31,7 +31,8 @@ export type {
  * through one path, the scheduler's `email_deliver` job, which hands each row to the deployment's
  * sender (`EmailSender`, the provider or the console). A caller never sends: it enqueues, once per
  * idempotency key, and the job delivers. The provider's delivery webhook records what happened to
- * a sent email (`recordDelivery`); the operator commands list the rows and re-queue a failed one.
+ * a sent email (`findSent`, `recordDelivery`: src/api/routes/emailWebhook.ts); the operator
+ * commands list the rows and re-queue a failed one.
  *
  * The delivery rules, each held by test/email/deliverJob.test.ts:
  *  - every 30 seconds, the pending rows that are due, the longest-due first, at most 20 a run, one
@@ -82,6 +83,9 @@ export interface EmailDeps {
   postalAddress: string;
   /** The marketing segment contacts are added to; absent, contact writes are skipped. */
   marketingSegmentId?: string;
+  /** The provider's delivery-webhook signing secret (`whsec_` and base64), present only with the
+   *  provider's sender; absent, the webhook route is not mounted. A secret: never logged. */
+  webhookSecret?: string;
 }
 
 /** What one run did: the job's counts on its `job_ran` line. */
@@ -116,6 +120,9 @@ export interface EmailOutbox {
   /** The provider's delivery event, on the sent email it names; false when no sent email has that
    *  id (or a later event is recorded already). */
   recordDelivery(providerMessageId: string, state: DeliveryState, atMs: number): boolean;
+  /** The sent email a provider id names, as anyone may read it (never the address or the
+   *  content); undefined for an unknown id, a row not sent, or a contact write's id. */
+  findSent(providerMessageId: string): OutboxRow | undefined;
   /** A failed row back to pending, due now, with its attempts counted from zero and the address
    *  the caller supplies (re-read from the row the email is about); false for any other row. */
   requeue(emailId: string, to: string): boolean;
@@ -142,8 +149,9 @@ function describeFailure(err: unknown): {
 }
 
 /** A tenant id is a wallet address: a line carries its first ten characters, as every line that
- *  names a tenant does (`truncateTenant`). The other refs are our own ids and hashes. */
-function subjectRefForLog(row: DueEmail): string | null {
+ *  names a tenant does (`truncateTenant`). The other refs are our own ids and hashes. Every line
+ *  that names a row's subject prints it through this. */
+export function subjectRefForLog(row: Pick<OutboxRow, "kind" | "subjectRef">): string | null {
   return row.kind === "identity_link" && row.subjectRef !== null
     ? `${row.subjectRef.slice(0, 10)}…`
     : row.subjectRef;
@@ -220,6 +228,10 @@ export class SqliteEmailOutbox implements EmailOutbox {
 
   recordDelivery(providerMessageId: string, state: DeliveryState, atMs: number): boolean {
     return this.repo.recordDelivery(providerMessageId, state, atMs);
+  }
+
+  findSent(providerMessageId: string): OutboxRow | undefined {
+    return this.repo.findSent(providerMessageId);
   }
 
   requeue(emailId: string, to: string): boolean {
@@ -331,5 +343,8 @@ export function buildEmailDeps(db: Database.Database, cfg: Config): EmailDeps | 
     publicAppUrl: c.publicAppUrl,
     postalAddress: c.postalAddress,
     marketingSegmentId: c.marketingSegmentId,
+    // The console sender has no webhook secret (the boot refuses one there), so a console box
+    // mounts no delivery webhook.
+    ...(c.provider === "resend" ? { webhookSecret: c.webhookSecret } : {}),
   };
 }

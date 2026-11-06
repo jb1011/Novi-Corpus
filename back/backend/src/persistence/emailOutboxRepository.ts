@@ -180,6 +180,12 @@ export class SqliteEmailOutboxRepository {
          WHERE provider_message_id = @providerMessageId AND status = 'sent'
            AND kind != 'contact_upsert' AND (delivery_at IS NULL OR delivery_at <= @at)`,
       ),
+      // The same rows `recordDelivery` writes: a sent email, never a contact write.
+      findSent: db.prepare(
+        `SELECT ${PUBLIC_COLUMNS} FROM email_outbox
+          WHERE provider_message_id = ? AND status = 'sent' AND kind != 'contact_upsert'
+          ORDER BY created_at, email_id LIMIT 1`,
+      ),
       requeue: db.prepare(
         `UPDATE email_outbox SET status = 'pending', to_address = @to, attempts = 0,
            next_attempt_at = @at
@@ -226,6 +232,12 @@ export class SqliteEmailOutboxRepository {
 
   recordDelivery(providerMessageId: string, state: DeliveryState, at: number): boolean {
     return this.stmts.recordDelivery.run({ providerMessageId, state, at }).changes > 0;
+  }
+
+  /** The sent email (never a contact write) the provider's id names, as anyone may read it. */
+  findSent(providerMessageId: string): OutboxRow | undefined {
+    const r = this.stmts.findSent.get(providerMessageId) as PublicRow | undefined;
+    return r === undefined ? undefined : toOutboxRow(r);
   }
 
   /** A failed row back to pending, due at `at`, its attempts counted from zero again. */
