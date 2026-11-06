@@ -4,8 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
+    "prebuild": "node tools/claims-check.mjs",
     "build": "astro build",
     "preview": "astro preview",
+    "check": "node tools/claims-check.mjs && node tools/check-redirects.mjs",
     "astro": "astro"
   },
   "engines": {
