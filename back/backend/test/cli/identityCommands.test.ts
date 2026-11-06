@@ -1630,6 +1630,29 @@ describe("on production a passed row needs the face match, the sanctions search 
   });
 });
 
+// ── identity:show ─────────────────────────────────────────────────────────────────────────────
+
+test("identity:show on a row whose key this deployment no longer holds prints names: null, the key id and a note", async () => {
+  human(guardian, "1001");
+  await recorded(guardian);
+  const oldKeyId = parsePiiKey(PII_KEY, "FORMATION_PII_KEY").id;
+  // The key the names were sealed under is gone: another key is the only one configured.
+  process.env.FORMATION_PII_KEY = NEW_PII_KEY;
+
+  const { output, ops } = await run<Shown & { latest: Record<string, unknown> }>([
+    "identity:show",
+    guardian,
+  ]);
+
+  expect(output.state).toBe("verified");
+  expect(output.latest).toMatchObject({
+    names: null,
+    nameKeyId: oldKeyId,
+    namesNote: `the names are sealed under key ${oldKeyId}, which this deployment does not hold: configure it again (FORMATION_PII_KEY_PREVIOUS) to read them`,
+  });
+  expect(ops).toEqual([]);
+});
+
 // ── identity:sweep ────────────────────────────────────────────────────────────────────────────
 
 describe("identity:sweep", () => {

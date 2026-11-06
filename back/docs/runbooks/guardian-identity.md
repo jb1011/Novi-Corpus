@@ -3,8 +3,9 @@
 World ID proves one real person; the identity check says who. On a production deployment (Arc
 mainnet) a guardian cannot use the legal-body doors until their identity record reads `verified`.
 In slice I-0 the provider is **Stripe Identity**, and nothing is automatic: an operator sends the
-guardian a link, reads the finished session in the Stripe dashboard, and records it from the box
-with the `identity:*` commands. The doors read what those commands write.
+guardian a link and asks for their legal name, reads the finished session in the Stripe dashboard,
+compares the name, and records it from the box with the `identity:*` commands. The doors read what
+those commands write.
 
 Every command below runs on the box, from the backend directory:
 
@@ -33,18 +34,38 @@ document_unverified_other"), never a person's name, address, email or document n
    tenant id and never the World ID nullifier: the session lives at Stripe, and neither belongs
    there. Note the reference beside the tenant id wherever you track the request, without the name.
 
-2. **Send it.** With `email:send-link` from the box (PR 2a), or, until PR 2a is deployed, from the
-   contact mailbox. Send the flow link only: it is made to be shared. The dashboard's single-use
-   session links expire after 48 hours and are not sent by email, as Stripe advises.
+2. **Send it, and ask for the name.** With `email:send-link` from the box (PR 2a), or, until PR 2a
+   is deployed, from the contact mailbox. Send the flow link only: it is made to be shared. The
+   dashboard's single-use session links expire after 48 hours and are not sent by email, as Stripe
+   advises. In the same email (or a follow-up), ask the guardian for their legal name **exactly as
+   printed on the document** they will show: first name, last name, and the full name if the
+   document prints more.
 
-3. **Read the session** in the dashboard once the person has finished. Each visit to the flow link
-   opens a new session (`vs_…`); record each finished one as its own check. What to read:
+3. **Read the session, and compare the name.** Open the session in the dashboard once the person
+   has finished. Each visit to the flow link opens a new session (`vs_…`); record each finished one
+   as its own check.
+
+   The name of record is **the guardian's**, as they gave it, confirmed by you against the
+   document; it is never a copy of Stripe's output. Why: Stripe's terms limit passing its data on,
+   and the name of record reaches the Wyoming filing and the declaration. So read Stripe's verified
+   `first_name` and `last_name` and the document image in the session, compare them with the name
+   the guardian sent, and record the guardian's version:
+
+   - the same name (case and spacing aside, which the record normalises): record it as the guardian
+     gave it;
+   - a difference beyond case and spacing (another spelling, a missing or extra name, another
+     order): record the guardian's version with `--name-mismatch`. The check lands in review
+     (`name_mismatch`). Ask the guardian, then settle it with `identity:correct-name` (section 4)
+     to the name the document prints, never silently;
+   - no name from the guardian yet: do not record a pass; write to them first.
+
+   What to read:
 
    | In the session                 | What to type                                                   |
    | ------------------------------ | -------------------------------------------------------------- |
    | status `verified`              | `--result passed`                                              |
    | status `requires_input` + code | `--result failed`, see below                                   |
-   | `first_name`, `last_name`      | `--name-first`, `--name-last`, as shown                        |
+   | `first_name`, `last_name`      | compare with the guardian's name (above); type the guardian's at the prompt (`--names-prompt`) |
    | `document.type`                | `passport` → `passport`, `id_card` → `identity_card`, `driving_license` → `driving_licence` |
    | `issuing_country` (alpha-2)    | `--country` in alpha-3: FR → FRA, DE → DEU, ES → ESP, GB → GBR, US → USA (ISO 3166-1) |
    | the selfie check `verified`    | `--liveness passed`                                            |
@@ -55,7 +76,7 @@ document_unverified_other"), never a person's name, address, email or document n
    `--watchlist clear` or `hit` (never `not_run`).
 
    A name printed in capitals (`DUPONT`) is stored as a person writes it (`Dupont`); a mixed-case
-   name is stored as typed. Type it as the session shows it.
+   name is stored as typed.
 
 4. **Search the sanctions lists by hand.** Search the full name on OpenSanctions and note the
    result: `--watchlist clear`, or `--watchlist hit` for a possible match (the check then waits
@@ -67,19 +88,20 @@ document_unverified_other"), never a person's name, address, email or document n
    ```bash
    npm run cli -- identity:show <tenantId>
    npm run cli -- identity:record <tenantId> \
-     --provider stripe --provider-ref vs_… --result passed \
-     --name-first '<first name>' --name-last '<last name>' \
+     --provider stripe --provider-ref vs_… --result passed --names-prompt \
      --country FRA --document-type passport --liveness passed --watchlist clear \
      --completed-at '<the session's completion time, ISO-8601 with its zone>' \
      --operator <your operator name> --expect-latest none
    ```
 
-   Without `--yes` the command prints what it would write and writes nothing; read it, then run the
-   same line with `--yes`. `--completed-at` defaults to now; a time in the future is refused. The
-   check is valid for `IDENTITY_REVERIFY_YEARS` (three) calendar years from its completion.
+   `--names-prompt` asks for the first name, the last name and the full name (optional: Enter skips
+   it), so no name is on the command line, in the shell history or in the process list. Add
+   `--name-mismatch` when the guardian's name differs from the document's (step 3).
 
-   Type the line yourself, in the box's shell. Do not keep it in a file, and clear it from the shell
-   history afterwards (`history -d <n>`): it holds the name.
+   Without `--yes` the command prints what it would write and writes nothing; read it, then run the
+   same line with `--yes` (the prompt asks for the names again). `--completed-at` defaults to now; a
+   time in the future is refused, and so is one so old that the pass would already be expired. The
+   check is valid for `IDENTITY_REVERIFY_YEARS` (three) calendar years from its completion.
 
    A failed session:
 
@@ -110,12 +132,15 @@ document_unverified_other"), never a person's name, address, email or document n
 ### Renewal, and a change of name
 
 A guardian verifies again before the check expires (`expiresAt`, three years), or after a change of
-name, by the same procedure: a new link, a new session, and `identity:record --result passed` with
-`--expect-latest` the current check's id. The new check supersedes the current one: the guardian
-stays `verified`, and the expiry counts from the new completion. Every rule of a pass applies, the
-duplicate check and the production rules included, so a renewal that lands in review (a watchlist
-hit, a duplicate) puts the guardian in review until you decide it. A failed session over a verified
-guardian is not recorded as such: revoke first if the guardian must lose the pass.
+name, by the same procedure: a new link, the guardian's name asked for again and compared with the
+document as in step 3, a new session, and `identity:record --result passed --names-prompt` with
+`--expect-latest` the current check's id. The new check supersedes the current one and names it
+(`supersedesCheckId`): the guardian stays `verified`, and the expiry counts from the new completion,
+which must be after the current pass's (an older one is refused, so an expiry never moves back).
+Every rule of a pass applies, the duplicate check, `--name-mismatch` and the production rules
+included, so a renewal that lands in review (a watchlist hit, a duplicate, a name that differs)
+puts the guardian in review until you decide it. A failed session over a verified guardian is not
+recorded as such: revoke first if the guardian must lose the pass.
 
 ### What `identity:record` refuses
 
@@ -127,8 +152,14 @@ guardian is not recorded as such: revoke first if the guardian must lose the pas
 - On a guardian who is `verified` already, `--result failed` or `--result needs_review`: a renewal
   records `--result passed` (above). Correct a name with `identity:correct-name`, or revoke first
   (`identity:revoke`) when a failed check or a review must be recorded.
+- A pass over a pass whose `--completed-at` is not after the current pass's completion (`a renewal
+  must complete after the current pass`), and any pass whose `--completed-at` is so old that it
+  would already be expired.
+- `--names-prompt` with `--name-first`, `--name-last` or `--name-full`, or with `--result failed`;
+  `--name-mismatch` with `--result failed`.
 - `FORMATION_PII_KEY` missing: the names are encrypted under it. `identity:show`, `identity:accept`
-  and `identity:correct-name` refuse for the same reason.
+  and `identity:correct-name` refuse for the same reason. With the PII key set, the box does not
+  boot without `IDENTITY_NAME_HMAC_KEY` (section 6).
 - On production, `--result passed` without `--liveness passed`, or with `--watchlist not_run`.
 - `--provider sandbox` on production.
 - `--operator system`: the sweep writes its erasures under that name, and every command refuses it.
@@ -144,7 +175,8 @@ review reason on the row:
 | `watchlist_hit`      | Your sanctions search found a possible match.                                                     |
 | `document_expired`   | You flagged the document as out of date.                                                          |
 | `country_blocked`    | The document's country is in `SCREENING_BLOCKED_COUNTRIES` (default CUB, IRN, PRK).               |
-| `name_rule_failed`   | The name breaks the name rule: a first or last name missing, a character the declaration refuses, or a script other than Latin. |
+| `name_rule_failed`   | The name breaks the name rule: a first or last name missing, a character the declaration refuses, or a script other than Latin. A person with a single legal name lands here too: never invent a name or use a placeholder; write to Martin, and the case waits for counsel's answer on how a single-name person is named in a Wyoming filing. |
+| `name_mismatch`      | You recorded `--name-mismatch`: the guardian's name differs from the document's beyond case and spacing. Ask the guardian, then `identity:correct-name` (section 4). |
 | `duplicate_identity` | Another guardian's current passed check holds the same name and document country. The output lists those check ids (`duplicateOf`), never the name. |
 
 To see who holds a duplicate, read the tenant of each listed check, then show it:
@@ -162,7 +194,9 @@ from its closed list, a `--reason`, and `--yes`. Each appends a new row; nothing
 deleted.
 
 - `identity:accept <tenantId>`: the review was fine. A passed row with the review's facts and its
-  names (sealed again under the current key, the name digest computed again under it). It is
+  names (sealed again under the current PII key; the name's fingerprint, computed again, is the
+  same, since that key takes no part in it). A review with `name_mismatch` is settled with
+  `identity:correct-name` (section 4), after asking the guardian. It is
   refused while another account's current passed check holds the same name and document country,
   however the review began: the refusal lists those checks. Refuse this one with
   `duplicate_identity`, or revoke the other first.
@@ -198,11 +232,21 @@ company is revoked with `company:revoke`, by its own decision.
 
 ## 4. When a name looks wrong
 
-`identity:correct-name <tenantId> --name-first … --name-last … [--name-full …]` writes the name of
-record again, for a passed check or a review. The new name must pass the name rule. Without
-`--name-full` the record keeps no full name: the old one is never carried over a correction. The
-row passes when the review had no reason other than `name_rule_failed`, and it lands in review
-again when the new name matches another guardian's current passed check (`duplicate_identity`).
+```bash
+npm run cli -- identity:correct-name <tenantId> --names-prompt \
+  --reason-code <code> --reason '<why, without a name>' \
+  --operator <your operator name> --expect-latest <the check's id> --yes
+```
+
+writes the name of record again, for a passed check or a review; the prompt asks for the first, the
+last and the optional full name. The new name must pass the name rule. Without a full name the
+record keeps none: the old one is never carried over a correction. The corrected name settles
+`name_rule_failed` and `name_mismatch`: the row passes when the review had no other reason, and it
+lands in review again when the new name matches another guardian's current passed check
+(`duplicate_identity`).
+
+For a `name_mismatch`, ask the guardian first, then record the name the document prints, the
+guardian having confirmed it. Never settle a difference without the guardian's answer.
 
 Before correcting, search the corrected name on OpenSanctions, as for a new check: the search was
 made on the old name. On a hit, do not correct: refuse the review (`watchlist_confirmed` once you
@@ -210,10 +254,12 @@ have confirmed it), or revoke a passed check.
 
 Then compare:
 
-- the name Stripe extracted with the name printed on the document image in the session;
+- the name the guardian gave, the name Stripe extracted, and the name printed on the document image
+  in the session;
 - for a passport, the Latin form in the machine-readable zone (the two lines at the bottom of the
   photo page): it is the form a document in another script gives in Latin, and the form to record;
-- the order of the names: the family name goes in `--name-last`, whatever order the document prints.
+- the order of the names: the family name is the last name (the second prompt), whatever order the
+  document prints.
 
 Never change a name to what the person asks for unless the document shows it. Codes:
 `transliteration` (a Latin spelling of the same name), `other_script` (the document's name is in
@@ -241,21 +287,39 @@ run, `npm run cli -- scheduler:run identity_sweep --yes`. Each erasure is a `nam
 `system`. Every run with `--yes`, none erased included, writes one ops line,
 `identity_names_erased { count, rules }`, which holds no name.
 
-## 6. Rotating the PII key
+## 6. The two keys: the PII key may rotate, the fingerprint key never does
 
-The names are sealed under `FORMATION_PII_KEY`, and each row names the key it was sealed under. A
-rotation moves the old key to `FORMATION_PII_KEY_PREVIOUS` and sets a new `FORMATION_PII_KEY`: new
-rows are sealed under the new key, older rows still open under the previous one, and the duplicate
-check compares the name digest under both keys.
+Two settings hold the record's secrets, both on any box with the PII key:
 
-Only the current and the previous key are supported, and there is no command that seals the older
-rows again. So `FORMATION_PII_KEY_PREVIOUS` stays configured until every passed row sealed under it
-is superseded or expired: up to three years (`IDENTITY_REVERIFY_YEARS`). A second rotation inside
-that window leaves those rows unreadable.
+- `FORMATION_PII_KEY` seals the names (AES-256-GCM); each row names the key it was sealed under.
+- `IDENTITY_NAME_HMAC_KEY` (32 bytes as 64 hex characters, `openssl rand -hex 32`) keys the name's
+  fingerprint, the digest the duplicate check compares. The box refuses to boot with the PII key
+  and without it. Back it up beside the PII key.
+
+**`IDENTITY_NAME_HMAC_KEY` never rotates.** A name has one fingerprint for the life of the record,
+so the duplicate check finds a pass whatever key its names are sealed under. If it is ever
+compromised, the fix is a one-off migration that computes every row's fingerprint again under a new
+secret from the decrypted names; it is written when it is needed, not before.
+
+**`FORMATION_PII_KEY` may rotate.** A rotation moves the old key to `FORMATION_PII_KEY_PREVIOUS`
+and sets a new `FORMATION_PII_KEY`: new rows are sealed under the new key, older rows still open
+under the previous one. The fingerprints do not change. Only the current and the previous key are
+supported, and there is no command that seals the older rows again. So `FORMATION_PII_KEY_PREVIOUS`
+stays configured until every row sealed under it that still holds names and may still be read is
+gone:
+
+- a passed row, until it is superseded or expired (up to three years, `IDENTITY_REVERIFY_YEARS`);
+- a `needs_review` row, until it is decided (`identity:accept` reads its names);
+- any latest row an operator may need to show (`identity:show`).
+
+A second rotation inside that window leaves those rows unreadable. The SSN side has its own,
+shorter window (docs/runbooks/doola-deploy.md, A2); keep the previous key until both are clear.
 
 A CRITICAL `identity_names_unreadable { checkId, keyId, tenant }` in the ops log means a row's key
 is missing on this deployment: that guardian's `GET /world-id/me` and the declared doors answer 503
 `identity_unavailable` until the key named by `keyId` is configured again. The line holds ids only.
+`identity:show` on such a row prints `names: null`, the row's `nameKeyId` and a one-line note,
+and the rest of the record as usual.
 
 ## 7. Disclosure
 

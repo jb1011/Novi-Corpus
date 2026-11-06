@@ -864,8 +864,29 @@ export function correctIdentityName(
 // ── identity:show ────────────────────────────────────────────────────────────────────────────
 
 /**
+ * The latest row's names as `identity:show` prints them: decrypted while the deployment holds the
+ * key they were sealed under; else `names: null` with that key's id and a note, so the operator
+ * sees the rest of the record instead of a crash.
+ */
+function shownNames(
+  deps: IdentityDeps,
+  row: GuardianIdentityCheck,
+): { names: Names | null; nameKeyId?: string; namesNote?: string } {
+  if (row.names === null || !holdsNames(row)) return { names: null };
+  const keyId = row.names.keyId;
+  if (deps.pii.current.id === keyId || deps.pii.previous?.id === keyId)
+    return { names: namesOfRecord(deps, row) };
+  return {
+    names: null,
+    nameKeyId: keyId,
+    namesNote: `the names are sealed under key ${keyId}, which this deployment does not hold: configure it again (FORMATION_PII_KEY_PREVIOUS) to read them`,
+  };
+}
+
+/**
  * The tenant's current state, its latest row with the names of record decrypted (the only output
- * that holds a name), and every row with its events. Writes nothing, and no ops line.
+ * that holds a name; `names: null` with the key id and a note when the row's key is missing), and
+ * every row with its events. Writes nothing, and no ops line.
  */
 export function showIdentity(
   db: Database.Database,
@@ -891,7 +912,7 @@ export function showIdentity(
             status: latest.status,
             supersedesCheckId: latest.supersedesCheckId,
             reviewReasons: latest.reviewReasons,
-            names: holdsNames(latest) ? namesOfRecord(identityDeps(cfg, repo, pii), latest) : null,
+            ...shownNames(identityDeps(cfg, repo, pii), latest),
             namesErasedAt: latest.namesErasedAt,
             provider: latest.provider,
             providerRef: latest.providerRef,
