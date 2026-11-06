@@ -525,22 +525,90 @@ describe("identity:record", () => {
     expect(latestOf(guardian)).toMatchObject({
       checkId: renewal.checkId,
       providerRef: "vs_test_0002",
+      // The renewal names the pass it replaces; a first check names none.
+      supersedesCheckId: first.checkId,
     });
+    expect(repo.findById(first.checkId)?.supersedesCheckId).toBeNull();
     expect(showIdentity(db, config(), guardian)).toMatchObject({
       state: "verified",
       latestCheckId: renewal.checkId,
     });
   });
 
+  test("a renewal must complete after the current pass: the same time or an earlier one is refused", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2027, 5, 1, 13) });
+    human(guardian, "1001");
+    const first = await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
+    const AFTER =
+      "refusing: a renewal must complete after the current pass (2026-11-10T12:00:00.000Z)";
+
+    for (const completedAt of ["2026-11-10T12:00Z", "2026-11-10T13:00+02:00", "2026-06-01T12:00Z"])
+      expect(
+        await refusal(
+          recordLine(guardian, {
+            "--provider-ref": "vs_test_0002",
+            "--completed-at": completedAt,
+            "--expect-latest": String(first.checkId),
+          }),
+        ),
+        completedAt,
+      ).toBe(AFTER);
+    // The dry run refuses what the write would.
+    expect(
+      await refusal(
+        recordLine(
+          guardian,
+          {
+            "--provider-ref": "vs_test_0002",
+            "--completed-at": "2026-11-10T12:00Z",
+            "--expect-latest": String(first.checkId),
+          },
+          [],
+        ),
+      ),
+    ).toBe(AFTER);
+    expect(repo.list(guardian)).toHaveLength(1);
+  });
+
+  test("no pass is recorded already expired: a completion three years or more ago is refused", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2029, 10, 10, 12) });
+    human(guardian, "1001");
+    const EXPIRED = "refusing: --completed-at is so old that this pass would already be expired";
+
+    // Three calendar years to the millisecond: the expiry is now, not in the future.
+    expect(await refusal(recordLine(guardian, { "--completed-at": "2026-11-10T12:00Z" }))).toBe(
+      EXPIRED,
+    );
+    expect(await refusal(recordLine(guardian, { "--completed-at": "2025-01-01T00:00Z" }))).toBe(
+      EXPIRED,
+    );
+    // Held to it whatever the pass lands as: a watchlist hit too.
+    expect(
+      await refusal(
+        recordLine(guardian, { "--completed-at": "2026-11-10T12:00Z", "--watchlist": "hit" }),
+      ),
+    ).toBe(EXPIRED);
+    expect(repo.list(guardian)).toEqual([]);
+    // A millisecond later the pass is in date for a millisecond, and is recorded.
+    const recordedPass = await recorded(guardian, { "--completed-at": "2026-11-10T12:00:00.001Z" });
+    expect(recordedPass).toMatchObject({ status: "passed" });
+  });
+
   test("a renewal pass is held to every rule of a pass, the duplicate check included", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2027, 5, 1, 13) });
     human(guardian, "1001");
     human(second, "1002");
     const held = await recorded(guardian);
-    const own = await recorded(second, { "--name-first": "Ana", "--name-last": "Example" });
+    const own = await recorded(second, {
+      "--name-first": "Ana",
+      "--name-last": "Example",
+      "--completed-at": "2026-11-10T12:00Z",
+    });
 
     // The second guardian renews under the name another account's current pass holds.
     const renewal = await recorded(second, {
       "--provider-ref": "vs_test_0002",
+      "--completed-at": "2027-06-01T12:00Z",
       "--expect-latest": String(own.checkId),
     });
 

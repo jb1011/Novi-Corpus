@@ -379,7 +379,9 @@ const REASON_FLAGS: OptionTable = [
  * holds the same name and country (the other check ids are printed, never the name). A provider's
  * own review (`--result needs_review`) carries `provider_flag` first. On a verified guardian only
  * `--result passed` is taken: a renewal, or a new check after a change of name, which supersedes
- * the current pass and has its expiry from its own completion.
+ * the current pass and has its expiry from its own completion. A pass recorded over a pass names
+ * it (`supersedesCheckId`) and must complete after it, so an expiry never moves back; and no pass
+ * is recorded that would already be expired.
  */
 export function recordIdentity(
   db: Database.Database,
@@ -412,6 +414,8 @@ export function recordIdentity(
   const nowMs = Date.now();
   const completedAt =
     opts.completedAt === undefined ? nowMs : parseCompletedAt(opts.completedAt, nowMs);
+  if (result === "passed" && addUtcYears(completedAt, cfg.identity.reverifyYears) <= nowMs)
+    refuse("--completed-at is so old that this pass would already be expired");
   const country = opts.country === undefined ? null : parseCountry(opts.country);
   const documentType = optionalOneOf("--document-type", opts.documentType, DOCUMENT_TYPES);
   const liveness = optionalOneOf("--liveness", opts.liveness, LIVENESS);
@@ -462,6 +466,14 @@ export function recordIdentity(
       refuse(
         `the guardian is verified until ${isoDate(latest.expiresAt as number)}; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review`,
       );
+    // A pass over a pass is a renewal: it names the pass it replaces, and completes after it, so
+    // the expiry, counted from the completion, never moves back.
+    const renews = result === "passed" && latest?.status === "passed" ? latest : undefined;
+    // A passed row always says when it completed (the table's CHECK).
+    if (renews !== undefined && completedAt <= (renews.completedAt as number))
+      refuse(
+        `a renewal must complete after the current pass (${new Date(renews.completedAt as number).toISOString()})`,
+      );
     const duplicateOf =
       hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId) : [];
     const reviewReasons: ReviewReasonCode[] =
@@ -473,7 +485,7 @@ export function recordIdentity(
       providerRef: opts.providerRef,
       subject: null,
       status: failed ? "failed" : reviewReasons.length > 0 ? "needs_review" : "passed",
-      supersedesCheckId: null,
+      supersedesCheckId: renews?.checkId ?? null,
       // The operator records a completed attempt: as far as the record knows, it began then.
       startedAt: completedAt,
       completedAt,
