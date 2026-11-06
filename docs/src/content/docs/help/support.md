@@ -1,44 +1,29 @@
 ---
-title: "Support"
-description: "Where to get help and how to reach the team."
+title: "Support and contact"
+description: "How to report an error in these docs or a security problem, and where the source of these docs lives."
 section: "overview"
 register: "plain"
+reviewed: 2026-11-06
 ---
 
-## Product
+<!-- Sources: design 3.3 (help/support.md: contact, status page, security reports, the repo; no GitBook steps, no legacy hosts), 7.4 (the contact address and the status page are open facts). -->
 
-* App: [project-alpha-pi.vercel.app](https://project-alpha-pi.vercel.app)
-* Transparency: [/transparency](https://project-alpha-pi.vercel.app/transparency)
-* Personhood explainer: [/personhood](https://project-alpha-pi.vercel.app/personhood)
-* Connect an agent: [/agents/connect](https://project-alpha-pi.vercel.app/agents/connect)
+## Report an error in these docs
 
-## Verify an agent yourself
+Every page ends with a "Report an error" link. It opens an issue in the public repository with the page already named.
 
-1. Resolve `<publicId>.novicorpus.eth` (try [`demo.novicorpus.eth`](https://sepolia.app.ens.domains/demo.novicorpus.eth)).
-2. Confirm `addr` is the treasury you will pay.
-3. Read `legal-status`. Pause on the dashboard and refresh the name if you are testing liveness.
-4. Run the ENSIP-25 loop (ENS record ↔ Arc `setMetadata`).
-5. Optional: MCP `resolve_agent` with no special key.
+## Contact and service status
 
-## This documentation
+The support address and the service status page are listed here when the Arc mainnet beta opens.
 
-Markdown in `docs/` on the [Project-Alpha](https://github.com/jb1011/Project-Alpha) repo, published with GitBook, intended host `docs.novicorpus.com`.
+## A security problem
 
-Internal design history stays in `back/docs/`. If a public page and an internal spec disagree, **shipped code wins**, then this GitBook, then the spec.
+Never post the details of a security problem in a public issue. The private address for security reports is listed here when the Arc mainnet beta opens. Until then, open an issue that asks for a private channel, without the details.
 
-## Legal
+## The source of these docs
 
-Nothing here is legal advice. Formation, EIN, tax, and limited liability depend on a real filing, a named controller, and counsel. Testnet and Doola sandbox are labeled demo when they are demo. Do not represent a stub EIN as a filed company.
+Every page is a Markdown file in the `docs/` folder of the public repository, [jb1011/Novi-Corpus](https://github.com/jb1011/Novi-Corpus). If a page and the code disagree, the code is right and the page is wrong: please report it.
 
-## Team
+## Not legal advice
 
-Novi Corpus is built by Martin, JB, and Alex. See the root `README.md` of the repo for GitHub handles.
-
-## Connecting GitBook
-
-1. Create a GitBook space.
-2. Git Sync this repository. The space root is `docs/` via `.gitbook.yaml`.
-3. Add custom domain `docs.novicorpus.com`.
-4. At your DNS host, CNAME `docs` to the GitBook host shown in the space settings.
-
-Git Sync uses `SUMMARY.md` as the left sidebar.
+Nothing here is legal advice. Novi Corpus is not a law firm.
