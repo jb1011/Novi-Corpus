@@ -279,16 +279,29 @@ describe("Scheduler", () => {
     );
   });
 
+  test("a job's counts cannot overwrite the name and the duration on its job_ran line", async () => {
+    const scheduler = new Scheduler({});
+    scheduler.register(job("identity_sweep", DAY, async () => ({ name: 7, ms: 9, count: 1 })));
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(FIRST_RUN_DELAY_MS);
+    expect(lines("job_ran")).toEqual([
+      expect.objectContaining({ name: "identity_sweep", ms: 0, count: 1 }),
+    ]);
+    scheduler.stop();
+  });
+
   test("register refuses a second job of the same name, an interval that is not a positive whole number of ms, and a job after start", () => {
     const scheduler = new Scheduler({});
     scheduler.register(job("identity_sweep", DAY, async () => ({})));
     expect(() => scheduler.register(job("identity_sweep", DAY, async () => ({})))).toThrow(
       "scheduler: a job named identity_sweep is registered already",
     );
-    for (const everyMs of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])
+    // Past 2^31 - 1 ms Node fires a timer at once, so a monthly job would spin.
+    for (const everyMs of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])
       expect(() => scheduler.register(job("email_deliver", everyMs, async () => ({})))).toThrow(
-        "scheduler: email_deliver: everyMs must be a positive whole number of milliseconds",
+        "scheduler: email_deliver: everyMs must be a positive whole number of milliseconds, at most 2147483647",
       );
+    scheduler.register(job("longest", 2_147_483_647, async () => ({})));
     scheduler.start();
     expect(() => scheduler.register(job("email_deliver", DAY, async () => ({})))).toThrow(
       "scheduler: register every job before start()",

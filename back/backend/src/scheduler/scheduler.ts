@@ -9,7 +9,8 @@ import { opsLog } from "../observability/opsLog";
  *    then one every `everyMs`, on its own cadence;
  *  - one run at a time per job: a tick that comes while the job's last run is still going is
  *    skipped, and so is a `runNow` (refused);
- *  - a success writes `job_ran { name, ms, ...counts }`, the counts the job returned;
+ *  - a success writes `job_ran { ...counts, name, ms }`, the counts the job returned, which
+ *    cannot overwrite the job's name or the run's duration;
  *  - a throw writes `job_failed { name, consecutive, error }`, with the error's MESSAGE only, never
  *    its stack or its other fields; from the third failure in a row, and on every failure after
  *    it, the line is on the CRITICAL channel (`severity: "CRITICAL"`, as `formation_stale`); a
@@ -22,8 +23,13 @@ import { opsLog } from "../observability/opsLog";
 
 export interface Job {
   name: string;
+  /** At most `MAX_EVERY_MS`: Node fires a longer timer at once. */
   everyMs: number;
-  /** Returns the counts for the `job_ran` line. Handed the scheduler's clock. */
+  /**
+   * Returns the counts for the `job_ran` line. Handed the scheduler's clock. A count named `name`
+   * or `ms` is overwritten by the line's own; the names `opslog` and `at` are reserved too, since
+   * the ops line writes its own fields under them.
+   */
   run(nowMs: number): Promise<Record<string, number>>;
 }
 
@@ -45,6 +51,9 @@ export interface JobStatus {
 export const FIRST_RUN_DELAY_MS = 30_000;
 /** From this many failures in a row, `job_failed` is CRITICAL. */
 export const CRITICAL_AFTER_FAILURES = 3;
+/** The longest interval: 2^31 - 1 ms, about 24.8 days. Node clamps a longer timeout to 1 ms, so a
+ *  monthly job would run without pause. */
+export const MAX_EVERY_MS = 2_147_483_647;
 
 interface Entry extends JobStatus {
   job: Job;
@@ -66,9 +75,9 @@ export class Scheduler {
     if (this.started) throw new Error("scheduler: register every job before start()");
     if (this.entries.has(job.name))
       throw new Error(`scheduler: a job named ${job.name} is registered already`);
-    if (!Number.isSafeInteger(job.everyMs) || job.everyMs <= 0)
+    if (!Number.isSafeInteger(job.everyMs) || job.everyMs <= 0 || job.everyMs > MAX_EVERY_MS)
       throw new Error(
-        `scheduler: ${job.name}: everyMs must be a positive whole number of milliseconds`,
+        `scheduler: ${job.name}: everyMs must be a positive whole number of milliseconds, at most ${MAX_EVERY_MS}`,
       );
     this.entries.set(job.name, {
       job,
@@ -159,7 +168,7 @@ export class Scheduler {
     entry.lastRunAt = startedAt;
     entry.lastOk = true;
     entry.consecutiveFailures = 0;
-    opsLog("job_ran", { name: entry.name, ms: this.now() - startedAt, ...counts });
+    opsLog("job_ran", { ...counts, name: entry.name, ms: this.now() - startedAt });
     return counts;
   }
 }
