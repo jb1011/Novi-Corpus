@@ -96,6 +96,20 @@ export function operatorConfig(): Config {
 }
 
 /**
+ * Whether the database holds every table named: false on a database the API of this build has not
+ * migrated yet (the operator's commands never migrate; the API does at its start), so a command
+ * can say so instead of failing on a SQLite error.
+ */
+export function hasTables(db: Database.Database, names: readonly string[]): boolean {
+  const present = new Set(
+    (
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
+    ).map((r) => r.name),
+  );
+  return names.every((name) => present.has(name));
+}
+
+/**
  * Opens the database the configuration names (never a path of its own: an operator who moved the
  * data directory must not open a different, empty database), runs `fn`, and closes it. `fn` is
  * handed the configuration too, for what the deployment decides. A command that checks the

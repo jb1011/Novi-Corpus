@@ -213,7 +213,9 @@ export function warnIfUndelivered(
 
 export class SqliteEmailOutbox implements EmailOutbox {
   private readonly db: Database.Database;
-  private readonly repo: SqliteEmailOutboxRepository;
+  /** Prepared at first use, not here: building the email system reads nothing, so an operator's
+   *  `scheduler:list` on a database the API has not migrated yet still lists `email_deliver`. */
+  private prepared: SqliteEmailOutboxRepository | undefined;
   private readonly now: () => number;
   private readonly marketingSegmentId: string | undefined;
 
@@ -227,9 +229,13 @@ export class SqliteEmailOutbox implements EmailOutbox {
     } = {},
   ) {
     this.db = db;
-    this.repo = new SqliteEmailOutboxRepository(db);
     this.now = opts.now ?? Date.now;
     this.marketingSegmentId = opts.marketingSegmentId;
+  }
+
+  private get repo(): SqliteEmailOutboxRepository {
+    this.prepared ??= new SqliteEmailOutboxRepository(this.db);
+    return this.prepared;
   }
 
   enqueue(e: Parameters<EmailOutbox["enqueue"]>[0]): { emailId: string; inserted: boolean } {

@@ -4,7 +4,7 @@ import type { Config } from "../config/env";
 import { SqliteScheduledJobRunRepository } from "../persistence/scheduledJobRunRepository";
 import { buildScheduledJobs } from "../scheduler/jobs";
 import { FIRST_RUN_DELAY_MS, Scheduler } from "../scheduler/scheduler";
-import { print, refuse, withDatabase, withDatabaseAsync } from "./operator";
+import { hasTables, print, refuse, withDatabase, withDatabaseAsync } from "./operator";
 
 /**
  * THE SCHEDULER'S OPERATOR COMMANDS: `scheduler:list` prints the jobs this deployment registers
@@ -13,7 +13,7 @@ import { print, refuse, withDatabase, withDatabaseAsync } from "./operator";
  *
  * `scheduler:list` prints, beside each job, its last run as the API process's scheduler wrote it
  * to `scheduled_job_runs` (`lastRunAt`, `lastOk`, `consecutiveFailures`; null where the job never
- * ran). The run history is in the ops log: a `job_ran` or `job_failed` line per run (a quiet job
+ * ran, and on a database the API of this build has not migrated yet, which has no such table). The run history is in the ops log: a `job_ran` or `job_failed` line per run (a quiet job
  * writes no `job_ran` for a run with nothing to do) and a `job_skipped` line per skipped tick. A
  * run from here writes those lines too, and only those: the table is the API process's, so a
  * manual run never resets the failure count the API's CRITICAL rule reads.
@@ -33,9 +33,11 @@ function describeEvery(ms: number): string {
 }
 
 export function listScheduledJobs(db: Database.Database, cfg: Config): Record<string, unknown> {
-  const lastRuns = new Map(
-    new SqliteScheduledJobRunRepository(db).list().map((run) => [run.name, run]),
-  );
+  // No table yet: the API of this build has not started on this database, so no job ran under it.
+  const recorded = hasTables(db, ["scheduled_job_runs"])
+    ? new SqliteScheduledJobRunRepository(db).list()
+    : [];
+  const lastRuns = new Map(recorded.map((run) => [run.name, run]));
   const jobs = buildScheduledJobs(db, cfg).map((job) => {
     const last = lastRuns.get(job.name);
     return {
