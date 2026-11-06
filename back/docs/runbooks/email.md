@@ -123,11 +123,20 @@ the path answers 404.
 | A missing header, a timestamp more than 5 minutes off, a wrong signature | 401 | `email_webhook_unauthorized` (warn) with the reason code |
 | Signed, but not an event, or a delivery event without an email id | 200 | `email_webhook_unparsable` (warn) |
 | Signed, any other event (sent, opened, clicked, ...)        | 200    | none                                  |
-| Signed, an id no sent email carries                         | 200    | `email_delivery_unmatched` (info)     |
+| Signed, a delivery event for an id no sent email carries    | 200    | `email_delivery_unmatched` (info); the event is kept (below) |
 | Signed, a delivery event                                    | 200    | `email_bounced` (WARN) for bounced, complained, failed, suppressed |
 
 The row keeps the newest event by the event's own time; an older or redelivered event changes
 nothing and writes no line, and `delayed` never overwrites an outcome.
+
+A delivery event can arrive before its email's row holds the provider's id: the send's answer
+was lost (the provider took the email; the row is still pending and is retried under the same
+key, which the provider answers with the same id), or an `email.suppressed` raced the send. Such
+an event is kept in `email_delivery_orphans` (the id, the state, two times; never the address).
+When the delivery job marks a row sent with that id, it applies the kept events by the same
+rules and deletes them, and an undelivered end state writes its `email_bounced` WARN line then.
+The kept events no row ever claims (the campaign's emails reach the same endpoint) are deleted by
+the delivery job 7 days after they arrived.
 
 To rotate the secret: rotate it in the dashboard, set the new value, restart the API. Events
 refused in between are retried by the provider (immediately, then after 5 s, 5 min, 30 min, 2 h,
@@ -168,7 +177,9 @@ nothing.
 
 A manual delivery run, in the CLI's own process: `npm run cli -- scheduler:run email_deliver
 --yes`. The API's job keeps running beside it; the idempotency key and the guarded writes keep the
-two from sending an email twice.
+two from sending an email twice. When both sent the same row, the one that recorded it second
+writes an `email_sent_unrecorded` warning (the email id and kind) and does not count it: the
+provider answered both under the same key, with one email.
 
 ## 5. What an undelivered email means, by kind
 

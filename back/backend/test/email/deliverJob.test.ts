@@ -484,6 +484,215 @@ describe("deliverDue", () => {
   });
 });
 
+describe("a send another process recorded first", () => {
+  test("is not counted, and says so: email_sent_unrecorded { emailId, kind }, a warning", async () => {
+    const sender = new StubSender();
+    const { emailId } = enqueue(1, "filing_landed");
+    sender.answer = async () => {
+      // Another process (a manual scheduler:run) recorded the row sent while this send was going.
+      db.prepare(
+        `UPDATE email_outbox SET status = 'sent', provider_message_id = 'msg_elsewhere',
+           sent_at = ?, next_attempt_at = NULL, to_address = NULL, text = NULL, html = NULL
+         WHERE email_id = ?`,
+      ).run(T0, emailId);
+      return { providerMessageId: "msg_1" };
+    };
+    await expect(outbox.deliverDue(sender, T0)).resolves.toEqual({
+      sent: 0,
+      retried: 0,
+      failed: 0,
+    });
+    expect(raw(emailId)).toMatchObject({ status: "sent", provider_message_id: "msg_elsewhere" });
+    expect(lines("email_sent_unrecorded")).toEqual([
+      {
+        opslog: "email_sent_unrecorded",
+        at: expect.any(String),
+        level: "warn",
+        emailId,
+        kind: "filing_landed",
+      },
+    ]);
+  });
+});
+
+describe("delivery events that arrive before the row holds its provider id (orphans)", () => {
+  const DAY = 86_400_000;
+  const orphans = () =>
+    db
+      .prepare("SELECT * FROM email_delivery_orphans ORDER BY provider_message_id, state")
+      .all() as Record<string, unknown>[];
+  /** A row sent on its second attempt, the first send's answer lost: the provider took the first
+   *  send as `msg_first` and reports on it while the row is still pending. */
+  const lostAnswer = () => {
+    const sender = new StubSender();
+    sender.answer = async (_e, call) => {
+      if (call === 1) throw new EmailSendError(null, "timeout", true);
+      return { providerMessageId: "msg_first" };
+    };
+    return sender;
+  };
+
+  test("a bounce reported while the row's answer was lost is kept, then recorded and warned when the row is sent", async () => {
+    const sender = lostAnswer();
+    const { emailId } = enqueue(1, "filing_landed");
+    await outbox.deliverDue(sender, T0);
+    expect(raw(emailId)).toMatchObject({ status: "pending", provider_message_id: null });
+
+    clock = T0 + MINUTE;
+    expect(outbox.recordDeliveryEvent("msg_first", "bounced", T0 + 30 * SECOND)).toEqual({
+      row: undefined,
+    });
+    expect(orphans()).toEqual([
+      {
+        provider_message_id: "msg_first",
+        state: "bounced",
+        event_at: T0 + 30 * SECOND,
+        received_at: T0 + MINUTE,
+      },
+    ]);
+    expect(lines("email_bounced")).toEqual([]);
+
+    clock = T0 + 2 * MINUTE;
+    await expect(outbox.deliverDue(sender, clock)).resolves.toEqual({
+      sent: 1,
+      retried: 0,
+      failed: 0,
+    });
+    expect(raw(emailId)).toMatchObject({
+      status: "sent",
+      provider_message_id: "msg_first",
+      delivery_state: "bounced",
+      delivery_at: T0 + 30 * SECOND,
+    });
+    expect(orphans()).toEqual([]);
+    expect(lines("email_bounced")).toEqual([
+      {
+        opslog: "email_bounced",
+        at: expect.any(String),
+        level: "warn",
+        severity: "WARN",
+        emailId,
+        kind: "filing_landed",
+        subjectRef: "ref-1",
+        state: "bounced",
+      },
+    ]);
+  });
+
+  test("a suppression that races the send (reported before the row is marked sent) is recorded and warned with it", async () => {
+    const sender = new StubSender();
+    const { emailId } = outbox.enqueue({
+      kind: "identity_link",
+      subjectRef: TENANT,
+      idempotencyKey: "identity_link:abc:2026-11-10",
+      to: ADDRESS,
+      subject: "Confirm who you are",
+      ...BODY,
+    });
+    sender.answer = async () => {
+      expect(outbox.recordDeliveryEvent("msg_1", "suppressed", T0)).toEqual({ row: undefined });
+      return { providerMessageId: "msg_1" };
+    };
+    await expect(outbox.deliverDue(sender, T0)).resolves.toEqual({
+      sent: 1,
+      retried: 0,
+      failed: 0,
+    });
+    expect(raw(emailId)).toMatchObject({ delivery_state: "suppressed", delivery_at: T0 });
+    expect(orphans()).toEqual([]);
+    expect(lines("email_bounced")).toEqual([
+      expect.objectContaining({
+        emailId,
+        kind: "identity_link",
+        subjectRef: `${TENANT.slice(0, 10)}…`,
+        state: "suppressed",
+      }),
+    ]);
+  });
+
+  test("the orphans are applied by the ordering rules: the newest event wins, delayed never overwrites an outcome; one WARN line, for an undelivered end state only", async () => {
+    // Received in the wrong order: the newer delivered first, the older bounce second.
+    const first = enqueue(1);
+    outbox.recordDeliveryEvent("msg_1", "delivered", T0 - 10 * SECOND);
+    outbox.recordDeliveryEvent("msg_1", "bounced", T0 - 20 * SECOND);
+    // A bounce, then a later delay: the bounce stays.
+    const second = enqueue(2);
+    outbox.recordDeliveryEvent("msg_2", "bounced", T0 - 20 * SECOND);
+    outbox.recordDeliveryEvent("msg_2", "delayed", T0 - 10 * SECOND);
+    // The same bounce twice (the provider's retry): one orphan.
+    outbox.recordDeliveryEvent("msg_2", "bounced", T0 - 20 * SECOND);
+    expect(orphans()).toHaveLength(4);
+
+    // Each row's provider id from its own ref: ref-1 is msg_1, whichever row is sent first.
+    const sender = new StubSender();
+    sender.answer = async (e) => ({
+      providerMessageId: `msg_${e.idempotencyKey.split("-").pop()}`,
+    });
+    await expect(outbox.deliverDue(sender, T0)).resolves.toEqual({
+      sent: 2,
+      retried: 0,
+      failed: 0,
+    });
+    expect(raw(first.emailId)).toMatchObject({
+      delivery_state: "delivered",
+      delivery_at: T0 - 10 * SECOND,
+    });
+    expect(raw(second.emailId)).toMatchObject({
+      delivery_state: "bounced",
+      delivery_at: T0 - 20 * SECOND,
+    });
+    expect(orphans()).toEqual([]);
+    expect(lines("email_bounced")).toEqual([
+      expect.objectContaining({ emailId: second.emailId, state: "bounced" }),
+    ]);
+  });
+
+  test("an orphan applied, then a later event: an older one is ignored, a newer one recorded", async () => {
+    const { emailId } = enqueue(1);
+    outbox.recordDeliveryEvent("msg_1", "bounced", T0 - 20 * SECOND);
+    await outbox.deliverDue(new StubSender(), T0);
+    expect(raw(emailId)).toMatchObject({
+      delivery_state: "bounced",
+      delivery_at: T0 - 20 * SECOND,
+    });
+
+    const older = outbox.recordDeliveryEvent("msg_1", "delivered", T0 - 30 * SECOND);
+    expect(older).toEqual({ row: expect.objectContaining({ emailId }), recorded: false });
+    expect(raw(emailId)).toMatchObject({
+      delivery_state: "bounced",
+      delivery_at: T0 - 20 * SECOND,
+    });
+
+    const newer = outbox.recordDeliveryEvent("msg_1", "delivered", T0 - 10 * SECOND);
+    expect(newer).toEqual({ row: expect.objectContaining({ emailId }), recorded: true });
+    expect(raw(emailId)).toMatchObject({
+      delivery_state: "delivered",
+      delivery_at: T0 - 10 * SECOND,
+    });
+    expect(orphans()).toEqual([]);
+  });
+
+  test("an orphan no email ever claims (a campaign email from the same provider account) is deleted by the delivery job once it is older than 7 days", async () => {
+    const sender = new StubSender();
+    outbox.recordDeliveryEvent("re_campaign_1", "delivered", T0 - SECOND);
+    clock = T0 + DAY;
+    outbox.recordDeliveryEvent("re_campaign_2", "delivered", T0 + DAY - SECOND);
+
+    clock = T0 + 7 * DAY;
+    await expect(outbox.deliverDue(sender, clock)).resolves.toEqual({
+      sent: 0,
+      retried: 0,
+      failed: 0,
+    });
+    expect(orphans().map((o) => o.provider_message_id)).toEqual(["re_campaign_1", "re_campaign_2"]);
+
+    clock = T0 + 7 * DAY + 1;
+    await outbox.deliverDue(sender, clock);
+    expect(orphans().map((o) => o.provider_message_id)).toEqual(["re_campaign_2"]);
+    expect(sender.sends).toEqual([]);
+  });
+});
+
 describe("the email_deliver job", () => {
   const BASE = {
     PLATFORM_PRIVATE_KEY: `0x${"1".repeat(64)}`,

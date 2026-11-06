@@ -10,6 +10,9 @@ import type Database from "better-sqlite3";
  * `DueEmail` is a row as the delivery job sends it, with the address and the content, and only
  * `listDue` answers it. Every move from `pending` is guarded on `status = 'pending'`, so a row
  * another process has already settled is left as it is.
+ *
+ * It also keeps the delivery events no sent row claims yet (`email_delivery_orphans`): kept,
+ * taken back when a row is sent with their id, and deleted once old.
  */
 
 export const OUTBOX_KINDS = [
@@ -34,6 +37,13 @@ export const DELIVERY_STATES = [
   "suppressed",
 ] as const;
 export type DeliveryState = (typeof DELIVERY_STATES)[number];
+
+/** A delivery event kept until a sent row carries its provider id. */
+export interface OrphanDeliveryEvent {
+  state: DeliveryState;
+  /** The event's own time (ms). */
+  eventAt: number;
+}
 
 /** A row as anyone may read it: never the address, the text or the HTML. */
 export interface OutboxRow {
@@ -202,6 +212,21 @@ export class SqliteEmailOutboxRepository {
            next_attempt_at = @at
          WHERE email_id = @emailId AND status = 'failed'`,
       ),
+      // One per id and state: a redelivered event keeps the later event time, and the first
+      // arrival, which its age is counted from.
+      keepOrphan: db.prepare(
+        `INSERT INTO email_delivery_orphans (provider_message_id, state, event_at, received_at)
+         VALUES (@providerMessageId, @state, @at, @receivedAt)
+         ON CONFLICT(provider_message_id, state)
+           DO UPDATE SET event_at = MAX(event_at, excluded.event_at)`,
+      ),
+      // The oldest event first, as they happened.
+      orphans: db.prepare(
+        `SELECT state, event_at FROM email_delivery_orphans WHERE provider_message_id = ?
+          ORDER BY event_at, received_at, state`,
+      ),
+      deleteOrphans: db.prepare("DELETE FROM email_delivery_orphans WHERE provider_message_id = ?"),
+      deleteOldOrphans: db.prepare("DELETE FROM email_delivery_orphans WHERE received_at < ?"),
       // The newest first, so a limit keeps the newest rows (a negative LIMIT is none); `list`
       // turns them back into the oldest first.
       list: db.prepare(
@@ -266,6 +291,31 @@ export class SqliteEmailOutboxRepository {
   findSent(providerMessageId: string): OutboxRow | undefined {
     const r = this.stmts.findSent.get(providerMessageId) as PublicRow | undefined;
     return r === undefined ? undefined : toOutboxRow(r);
+  }
+
+  /** A delivery event no sent row claims, kept until one does (`takeOrphans`). */
+  keepOrphan(
+    providerMessageId: string,
+    state: DeliveryState,
+    at: number,
+    receivedAt: number,
+  ): void {
+    this.stmts.keepOrphan.run({ providerMessageId, state, at, receivedAt });
+  }
+
+  /** The events kept for a provider id, the oldest first, and deleted. Call it in the
+   *  transaction that writes the id on its row. */
+  takeOrphans(providerMessageId: string): OrphanDeliveryEvent[] {
+    const events = (
+      this.stmts.orphans.all(providerMessageId) as { state: DeliveryState; event_at: number }[]
+    ).map((r) => ({ state: r.state, eventAt: r.event_at }));
+    this.stmts.deleteOrphans.run(providerMessageId);
+    return events;
+  }
+
+  /** Deletes the kept events that arrived before `receivedBefore` (ms); how many. */
+  deleteOrphansReceivedBefore(receivedBefore: number): number {
+    return this.stmts.deleteOldOrphans.run(receivedBefore).changes;
   }
 
   /** A failed row back to pending, due at `at`, its attempts counted from zero again. */

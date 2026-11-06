@@ -1409,6 +1409,29 @@ const EMAIL_OUTBOX_DDL = `
 `;
 
 /**
+ * THE DELIVERY EVENTS NO SENT EMAIL CLAIMS YET (`email_delivery_orphans`, see `src/email/outbox.ts`):
+ * a signed delivery event whose provider id no sent row carries. Two ways it happens to one of
+ * ours: the send's answer was lost (the provider took the email, the row is still pending and is
+ * retried under the same key, which the provider answers with the same id), or an event such as
+ * `email.suppressed` arrives before the row is marked sent. It is kept, one row per id and state
+ * (a redelivered event keeps the later event time), and when the delivery job writes that id on
+ * a row, the same transaction applies it through the outbox's ordering rules and deletes it. The
+ * rest never match (campaign emails from the same provider account reach the same endpoint) and
+ * the delivery job deletes them 7 days after they arrived. A provider id, a state and two times
+ * (ms): never an address or anything else the event carries.
+ */
+const EMAIL_DELIVERY_ORPHANS_DDL = `
+  CREATE TABLE IF NOT EXISTS email_delivery_orphans (
+    provider_message_id TEXT NOT NULL,
+    state               TEXT NOT NULL CHECK (state IN ('delivered', 'delayed', 'bounced',
+                          'complained', 'failed', 'suppressed')),
+    event_at            INTEGER NOT NULL,
+    received_at         INTEGER NOT NULL,
+    PRIMARY KEY (provider_message_id, state)
+  );
+`;
+
+/**
  * An agentId in the one spelling `legal_bodies` stores it (whose CHECK writes the same rule
  * inline): TEXT with no hidden bytes, decimal digits only, no leading zero except '0' itself, at
  * most 78 digits (the width of a uint256).
@@ -1915,6 +1938,8 @@ export function migrate(db: Database.Database): void {
     ${SCHEDULED_JOB_RUNS_DDL}
     -- Every email the product sends, until the delivery job has sent it.
     ${EMAIL_OUTBOX_DDL}
+    -- The delivery events that arrived before their email's row was sent.
+    ${EMAIL_DELIVERY_ORPHANS_DDL}
 
     -- Anchor cycles: one row PER MANIFEST VERSION. Deliberately NOT keyed like bridge_legs
     -- (entity, step) — a bridge has exactly one of each leg, whereas an entity accumulates
