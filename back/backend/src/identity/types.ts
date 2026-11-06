@@ -21,14 +21,16 @@ export type IdentityProvider = "stripe" | "persona" | "sumsub" | "sandbox";
 export type DocumentType = "passport" | "identity_card" | "driving_licence";
 export type Watchlist = "clear" | "hit" | "not_run";
 export type Liveness = "passed" | "failed" | "not_run";
-/** Why a check went to review rather than passing. */
+/** Why a check went to review rather than passing. `name_mismatch`: the name the guardian gave
+ *  differs from the document's beyond the case and spacing `nameOfRecord` normalises. */
 export type ReviewReasonCode =
   | "provider_flag"
   | "watchlist_hit"
   | "country_blocked"
   | "document_expired"
   | "duplicate_identity"
-  | "name_rule_failed";
+  | "name_rule_failed"
+  | "name_mismatch";
 /** What the operator found when deciding a review, to accept or to refuse it. */
 export type ReviewDecisionCode =
   | "provider_flag_cleared"
@@ -72,6 +74,7 @@ export const REVIEW_REASON_CODES: readonly string[] = [
   "document_expired",
   "duplicate_identity",
   "name_rule_failed",
+  "name_mismatch",
 ] satisfies readonly ReviewReasonCode[];
 export const REVIEW_DECISION_CODES: readonly string[] = [
   "provider_flag_cleared",

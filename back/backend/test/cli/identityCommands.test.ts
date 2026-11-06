@@ -14,6 +14,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -1222,6 +1223,244 @@ describe("identity:correct-name", () => {
     ).toBe(
       `refusing: the names of check ${passed.checkId} were erased: record a new check instead`,
     );
+  });
+});
+
+// ── the guardian's name, confirmed against the document ──────────────────────────────────────
+
+describe("a name that differs from the document's", () => {
+  test("record --name-mismatch stores needs_review with name_mismatch, for a pass or a review; a failed check refuses it", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+
+    const passed = await run<Recorded>(recordLine(guardian, {}, ["--name-mismatch", "--yes"]));
+    expect(passed.output).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["name_mismatch"],
+    });
+    const review = await run<Recorded>(
+      recordLine(second, { "--result": "needs_review", "--name-first": "Ana" }, [
+        "--name-mismatch",
+        "--yes",
+      ]),
+    );
+    expect(review.output).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["provider_flag", "name_mismatch"],
+    });
+    expect(
+      await refusal(
+        recordLine(
+          third,
+          {
+            "--result": "failed",
+            "--name-first": null,
+            "--name-last": null,
+            "--watchlist": null,
+            "--reason-code": "other",
+            "--reason": REASON,
+          },
+          ["--name-mismatch", "--yes"],
+        ),
+      ),
+    ).toBe(
+      "refusing: --name-mismatch is not taken with --result failed: a failed check keeps no name",
+    );
+  });
+
+  test("on production identity:correct-name resolves a mismatch to passed when every other rule holds", () => {
+    human(guardian, "1001");
+    const cfg = config({ arcNetwork: "mainnet" });
+    recordIdentity(db, cfg, guardian, recordOpts({ nameMismatch: true }));
+    const review = latestOf(guardian);
+    expect(review).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["name_mismatch"],
+      environment: "production",
+    });
+
+    correctIdentityName(db, cfg, guardian, {
+      operator: OPERATOR,
+      expectLatest: String(review.checkId),
+      reasonCode: "other",
+      reason: REASON,
+      yes: true,
+      nameFirst: FIRST,
+      nameLast: "DUPONT-EXAMPLE",
+    });
+
+    expect(latestOf(guardian)).toMatchObject({
+      status: "passed",
+      reviewReasons: [],
+      supersedesCheckId: review.checkId,
+      environment: "production",
+    });
+  });
+
+  test("identity:correct-name drops name_rule_failed and name_mismatch together, and keeps any other reason", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const both = await run<Recorded>(
+      recordLine(guardian, { "--name-first": "伟", "--name-last": "王" }, [
+        "--name-mismatch",
+        "--yes",
+      ]),
+    );
+    expect(both.output.reviewReasons).toEqual(["name_rule_failed", "name_mismatch"]);
+    const corrected = await run<Recorded>(
+      decisionLine("identity:correct-name", guardian, both.output.checkId, "other_script", {
+        "--name-first": "Wei",
+        "--name-last": "WANG",
+      }),
+    );
+    expect(corrected.output).toMatchObject({ status: "passed", reviewReasons: [] });
+
+    const held = await run<Recorded>(
+      recordLine(second, { "--watchlist": "hit", "--name-first": "Ana" }, [
+        "--name-mismatch",
+        "--yes",
+      ]),
+    );
+    const kept = await run<Recorded>(
+      decisionLine("identity:correct-name", second, held.output.checkId, "other", {
+        "--name-first": "Ana",
+        "--name-last": LAST,
+      }),
+    );
+    expect(kept.output).toMatchObject({ status: "needs_review", reviewReasons: ["watchlist_hit"] });
+  });
+
+  test("the name flags say the name is the guardian's, confirmed against the document", () => {
+    const program = buildCli(noChain);
+    for (const command of ["identity:record", "identity:correct-name"]) {
+      const options = program.commands.find((c) => c.name() === command)?.options ?? [];
+      for (const flag of ["--name-first", "--name-last", "--name-full"]) {
+        const help = options.find((o) => o.long === flag)?.description ?? "";
+        expect(help, `${command} ${flag}`).toContain(
+          "as the guardian gave it, confirmed against the document",
+        );
+      }
+    }
+  });
+});
+
+// ── names read at a prompt, never on the command line ─────────────────────────────────────────
+
+describe("--names-prompt", () => {
+  /** Standard input, not a terminal: the lines given, then its end. */
+  function piped(text: string): void {
+    vi.spyOn(process, "stdin", "get").mockReturnValue(
+      Readable.from([text]) as unknown as typeof process.stdin,
+    );
+  }
+
+  test("identity:record reads the first, last and full names from standard input, one per line, and no ops line or output holds them", async () => {
+    human(guardian, "1001");
+    piped(`${FIRST}\n${LAST_PRINTED}\nJEAN PIERRE DUPONT\n`);
+
+    const { output, ops } = await run<Recorded>(
+      recordLine(guardian, { "--name-first": null, "--name-last": null }, [
+        "--names-prompt",
+        "--yes",
+      ]),
+    );
+
+    expect(output).toMatchObject({ status: "passed", reviewReasons: [] });
+    expect(showIdentity(db, config(), guardian)).toMatchObject({
+      latest: { names: { first: FIRST, last: LAST, full: "Jean Pierre Dupont" } },
+    });
+    for (const text of [JSON.stringify(output), ...ops.map((o) => JSON.stringify(o))])
+      expect(text).not.toMatch(SURNAME);
+  });
+
+  test("an empty or missing third line keeps no full name; fewer than two lines is refused", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    piped(`${FIRST}\n${LAST_PRINTED}\n\n`);
+    await run(
+      recordLine(guardian, { "--name-first": null, "--name-last": null }, [
+        "--names-prompt",
+        "--yes",
+      ]),
+    );
+    expect(showIdentity(db, config(), guardian)).toMatchObject({
+      latest: { names: { first: FIRST, last: LAST, full: null } },
+    });
+
+    piped(`${FIRST}`);
+    expect(
+      await refusal(
+        recordLine(second, { "--name-first": null, "--name-last": null }, [
+          "--names-prompt",
+          "--yes",
+        ]),
+      ),
+    ).toBe("refusing: --names-prompt needs the first name and the last name, one per line");
+    expect(repo.list(second)).toEqual([]);
+  });
+
+  test("it cannot be combined with a name flag, nor with --result failed", async () => {
+    human(guardian, "1001");
+    piped(`${FIRST}\n${LAST_PRINTED}\n`);
+    for (const [flag, over] of [
+      ["--name-first", { "--name-last": null }],
+      ["--name-last", { "--name-first": null }],
+      ["--name-full", { "--name-first": null, "--name-last": null, "--name-full": "Jean Dupont" }],
+    ] as const)
+      expect(await refusal(recordLine(guardian, over, ["--names-prompt", "--yes"])), flag).toBe(
+        `refusing: --names-prompt cannot be combined with ${flag}: the names are read at the prompt`,
+      );
+    expect(
+      await refusal(
+        recordLine(
+          guardian,
+          {
+            "--result": "failed",
+            "--name-first": null,
+            "--name-last": null,
+            "--watchlist": null,
+            "--reason-code": "other",
+            "--reason": REASON,
+          },
+          ["--names-prompt", "--yes"],
+        ),
+      ),
+    ).toBe(
+      "refusing: --names-prompt is not taken with --result failed: a failed check keeps no name",
+    );
+    expect(repo.list(guardian)).toEqual([]);
+  });
+
+  test("identity:correct-name reads the corrected names from standard input; without them or the prompt it refuses", async () => {
+    human(guardian, "1001");
+    const review = await recorded(guardian, { "--name-first": "伟", "--name-last": "王" });
+    const correctLine = (over: Options, extra: string[]) => [
+      ...decisionLine(
+        "identity:correct-name",
+        guardian,
+        review.checkId,
+        "other_script",
+        over,
+        false,
+      ),
+      ...extra,
+    ];
+
+    expect(await refusal(correctLine({}, ["--yes"]))).toBe(
+      "refusing: --name-first and --name-last are required, or --names-prompt",
+    );
+    piped("Wei\nWANG\n");
+    expect(await refusal(correctLine({ "--name-first": "Wei" }, ["--names-prompt", "--yes"]))).toBe(
+      "refusing: --names-prompt cannot be combined with --name-first: the names are read at the prompt",
+    );
+    piped("Wei\nWANG\n");
+    const { output, ops } = await run<Recorded>(correctLine({}, ["--names-prompt", "--yes"]));
+
+    expect(output).toMatchObject({ status: "passed", reviewReasons: [] });
+    expect(showIdentity(db, config(), guardian)).toMatchObject({
+      latest: { names: { first: "Wei", last: "Wang", full: null } },
+    });
+    for (const o of ops) expect(JSON.stringify(o)).not.toMatch(/wei|wang/i);
   });
 });
 

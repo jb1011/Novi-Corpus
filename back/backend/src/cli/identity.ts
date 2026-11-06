@@ -28,6 +28,7 @@ import {
   validateIdentityCheck,
 } from "../persistence/identityRepository";
 import { SqliteWorldStore } from "../persistence/worldStore";
+import { readNames, withPromptedNames } from "./namesPrompt";
 import {
   OPERATOR_NAME,
   osUser,
@@ -341,6 +342,10 @@ export interface RecordOptions {
   nameFirst?: string;
   nameLast?: string;
   nameFull?: string;
+  /** The guardian's name differs from the document's: the check waits for a review. */
+  nameMismatch?: boolean;
+  /** The names are read at a prompt (`namesPrompt.ts`); resolved before `recordIdentity`. */
+  namesPrompt?: boolean;
   country?: string;
   documentType?: string;
   documentExpired?: boolean;
@@ -355,11 +360,12 @@ export interface RecordOptions {
 }
 
 type OptionTable = readonly (readonly [keyof RecordOptions, string])[];
-/** What a check that keeps names needs, and what a failed one refuses. */
+/** What a failed check refuses: it keeps no name. */
 const NAME_FLAGS: OptionTable = [
   ["nameFirst", "--name-first"],
   ["nameLast", "--name-last"],
   ["nameFull", "--name-full"],
+  ["nameMismatch", "--name-mismatch"],
 ];
 const KEPT_NEEDS: OptionTable = [
   ["nameFirst", "--name-first"],
@@ -373,10 +379,13 @@ const REASON_FLAGS: OptionTable = [
 ];
 
 /**
- * Records one check the operator read in the provider's dashboard. A passed result is stored as
- * `needs_review`, with its reasons, when the watchlist search hit, the document was out of date,
- * its country is blocked, the name breaks the name rule, or another tenant's current passed check
- * holds the same name and country (the other check ids are printed, never the name). A provider's
+ * Records one check the operator read in the provider's dashboard. The names are the guardian's
+ * own, as printed on the document, confirmed by the operator against the provider's verified names
+ * and the document. A passed result is stored as `needs_review`, with its reasons, when the
+ * watchlist search hit, the document was out of date, its country is blocked, the name breaks the
+ * name rule, the guardian's name differs from the document's (`--name-mismatch`), or another
+ * tenant's current passed check holds the same name and country (the other check ids are printed,
+ * never the name). A provider's
  * own review (`--result needs_review`) carries `provider_flag` first. On a verified guardian only
  * `--result passed` is taken: a renewal, or a new check after a change of name, which supersedes
  * the current pass and has its expiry from its own completion. A pass recorded over a pass names
@@ -446,6 +455,7 @@ export function recordIdentity(
     if (country !== null && cfg.identity.blockedCountries.has(country))
       flagged.push("country_blocked");
     if (nameRuleProblem(names.first, names.last) !== null) flagged.push("name_rule_failed");
+    if (opts.nameMismatch === true) flagged.push("name_mismatch");
   }
   const operatorOsUser = osUser();
   const repo = new SqliteIdentityRepository(db);
@@ -558,9 +568,11 @@ export interface DecisionOptions {
 }
 
 export interface CorrectNameOptions extends DecisionOptions {
-  nameFirst: string;
-  nameLast: string;
+  /** Required, unless the names are read at a prompt (resolved before `correctIdentityName`). */
+  nameFirst?: string;
+  nameLast?: string;
   nameFull?: string;
+  namesPrompt?: boolean;
 }
 
 /** What a decision row carries over from the row it decides: everything but the status, the
@@ -788,8 +800,8 @@ export function revokeIdentity(
  * Corrects the name of record of a passed check or a review: the new names through `nameOfRecord`
  * and the name rule (refused when they break it), the full name only when a new one is given (the
  * old one is never carried over a correction), all sealed under the current key with the new
- * name's fingerprint.
- * The row passes when the review's reasons other than `name_rule_failed` are none (on production,
+ * name's fingerprint. The corrected name resolves `name_rule_failed` and `name_mismatch`.
+ * The row passes when the review's reasons other than those two are none (on production,
  * only when the check had the face match and the sanctions search: `assertProductionPass`); since
  * the name changed, another tenant's current passed check holding the new name and country adds
  * `duplicate_identity`, as `identity:record` would.
@@ -803,6 +815,8 @@ export function correctIdentityName(
   const tenantId = parseTenant(tenantArg);
   const pii = requirePii(cfg);
   const fingerprintKey = requireNameHmacKey(cfg);
+  if (opts.nameFirst === undefined || opts.nameLast === undefined)
+    refuse("--name-first and --name-last are required, or --names-prompt");
   const first = nameOfRecord(opts.nameFirst);
   const last = nameOfRecord(opts.nameLast);
   const problem = nameRuleProblem(first, last);
@@ -821,7 +835,10 @@ export function correctIdentityName(
         full: opts.nameFull === undefined ? null : nameOfRecord(opts.nameFull),
       };
       const hmac = nameHmac(fingerprintKey, first, last);
-      const remaining = latest.reviewReasons.filter((code) => code !== "name_rule_failed");
+      // The corrected name resolves the name's own reasons, and only those.
+      const remaining = latest.reviewReasons.filter(
+        (code) => code !== "name_rule_failed" && code !== "name_mismatch",
+      );
       const duplicate =
         latest.documentCountry !== null &&
         !remaining.includes("duplicate_identity") &&
@@ -1014,9 +1031,26 @@ export function registerIdentityCommands(program: Command): void {
     .requiredOption("--provider <stripe|persona|sumsub|sandbox>", "the provider that ran the check")
     .requiredOption("--provider-ref <id>", "the provider's id of the check, such as vs_…")
     .requiredOption("--result <passed|failed|needs_review>", "what the provider shows")
-    .option("--name-first <text>", "passed, needs_review: the first name as the document prints it")
-    .option("--name-last <text>", "passed, needs_review: the last name as the document prints it")
-    .option("--name-full <text>", "passed, needs_review, optional: the full name as printed")
+    .option(
+      "--name-first <text>",
+      "passed, needs_review: the first name as the guardian gave it, confirmed against the document",
+    )
+    .option(
+      "--name-last <text>",
+      "passed, needs_review: the last name as the guardian gave it, confirmed against the document",
+    )
+    .option(
+      "--name-full <text>",
+      "passed, needs_review, optional: the full name as the guardian gave it, confirmed against the document",
+    )
+    .option(
+      "--names-prompt",
+      "passed, needs_review: type the names at a prompt (or pipe them in, one per line: first, last, optional full) instead of the three name flags",
+    )
+    .option(
+      "--name-mismatch",
+      "passed, needs_review: the guardian's name differs from the document's; the check waits for review (resolve it with identity:correct-name)",
+    )
     .option("--country <ISO-3>", "the document's issuing country, ISO 3166-1 alpha-3 (FRA)")
     .option("--document-type <passport|identity_card|driving_licence>", "the document checked")
     .option("--document-expired", "the document was out of date")
@@ -1037,9 +1071,15 @@ export function registerIdentityCommands(program: Command): void {
     .requiredOption("--operator <name>", `who records: ${OPERATOR_NAME.source}`)
     .requiredOption("--expect-latest <checkId|none>", EXPECT_LATEST_HELP)
     .option("--yes", "confirm: record the check")
-    .action((tenantId: string, opts: RecordOptions) =>
-      withDatabase((db, _docStoreDir, cfg) => print(recordIdentity(db, cfg, tenantId, opts))),
-    );
+    .action(async (tenantId: string, opts: RecordOptions) => {
+      // Refused before anything is read at the prompt.
+      if (opts.namesPrompt === true && opts.result === "failed")
+        refuse("--names-prompt is not taken with --result failed: a failed check keeps no name");
+      const withNames = await withPromptedNames(opts, () =>
+        readNames(process.stdin, process.stderr),
+      );
+      withDatabase((db, _docStoreDir, cfg) => print(recordIdentity(db, cfg, tenantId, withNames)));
+    });
 
   const decision = (
     name: string,
@@ -1094,12 +1134,30 @@ export function registerIdentityCommands(program: Command): void {
     NAME_CORRECTION_CODES,
     "record the correction",
   )
-    .requiredOption("--name-first <text>", "the first name of record, Latin script")
-    .requiredOption("--name-last <text>", "the last name of record, Latin script")
-    .option("--name-full <text>", "optional: the full name; without it the record keeps none")
-    .action((tenantId: string, opts: CorrectNameOptions) =>
-      withDatabase((db, _docStoreDir, cfg) => print(correctIdentityName(db, cfg, tenantId, opts))),
-    );
+    .option(
+      "--name-first <text>",
+      "the first name as the guardian gave it, confirmed against the document, in Latin script",
+    )
+    .option(
+      "--name-last <text>",
+      "the last name as the guardian gave it, confirmed against the document, in Latin script",
+    )
+    .option(
+      "--name-full <text>",
+      "optional: the full name as the guardian gave it, confirmed against the document; without it the record keeps none",
+    )
+    .option(
+      "--names-prompt",
+      "type the names at a prompt (or pipe them in, one per line: first, last, optional full) instead of the three name flags",
+    )
+    .action(async (tenantId: string, opts: CorrectNameOptions) => {
+      const withNames = await withPromptedNames(opts, () =>
+        readNames(process.stdin, process.stderr),
+      );
+      withDatabase((db, _docStoreDir, cfg) =>
+        print(correctIdentityName(db, cfg, tenantId, withNames)),
+      );
+    });
 
   program
     .command("identity:sweep")
