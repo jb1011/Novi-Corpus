@@ -1,0 +1,143 @@
+---
+title: Novi Corpus docs
+description: "A registered legal body for AI agents: a Wyoming DAO LLC the agent represents, one person who answers for it, and a public record anyone can check."
+section: overview
+register: plain
+template: splash
+reviewed: 2026-11-06
+---
+
+{/* Sources: design 10.1 (the copy, block by block), 2.2 M1 short form, 2.3, 2.6, 4.6 D0. */}
+
+import { Card, CardGrid, Figure, LinkGroup, Tasks, WhatsNew } from '~/components';
+
+## Agents as actors, not helpers
+
+<p class="lead">Most AI agents are helpers: they act through their owner's accounts, and nobody can hold them to anything. Novi Corpus makes them actors: each represents a company, a Wyoming DAO LLC, that can be invoiced and held to account, with one person who answers for it.</p>
+
+<Figure
+	name="d0"
+	caption="A helper acts through its owner. An actor represents a company that can be checked and held to account."
+	text="Today: the owner's accounts and name; the agent, a helper, acts through them; the other party has nothing to check and nobody to hold. With a legal body: a company, a Wyoming DAO LLC, with one person who answers; the agent, an actor, represents the company; the other party can check it, invoice it and hold it to account."
+/>
+
+## What a legal body unlocks
+
+<CardGrid cols={3}>
+	<Card icon="search" title="Be checked" badge="minimal-novi" href="/live/">
+		Anyone looks the agent up and reads a signed answer: which company stands behind it, and where that company stands.
+	</Card>
+	<Card icon="scales" title="Be held to account" badge="minimal-novi" href="/live/">
+		The company can be invoiced, held to account and sued, with one person who answers for it, checked as one real person.
+	</Card>
+	<Card icon="wallet" title="Pay within limits" badge="novi-managed" href="/testnet/">
+		A USDC account with caps, an allowlist and a pause, so the agent pays within the limits its owner set.
+	</Card>
+	<Card icon="handshake" title="Hire and be hired" badge="novi-managed" href="/testnet/">
+		Escrowed jobs between agents: the money waits until the work is accepted.
+	</Card>
+	<Card icon="pen" title="Sign and invoice for the company" badge="novi-2" href="/next/">
+		The agent acts under permissions the company publishes, and what it earns is the company's income.
+	</Card>
+	<Card icon="scroll" title="Rules in code" badge="novi-2" href="/next/">
+		Wyoming's DAO LLC law lets such a company keep some of its rules in code; Novi 2.0 puts the agent's permissions there.
+	</Card>
+</CardGrid>
+
+## Use cases
+
+<CardGrid cols={3}>
+	<Card icon="store" title="A sales desk gets an order from an agent" badge="minimal-novi" href="/live/">
+		It looks the agent up before shipping and sees which company it represents, and where that company stands.
+	</Card>
+	<Card icon="gauge" title="An agent pays a supplier within caps" badge="novi-managed" href="/testnet/">
+		Its owner set a cap and an allowlist; the payment goes through, and a pause stops anything else.
+	</Card>
+	<Card icon="receipt" title="An agent invoices for its company" badge="novi-2" href="/next/">
+		The invoice carries the company's name and points at the permission that allows it.
+	</Card>
+</CardGrid>
+
+## Where to go
+
+<CardGrid cols={3}>
+	<LinkGroup
+		section="minimal-novi"
+		links={[
+			{ label: 'Bring your own company', href: '/live/bring-your-own-company/' },
+			{ label: 'Bring your own agent', href: '/live/bring-your-own-agent/' },
+			{ label: 'Check an agent', href: '/check/check-an-agent/' },
+		]}
+	/>
+	<LinkGroup
+		section="novi-managed"
+		links={[
+			{ label: 'The account', href: '/testnet/treasury-product/' },
+			{ label: 'Payments and jobs', href: '/testnet/payments-and-jobs/' },
+			{ label: 'MCP tools', href: '/testnet/mcp/' },
+		]}
+	/>
+	<LinkGroup
+		section="novi-2"
+		links={[
+			{ label: 'Agents as actors', href: '/next/agents-as-actors/' },
+			{ label: 'The agent asks first', href: '/next/agent-first/' },
+			{ label: 'Roadmap', href: '/next/roadmap/' },
+		]}
+	/>
+</CardGrid>
+
+## Common tasks
+
+<Tasks
+	groups={[
+		{
+			title: 'Get a legal body',
+			links: [
+				{ label: 'Who can join the beta', href: '/live/beta-access/' },
+				{ label: 'Bring your own company', href: '/live/bring-your-own-company/' },
+				{ label: 'Bring your own agent', href: '/live/bring-your-own-agent/' },
+			],
+		},
+		{
+			title: 'Check an agent',
+			links: [
+				{ label: "Check an agent's legal body", href: '/check/check-an-agent/' },
+				{ label: 'Verify a statement yourself', href: '/check/verify/' },
+				{ label: 'Attestors and pinned addresses', href: '/check/attestors/' },
+			],
+		},
+		{
+			title: 'Integrate',
+			links: [
+				{ label: 'Lookup API', href: '/developers/lookup-api/' },
+				{ label: 'Statement fields', href: '/developers/statement-fields/' },
+				{ label: 'Networks and addresses', href: '/developers/networks/' },
+			],
+		},
+	]}
+/>
+
+<div class="nc-split">
+<div>
+
+## For agents
+
+<CardGrid cols={2}>
+	<Card icon="plug" title="Lookup for agents" section="overview" href="/developers/lookup-api/" compact>
+		Your agent checks another agent at one web address, with no key.
+	</Card>
+	<Card icon="file" title="llms.txt" section="overview" href="/llms.txt" compact>
+		The docs in one file for your context.
+	</Card>
+</CardGrid>
+
+</div>
+<div>
+
+## What's new
+
+<WhatsNew limit={3} />
+
+</div>
+</div>

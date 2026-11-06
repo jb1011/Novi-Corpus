@@ -1,0 +1,16 @@
+---
+// Sidebar: the current section's sidebar only (the topics are the header tabs),
+// with a line icon on each group (design 3.2). Replaces the plugin's topic list.
+import MobileMenuFooter from '@astrojs/starlight/components/MobileMenuFooter.astro';
+import SidebarPersister from '@astrojs/starlight/components/SidebarPersister.astro';
+import SidebarList from './SidebarList.astro';
+
+const { sidebar, entry } = Astro.locals.starlightRoute;
+const section = (entry.data as { section?: string }).section;
+---
+
+<div class="nc-sidebar" data-section={section}>
+	<SidebarPersister><SidebarList sublist={sidebar} /></SidebarPersister>
+</div>
+
+<div class="md:sl-hidden"><MobileMenuFooter /></div>

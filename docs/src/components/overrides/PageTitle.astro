@@ -1,0 +1,71 @@
+---
+// Page title: the section crumb, the h1, the one-line subtitle (the page's
+// `description`), and the badge line (design 4.4; 2.5 rule 16):
+// the section badge, "Describes Arc mainnet/testnet" where set, "Last reviewed" where set.
+//
+// The landing (design 10.1, block 1) gets the hero instead: the title and the tagline
+// centred, over a search box that opens the site search, with no crumb and no badge line.
+import Icon from '../Icon.astro';
+import SectionBadge from '../SectionBadge.astro';
+import { NETWORKS, SECTIONS } from '../../sections.mjs';
+import { formatDate } from '../../format.mjs';
+
+type Data = {
+	title: string;
+	description?: string;
+	section?: keyof typeof SECTIONS;
+	network?: keyof typeof NETWORKS;
+	reviewed?: Date;
+};
+
+const { entry, id } = Astro.locals.starlightRoute;
+const data = entry.data as Data;
+const isLanding = id === '' || id === 'index';
+const s = data.section ? SECTIONS[data.section] : undefined;
+const hasBadge = Boolean(s?.badge);
+const showLine = hasBadge || data.network || data.reviewed;
+---
+
+{
+	isLanding ? (
+		<div class="nc-hero">
+			<h1 id="_top">{data.title}</h1>
+			{data.description && <p class="nc-subtitle">{data.description}</p>}
+			<button type="button" class="nc-hero-search" data-nc-search>
+				<Icon name="search" size={16} />
+				<span>Search the docs</span>
+				<kbd>Ctrl K</kbd>
+			</button>
+		</div>
+	) : (
+		<>
+			{s && (
+				<p class="nc-crumb" data-section={data.section} data-pagefind-ignore>
+					<Icon name={s.icon} size={16} />
+					<span>{s.label}</span>
+				</p>
+			)}
+			<h1 id="_top">{data.title}</h1>
+			{data.description && <p class="nc-subtitle">{data.description}</p>}
+			{showLine && (
+				<div class="nc-badgeline" data-pagefind-ignore>
+					{hasBadge && <SectionBadge section={data.section!} />}
+					{data.network && <span>{NETWORKS[data.network]}</span>}
+					{data.reviewed && <span>Last reviewed {formatDate(data.reviewed)}</span>}
+				</div>
+			)}
+		</>
+	)
+}
+
+<script>
+	// The hero's search box opens the header's search dialog (Starlight's <site-search>).
+	// The click must stop here: the dialog closes on any click that reaches the window
+	// from outside it, and this one would reach it right after the dialog opened.
+	for (const button of document.querySelectorAll<HTMLButtonElement>('[data-nc-search]')) {
+		button.addEventListener('click', (event) => {
+			event.stopPropagation();
+			document.querySelector<HTMLButtonElement>('site-search button[data-open-modal]')?.click();
+		});
+	}
+</script>

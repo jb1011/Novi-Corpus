@@ -1,0 +1,18 @@
+---
+// 404: outside the docs collection, so it stays out of search and llms.txt.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+---
+
+<StarlightPage
+	frontmatter={{
+		title: 'Page not found',
+		description: 'This page does not exist, or it has moved.',
+		section: 'overview',
+		register: 'plain',
+		template: 'splash',
+		pagefind: false,
+		head: [{ tag: 'meta', attrs: { name: 'robots', content: 'noindex' } }],
+	}}
+>
+	<p>Search the docs from the top of the page, or start again from <a href="/">the docs home</a>.</p>
+</StarlightPage>

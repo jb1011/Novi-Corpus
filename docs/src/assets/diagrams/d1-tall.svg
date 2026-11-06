@@ -1,0 +1,53 @@
+<!-- Novi Corpus docs diagram D1 (tall). Generated from the approved v0.5 mockup builder;
+     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro. -->
+<svg xmlns="http://www.w3.org/2000/svg" class="tall" viewBox="0 0 340 676" role="img" aria-label="How the parts fit together"><title>How the parts fit together</title><desc>The legal body links one company and one agent both ways; Novi Corpus reads the link and signs an answer about it.</desc>
+<defs>
+      <pattern id="d1t-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" class="dot"/></pattern>
+      <linearGradient id="d1t-card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g-top"/><stop offset="1" class="g-bot"/></linearGradient>
+      <radialGradient id="d1t-glow" cx="50%" cy="50%" r="60%"><stop offset="0" class="glow-in"/><stop offset="1" class="glow-out"/></radialGradient>
+      <marker id="d1t-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      <marker id="d1t-aa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-acc"/></marker>
+      <marker id="d1t-am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-amber"/></marker>
+      <marker id="d1t-al" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-live"/></marker>
+    </defs>
+<rect x="0" y="0" width="340" height="676" fill="url(#d1t-dots)" class="bgdots"/>
+<rect class="cbg" x="0" y="6" width="300" height="92" rx="14" fill="url(#d1t-card)"/>
+<rect class="cst r-law" x="0.5" y="6.5" width="299" height="91" rx="14"/>
+<rect class="ictile r-law" x="18" y="24" width="40" height="40" rx="10"/>
+<g class="ic r-law" transform="translate(26 32) scale(1.0)"><path d="M3 21h18M5 21V8l7-5 7 5v13M9 21v-5h6v5M9 11h.01M15 11h.01"/></g>
+<text class="eb r-law" x="72" y="40">COMPANY</text>
+<text class="tt" x="72" y="65">A Wyoming DAO LLC</text>
+<rect class="cbg" x="0" y="112" width="300" height="92" rx="14" fill="url(#d1t-card)"/>
+<rect class="cst r-ink" x="0.5" y="112.5" width="299" height="91" rx="14"/>
+<rect class="ictile r-ink" x="18" y="130" width="40" height="40" rx="10"/>
+<g class="ic r-ink" transform="translate(26 138) scale(1.0)"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></g>
+<text class="eb r-ink" x="72" y="146">GUARDIAN</text>
+<text class="tt" x="72" y="171">One person who answers</text>
+<path class="ln" d="M301 52 H322 V274"/><path class="ln" d="M301 158 H322"/>
+<path class="ln" d="M322 274 V286" marker-end="url(#d1t-a)"/>
+<text class="pl-s" x="0" y="236">named in the agreement,</text><text class="pl-s" x="0" y="258">approves the agreement</text>
+<rect class="cbg" x="0" y="288" width="340" height="92" rx="14" fill="url(#d1t-card)"/>
+<rect class="cst r-acc" x="0.5" y="288.5" width="339" height="91" rx="14"/>
+<rect class="ictile r-acc" x="18" y="306" width="40" height="40" rx="10"/>
+<g class="ic r-acc" transform="translate(26 314) scale(1.0)"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.4 1.4M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.4-1.4"/></g>
+<text class="eb r-acc" x="72" y="322">LEGAL BODY</text>
+<text class="tt" x="72" y="347">The link, public ledger</text>
+<path class="ln ln-acc" d="M30 381 V428" marker-end="url(#d1t-aa)"/>
+<text class="pl-s acc" x="44" y="410">names the agent</text>
+<path class="ln ln-acc" d="M200 428 V382" marker-end="url(#d1t-aa)"/>
+<text class="pl-s acc" x="214" y="402">names its</text><text class="pl-s acc" x="214" y="420">legal body</text>
+<rect class="cbg" x="0" y="430" width="340" height="92" rx="14" fill="url(#d1t-card)"/>
+<rect class="cst r-soft" x="0.5" y="430.5" width="339" height="91" rx="14"/>
+<rect class="ictile r-soft" x="18" y="448" width="40" height="40" rx="10"/>
+<g class="ic r-soft" transform="translate(26 456) scale(1.0)"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4"/><circle cx="12" cy="3.5" r="1"/><path d="M9 13h.01M15 13h.01M9.5 17h5"/></g>
+<text class="eb r-soft" x="72" y="464">AGENT IDENTITY</text>
+<text class="tt" x="72" y="489">Number, owner, wallet</text>
+<path class="ln ln-live" d="M30 523 V578" marker-end="url(#d1t-al)"/>
+<text class="pl-s live" x="44" y="556">Novi Corpus reads both</text>
+<rect class="cbg" x="0" y="580" width="340" height="92" rx="14" fill="url(#d1t-card)"/>
+<rect class="cst r-live" x="0.5" y="580.5" width="339" height="91" rx="14"/>
+<rect class="ictile r-live" x="18" y="598" width="40" height="40" rx="10"/>
+<g class="ic r-live" transform="translate(26 606) scale(1.0)"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></g>
+<text class="eb r-live" x="72" y="614">SIGNED ANSWER</text>
+<text class="tt" x="72" y="639">What a checker reads</text>
+</svg>

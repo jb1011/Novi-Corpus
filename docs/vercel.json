@@ -3,5 +3,138 @@
   "framework": null,
   "installCommand": "npm install",
   "buildCommand": "npm run build",
-  "outputDirectory": "_book"
+  "outputDirectory": "dist",
+  "trailingSlash": true,
+  "redirects": [
+    {
+      "source": "/README.html",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/introduction/status.html",
+      "destination": "/start/status/",
+      "permanent": true
+    },
+    {
+      "source": "/introduction/how-it-works.html",
+      "destination": "/live/",
+      "permanent": true
+    },
+    {
+      "source": "/product/legal-body.html",
+      "destination": "/live/",
+      "permanent": true
+    },
+    {
+      "source": "/product/treasury.html",
+      "destination": "/testnet/treasury-product/",
+      "permanent": true
+    },
+    {
+      "source": "/product/custody.html",
+      "destination": "/testnet/treasury-product/",
+      "permanent": true
+    },
+    {
+      "source": "/product/onboarding.html",
+      "destination": "/testnet/treasury-product/",
+      "permanent": true
+    },
+    {
+      "source": "/product/guardian.html",
+      "destination": "/live/guardian/",
+      "permanent": true
+    },
+    {
+      "source": "/product/formation.html",
+      "destination": "/live/bring-your-own-agent/",
+      "permanent": true
+    },
+    {
+      "source": "/identity/world.html",
+      "destination": "/live/guardian/",
+      "permanent": true
+    },
+    {
+      "source": "/identity/ens.html",
+      "destination": "/testnet/ens/",
+      "permanent": true
+    },
+    {
+      "source": "/identity/legal-body-statement.html",
+      "destination": "/identity/legal-body-statement/",
+      "permanent": true
+    },
+    {
+      "source": "/identity/registries.html",
+      "destination": "/live/identity-and-link/",
+      "permanent": true
+    },
+    {
+      "source": "/agents/connect.html",
+      "destination": "/testnet/mcp/",
+      "permanent": true
+    },
+    {
+      "source": "/agents/mcp.html",
+      "destination": "/testnet/mcp/",
+      "permanent": true
+    },
+    {
+      "source": "/agents/payments.html",
+      "destination": "/testnet/payments-and-jobs/",
+      "permanent": true
+    },
+    {
+      "source": "/agents/jobs.html",
+      "destination": "/testnet/payments-and-jobs/",
+      "permanent": true
+    },
+    {
+      "source": "/developers/architecture.html",
+      "destination": "https://github.com/jb1011/Novi-Corpus#readme",
+      "permanent": true
+    },
+    {
+      "source": "/developers/rest-api.html",
+      "destination": "/testnet/rest-api/",
+      "permanent": true
+    },
+    {
+      "source": "/developers/contracts.html",
+      "destination": "/developers/contracts/",
+      "permanent": true
+    },
+    {
+      "source": "/reference/networks.html",
+      "destination": "/developers/networks/",
+      "permanent": true
+    },
+    {
+      "source": "/reference/stack.html",
+      "destination": "https://github.com/jb1011/Novi-Corpus#readme",
+      "permanent": true
+    },
+    {
+      "source": "/reference/support.html",
+      "destination": "/help/support/",
+      "permanent": true
+    },
+    {
+      "source": "/index.html",
+      "destination": "/",
+      "permanent": true
+    },
+    {
+      "source": "/:path(.*)/index.html",
+      "destination": "/:path/",
+      "permanent": true
+    },
+    {
+      "source": "/:path(.*).html",
+      "destination": "/:path/",
+      "permanent": true
+    }
+  ]
 }

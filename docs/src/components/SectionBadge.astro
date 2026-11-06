@@ -1,0 +1,23 @@
+---
+// The section badge: a dot and the section's words, in the section colour (design 2.8).
+// Colour is never the only carrier: the dot always sits beside a word.
+//   <SectionBadge section="minimal-novi" />          Live on Arc mainnet (beta)
+//   <SectionBadge section="novi-managed" short />    Novi Managed · coming later
+//   <SectionBadge section="overview" text="Overview" />
+import { SECTIONS } from '../sections.mjs';
+
+interface Props {
+	section: keyof typeof SECTIONS;
+	/** "Section · status" form, for cards on the Overview. */
+	short?: boolean;
+	/** Free text in the section colour (sections without a badge, or a dated tag). */
+	text?: string;
+	class?: string;
+}
+
+const { section, short = false, text, class: className } = Astro.props;
+const s = SECTIONS[section];
+const words = text ?? (short && s.short ? `${s.label} · ${s.short}` : (s.badge ?? s.label));
+---
+
+<span class:list={['nc-badge', className]} data-section={section}>{words}</span>

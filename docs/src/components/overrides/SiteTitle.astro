@@ -1,0 +1,28 @@
+---
+// The lockup (white on dark, black on light, design 4.1) and the word "Docs".
+import white from '../../assets/brand/novi-corpus-lockup-white.png';
+import black from '../../assets/brand/novi-corpus-lockup-black.png';
+
+const { siteTitleHref } = Astro.locals.starlightRoute;
+const h = 22;
+const w = Math.round((white.width / white.height) * h);
+---
+
+<a href={siteTitleHref} class="site-title nc-site-title sl-flex">
+	<img class="light:sl-hidden print:hidden" src={white.src} width={w} height={h} alt="Novi Corpus" />
+	<img class="dark:sl-hidden print:block" src={black.src} width={w} height={h} alt="Novi Corpus" />
+	<span class="nc-docs-word">Docs</span>
+</a>
+
+<style>
+	.nc-site-title {
+		align-items: center;
+		gap: 0.6rem;
+		text-decoration: none;
+		white-space: nowrap;
+	}
+	.nc-site-title img {
+		height: 22px;
+		width: auto;
+	}
+</style>

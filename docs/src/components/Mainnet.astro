@@ -1,0 +1,19 @@
+---
+// The mainnet switch inside a page (design 2.6, the step-1 condition).
+//   <Mainnet live>...</Mainnet>      rendered only once MAINNET_LIVE is true (src/sections.mjs)
+//   <Mainnet pending>...</Mainnet>   rendered only before, while the beta has not opened
+// Anything a page states as live on Arc mainnet goes in a `live` block, or carries the
+// condition in a `pending` block, so flipping MAINNET_LIVE updates every page at once.
+import { MAINNET_LIVE } from '../sections.mjs';
+
+interface Props {
+	live?: boolean;
+	pending?: boolean;
+}
+
+const { live = false, pending = false } = Astro.props;
+if (live === pending) throw new Error('Mainnet.astro: pass exactly one of `live` or `pending`');
+const show = live ? MAINNET_LIVE : !MAINNET_LIVE;
+---
+
+{show && <slot />}

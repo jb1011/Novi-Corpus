@@ -1,0 +1,167 @@
+/*
+ * Novi Corpus docs: design tokens (design 4.1 to 4.3).
+ * Dark is the default look (the app and the landing are dark); light follows 4.2.
+ * Brand tokens are `--nc-*`; Starlight's `--sl-*` variables are mapped onto them,
+ * so built-in components (search, asides, code, tables) take the brand as is.
+ * Unlayered on purpose: these win over Starlight's `@layer starlight.*` defaults.
+ */
+
+:root,
+::backdrop {
+	/* Brand, dark (interface/src/app/globals.css) */
+	--nc-paper: #090909;
+	--nc-paper-2: #111111;
+	--nc-paper-3: #1a1a1a;
+	--nc-ink: #f2f0ea;
+	--nc-ink-2: #e0ddd6;
+	--nc-muted: #9c9a92;
+	--nc-muted-2: #7a7872;
+	--nc-line: rgba(255, 255, 255, 0.08);
+	--nc-line-strong: rgba(255, 255, 255, 0.14);
+	--nc-accent: #4d8ef7;
+	--nc-accent-2: #2563eb;
+	--nc-accent-soft: #93c5fd;
+	--nc-accent-deep: #1e3a8a;
+	--nc-highlight: #6366f1;
+	--nc-highlight-text: #8b8ef5;
+	--nc-cream: #ede8de;
+	--nc-live: #00d294;
+	--nc-amber: #e0a93a;
+	--nc-violet: #a78bfa;
+	--nc-card-top: #151516;
+	--nc-card-bottom: #101011;
+
+	/* Section colours (design 2.8): tab underline, badge, sidebar icons. */
+	--nc-c-ov: var(--nc-accent);
+	--nc-c-min: var(--nc-live);
+	--nc-c-man: var(--nc-amber);
+	--nc-c-v2: var(--nc-violet);
+	--nc-c-dev: var(--nc-accent-soft);
+
+	/* Type (design 4.3): Archivo for everything but code. */
+	--nc-sans: 'Archivo', 'Helvetica Neue', Arial, ui-sans-serif, system-ui, sans-serif;
+	--nc-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+	--nc-radius-card: 16px;
+	--nc-radius-code: 12px;
+	--nc-radius-chip: 4px;
+
+	/* Header: a bar and a row of tabs (the tab row is part of the nav height). */
+	--nc-bar-h: 3.5rem;
+	--nc-tabs-h: 2.75rem;
+
+	/* Starlight mapping, dark */
+	--sl-color-white: var(--nc-ink);
+	--sl-color-gray-1: var(--nc-ink-2);
+	--sl-color-gray-2: #cfccc4;
+	--sl-color-gray-3: var(--nc-muted);
+	--sl-color-gray-4: var(--nc-muted-2);
+	--sl-color-gray-5: #2b2b2b;
+	--sl-color-gray-6: var(--nc-paper-3);
+	--sl-color-black: var(--nc-paper);
+	--sl-color-accent-low: #10234a;
+	--sl-color-accent: var(--nc-accent);
+	--sl-color-accent-high: var(--nc-accent-soft);
+	--sl-color-text: var(--nc-ink-2);
+	--sl-color-text-accent: var(--nc-accent-soft);
+	--sl-color-text-invert: var(--nc-paper);
+	--sl-color-bg: var(--nc-paper);
+	--sl-color-bg-nav: rgba(9, 9, 9, 0.92);
+	--sl-color-bg-sidebar: var(--nc-paper);
+	--sl-color-bg-inline-code: var(--nc-paper-3);
+	--sl-color-bg-accent: var(--nc-accent-soft);
+	--sl-color-hairline-light: var(--nc-line-strong);
+	--sl-color-hairline: var(--nc-line);
+	--sl-color-hairline-shade: var(--nc-line);
+	--sl-color-backdrop-overlay: rgba(9, 9, 9, 0.7);
+
+	--sl-font: var(--nc-sans);
+	--sl-font-mono: var(--nc-mono);
+	--sl-text-body: 1rem;
+	--sl-line-height: 1.65;
+	--sl-line-height-headings: 1.15;
+	--sl-text-h1: 1.8125rem; /* 29 px on phones, 32 px from 50em */
+	--sl-text-h2: 1.375rem;
+	--sl-text-h3: 1.1875rem;
+	--sl-text-h4: 1.0625rem;
+	--sl-text-h5: 1rem;
+	--sl-content-width: 45rem; /* 720 px column: 68 to 72 characters */
+	--sl-nav-height: calc(var(--nc-bar-h) + var(--nc-tabs-h));
+}
+
+@media (min-width: 50em) {
+	:root {
+		--nc-bar-h: 3.75rem;
+		--sl-text-h1: 2rem;
+		--sl-text-h2: 1.5rem;
+		--sl-text-h3: 1.1875rem;
+		--sl-text-h4: 1.0625rem;
+	}
+}
+
+:root[data-theme='light'],
+[data-theme='light'] ::backdrop {
+	/* Brand, light (design 4.2). muted-2 darkened from #75736d to #6b6964 so small text reaches 4.5:1 on paper. */
+	--nc-paper: #f6f4ee;
+	--nc-paper-2: #ffffff;
+	--nc-paper-3: #ece9e1;
+	--nc-ink: #0c0c0c;
+	--nc-ink-2: #2a2926;
+	--nc-muted: #5b5955;
+	--nc-muted-2: #6b6964;
+	--nc-line: rgba(0, 0, 0, 0.08);
+	--nc-line-strong: rgba(0, 0, 0, 0.14);
+	--nc-accent: #2563eb;
+	--nc-accent-soft: #1e3a8a;
+	--nc-highlight: #4f46e5;
+	--nc-highlight-text: #4f46e5;
+	--nc-live: #047857;
+	--nc-amber: #92400e;
+	--nc-violet: #6d28d9;
+	--nc-card-top: #ffffff;
+	--nc-card-bottom: #fbfaf6;
+
+	--nc-c-ov: var(--nc-accent);
+	--nc-c-dev: var(--nc-accent-soft);
+
+	--sl-color-white: var(--nc-ink);
+	--sl-color-gray-1: var(--nc-ink-2);
+	--sl-color-gray-2: #3a3935;
+	--sl-color-gray-3: var(--nc-muted);
+	--sl-color-gray-4: var(--nc-muted-2);
+	--sl-color-gray-5: #d6d2c8;
+	--sl-color-gray-6: var(--nc-paper-3);
+	--sl-color-gray-7: #f1eee6;
+	--sl-color-black: var(--nc-paper);
+	--sl-color-accent-low: #dbe6fd;
+	--sl-color-accent: var(--nc-accent);
+	--sl-color-accent-high: var(--nc-accent-soft);
+	--sl-color-text: var(--nc-ink-2);
+	--sl-color-text-accent: var(--nc-accent);
+	--sl-color-text-invert: var(--nc-paper-2);
+	--sl-color-bg: var(--nc-paper);
+	--sl-color-bg-nav: rgba(246, 244, 238, 0.94);
+	--sl-color-bg-sidebar: var(--nc-paper);
+	--sl-color-bg-inline-code: var(--nc-paper-3);
+	--sl-color-bg-accent: var(--nc-accent);
+	--sl-color-hairline-light: var(--nc-line-strong);
+	--sl-color-hairline: var(--nc-line);
+	--sl-color-hairline-shade: var(--nc-line);
+	--sl-color-backdrop-overlay: rgba(40, 38, 34, 0.45);
+}
+
+/* Section colour of any element carrying data-section. */
+[data-section='overview'] {
+	--sc: var(--nc-c-ov);
+}
+[data-section='minimal-novi'] {
+	--sc: var(--nc-c-min);
+}
+[data-section='novi-managed'] {
+	--sc: var(--nc-c-man);
+}
+[data-section='novi-2'] {
+	--sc: var(--nc-c-v2);
+}
+[data-section='developers'] {
+	--sc: var(--nc-c-dev);
+}

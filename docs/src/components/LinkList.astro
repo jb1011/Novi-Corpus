@@ -1,0 +1,27 @@
+---
+// A plain list of links with an arrow each (design 4.4): the "Try it on Arc testnet" links of
+// a section overview. The same rows as LinkGroup, without the section heading.
+//   <LinkList links={[{ label: 'The account', href: '/testnet/treasury-product/' }]} />
+import Icon from './Icon.astro';
+
+interface Props {
+	links: { label: string; href: string }[];
+}
+
+const { links } = Astro.props;
+---
+
+<div class="nc-linkgroup nc-linklist">
+	<ul>
+		{
+			links.map((l) => (
+				<li>
+					<a href={l.href}>
+						<span>{l.label}</span>
+						<Icon name="arrow" size={16} />
+					</a>
+				</li>
+			))
+		}
+	</ul>
+</div>

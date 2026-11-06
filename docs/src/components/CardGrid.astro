@@ -1,0 +1,10 @@
+---
+// A grid of cards: two or three columns, one column on phones (design 4.8).
+//   <CardGrid cols={3}> <Card .../> <Card .../> <Card .../> </CardGrid>
+interface Props {
+	cols?: 2 | 3;
+}
+const { cols = 2 } = Astro.props;
+---
+
+<div class="nc-grid" data-cols={cols}><slot /></div>

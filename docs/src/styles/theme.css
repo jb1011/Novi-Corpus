@@ -1,0 +1,421 @@
+/*
+ * Novi Corpus docs: the chrome (header, tabs, sidebar, title, badge line, footer).
+ * Matches the approved mockups (Roadmap/6-demo-day/docs-site/mockups, v0.5).
+ */
+
+body {
+	font-family: var(--nc-sans);
+	letter-spacing: -0.01em;
+	-webkit-font-smoothing: antialiased;
+}
+
+html {
+	color-scheme: dark;
+}
+html[data-theme='light'] {
+	color-scheme: light;
+}
+
+:focus-visible {
+	outline: 2px solid var(--nc-accent);
+	outline-offset: 2px;
+}
+
+.nc-icon {
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.7;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	flex: none;
+}
+
+/* ---------- Header: bar + tabs ---------- */
+
+.page > header.header {
+	padding: 0;
+	backdrop-filter: blur(8px);
+	-webkit-backdrop-filter: blur(8px);
+}
+
+.nc-header {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+}
+
+.nc-bar {
+	height: var(--nc-bar-h);
+	display: flex;
+	align-items: center;
+	gap: 1rem;
+	padding: 0 var(--sl-nav-pad-x);
+}
+/* room for the fixed menu button on phones (pages with a sidebar) */
+:root[data-has-sidebar] .nc-bar {
+	padding-inline-end: calc(var(--sl-nav-pad-x) + var(--sl-menu-button-size) + var(--sl-nav-gap));
+}
+
+.nc-title {
+	display: flex;
+	align-items: center;
+	min-width: 0;
+	overflow: clip;
+	padding: 0.25rem;
+	margin: -0.25rem;
+}
+
+.site-title {
+	gap: 0.6rem;
+}
+.site-title img {
+	height: 1.375rem;
+	width: auto;
+}
+.nc-docs-word {
+	color: var(--nc-muted);
+	font-size: 1rem;
+	font-weight: 400;
+}
+
+.nc-search {
+	display: flex;
+	margin-inline-start: auto;
+}
+
+.nc-right {
+	align-items: center;
+	gap: 1.25rem;
+}
+
+.nc-toplinks {
+	display: flex;
+	gap: 1.1rem;
+	font-size: 0.875rem;
+	white-space: nowrap;
+}
+.nc-toplinks a {
+	color: var(--nc-muted);
+	text-decoration: none;
+}
+.nc-toplinks a:hover {
+	color: var(--nc-ink);
+}
+
+@media (min-width: 50rem) {
+	.nc-bar,
+	:root[data-has-sidebar] .nc-bar {
+		padding-inline-end: var(--sl-nav-pad-x);
+		gap: 1.5rem;
+	}
+	.nc-search {
+		flex: 1;
+		justify-content: center;
+		margin-inline-start: 0;
+	}
+	.nc-search button[data-open-modal] {
+		width: 26.25rem;
+		max-width: 100%;
+		border-radius: 10px;
+		border-color: var(--nc-line-strong);
+		background: transparent;
+	}
+}
+
+/* The fixed menu button sits in the bar row, not in the middle of bar + tabs. */
+.sl-menu-button {
+	top: calc((var(--nc-bar-h) - var(--sl-menu-button-size)) / 2) !important;
+}
+/* The mobile menu opens under the bar and the tabs. */
+
+.nc-tabs {
+	height: var(--nc-tabs-h);
+	display: flex;
+	gap: 0.375rem;
+	padding: 0 calc(var(--sl-nav-pad-x) - 0.5rem);
+	overflow-x: auto;
+	overflow-y: hidden;
+	scrollbar-width: none;
+}
+.nc-tabs::-webkit-scrollbar {
+	display: none;
+}
+
+.nc-tab {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	min-height: 2.75rem;
+	padding: 0 0.625rem;
+	color: var(--nc-muted);
+	font-size: 0.906rem;
+	white-space: nowrap;
+	text-decoration: none;
+	border-bottom: 2px solid transparent;
+}
+.nc-tab .nc-icon {
+	stroke: var(--sc);
+}
+.nc-tab:hover {
+	color: var(--nc-ink);
+}
+.nc-tab[aria-current='true'] {
+	color: var(--nc-ink);
+	border-bottom-color: var(--sc);
+}
+
+/* ---------- Sidebar ---------- */
+
+.nc-sidebar {
+	display: contents;
+}
+
+.nc-side {
+	--sl-sidebar-item-padding-inline: 0.625rem;
+	list-style: none;
+	padding: 0;
+	margin: 0;
+	font-size: 0.875rem;
+}
+.nc-side li {
+	overflow-wrap: anywhere;
+}
+.nc-side.top-level > li + li {
+	margin-top: 0.125rem;
+}
+.nc-side.top-level > li:has(> details) {
+	margin-top: 1.1rem;
+}
+.nc-side ul li {
+	margin: 0;
+	border: 0;
+	padding: 0;
+}
+.nc-side a {
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+	border-radius: 8px;
+	text-decoration: none;
+	color: var(--nc-muted);
+	padding: 0.4em var(--sl-sidebar-item-padding-inline);
+	line-height: 1.4;
+}
+.nc-side a:hover,
+.nc-side a:focus-visible {
+	color: var(--nc-ink);
+	background: var(--nc-paper-3);
+}
+.nc-side [aria-current='page'],
+.nc-side [aria-current='page']:hover,
+.nc-side [aria-current='page']:focus-visible {
+	color: var(--nc-ink);
+	font-weight: 500;
+	background: color-mix(in srgb, var(--sc, var(--nc-accent)) 14%, transparent);
+}
+.nc-side summary {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.3em var(--sl-sidebar-item-padding-inline);
+	cursor: pointer;
+	user-select: none;
+	list-style: none;
+}
+.nc-side summary::marker,
+.nc-side summary::-webkit-details-marker {
+	display: none;
+}
+.nc-side .group-label {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+}
+.nc-side .group-label .large {
+	font-size: 0.8125rem;
+	font-weight: 600;
+	color: var(--nc-ink-2);
+}
+.nc-side .group-label .nc-icon {
+	stroke: var(--sc, var(--nc-accent));
+}
+.nc-side .caret {
+	color: var(--nc-muted-2);
+	transition: transform 0.2s ease-in-out;
+	flex-shrink: 0;
+}
+.nc-side [open] > summary .caret {
+	transform: rotateZ(90deg);
+}
+
+/* ---------- Page title and badge line ---------- */
+
+.nc-crumb {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin: 1rem 0 0.25rem;
+	font-size: 0.8125rem;
+	font-weight: 500;
+	color: var(--sc);
+}
+[data-theme='light'] .nc-crumb {
+	/* section colours in light mode are text-safe */
+	color: var(--sc);
+}
+
+.content-panel h1#_top {
+	margin-top: 0.25rem;
+	font-size: var(--sl-text-h1);
+	line-height: 1.15;
+	font-weight: 500;
+	letter-spacing: -0.02em;
+	color: var(--nc-ink);
+	text-wrap: balance;
+}
+
+.nc-subtitle {
+	margin: 0.625rem 0 0;
+	max-width: 62ch;
+	font-size: 1.125rem;
+	line-height: 1.5;
+	color: var(--nc-muted);
+}
+
+.nc-badgeline {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem 0.875rem;
+	margin: 1rem 0 0;
+	font-size: 0.8125rem;
+	color: var(--nc-muted-2);
+}
+
+/* The section badge: a dot and the words, in the section colour. */
+.nc-badge {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.44rem;
+	padding: 0.19rem 0.625rem;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--sc) 45%, transparent);
+	background: color-mix(in srgb, var(--sc) 10%, transparent);
+	color: var(--nc-ink);
+	font-size: 0.78rem;
+	font-weight: 500;
+	line-height: 1.4;
+	white-space: nowrap;
+}
+.nc-badge::before {
+	content: '';
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: var(--sc);
+	flex: none;
+}
+
+/* ---------- Content ---------- */
+
+.sl-markdown-content {
+	line-height: var(--sl-line-height);
+}
+.sl-markdown-content :is(h2, h3, h4) {
+	font-weight: 500;
+	letter-spacing: -0.01em;
+	color: var(--nc-ink);
+}
+.sl-markdown-content h2 {
+	margin-top: 2.25rem;
+}
+.sl-markdown-content a:not(.nc-card, .nc-linkgroup a, .sl-link-card) {
+	color: var(--nc-accent-soft);
+	text-decoration-color: color-mix(in srgb, currentColor 40%, transparent);
+	text-underline-offset: 0.18em;
+}
+[data-theme='light'] .sl-markdown-content a:not(.nc-card, .nc-linkgroup a, .sl-link-card) {
+	color: var(--nc-accent);
+}
+.sl-markdown-content a:hover {
+	color: var(--nc-ink);
+}
+
+.sl-markdown-content code:not(pre code) {
+	border-radius: var(--nc-radius-chip);
+	font-size: 0.875em;
+}
+/* Long identifiers wrap in running text; in tables they stay whole and the table scrolls. */
+.sl-markdown-content :is(p, li) > code {
+	overflow-wrap: anywhere;
+}
+.sl-markdown-content :is(td, th) code {
+	white-space: nowrap;
+}
+
+/* One column from the title to the text, as in the mockups (no rule between them). */
+.content-panel + .content-panel {
+	border-top: 0;
+}
+
+.sl-markdown-content .expressive-code {
+	--ec-brdRad: var(--nc-radius-code);
+}
+
+/* Tables: hairlines, tabular numbers; they scroll inside themselves on phones. */
+.sl-markdown-content table {
+	font-size: 0.9rem;
+	font-variant-numeric: tabular-nums;
+}
+.sl-markdown-content :is(th, td) {
+	border-bottom: 1px solid var(--nc-line);
+	padding: 0.55rem 0.75rem;
+}
+.sl-markdown-content th {
+	color: var(--nc-ink);
+	font-weight: 500;
+	background: transparent;
+}
+.sl-markdown-content tr:nth-child(2n) {
+	background: transparent;
+}
+
+/* ---------- Footer ---------- */
+
+.nc-pagefoot {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 1.125rem;
+	margin-top: 2.5rem;
+	padding-top: 1rem;
+	border-top: 1px solid var(--nc-line);
+	font-size: 0.8125rem;
+	color: var(--nc-muted-2);
+}
+.nc-pagefoot a {
+	color: var(--nc-accent-soft);
+	text-decoration: none;
+}
+[data-theme='light'] .nc-pagefoot a {
+	color: var(--nc-accent);
+}
+
+/* Starlight's pagination and right rail in the brand's greys. */
+.pagination-links a {
+	border-color: var(--nc-line-strong);
+	border-radius: 12px;
+	box-shadow: none;
+}
+.right-sidebar-panel h2 {
+	color: var(--nc-ink-2);
+	font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		transition: none !important;
+		animation: none !important;
+	}
+}

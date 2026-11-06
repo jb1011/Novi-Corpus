@@ -1,0 +1,43 @@
+---
+// An address, verbatim, with its chain and an explorer link (design 2.5 rule 14, 4.4).
+// Long addresses wrap anywhere so a phone never scrolls sideways (design 4.8).
+//   <Address label="Identity registry" address="0x8004..." chain="Arc testnet" explorer="https://..." />
+//   <Address inline address="0x8004..." explorer="https://..." />
+interface Props {
+	address: string;
+	label?: string;
+	chain?: string;
+	explorer?: string;
+	inline?: boolean;
+}
+
+const { address, label, chain, explorer, inline = false } = Astro.props;
+---
+
+{
+	inline ? (
+		<span class="nc-addr-inline">
+			<code class="nc-addr" translate="no">
+				{address}
+			</code>
+			{explorer && (
+				<a href={explorer} class="nc-addr-link">
+					explorer
+				</a>
+			)}
+		</span>
+	) : (
+		<div class="nc-address">
+			{label && <div class="nc-address-label">{label}</div>}
+			<code class="nc-addr" translate="no">
+				{address}
+			</code>
+			{(chain || explorer) && (
+				<div class="nc-address-meta">
+					{chain && <span>{chain}</span>}
+					{explorer && <a href={explorer}>View on the explorer</a>}
+				</div>
+			)}
+		</div>
+	)
+}
