@@ -2,7 +2,7 @@
  * The email outbox (`src/email/outbox.ts` over `email_outbox`): every email the product sends is
  * a row here first, enqueued once per idempotency key, and the delivery job sends it
  * (test/email/deliverJob.test.ts). This file holds the table's rules and the outbox's other
- * methods: enqueue, list, requeue, recordDelivery, and the contact upsert's row.
+ * methods: enqueue, list, requeue, recordDelivery, findSent, and the contact upsert's row.
  *
  * Every address here is on example.com, and no fixture holds a readable name.
  */
@@ -350,6 +350,37 @@ describe("recordDelivery", () => {
     ).run(T0, contact.emailId);
     expect(outbox.recordDelivery("ct_1", "bounced", T0)).toBe(false);
     expect(raw(contact.emailId)).toMatchObject({ delivery_state: null });
+  });
+});
+
+describe("findSent", () => {
+  test("answers the public row of the sent email a provider id names; never a pending row, a contact write or an unknown id", () => {
+    const a = invite("invite:hash-0001");
+    expect(outbox.findSent("msg_a")).toBeUndefined();
+    sendRow(a.emailId, "msg_a");
+    const found = outbox.findSent("msg_a");
+    expect(found).toMatchObject({
+      emailId: a.emailId,
+      kind: "invite_code",
+      subjectRef: "hash-0001",
+      status: "sent",
+      providerMessageId: "msg_a",
+    });
+    // The public shape: never the address or the content.
+    expect(Object.keys(found ?? {}).sort()).toEqual(Object.keys(outbox.list({})[0] ?? {}).sort());
+    expect(outbox.findSent("msg_unknown")).toBeUndefined();
+
+    const contact = outbox.enqueue({
+      kind: "contact_upsert",
+      subjectRef: "waitlist",
+      idempotencyKey: contactIdempotencyKey(ADDRESS),
+      to: ADDRESS,
+    });
+    db.prepare(
+      `UPDATE email_outbox SET status = 'sent', provider_message_id = 'ct_1', sent_at = ?,
+         next_attempt_at = NULL, to_address = NULL WHERE email_id = ?`,
+    ).run(T0, contact.emailId);
+    expect(outbox.findSent("ct_1")).toBeUndefined();
   });
 });
 
