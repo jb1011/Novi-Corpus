@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
-import type { EmailDeps } from "../email/sender";
+import type { EmailDeps } from "../email/outbox";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
 import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
@@ -284,10 +284,10 @@ export interface ApiDeps extends EntityViewDeps {
    */
   identity?: IdentityDeps;
   /**
-   * The email system: the sender and what every email is built with (the link base, the postal
-   * address, the marketing segment). Present only where `cfg.email` is, which is only where
-   * PUBLIC_APP_URL is set; absent on a box that configures no email (the testnet box), which then
-   * sends nothing. Task 12b adds the outbox to it.
+   * The email system: the outbox every email is enqueued to, the sender its delivery job sends
+   * with, and what every email is built with (the link base, the postal address, the marketing
+   * segment). Present only where `cfg.email` is, which is only where PUBLIC_APP_URL is set; absent
+   * on a box that configures no email (the testnet box), which then sends nothing.
    */
   email?: EmailDeps;
   /** AgentBook (design 2026-08-25 v3). Present wherever the World Chain READ config is, which is

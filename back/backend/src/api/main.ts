@@ -50,8 +50,7 @@ import {
   legalBodyEnvironment,
   loadConfig,
 } from "../config/env";
-import { ResendEmailSender } from "../email/resend";
-import { ConsoleEmailSender, type EmailDeps } from "../email/sender";
+import { buildEmailDeps } from "../email/outbox";
 import { resolveFormationDeployment } from "../formation";
 import { createCompany } from "../formation/company";
 import { newChainHeadCache } from "../formation/payment";
@@ -457,24 +456,12 @@ async function main() {
       }
     : undefined;
   // The email system: built only where `cfg.email` is, which is only where PUBLIC_APP_URL is set.
-  // The testnet box sets none of the email settings, so it builds no sender and sends nothing. The
-  // console sender writes one ops line per email (never the address; the text body only with
-  // EMAIL_CONSOLE_SHOW_BODY, which production refuses) and sends nothing; the provider sender sends.
-  const email: EmailDeps | undefined = cfg.email
-    ? {
-        sender:
-          cfg.email.provider === "resend"
-            ? new ResendEmailSender({
-                apiKey: cfg.email.apiKey,
-                from: cfg.email.from,
-                replyTo: cfg.email.replyTo,
-              })
-            : new ConsoleEmailSender({ showBody: cfg.email.consoleShowBody }),
-        publicAppUrl: cfg.email.publicAppUrl,
-        postalAddress: cfg.email.postalAddress,
-        marketingSegmentId: cfg.email.marketingSegmentId,
-      }
-    : undefined;
+  // The testnet box sets none of the email settings, so it builds no sender, no outbox and no
+  // delivery job, and sends nothing. Every email is enqueued to the outbox and sent by the
+  // scheduler's `email_deliver` job, handed this same one below. The console sender writes one ops
+  // line per email (never the address; the text body only with EMAIL_CONSOLE_SHOW_BODY, which
+  // production refuses) and sends nothing; the provider sender sends.
+  const email = buildEmailDeps(db, cfg);
   if (email)
     console.warn(
       `⚠ Email ENABLED (sender ${email.sender.kind}, links on ${email.publicAppUrl}${email.marketingSegmentId ? ", marketing segment set" : ", no marketing segment: contact writes are skipped"}${cfg.email?.provider === "console" && cfg.email.consoleShowBody ? ", the console sender PRINTS each text body (EMAIL_CONSOLE_SHOW_BODY)" : ""})`,
@@ -927,11 +914,12 @@ async function main() {
   /**
    * THE IN-PROCESS SCHEDULER (src/scheduler): named periodic jobs, run inside this process so the
    * box needs no cron line. Built only when the deployment registers at least one job; the
-   * identity sweep is registered only where the PII key is set, so the testnet box, which cannot
-   * hold the key, starts none. Each job's last run is kept in `scheduled_job_runs`, so the count
-   * of failures in a row survives a restart.
+   * identity sweep is registered only where the PII key is set, and the email delivery only where
+   * the email system is (handed the one built above), so the testnet box, which has neither,
+   * starts none. Each job's last run is kept in `scheduled_job_runs`, so the count of failures in
+   * a row survives a restart.
    */
-  const scheduledJobs = buildScheduledJobs(db, cfg);
+  const scheduledJobs = buildScheduledJobs(db, cfg, email);
   const scheduler =
     scheduledJobs.length > 0
       ? new Scheduler({ runs: new SqliteScheduledJobRunRepository(db) })

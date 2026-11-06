@@ -359,6 +359,55 @@ describe("Scheduler: stop, skipped ticks, quiet jobs", () => {
     expect(lines("job_skipped")).toEqual([]);
   });
 
+  test("each run is handed the scheduler's stop signal: unset while it runs, set by stop(), so a long run can stop between its items and stop() waits only for the item going", async () => {
+    let seen: AbortSignal | undefined;
+    let finishItem: (() => void) | undefined;
+    const items: number[] = [];
+    const deliver: Job = {
+      name: "email_deliver",
+      everyMs: 30 * SECOND,
+      run: async (_nowMs, signal) => {
+        seen = signal;
+        for (const item of [1, 2, 3]) {
+          if (signal?.aborted) break;
+          await new Promise<void>((resolve) => {
+            finishItem = resolve;
+          });
+          items.push(item);
+        }
+        return { sent: items.length };
+      },
+    };
+    const scheduler = new Scheduler({});
+    scheduler.register(deliver);
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(30 * SECOND);
+    expect(seen).toBeInstanceOf(AbortSignal);
+    expect(seen?.aborted).toBe(false);
+
+    // Stopped while the first item is going: that item finishes, and no other is taken.
+    const stopping = scheduler.stop();
+    expect(seen?.aborted).toBe(true);
+    finishItem?.();
+    await stopping;
+    expect(items).toEqual([1]);
+    expect(lines("job_ran")).toEqual([expect.objectContaining({ name: "email_deliver", sent: 1 })]);
+
+    // A manual run on a scheduler that was never stopped is handed a signal that is not set.
+    const manual = new Scheduler({});
+    let manualSignal: AbortSignal | undefined;
+    manual.register({
+      name: "email_deliver",
+      everyMs: 30 * SECOND,
+      run: async (_nowMs, signal) => {
+        manualSignal = signal;
+        return {};
+      },
+    });
+    await manual.runNow("email_deliver");
+    expect(manualSignal?.aborted).toBe(false);
+  });
+
   test("stop() with no run going settles at once, and a run that fails does not make it reject", async () => {
     const idle = new Scheduler({});
     idle.register(job("identity_sweep", DAY, async () => ({ count: 0 })));
@@ -666,7 +715,8 @@ test("main.ts builds the job list, starts the scheduler after serve() and the sw
   const sweeperAt = main.indexOf("legalBodySweeper.start()");
   const startAt = main.indexOf("scheduler.start()");
   expect(serveAt, "serve() call not found: this guard has stopped guarding").toBeGreaterThan(0);
-  expect(main).toContain("buildScheduledJobs(db, cfg)");
+  // The job list, handed the email system main.ts built (the job `email_deliver` sends with it).
+  expect(main).toContain("buildScheduledJobs(db, cfg, email)");
   expect(main).toMatch(/scheduledJobs\.length > 0\s*\?\s*new Scheduler\(/);
   // The table of each job's last run, so the failure count survives a restart.
   expect(main).toMatch(/new Scheduler\(\{ runs: new SqliteScheduledJobRunRepository\(db\) \}\)/);
