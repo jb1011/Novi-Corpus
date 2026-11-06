@@ -162,6 +162,38 @@ contract AgentTreasuryPauseLockTest is AgentTreasuryTestBase {
         assertEq(usdc.balanceOf(payee), 1e6);
     }
 
+    function test_pauseEmitsPaused() public {
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AgentTreasury.Paused();
+        vm.prank(guardian);
+        vault.pause();
+    }
+
+    function test_unpauseEmitsUnpaused() public {
+        vm.prank(guardian);
+        vault.pause();
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AgentTreasury.Unpaused();
+        vm.prank(guardian);
+        vault.unpause();
+    }
+
+    /// @notice Only the guardian may unpause: the operator, the manager and a stranger are all
+    ///         refused, and the vault stays paused after each attempt.
+    function test_unpauseOnlyGuardian() public {
+        vm.prank(guardian);
+        vault.pause();
+
+        address[3] memory callers = [makeAddr("stranger"), operator, manager];
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(AgentTreasury.NotGuardian.selector);
+            vault.unpause();
+            assertTrue(vault.paused());
+        }
+    }
+
     function test_onlyGuardianPauses() public {
         vm.prank(operator);
         vm.expectRevert(AgentTreasury.NotGuardian.selector);
@@ -241,6 +273,45 @@ contract AgentTreasuryGuardianPowersTest is AgentTreasuryTestBase {
         vault.emergencyWithdraw();
     }
 
+    /// @notice Only the guardian may rotate the operator: a stranger, the current operator and
+    ///         the manager are all refused, and the operator is unchanged after each attempt.
+    function test_setOperatorOnlyGuardian() public {
+        address[3] memory callers = [makeAddr("stranger"), operator, manager];
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(AgentTreasury.NotGuardian.selector);
+            vault.setOperator(newOp);
+            assertEq(vault.operator(), operator);
+        }
+    }
+
+    /// @notice Only the guardian may edit the allowlist: a stranger, the operator and the
+    ///         manager are all refused, and the entry is unchanged after each attempt.
+    function test_setAllowlistEntryOnlyGuardian() public {
+        address target = makeAddr("allowlistTarget");
+        address[3] memory callers = [makeAddr("stranger"), operator, manager];
+        for (uint256 i = 0; i < callers.length; i++) {
+            vm.prank(callers[i]);
+            vm.expectRevert(AgentTreasury.NotGuardian.selector);
+            vault.setAllowlistEntry(target, true);
+            assertFalse(vault.isAllowed(target));
+        }
+    }
+
+    function test_setAllowlistEntryEmitsAllowlistUpdated() public {
+        address target = makeAddr("allowlistTarget");
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AgentTreasury.AllowlistUpdated(target, true);
+        vm.prank(guardian);
+        vault.setAllowlistEntry(target, true);
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AgentTreasury.AllowlistUpdated(target, false);
+        vm.prank(guardian);
+        vault.setAllowlistEntry(target, false);
+    }
+
     function test_guardianManagesAllowlist() public {
         address ok = makeAddr("ok");
         vm.prank(guardian);
@@ -302,6 +373,36 @@ contract AgentTreasuryPolicyTest is AgentTreasuryTestBase {
         assertEq(vault.period(), 12 hours);
         assertTrue(vault.allowlistEnabled());
         assertEq(vault.payoutAddress(), newPayout);
+    }
+
+    function test_scheduleEmitsPolicyUpdateScheduled() public {
+        bytes32 id = keccak256(abi.encode(uint256(1000e6), uint256(12 hours), true, newPayout));
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AgentTreasury.PolicyUpdateScheduled(id, 1000e6, 12 hours, true, newPayout, block.timestamp + DELAY);
+        vm.prank(manager);
+        bytes32 returned = vault.schedulePolicyUpdate(1000e6, 12 hours, true, newPayout);
+
+        assertEq(returned, id);
+    }
+
+    function test_vetoEmitsPolicyUpdateVetoed() public {
+        bytes32 id = _schedule();
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AgentTreasury.PolicyUpdateVetoed(id);
+        vm.prank(guardian);
+        vault.vetoPolicyUpdate(id);
+    }
+
+    function test_executeEmitsPolicyUpdated() public {
+        bytes32 id = _schedule();
+        vm.warp(block.timestamp + DELAY);
+
+        vm.expectEmit(true, true, true, true, address(vault));
+        emit AgentTreasury.PolicyUpdated(1000e6, 12 hours, true, newPayout);
+        vm.prank(manager);
+        vault.executePolicyUpdate(id);
     }
 
     function test_executeBeforeDelayReverts() public {
@@ -659,7 +760,7 @@ contract AgentTreasuryReentrancyTest is Test {
         // (allowlistEnabled is false by default, so no allowlist needed)
 
         // Arm: re-enter spend() with the same payee and a small amount
-        evil.arm(address(spendVault), payee, 100e6, false);
+        evil.arm(address(spendVault), payee, 100e6, ReentrantToken.Mode.Spend);
 
         // Outer spend call: prank as evil == operator
         vm.prank(address(evil));
@@ -690,7 +791,7 @@ contract AgentTreasuryReentrancyTest is Test {
         evil.mint(address(ewVault), 10_000e6);
 
         // Arm: re-enter emergencyWithdraw
-        evil.arm(address(ewVault), address(0), 0, true);
+        evil.arm(address(ewVault), address(0), 0, ReentrantToken.Mode.EmergencyWithdraw);
 
         // Outer emergencyWithdraw call: prank as evil == guardian
         vm.prank(address(evil));
@@ -699,5 +800,34 @@ contract AgentTreasuryReentrancyTest is Test {
 
         // Entire tx reverted — vault balance unchanged
         assertEq(evil.balanceOf(address(ewVault)), 10_000e6);
+    }
+
+    /// @dev fundOperator() reentrancy: vault.operator == address(evil).
+    ///      Outer call: test pranks as evil (operator). The payout goes to the operator, which
+    ///      is the token itself, so the token's transfer hook re-enters vault.fundOperator() —
+    ///      msg.sender == evil == operator, so onlyOperator passes and nonReentrant reverts.
+    function test_reentrantFundOperatorIsBlocked() public {
+        // operator is the token itself; manager and guardian are distinct non-token addresses
+        AgentTreasury fundVault = new AgentTreasury(
+            address(evil), address(legal),
+            mgr,            // manager  (≠ evil, ≠ grd)
+            grd,            // guardian (≠ evil, ≠ mgr)
+            address(evil),  // operator == token address
+            payoutAddr,
+            CAP, PERIOD, DELAY, false
+        );
+
+        evil.mint(address(fundVault), 10_000e6);
+
+        // Arm: re-enter fundOperator() with a second, smaller top-up that is within the cap
+        evil.arm(address(fundVault), address(0), 100e6, ReentrantToken.Mode.FundOperator);
+
+        vm.prank(address(evil));
+        vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
+        fundVault.fundOperator(100e6);
+
+        // Entire tx reverted: nothing left the vault
+        assertEq(evil.balanceOf(address(fundVault)), 10_000e6);
+        assertEq(evil.balanceOf(address(evil)), 0);
     }
 }

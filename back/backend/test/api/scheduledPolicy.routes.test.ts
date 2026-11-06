@@ -157,8 +157,15 @@ beforeEach(() => {
   migrate(db);
   repo = new SqliteEntityRepository(db);
   vi.clearAllMocks();
+  // The session token's expiry is signed from the injected clock, but the bearer check verifies
+  // it against Date.now(). Pin Date to the same instant, or every token is expired on arrival
+  // once the wall clock passes the fixed clock plus the one-hour TTL.
+  vi.useFakeTimers({ now: NOW, toFake: ["Date"] });
 });
-afterEach(() => db.close());
+afterEach(() => {
+  vi.useRealTimers();
+  db.close();
+});
 
 describe("computePolicyId", () => {
   test("matches the vector computed with cast", () => {

@@ -151,8 +151,15 @@ beforeEach(() => {
   migrate(db);
   repo = new SqliteEntityRepository(db);
   clock = Date.parse("2026-11-03T10:00:00Z");
+  // The session token's expiry is signed from the injected clock, but the bearer check verifies
+  // it against Date.now(). Pin Date to the same instant, or every token is expired on arrival
+  // once the wall clock passes the fixed clock plus the one-hour TTL.
+  vi.useFakeTimers({ now: clock, toFake: ["Date"] });
 });
-afterEach(() => db.close());
+afterEach(() => {
+  vi.useRealTimers();
+  db.close();
+});
 
 describe("GET /entities/:id/external-record", () => {
   test("the owner gets the view, with the agent id read from the entity", async () => {
