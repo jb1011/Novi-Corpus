@@ -52,6 +52,11 @@ for (const path of urls) {
 		const m = (await res.text()).match(/http-equiv="refresh" content="0;url=([^"]+)"/);
 		if (m) { target = m[1]; hop = '200 (refresh page)'; }
 	}
+	if (!target && res.status === 200 && path.endsWith('/index.html')) {
+		// A real file: Vercel answers it with a 308 to the directory; a plain static server serves it.
+		console.log(`ok   ${path} -> 200 (served as is; Vercel sends a 308 to the directory)`);
+		continue;
+	}
 	if (!target) { console.log(`FAIL ${path}: ${hop}, no redirect`); failed++; continue; }
 	const final = new URL(target, base + path);
 	const external = final.origin !== new URL(base).origin;

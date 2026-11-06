@@ -60,7 +60,7 @@
 }
 .dg summary {
 	cursor: pointer;
-	color: var(--nc-muted-2);
+	color: var(--nc-muted); /* muted-2 is under 4.5:1 on paper-2 */
 	min-height: 28px;
 }
 .dg details :is(p, ul) {
@@ -172,7 +172,7 @@
 .dg .eb { font-size: 16px; letter-spacing: 1.4px; font-weight: 600; }
 .dg .tt { font-size: 20px; font-weight: 500; fill: var(--dg-ink); }
 .dg .sb { font-size: 17px; fill: var(--dg-muted); }
-.dg .rk { font-size: 16px; fill: var(--dg-muted-2); }
+.dg .rk { font-size: 16px; fill: var(--dg-muted); } /* muted, not muted-2: 4.5:1 on the cards */
 .dg .rv { font-size: 17px; fill: var(--dg-ink); }
 .dg .ln { fill: none; stroke: var(--dg-line); stroke-width: 1.5; }
 .dg .ln-acc { stroke: var(--dg-acc); }

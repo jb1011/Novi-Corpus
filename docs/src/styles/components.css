@@ -271,7 +271,7 @@ a.nc-card:hover {
 	gap: 0.25rem 1rem;
 	margin-top: 0.375rem;
 	font-size: 0.8125rem;
-	color: var(--nc-muted-2);
+	color: var(--nc-muted); /* muted-2 is under 4.5:1 on paper-2 */
 }
 .nc-addr-link {
 	margin-inline-start: 0.375rem;
