@@ -2021,6 +2021,97 @@ export function migrate(db: Database.Database): void {
   // The statement log references `legal_bodies`, so it comes once they exist. Outside the
   // legal-body schema step, which compares and recreates only its own two tables.
   db.exec(STATEMENT_LOG_DDL);
+
+  // Founding 5 applications. Additive and independent of formation: a row is a person who asked
+  // to be considered, not a company. Status is a label for the reviewers. Nothing here mints an
+  // invite or waives a filing fee. It lives in migrate() itself, not in the company re-key,
+  // because a fresh database returns from that re-key before the legacy path.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS founding_applications (
+      id TEXT PRIMARY KEY,
+      created_at INTEGER NOT NULL,
+      email TEXT NOT NULL,
+      x_handle TEXT,
+      agent_name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      utm TEXT,
+      via TEXT NOT NULL DEFAULT 'web' CHECK (via IN ('web','mcp')),
+      status TEXT NOT NULL DEFAULT 'new'
+        CHECK (status IN ('new','shortlist','winner','rejected','waitlist')),
+      ip_hash TEXT,
+      UNIQUE (email),
+      UNIQUE (x_handle)
+    );
+    CREATE INDEX IF NOT EXISTS idx_founding_applications_created
+      ON founding_applications(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_founding_applications_status
+      ON founding_applications(status, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS founding_reviews (
+      application_id TEXT NOT NULL REFERENCES founding_applications(id),
+      reviewer TEXT NOT NULL,
+      use_case INTEGER NOT NULL CHECK (use_case BETWEEN 1 AND 5),
+      money_flow INTEGER NOT NULL CHECK (money_flow BETWEEN 1 AND 5),
+      builder INTEGER NOT NULL CHECK (builder BETWEEN 1 AND 5),
+      note TEXT,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (application_id, reviewer)
+    );
+  `);
+  // A database created before the form was shortened still has name, money use, link, stack, and
+  // consent. CREATE TABLE IF NOT EXISTS will not change it, so the row is rebuilt without them.
+  slimFoundingApplications(db);
+}
+
+/** Drop the founding columns the form no longer collects. Reviews stay: they reference the id. */
+function slimFoundingApplications(db: Database.Database): void {
+  const table = db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'founding_applications'",
+    )
+    .get();
+  if (!table) return;
+  const cols = (
+    db.prepare("PRAGMA table_info(founding_applications)").all() as { name: string }[]
+  ).map((col) => col.name);
+  if (!cols.includes("name") && !cols.includes("consent_at") && !cols.includes("money_use")) return;
+
+  // foreign_keys cannot change inside a transaction, and the reviews table points at this one.
+  db.pragma("foreign_keys = OFF");
+  try {
+    db.transaction(() => {
+      db.exec(`
+        CREATE TABLE founding_applications_next (
+          id TEXT PRIMARY KEY,
+          created_at INTEGER NOT NULL,
+          email TEXT NOT NULL,
+          x_handle TEXT,
+          agent_name TEXT NOT NULL,
+          description TEXT NOT NULL,
+          utm TEXT,
+          via TEXT NOT NULL DEFAULT 'web' CHECK (via IN ('web','mcp')),
+          status TEXT NOT NULL DEFAULT 'new'
+            CHECK (status IN ('new','shortlist','winner','rejected','waitlist')),
+          ip_hash TEXT,
+          UNIQUE (email),
+          UNIQUE (x_handle)
+        );
+        INSERT INTO founding_applications_next
+          (id, created_at, email, x_handle, agent_name, description, utm, via, status, ip_hash)
+        SELECT id, created_at, email, NULLIF(TRIM(x_handle), ''),
+               agent_name, description, utm, via, status, ip_hash
+          FROM founding_applications;
+        DROP TABLE founding_applications;
+        ALTER TABLE founding_applications_next RENAME TO founding_applications;
+        CREATE INDEX IF NOT EXISTS idx_founding_applications_created
+          ON founding_applications(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_founding_applications_status
+          ON founding_applications(status, created_at DESC);
+      `);
+    })();
+  } finally {
+    db.pragma("foreign_keys = ON");
+  }
 }
 
 /** Marker for the one-shot 2026-08-26 re-key (design §2 steps 1-5). */
