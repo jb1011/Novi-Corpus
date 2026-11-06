@@ -523,6 +523,25 @@ describe("Scheduler: stop, skipped ticks, quiet jobs", () => {
   });
 });
 
+describe("Scheduler: a quiet job that returns no counts", () => {
+  test("its run writes no job_ran line and does not throw: undefined is read as no counts", async () => {
+    const deliver: Job = {
+      ...job(
+        "email_deliver",
+        30 * SECOND,
+        async () => undefined as unknown as Record<string, number>,
+      ),
+      quiet: true,
+    };
+    const scheduler = new Scheduler({});
+    scheduler.register(deliver);
+    await expect(scheduler.runNow("email_deliver")).resolves.toBeUndefined();
+    expect(lines("job_ran")).toEqual([]);
+    expect(lines("job_failed")).toEqual([]);
+    expect(scheduler.status()[0]).toMatchObject({ lastOk: true, consecutiveFailures: 0 });
+  });
+});
+
 describe("Scheduler: each job's last run, in scheduled_job_runs", () => {
   let db: Database.Database;
   let runs: SqliteScheduledJobRunRepository;

@@ -851,6 +851,24 @@ describe("email:send-link", () => {
       `https://verify.example.com/start/${guardian.toLowerCase()}`,
     ])
       expect(await refusal(sendLink(guardian, { url: bad })), "tenant in the link").toBe(accountId);
+    // Any wallet-shaped value (0x and 40 hex characters), not only this guardian's: a link never
+    // carries an account id. Each decoded form is held to it.
+    const wallet = "refusing: the link must not carry a wallet address (use the opaque reference)";
+    for (const bad of [
+      `${LINK}&ref=${second}`,
+      `${LINK}&ref=${second.toLowerCase()}`,
+      `${LINK}&ref=0X${second.slice(2).toUpperCase()}`,
+      `https://verify.example.com/start/${second.toLowerCase()}`,
+      `${LINK}&ref=%30x${second.slice(2)}`,
+      `https://verify.example.com/start/%30x${second.slice(2)}`,
+      `${LINK}#${second}`,
+      `${LINK}&note=100%&ref=${second}`,
+      `${LINK}&tx=0x${"ab".repeat(32)}`,
+    ])
+      expect(await refusal(sendLink(guardian, { url: bad })), bad).toBe(wallet);
+    // 39 hex characters is not an address.
+    const short = await run(sendLink(guardian, { url: `${LINK}&v=0x${"a".repeat(39)}` }, false));
+    expect(short.output).toMatchObject({ queued: false, wouldQueue: { kind: "identity_link" } });
     expect(
       await refusal(sendLink(guardian, { url: "https://someone:secret@verify.example.com/x" })),
     ).toBe("refusing: --url must not hold a user name or a password");

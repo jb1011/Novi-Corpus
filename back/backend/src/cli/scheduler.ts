@@ -13,10 +13,11 @@ import { hasTables, print, refuse, withDatabase, withDatabaseAsync } from "./ope
  *
  * `scheduler:list` prints, beside each job, its last run as the API process's scheduler wrote it
  * to `scheduled_job_runs` (`lastRunAt`, `lastOk`, `consecutiveFailures`; null where the job never
- * ran, and on a database the API of this build has not migrated yet, which has no such table). The run history is in the ops log: a `job_ran` or `job_failed` line per run (a quiet job
- * writes no `job_ran` for a run with nothing to do) and a `job_skipped` line per skipped tick. A
- * run from here writes those lines too, and only those: the table is the API process's, so a
- * manual run never resets the failure count the API's CRITICAL rule reads.
+ * ran, and on a database the API of this build has not migrated yet, which has no such table).
+ * The run history is in the ops log: a `job_ran` or `job_failed` line per run (a quiet job writes
+ * no `job_ran` for a run with nothing to do) and a `job_skipped` line per skipped tick. A run from
+ * here writes those lines too, and only those: the table is the API process's, so a manual run
+ * never resets the failure count the API's CRITICAL rule reads.
  */
 
 const HISTORY = "the run history is in the ops log: job_ran, job_failed, job_skipped";
