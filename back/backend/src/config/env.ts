@@ -461,8 +461,20 @@ const EnvSchema = z.object({
   /** Which sender delivers: the provider, or the console sender (one ops line per email, nothing
    *  sent). */
   EMAIL_PROVIDER: z.preprocess(blankAsUnset, z.enum(["resend", "console"]).default("console")),
-  /** The provider's API key. A secret: masked by redact(). Required with EMAIL_PROVIDER=resend. */
-  RESEND_API_KEY: z.preprocess(blankAsUnset, z.string().trim().optional()),
+  /** The provider's API key. A secret: masked by redact(). Required with EMAIL_PROVIDER=resend.
+   *  One token of visible ASCII: it goes into a header, and a space, a control character or a
+   *  non-ASCII character there would fail every send instead of the boot. */
+  RESEND_API_KEY: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .trim()
+      .regex(
+        /^[\x21-\x7E]+$/,
+        "must be one token, with no space, control or non-ASCII character (it goes into a header)",
+      )
+      .optional(),
+  ),
   /** The signing secret of the provider's delivery webhook, `whsec_` and the base64 secret. A
    *  secret: masked by redact(). Required with EMAIL_PROVIDER=resend. */
   RESEND_WEBHOOK_SECRET: z.preprocess(
@@ -506,6 +518,7 @@ const EnvSchema = z.object({
     blankAsUnset,
     z
       .string()
+      .trim()
       .url()
       .refine(isLinkBase, "must be an http or https URL with no query, fragment or credentials")
       .optional(),
@@ -513,6 +526,10 @@ const EnvSchema = z.object({
   /** The marketing segment a consenting address is added to. Optional: without it, contact
    *  writes are skipped (`contact_upsert_skipped`). */
   RESEND_MARKETING_SEGMENT_ID: z.preprocess(blankAsUnset, z.string().trim().max(128).optional()),
+  /** true|false, default false. With the console sender, each email's ops line also carries its
+   *  text body (never the address), so a staging tester can follow the link it holds. Refused on
+   *  production. */
+  EMAIL_CONSOLE_SHOW_BODY: z.preprocess(blankAsUnset, z.string().trim().optional()),
 
   // --- FORMATION PAYMENTS (2026-08-26 §6; B1). Built now, shipped OFF. -----------------------
   /**
@@ -1148,6 +1165,9 @@ export type EmailConfig = {
   /** One line. */
   postalAddress: string;
   marketingSegmentId?: string;
+  /** EMAIL_CONSOLE_SHOW_BODY: the console sender prints each text body. Never on production; read
+   *  by the console sender only. */
+  consoleShowBody: boolean;
 } & ({ provider: "console" } | { provider: "resend"; apiKey: string; webhookSecret: string });
 
 /** Hedera rail (design 2026-09-10), narrowed to present-and-whole. */
@@ -1302,6 +1322,7 @@ const EMAIL_SETTINGS = [
   "EMAIL_REPLY_TO",
   "EMAIL_POSTAL_ADDRESS",
   "RESEND_MARKETING_SEGMENT_ID",
+  "EMAIL_CONSOLE_SHOW_BODY",
 ] as const;
 
 /**
@@ -1376,6 +1397,12 @@ function buildEmail(e: Env, env: Record<string, string | undefined>): Config["em
     replyTo: e.EMAIL_REPLY_TO,
     postalAddress: e.EMAIL_POSTAL_ADDRESS as string,
     marketingSegmentId: e.RESEND_MARKETING_SEGMENT_ID,
+    // Production refuses it, after `cfg` is assembled: the environment is not known here.
+    consoleShowBody: boolWithDerivedDefault(
+      e.EMAIL_CONSOLE_SHOW_BODY,
+      false,
+      "EMAIL_CONSOLE_SHOW_BODY",
+    ),
   };
   return e.EMAIL_PROVIDER === "resend"
     ? {
@@ -1703,6 +1730,20 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
     email,
   };
+
+  // The email system on production (PR 2a). Here rather than in `buildEmail`, which runs before
+  // the deployment's environment can be read off `cfg`. A production box prints no body into
+  // its log, whichever sender it runs, and builds its links on https only.
+  if (cfg.email && legalBodyEnvironment(cfg) === "production") {
+    if (cfg.email.consoleShowBody)
+      throw new Error(
+        "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused on production (ARC_NETWORK=mainnet): it would print every email's text body, with links and codes meant for one person, into the log",
+      );
+    if (new URL(cfg.email.publicAppUrl).protocol !== "https:")
+      throw new Error(
+        "Invalid config: PUBLIC_APP_URL must be https on production (ARC_NETWORK=mainnet): every link in an email is built on it",
+      );
+  }
 
   // Formation (design §2), Circle twin: a half-configured doola block must fail at boot, not at
   // the first filing — a real Wyoming LLC and a real fee are on the other side of that call.
