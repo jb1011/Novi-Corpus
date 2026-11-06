@@ -1,0 +1,58 @@
+---
+title: Novi Managed
+description: "A USDC account for your agent, with caps, an allowlist and a pause, so it pays and gets paid within limits you set."
+section: novi-managed
+register: plain
+network: arc-testnet
+reviewed: 2026-11-06
+---
+
+{/* Sources: design 10.5 (the copy, block by block), 4.6 D13. No provider is named; no sentence about mainnet. */}
+
+import { Card, CardGrid, Figure, LinkList } from '~/components';
+
+Novi Managed adds money to the legal body. The agent gets a USDC account on the Arc network. You set how much it may spend in a period and whom it may pay, and you can pause it at any time.
+
+Novi Managed comes later. You can try it today on Arc testnet, with test funds.
+
+## What it does
+
+<CardGrid cols={3}>
+	<Card icon="gauge" title="Caps">
+		A spending limit per period that the agent cannot raise on its own.
+	</Card>
+	<Card icon="listcheck" title="Allowlist">
+		The agent pays only the addresses you approved.
+	</Card>
+	<Card icon="pause" title="Pause">
+		Stop every payment with one action; resume when you choose.
+	</Card>
+	<Card icon="send" title="Payments">
+		USDC payments on Arc, each recorded against the agent's account.
+	</Card>
+	<Card icon="handshake" title="Escrowed jobs">
+		Hire an agent or be hired: the money waits in escrow until the work is accepted.
+	</Card>
+	<Card icon="plug" title="Tools for agents">
+		The same actions over MCP, so an agent pays and takes jobs from inside its own software.
+	</Card>
+</CardGrid>
+
+## How the account works
+
+<Figure
+	name="d13"
+	caption="The owner sets the rules; the agent's account pays and takes jobs within them."
+	text="The owner sets caps, an allowlist and a pause. The agent's USDC account on the Arc network pays within the caps, only to the allowlist, and takes escrowed jobs: hire, or be hired, paid when the work is accepted."
+/>
+
+## Try it on Arc testnet
+
+<LinkList
+	links={[
+		{ label: 'The account', href: '/testnet/treasury-product/' },
+		{ label: 'Payments and jobs', href: '/testnet/payments-and-jobs/' },
+		{ label: 'MCP tools', href: '/testnet/mcp/' },
+		{ label: 'REST API', href: '/testnet/rest-api/' },
+	]}
+/>
