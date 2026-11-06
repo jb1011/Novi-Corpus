@@ -3,7 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import { arcTestnet } from "../chains";
-import { type PiiKeyring, parsePiiKey } from "../formation/pii";
+import { type PiiKeyring, parseNameHmacKey, parsePiiKey } from "../formation/pii";
 import { usdToUnits } from "../policy/units";
 import type { Address, Hex } from "../types";
 
@@ -412,6 +412,13 @@ const EnvSchema = z.object({
   FORMATION_PII_KEY_PREVIOUS: z.string().optional(),
 
   // --- THE GUARDIAN IDENTITY RECORD (trust-and-access T-A, PR 1). ---------------------------
+  /**
+   * The name fingerprint's own secret: 32 bytes written as 64 hex characters (`openssl rand -hex
+   * 32`). The duplicate check compares a keyed digest of each name under it. REQUIRED whenever
+   * `FORMATION_PII_KEY` is set, and never rotated: a name keeps one digest for the life of the
+   * record, so a rotation of the PII key hides no duplicate. A secret: masked by redact().
+   */
+  IDENTITY_NAME_HMAC_KEY: z.string().optional(),
   /** Years a passed identity check stays valid before the guardian verifies again. */
   IDENTITY_REVERIFY_YEARS: z.coerce.number().int().min(1).max(10).default(3),
   /** Days a passed check's names are kept when its tenant never forms or declares a company. */
@@ -1033,6 +1040,9 @@ export interface Config {
     failedRetentionDays: number;
     /** ISO 3166-1 alpha-3, upper case. */
     blockedCountries: Set<string>;
+    /** The name fingerprint's secret, parsed ONCE from IDENTITY_NAME_HMAC_KEY (32 bytes); absent
+     *  when it is not set, which the boot refuses whenever the PII key is set. */
+    nameHmacKey?: Buffer;
   };
 }
 
@@ -1485,6 +1495,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         e.SCREENING_BLOCKED_COUNTRIES,
         "SCREENING_BLOCKED_COUNTRIES",
       ),
+      // Parsed here, once, so a malformed secret names its variable at boot.
+      nameHmacKey: e.IDENTITY_NAME_HMAC_KEY
+        ? parseNameHmacKey(e.IDENTITY_NAME_HMAC_KEY, "IDENTITY_NAME_HMAC_KEY")
+        : undefined,
     },
   };
 
@@ -1877,6 +1891,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     throw new Error(
       "Invalid config: FORMATION_PII_KEY is set with DOOLA_ENVIRONMENT=sandbox — a sandbox deployment refuses the SSN field outright and has nothing to encrypt (unset it, or set DOOLA_ENVIRONMENT=production if this box really files for real people)",
     );
+  // A box with the PII key can hold identity records, and their duplicate check compares the
+  // name's fingerprint under its own secret. AFTER the sandbox check above, deliberately: a PII
+  // key on a sandbox box is the more fundamental mistake, and the operator hears it first.
+  if (cfg.pii && cfg.identity.nameHmacKey === undefined)
+    throw new Error(
+      "Invalid config: IDENTITY_NAME_HMAC_KEY is required with FORMATION_PII_KEY: the identity record's duplicate check uses it",
+    );
 
   // ARC_NETWORK vs ARC_CHAIN_ID (design §2). Two knobs describe ONE network, and nothing else
   // reconciles them: a box that says "mainnet" while still pointing at the testnet chain id would
@@ -2184,8 +2205,13 @@ export function redact(cfg: Config): Record<string, unknown> {
     pii: redactKeyring(cfg.pii),
     // A `Set` serializes to `{}`: printed as a sorted array, so the boot log shows the list.
     // Guarded because test fixtures cast partial Config literals.
+    // The fingerprint secret is key material, never a log line.
     identity: cfg.identity
-      ? { ...cfg.identity, blockedCountries: [...cfg.identity.blockedCountries].sort() }
+      ? {
+          ...cfg.identity,
+          blockedCountries: [...cfg.identity.blockedCountries].sort(),
+          nameHmacKey: cfg.identity.nameHmacKey ? "REDACTED" : undefined,
+        }
       : undefined,
     ens: cfg.ens ? { ...cfg.ens, signerKey: "REDACTED" } : undefined,
     world: cfg.world ? { ...cfg.world, rpSigningKey: "REDACTED" } : undefined,

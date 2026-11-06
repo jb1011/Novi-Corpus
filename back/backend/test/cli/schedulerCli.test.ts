@@ -44,6 +44,8 @@ beforeEach(() => {
   // The identity sweep is registered only where the names can be held: with the PII key. A box
   // whose doola block is in sandbox refuses the key, so this deployment has no doola block.
   process.env.FORMATION_PII_KEY = PII_KEY;
+  // Required with the PII key: the identity record's duplicate check uses it.
+  process.env.IDENTITY_NAME_HMAC_KEY = Buffer.alloc(32, 5).toString("hex");
   for (const name of [
     "ARC_NETWORK",
     "DOOLA_API_KEY",

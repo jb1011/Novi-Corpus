@@ -283,47 +283,46 @@ export function decryptText(keyring: PiiKeyring, enc: EncryptedText, aad: string
 
 /** The HKDF info string for the name HMAC key. Bump the version if the input form ever changes. */
 const NAME_HMAC_INFO = "novi:identity:name-hmac:v1";
-/** HMAC-SHA256's natural key length. */
+/** HMAC-SHA256's natural key length, and the fingerprint secret's. */
 const NAME_HMAC_KEY_BYTES = 32;
+/** The fingerprint secret as the env holds it: 32 bytes written as 64 hex characters. */
+const NAME_HMAC_KEY_HEX = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * Parse `IDENTITY_NAME_HMAC_KEY`, the name fingerprint's own secret: exactly 32 bytes written as 64
+ * hex characters, and nothing else (one form, so a key cannot be read two ways). Throws with the
+ * variable named; the message never holds the value.
+ */
+export function parseNameHmacKey(raw: string, varName: string): Buffer {
+  const trimmed = raw.trim();
+  if (!NAME_HMAC_KEY_HEX.test(trimmed))
+    throw new Error(
+      `Invalid config: ${varName} must be ${NAME_HMAC_KEY_BYTES} bytes written as ${2 * NAME_HMAC_KEY_BYTES} hex characters (generate one with: openssl rand -hex ${NAME_HMAC_KEY_BYTES})`,
+    );
+  return Buffer.from(trimmed, "hex");
+}
 
 /** One name, in the form the HMAC reads: lower case, NFKC, whitespace collapsed. */
 function hmacForm(name: string): string {
   return name.toLowerCase().normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
-/** The digest of a name under one PII key: HMAC-SHA256 keyed by HKDF-SHA256 of its material. */
-function nameHmacUnder(piiKey: PiiKey, first: string, last: string): string {
+/**
+ * The name's fingerprint, so two identity records for the same person can be found without
+ * decrypting either: HMAC-SHA256, hex, over the lower-cased NFKC first and last names joined by a
+ * newline. It is the digest a row stores and the one the duplicate lookup compares.
+ *
+ * Keyed by HKDF-SHA256 of the fingerprint's own secret (`IDENTITY_NAME_HMAC_KEY`), which never
+ * rotates; the PII key takes no part in it. So a name has one digest for the life of the record,
+ * and a rotation of `FORMATION_PII_KEY` changes no fingerprint and hides no duplicate.
+ */
+export function nameHmac(secret: Buffer, first: string, last: string): string {
   const key = Buffer.from(
-    hkdfSync("sha256", piiKey.key, Buffer.alloc(0), NAME_HMAC_INFO, NAME_HMAC_KEY_BYTES),
+    hkdfSync("sha256", secret, Buffer.alloc(0), NAME_HMAC_INFO, NAME_HMAC_KEY_BYTES),
   );
   return createHmac("sha256", key)
     .update(`${hmacForm(first)}\n${hmacForm(last)}`, "utf8")
     .digest("hex");
-}
-
-/**
- * A keyed digest of a name, so two identity records for the same person can be found without
- * decrypting either: HMAC-SHA256, hex, over the lower-cased NFKC first and last names joined by a
- * newline. It is the digest a row stores.
- *
- * Keyed by HKDF-SHA256 of the CURRENT key, never the key itself: the AES key then serves one
- * purpose, and a digest reveals nothing about it. After a rotation the same name digests
- * differently, so a writer recomputes the digest under the current key rather than copying it,
- * and the duplicate lookup compares `nameHmacs`.
- */
-export function nameHmac(keyring: PiiKeyring, first: string, last: string): string {
-  return nameHmacUnder(keyring.current, first, last);
-}
-
-/**
- * The digests the duplicate lookup compares: the current key's first, then, during a rotation
- * window, the previous key's, so a row written before the rotation still matches. A row stores
- * only the current one (`nameHmac`).
- */
-export function nameHmacs(keyring: PiiKeyring, first: string, last: string): string[] {
-  const keys =
-    keyring.previous === undefined ? [keyring.current] : [keyring.current, keyring.previous];
-  return keys.map((key) => nameHmacUnder(key, first, last));
 }
 
 /**

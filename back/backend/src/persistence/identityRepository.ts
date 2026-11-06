@@ -109,12 +109,8 @@ export interface IdentityRepository {
   /** Oldest first. */
   events(checkId: number): IdentityEvent[];
   findById(checkId: number): GuardianIdentityCheck | undefined;
-  /**
-   * Check ids, oldest first, of OTHER tenants whose LATEST row passed with this country and any of
-   * these hmacs: the name's digest under each key the deployment holds (`nameHmacs`), so a pass
-   * written before a key rotation still matches. None for an empty list.
-   */
-  passedElsewhere(nameHmacs: string[], documentCountry: string, exceptTenantId: string): number[];
+  /** Check ids, oldest first, of OTHER tenants whose LATEST row passed with this hmac and country. */
+  passedElsewhere(nameHmac: string, documentCountry: string, exceptTenantId: string): number[];
   /**
    * The erasure of a row's names and its `names_erased` event, in one transaction. False, writing
    * nothing, when there is no such row or its names were erased already.
@@ -492,7 +488,7 @@ export class SqliteIdentityRepository implements IdentityRepository {
       // corrected or re-verified since does not hold the identity any more.
       passedElsewhere: db.prepare(
         `SELECT g.check_id AS check_id FROM guardian_identity_checks g
-          WHERE g.name_hmac IN (SELECT value FROM json_each(@name_hmacs))
+          WHERE g.name_hmac = @name_hmac
             AND g.document_country = @document_country
             AND g.status = 'passed'
             AND g.tenant_id <> @except_tenant_id
@@ -596,11 +592,10 @@ export class SqliteIdentityRepository implements IdentityRepository {
     return r ? toCheck(r) : undefined;
   }
 
-  passedElsewhere(nameHmacs: string[], documentCountry: string, exceptTenantId: string): number[] {
+  passedElsewhere(nameHmac: string, documentCountry: string, exceptTenantId: string): number[] {
     return (
       this.stmts.passedElsewhere.all({
-        // One JSON array, read back by `json_each`: a prepared statement binds no list.
-        name_hmacs: JSON.stringify(nameHmacs),
+        name_hmac: nameHmac,
         document_country: documentCountry,
         except_tenant_id: tenantIdShape("exceptTenantId", exceptTenantId),
       }) as { check_id: number }[]

@@ -578,6 +578,7 @@ describe("company:reinstate on a sandbox deployment", () => {
       WORLD_REQUIRE_GUARDIAN: "true",
       WORLD_MAX_COMPANIES_PER_HUMAN: "3",
       FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+      IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
     });
 
     const dry = await run<NotRecorded>(

@@ -3,7 +3,7 @@ import type { Command } from "commander";
 import { getAddress } from "viem";
 import { type WorldIdDeps, buildWorldIdDeps, realHumanState } from "../api/routes/worldId";
 import { type Config, legalBodyEnvironment } from "../config/env";
-import { type PiiKeyring, encryptText, nameHmac, nameHmacs } from "../formation/pii";
+import { type PiiKeyring, encryptText, nameHmac } from "../formation/pii";
 import { IDENTITY_AAD, nameOfRecord, nameRuleProblem } from "../identity/names";
 import { type IdentityDeps, identityState, namesOfRecord } from "../identity/state";
 import {
@@ -156,6 +156,14 @@ function parseCompletedAt(value: string, nowMs: number): number {
 function requirePii(cfg: Config): PiiKeyring {
   if (cfg.pii === undefined) refuse("FORMATION_PII_KEY is not set on this deployment");
   return cfg.pii;
+}
+
+/** The name fingerprint's secret, which every command that writes a name's digest needs. The boot
+ *  refuses the PII key without it, so a loaded configuration always holds both. */
+function requireNameHmacKey(cfg: Config): Buffer {
+  if (cfg.identity.nameHmacKey === undefined)
+    refuse("IDENTITY_NAME_HMAC_KEY is not set on this deployment");
+  return cfg.identity.nameHmacKey;
 }
 
 // ── shared rules ─────────────────────────────────────────────────────────────────────────────
@@ -381,6 +389,7 @@ export function recordIdentity(
 ): Record<string, unknown> {
   const tenantId = parseTenant(tenantArg);
   const pii = requirePii(cfg);
+  const fingerprintKey = requireNameHmacKey(cfg);
   const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
   const expected = parseExpectLatest(opts.expectLatest, true);
   const environment = legalBodyEnvironment(cfg);
@@ -423,9 +432,7 @@ export function recordIdentity(
         last: nameOfRecord(opts.nameLast as string),
         full: opts.nameFull === undefined ? null : nameOfRecord(opts.nameFull),
       };
-  // The row keeps the current key's digest; the duplicate lookup compares every key's.
-  const hmac = names === null ? null : nameHmac(pii, names.first, names.last);
-  const lookup = names === null ? [] : nameHmacs(pii, names.first, names.last);
+  const hmac = names === null ? null : nameHmac(fingerprintKey, names.first, names.last);
   // The reasons the flags alone decide, in the record's order; the duplicate is read below.
   const flagged: ReviewReasonCode[] = [];
   if (names !== null) {
@@ -456,7 +463,7 @@ export function recordIdentity(
         `the guardian is verified until ${isoDate(latest.expiresAt as number)}; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review`,
       );
     const duplicateOf =
-      hmac !== null && country !== null ? repo.passedElsewhere(lookup, country, tenantId) : [];
+      hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId) : [];
     const reviewReasons: ReviewReasonCode[] =
       duplicateOf.length > 0 ? [...flagged, "duplicate_identity"] : flagged;
     const row = shapeChecked({
@@ -664,12 +671,11 @@ function decide(
 /**
  * The operator's decision on a review, each with its own part of the decision codes. `accept`
  * appends a passed row carrying the review's facts and its names, sealed again under the current
- * key, with the name hmac computed again under it, so a duplicate is still found after a key
- * rotation (the lookup compares the digests under the current and the previous key, `nameHmacs`);
- * it is refused while another account's current passed check holds the same name and
- * country, and on production unless the check had the face match, the sanctions search and a name
- * that passes the name rule (`assertProductionPass`). `refuse` appends a failed row without names,
- * over a review or an attempt that never completed.
+ * PII key, with the name's fingerprint computed again from them under its own secret (the same
+ * digest: the PII key takes no part in it); it is refused while another account's current passed
+ * check holds the same name and country, and on production unless the check had the face match,
+ * the sanctions search and a name that passes the name rule (`assertProductionPass`). `refuse`
+ * appends a failed row without names, over a review or an attempt that never completed.
  */
 export function reviewIdentity(
   db: Database.Database,
@@ -701,6 +707,7 @@ export function reviewIdentity(
       }),
     });
   const pii = requirePii(cfg);
+  const fingerprintKey = requireNameHmacKey(cfg);
   return decide(db, tenantId, opts, {
     kind: "accepted",
     opsEvent: "identity_accepted",
@@ -709,18 +716,13 @@ export function reviewIdentity(
     onlyFrom: "only a needs_review check is accepted",
     build: (latest, carried, repo) => {
       const names = heldNames(identityDeps(cfg, repo, pii), latest);
-      const hmac = nameHmac(pii, names.first, names.last);
-      // Read again at the decision, under the current key and, during a rotation, the previous
-      // one: another account may have passed with the same name and country since the review was
-      // recorded, before or after the rotation.
+      const hmac = nameHmac(fingerprintKey, names.first, names.last);
+      // Read again at the decision: another account may have passed with the same name and
+      // country since the review was recorded.
       const elsewhere =
         latest.documentCountry === null
           ? []
-          : repo.passedElsewhere(
-              nameHmacs(pii, names.first, names.last),
-              latest.documentCountry,
-              tenantId,
-            );
+          : repo.passedElsewhere(hmac, latest.documentCountry, tenantId);
       if (elsewhere.length > 0)
         refuse(
           `another account holds a verified identity with the same name and document country (checks ${elsewhere.join(", ")}): refuse this one with duplicate_identity, or revoke the other first`,
@@ -773,7 +775,8 @@ export function revokeIdentity(
 /**
  * Corrects the name of record of a passed check or a review: the new names through `nameOfRecord`
  * and the name rule (refused when they break it), the full name only when a new one is given (the
- * old one is never carried over a correction), all sealed under the current key with a new hmac.
+ * old one is never carried over a correction), all sealed under the current key with the new
+ * name's fingerprint.
  * The row passes when the review's reasons other than `name_rule_failed` are none (on production,
  * only when the check had the face match and the sanctions search: `assertProductionPass`); since
  * the name changed, another tenant's current passed check holding the new name and country adds
@@ -787,6 +790,7 @@ export function correctIdentityName(
 ): Record<string, unknown> {
   const tenantId = parseTenant(tenantArg);
   const pii = requirePii(cfg);
+  const fingerprintKey = requireNameHmacKey(cfg);
   const first = nameOfRecord(opts.nameFirst);
   const last = nameOfRecord(opts.nameLast);
   const problem = nameRuleProblem(first, last);
@@ -804,13 +808,12 @@ export function correctIdentityName(
         last,
         full: opts.nameFull === undefined ? null : nameOfRecord(opts.nameFull),
       };
-      const hmac = nameHmac(pii, first, last);
+      const hmac = nameHmac(fingerprintKey, first, last);
       const remaining = latest.reviewReasons.filter((code) => code !== "name_rule_failed");
       const duplicate =
         latest.documentCountry !== null &&
         !remaining.includes("duplicate_identity") &&
-        repo.passedElsewhere(nameHmacs(pii, first, last), latest.documentCountry, tenantId).length >
-          0;
+        repo.passedElsewhere(hmac, latest.documentCountry, tenantId).length > 0;
       const reviewReasons: ReviewReasonCode[] = duplicate
         ? [...remaining, "duplicate_identity"]
         : remaining;

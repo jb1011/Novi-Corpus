@@ -50,6 +50,9 @@ const SURNAME = /dupont/i;
 const PII_KEY = Buffer.alloc(32, 7).toString("base64");
 /** The key a rotation moves to; `PII_KEY` is then the previous one. */
 const NEW_PII_KEY = Buffer.alloc(32, 9).toString("base64");
+/** The name fingerprint's own secret, as `IDENTITY_NAME_HMAC_KEY` holds it: a constant test key. */
+const NAME_HMAC_KEY = Buffer.alloc(32, 5).toString("hex");
+const FINGERPRINT = Buffer.from(NAME_HMAC_KEY, "hex");
 const RESERVED_SYSTEM =
   "refusing: --operator system is reserved for the retention sweep's own erasures";
 
@@ -75,6 +78,8 @@ beforeEach(() => {
   // The names are encrypted under it. A box whose doola block is in sandbox refuses the key, so
   // this deployment has no doola block at all.
   process.env.FORMATION_PII_KEY = PII_KEY;
+  // The duplicate check's fingerprint secret, required with the PII key.
+  process.env.IDENTITY_NAME_HMAC_KEY = NAME_HMAC_KEY;
   // World ID wired, so the guardian action's rows are read under its action.
   process.env.WORLD_APP_ID = "app_test";
   process.env.WORLD_RP_ID = "rp_test";
@@ -456,13 +461,13 @@ describe("identity:record", () => {
     expect(JSON.stringify(output)).not.toMatch(SURNAME);
   });
 
-  test("a passed row written under the old key is found as a duplicate by a record made after a key rotation", async () => {
+  test("a PII key rotation changes no fingerprint: a pass sealed under the old key is found as a duplicate after it, the old key no longer configured", async () => {
     human(guardian, "1001");
     human(second, "1002");
     const first = await recorded(guardian);
-    // The rotation: the new key current, the old one previous.
+    expect(latestOf(guardian).nameHmac).toBe(nameHmac(FINGERPRINT, FIRST, LAST));
+    // The rotation, and the old key dropped altogether: the lookup reads no PII key.
     process.env.FORMATION_PII_KEY = NEW_PII_KEY;
-    process.env.FORMATION_PII_KEY_PREVIOUS = PII_KEY;
 
     const { output } = await run<Recorded>(
       recordLine(second, { "--name-last": LAST, "--provider-ref": "vs_test_0002" }),
@@ -473,9 +478,9 @@ describe("identity:record", () => {
       reviewReasons: ["duplicate_identity"],
       duplicateOf: [first.checkId],
     });
-    // The new row keeps the current key's digest.
-    const newKey = parsePiiKey(NEW_PII_KEY, "FORMATION_PII_KEY");
-    expect(latestOf(second).nameHmac).toBe(nameHmac({ current: newKey }, FIRST, LAST));
+    // One fingerprint per name, before and after the rotation.
+    expect(latestOf(second).nameHmac).toBe(latestOf(guardian).nameHmac);
+    expect(latestOf(second).names?.keyId).toBe(parsePiiKey(NEW_PII_KEY, "FORMATION_PII_KEY").id);
   });
 
   test("record with --expect-latest none when a row exists refuses", async () => {
@@ -770,6 +775,18 @@ describe("identity:record", () => {
   });
 });
 
+test("the commands that fingerprint a name refuse without the fingerprint key in the configuration", () => {
+  human(guardian, "1001");
+  // A configuration the boot would refuse: the PII key without the fingerprint key.
+  const loaded = config();
+  const noFingerprint = config({ identity: { ...loaded.identity, nameHmacKey: undefined } });
+
+  expect(thrownBy(() => recordIdentity(db, noFingerprint, guardian, recordOpts()))).toBe(
+    "refusing: IDENTITY_NAME_HMAC_KEY is not set on this deployment",
+  );
+  expect(repo.list(guardian)).toEqual([]);
+});
+
 // ── identity:accept, identity:refuse, identity:revoke ─────────────────────────────────────────
 
 describe("the decisions", () => {
@@ -886,7 +903,7 @@ describe("the decisions", () => {
     expect(repo.list(guardian)).toHaveLength(1);
   });
 
-  test("accept after a key rotation seals the names under the new key and computes the hmac again under it", async () => {
+  test("accept after a key rotation seals the names under the new key, and the fingerprint is the same", async () => {
     human(guardian, "1001");
     const review = await recorded(guardian, { "--watchlist": "hit" });
     const before = latestOf(guardian);
@@ -902,15 +919,16 @@ describe("the decisions", () => {
 
     const row = latestOf(guardian);
     expect(row.names?.keyId).toBe(newKey.id);
-    expect(row.nameHmac).toBe(nameHmac({ current: newKey }, FIRST, LAST));
-    expect(row.nameHmac).not.toBe(before.nameHmac);
+    // Computed again from the decrypted names, under the fingerprint secret: the same digest.
+    expect(row.nameHmac).toBe(nameHmac(FINGERPRINT, FIRST, LAST));
+    expect(row.nameHmac).toBe(before.nameHmac);
     expect((await run<Shown>(["identity:show", guardian])).output).toMatchObject({
       state: "verified",
       latest: { names: { first: FIRST, last: LAST, full: null } },
     });
   });
 
-  test("accept after a key rotation finds a pass written under the previous key as a duplicate", async () => {
+  test("accept after a key rotation finds a pass sealed under the previous key as a duplicate: the fingerprint did not change", async () => {
     human(guardian, "1001");
     human(second, "1002");
     // The review comes first, so the other account's pass is recorded clean.
@@ -1074,7 +1092,7 @@ describe("identity:correct-name", () => {
     expect(output).toMatchObject({ status: "needs_review", reviewReasons: ["duplicate_identity"] });
   });
 
-  test("correct-name after a key rotation finds a pass written under the previous key as a duplicate", async () => {
+  test("correct-name after a key rotation finds a pass sealed under the old key as a duplicate, the old key no longer configured", async () => {
     human(guardian, "1001");
     human(second, "1002");
     await recorded(guardian);
@@ -1082,8 +1100,9 @@ describe("identity:correct-name", () => {
       "--name-last": "Dupond",
       "--provider-ref": "vs_test_0002",
     });
+    // The rotation, the old key dropped: correct-name decrypts nothing, and the lookup reads no
+    // PII key.
     process.env.FORMATION_PII_KEY = NEW_PII_KEY;
-    process.env.FORMATION_PII_KEY_PREVIOUS = PII_KEY;
 
     const { output } = await run<Recorded>(
       decisionLine("identity:correct-name", second, typo.checkId, "transliteration", {

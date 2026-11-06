@@ -1,7 +1,9 @@
 /**
  * The guardian identity record's settings (`cfg.identity`), the PII keyring parsed once
- * (`cfg.pii`, the same object as `cfg.formation.pii`), and the rule that a mainnet deployment with
- * the legal-body feature on holds that keyring: the record encrypts names under it.
+ * (`cfg.pii`, the same object as `cfg.formation.pii`), the rule that a mainnet deployment with
+ * the legal-body feature on holds that keyring (the record encrypts names under it), and the name
+ * fingerprint's own secret (`IDENTITY_NAME_HMAC_KEY`, `cfg.identity.nameHmacKey`), required with
+ * the PII key.
  *
  * Every key here is a placeholder or one of anvil's published test accounts, never a real wallet.
  */
@@ -24,6 +26,8 @@ const LB_FACTORY = "0x3333333333333333333333333333333333333333";
 /** anvil's published account #0. */
 const ATTESTATION_KEY = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 const PII_KEY = Buffer.alloc(32, 7);
+/** The fingerprint secret: a constant test key, 64 hex characters. */
+const NAME_HMAC_KEY = Buffer.alloc(32, 5);
 
 /** A mainnet deployment with the legal-body feature on that boots: a production provider with the
  *  identity and SSN-key floors, controller mode, the factory and the attestation key. */
@@ -41,6 +45,7 @@ const MAINNET_LEGAL_BODY = {
   DOOLA_API_KEY: "dk_live_key",
   DOOLA_WEBHOOK_SECRET: "whsec_live",
   FORMATION_PII_KEY: PII_KEY.toString("base64"),
+  IDENTITY_NAME_HMAC_KEY: NAME_HMAC_KEY.toString("hex"),
   LEGAL_BODY_FACTORY_ADDRESS: LB_FACTORY,
   NOVI_ATTESTATION_KEY: ATTESTATION_KEY,
 };
@@ -116,6 +121,30 @@ test("the same deployment with the key boots, and the keyring is parsed once", (
   expect(cfg.pii).toBe(cfg.formation?.pii);
 });
 
+test("the PII key without the fingerprint key refuses to boot", () => {
+  const { IDENTITY_NAME_HMAC_KEY: _fingerprint, ...noFingerprint } = MAINNET_LEGAL_BODY;
+  expect(thrownBy(() => loadConfig(noFingerprint))).toBe(
+    "Invalid config: IDENTITY_NAME_HMAC_KEY is required with FORMATION_PII_KEY: the identity record's duplicate check uses it",
+  );
+});
+
+test("the fingerprint key is parsed once at boot: 32 bytes written as 64 hex characters", () => {
+  expect(loadConfig(MAINNET_LEGAL_BODY).identity.nameHmacKey?.equals(NAME_HMAC_KEY)).toBe(true);
+  for (const bad of [
+    NAME_HMAC_KEY.toString("base64"),
+    NAME_HMAC_KEY.toString("hex").slice(1),
+    `${NAME_HMAC_KEY.toString("hex")}0`,
+    `${NAME_HMAC_KEY.toString("hex").slice(2)}zz`,
+    " ",
+  ])
+    expect(
+      thrownBy(() => loadConfig({ ...MAINNET_LEGAL_BODY, IDENTITY_NAME_HMAC_KEY: bad })),
+      bad,
+    ).toBe(
+      "Invalid config: IDENTITY_NAME_HMAC_KEY must be 32 bytes written as 64 hex characters (generate one with: openssl rand -hex 32)",
+    );
+});
+
 test("a deployment with no PII key has no keyring", () => {
   expect(loadConfig(BASE).pii).toBeUndefined();
 });
@@ -126,7 +155,7 @@ test("a testnet deployment with the factory and no PII key boots", () => {
   expect(cfg.pii).toBeUndefined();
 });
 
-test("redact() hides the top-level keyring, keeps its ids, and prints the blocked countries sorted", () => {
+test("redact() hides the top-level keyring and the fingerprint key, keeps the key ids, and prints the blocked countries sorted", () => {
   const previous = Buffer.alloc(32, 9);
   const cfg = loadConfig({
     ...MAINNET_LEGAL_BODY,
@@ -134,7 +163,7 @@ test("redact() hides the top-level keyring, keeps its ids, and prints the blocke
     SCREENING_BLOCKED_COUNTRIES: "PRK,CUB,IRN",
   });
   const printed = JSON.stringify(redact(cfg));
-  for (const key of [PII_KEY, previous]) {
+  for (const key of [PII_KEY, previous, NAME_HMAC_KEY]) {
     expect(printed).not.toContain(key.toString("base64"));
     expect(printed).not.toContain(key.toString("hex"));
     expect(printed).not.toContain(JSON.stringify([...key]).slice(1, -1));
@@ -149,5 +178,6 @@ test("redact() hides the top-level keyring, keeps its ids, and prints the blocke
     unusedRetentionDays: 365,
     failedRetentionDays: 30,
     blockedCountries: ["CUB", "IRN", "PRK"],
+    nameHmacKey: "REDACTED",
   });
 });
