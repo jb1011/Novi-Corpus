@@ -4,6 +4,7 @@ description: "The signed statement about an agent's legal body: how to ask for i
 section: "minimal-novi"
 register: "technical"
 reviewed: 2026-11-06
+network: arc-testnet
 ---
 
 <!-- Sources: PR #158 (the statement reference), updated in place per design 7.1: the DAO wording of 2.1 and decision 1 (8), repo links to jb1011/Novi-Corpus, the entityType note (2.1 fact 5), "Attestors: listed at mainnet go-live". Split into check/ and developers/ pages at step 2 (design 3.2). -->

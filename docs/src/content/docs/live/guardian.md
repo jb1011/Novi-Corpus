@@ -14,7 +14,7 @@ The guardian is the one person who answers for the company and its agents. In th
 ## World ID
 
 - World ID gives Novi Corpus a number that is the same each time you prove yourself to us, and different for any other app. It sends us no name, image or document.
-- One person can hold one account. That account can be the guardian of several companies and agents, up to a limit per person.
+- One person can hold one account. That account can be the guardian of several companies and agents.
 - A legal body needs a World ID credential from an Orb, a passport or a Japanese My Number Card. Credentials that only prove a device are refused.
 - A waiver is never accepted for a legal body.
 

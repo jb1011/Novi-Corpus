@@ -11,4 +11,6 @@ reviewed: 2026-11-06
 
 This page is being written. Last reviewed: 6 November 2026.
 
+Until this page is written, see [Legal-body statements](/identity/legal-body-statement/).
+
 The registries and contracts of Novi Managed on Arc testnet are on [The account: caps, allowlist, pause](/testnet/treasury-product/#on-chain-identity).
