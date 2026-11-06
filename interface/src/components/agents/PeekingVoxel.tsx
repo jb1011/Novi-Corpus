@@ -18,11 +18,10 @@ export function PeekingVoxel() {
   const timer = useRef<number | null>(null);
 
   useEffect(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
-      setUp(true);
-      return;
-    }
-    timer.current = window.setTimeout(() => setUp(true), FIRST_WAIT_MS);
+    // With reduced motion the face shows at once and stays (onRiseEnd returns early). The state
+    // still changes from a timer, never synchronously inside the effect.
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    timer.current = window.setTimeout(() => setUp(true), reduced ? 0 : FIRST_WAIT_MS);
     return () => {
       if (timer.current !== null) window.clearTimeout(timer.current);
     };
