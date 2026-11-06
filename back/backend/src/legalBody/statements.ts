@@ -2,6 +2,7 @@ import {
   type Address,
   type Hex,
   type LocalAccount,
+  getAddress,
   isAddress,
   isAddressEqual,
   zeroAddress,
@@ -471,11 +472,13 @@ function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFa
     today: wyomingDate(issuedAt),
   });
   const guardianHumanVerified = realHumanState(deps.world, row.tenantId, deps.environment).ok;
-  // On the statement's own clock, so the fact is of the instant the statement is issued at.
+  // On the statement's own clock, so the fact is of the instant the statement is issued at. The
+  // record is keyed by the checksummed tenant id, and the repository refuses any other spelling:
+  // a row an older version stored unchecksummed must not make the answer throw.
   const guardianIdentityVerified =
     deps.environment === "production" &&
     deps.identity !== undefined &&
-    identityState(deps.identity.repo, row.tenantId, nowMs) === "verified";
+    identityState(deps.identity.repo, getAddress(row.tenantId), nowMs) === "verified";
   return {
     provider: company.provider,
     attestation,

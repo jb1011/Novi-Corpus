@@ -12,13 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { type Address, getAddress, zeroAddress } from "viem";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, test, vi } from "vitest";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { type Deployment, LegalBodyInputError } from "../../src/persistence/legalBodyRepository";
 import {
   type NewStatementRecord,
   SqliteLegalBodyStatementRepository,
   type StatementEvidence,
+  type StatementRecord,
 } from "../../src/persistence/legalBodyStatementRepository";
 import { ANVIL_ACCOUNT_2, CHAIN_ID, FACTORY } from "../helpers/customerCompanyFixtures";
 import {
@@ -346,6 +347,20 @@ describe("the database guards the log against raw SQL", () => {
       )
       .run(row);
   }
+
+  test("a row logged before identityVerified was added reads without it, and the type says it may be absent", () => {
+    const { identityVerified: _absent, ...logged } = EVIDENCE;
+    expect(rawInsert({ evidence: JSON.stringify(logged) }).changes).toBe(1);
+
+    const evidence = log.latest(bodyId)?.evidence;
+    expect(evidence).toEqual(logged);
+    expect(evidence).not.toHaveProperty("identityVerified");
+    // What is read may lack the key; what is written must hold it.
+    expectTypeOf<StatementRecord["evidence"]["identityVerified"]>().toEqualTypeOf<
+      boolean | undefined
+    >();
+    expectTypeOf<StatementEvidence["identityVerified"]>().toEqualTypeOf<boolean>();
+  });
 
   test("UPDATE, DELETE and an INSERT over an existing row abort", () => {
     log.appendIfChanged(record());

@@ -4,6 +4,8 @@
  *
  * Every name here is a made-up fixture.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "vitest";
 import {
   IDENTITY_AAD,
@@ -24,6 +26,19 @@ test("title-casing keeps diacritics", () => {
 test("title-casing starts a new word after a hyphen and after an apostrophe", () => {
   expect(nameOfRecord("JEAN-PIERRE")).toBe("Jean-Pierre");
   expect(nameOfRecord("O'BRIEN")).toBe("O'Brien");
+});
+
+test("title-casing starts a new word after a full stop: initials printed in capitals stay initials", () => {
+  expect(nameOfRecord("J.R.")).toBe("J.R.");
+  expect(nameOfRecord("J.R. DUPONT")).toBe("J.R. Dupont");
+});
+
+test("title-casing reads no locale: the plain case forms, never the locale ones that follow the box's settings", () => {
+  const source = readFileSync(
+    join(import.meta.dirname, "..", "..", "src", "identity", "names.ts"),
+    "utf8",
+  );
+  expect(source).not.toMatch(/\.toLocale(Upper|Lower)Case\(/);
 });
 
 test("title-casing works outside Latin script, final sigma included", () => {

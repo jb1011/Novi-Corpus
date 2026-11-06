@@ -38,6 +38,7 @@ import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
 import {
   ANVIL_ACCOUNT_2,
+  ANVIL_ACCOUNT_3,
   APPROVED,
   CHAIN_ID,
   SANDBOX_TYPED,
@@ -214,6 +215,30 @@ describe("on production the declared door requires a verified guardian identity 
       message: IDENTITY_NOT_VERIFIED_MESSAGE,
     });
     expect(countRows("companies")).toBe(0);
+    expect(countRows("company_declarations")).toBe(0);
+  });
+
+  test("the gate reads the caller's own record: a second World-verified guardian without one is refused while the first is served", async () => {
+    // anvil's published account #3: a test key, never a real wallet.
+    const other = ANVIL_ACCOUNT_3;
+    recordHuman(store, other.address, "1002", nowMs);
+    verified();
+    const app = makeApp(doors());
+
+    const refused = await refusalOf(
+      await post(app, STATEMENT_MESSAGE, await sessionOf(other), DECLARED),
+    );
+    expect(refused).toMatchObject({
+      status: 403,
+      code: "guardian_identity_not_verified",
+      message: IDENTITY_NOT_VERIFIED_MESSAGE,
+    });
+    // The verified guardian's names reach no other caller's answer.
+    expect(refused.text).not.toContain(FIRST);
+    expect(refused.text).not.toContain(LAST);
+    const served = await post(app, STATEMENT_MESSAGE, await sessionOf(guardian), DECLARED);
+    expect(served.status).toBe(200);
+    expect((await served.json()).typedData.message.declarantName).toBe(WRITTEN);
     expect(countRows("company_declarations")).toBe(0);
   });
 

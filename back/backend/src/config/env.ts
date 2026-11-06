@@ -419,7 +419,9 @@ const EnvSchema = z.object({
   /** Days the names of a superseded or abandoned check are kept before they are erased. */
   IDENTITY_FAILED_RETENTION_DAYS: z.coerce.number().int().min(1).default(30),
   /** Document countries a check is never verified for without review: comma-separated ISO
-   *  3166-1 alpha-3 codes, upper case. Parsed by `parseCountryList`. */
+   *  3166-1 alpha-3 codes, upper case. Parsed by `parseCountryList`. An empty value
+   *  (`SCREENING_BLOCKED_COUNTRIES=` with nothing after it) is refused on purpose, so the list
+   *  cannot be cleared by accident. */
   SCREENING_BLOCKED_COUNTRIES: z.string().default("CUB,IRN,PRK"),
 
   // --- FORMATION PAYMENTS (2026-08-26 §6; B1). Built now, shipped OFF. -----------------------

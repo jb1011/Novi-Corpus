@@ -166,6 +166,22 @@ describe("on production the body answer states guardianIdentityVerified, unsigne
     expect((await answerOf(production())).guardianIdentityVerified).toBe(false);
   });
 
+  test("a body row whose tenant id an older version kept in lower case: the record is read under the checksummed spelling", async () => {
+    const row = linkedBody();
+    verified();
+    // An older version could store a tenant id unchecksummed; the column is write-once now, so the
+    // test lifts that guard to make the legacy row.
+    s.db.exec("DROP TRIGGER trg_legal_bodies_write_once");
+    s.db
+      .prepare(
+        "UPDATE legal_bodies SET tenant_id = lower(tenant_id), guardian = lower(guardian) WHERE legal_body_id = ?",
+      )
+      .run(row.legalBodyId);
+    expect(TENANT.toLowerCase()).not.toBe(TENANT);
+
+    expect((await answerOf(production())).guardianIdentityVerified).toBe(true);
+  });
+
   test("the identity record not wired: false", async () => {
     linkedBody();
     verified();

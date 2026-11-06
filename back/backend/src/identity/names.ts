@@ -11,22 +11,26 @@ import { DECLARANT_NAME, applyTextRule } from "../legalBody/textRules";
 
 const WHITESPACE_RUNS = /\s+/g;
 const HAS_LETTER = /\p{L}/u;
-/** The first code point of the field, and the one after a space, a hyphen or an apostrophe. */
-const WORD_START = /(^|[ '-])(.)/gu;
+/** The first code point of the field, and the one after a space, a hyphen, an apostrophe or a
+ *  full stop (so initials such as "J.R." stay initials), when it is not one of those itself: the
+ *  space after "J.R." must not be taken as the word start, or the word after it stays lower case. */
+const WORD_START = /(^|[ '.-])([^ '.-])/gu;
 /** Letters of the Latin script, combining marks, and the punctuation the declarant rule allows. */
 const LATIN_NAME = /^[\p{Script=Latin}\p{M} '.-]+$/u;
 
 /**
  * One field: trimmed, inner whitespace collapsed to one space; then, when the field has letters
- * and equals its upper-case form, each word title-cased (a new word after a space, "-" or "'"),
- * diacritics kept. No locale, so the result does not depend on the box's settings.
+ * and equals its upper-case form, each word title-cased (a new word after a space, "-", "'" or
+ * "."), diacritics kept. The plain case forms, never the locale ones (those follow the process's
+ * locale, a Turkish one lower-casing "I" to a dotless "ı"), so the result does not depend on the
+ * box's settings.
  */
 export function nameOfRecord(printed: string): string {
   const value = printed.trim().replace(WHITESPACE_RUNS, " ");
-  if (!HAS_LETTER.test(value) || value !== value.toLocaleUpperCase()) return value;
+  if (!HAS_LETTER.test(value) || value !== value.toUpperCase()) return value;
   return value
-    .toLocaleLowerCase()
-    .replace(WORD_START, (_, before: string, first: string) => before + first.toLocaleUpperCase());
+    .toLowerCase()
+    .replace(WORD_START, (_, before: string, first: string) => before + first.toUpperCase());
 }
 
 /** The declarant name the declared door compares with: the first name, a space, the last name. */

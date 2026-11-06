@@ -46,10 +46,17 @@ export interface StatementEvidence {
   companyStatus: "draft" | "ready" | "abandoned";
   humanVerified: boolean;
   /** On production, whether the guardian's identity record was verified at the issue; false on a
-   *  sandbox. Not signed, so not in the claims hash: a change of it alone adds no row. Rows logged
-   *  before this field was added hold no such key. */
+   *  sandbox. Not signed, so not in the claims hash: a change of it alone adds no row. Every row
+   *  written holds it; rows logged before it was added do not, so a read may lack it
+   *  (`LoggedStatementEvidence`). */
   identityVerified: boolean;
 }
+
+/** The evidence as a logged row holds it: `identityVerified` is absent from the rows logged before
+ *  it was added, and is read as it is, absent, never filled in. */
+export type LoggedStatementEvidence = Omit<StatementEvidence, "identityVerified"> & {
+  identityVerified?: boolean;
+};
 
 export interface NewStatementRecord {
   legalBodyId: string;
@@ -72,8 +79,10 @@ export interface NewStatementRecord {
   evidence: StatementEvidence;
 }
 
-export interface StatementRecord extends NewStatementRecord {
+export interface StatementRecord extends Omit<NewStatementRecord, "evidence"> {
   id: number;
+  /** As logged: a row logged before `identityVerified` was added holds no such key. */
+  evidence: LoggedStatementEvidence;
   /** UTC, `YYYY-MM-DD HH:MM:SS`, as SQLite's CURRENT_TIMESTAMP writes it. */
   createdAt: string;
 }
@@ -130,7 +139,7 @@ function toRecord(r: Row): StatementRecord {
     observedAtBlock: r.observed_at_block,
     issuedAt: r.issued_at,
     // Valid JSON, by the table's CHECK.
-    evidence: JSON.parse(r.evidence) as StatementEvidence,
+    evidence: JSON.parse(r.evidence) as LoggedStatementEvidence,
     createdAt: r.created_at,
   };
 }
