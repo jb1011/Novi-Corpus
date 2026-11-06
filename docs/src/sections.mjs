@@ -8,6 +8,18 @@
 
 /** @typedef {'overview' | 'minimal-novi' | 'novi-managed' | 'novi-2' | 'developers'} SectionId */
 
+/**
+ * THE MAINNET SWITCH (design 2.6, the step-1 condition).
+ *
+ * `false` until the mainnet deploy ceremony: the Minimal Novi badge then reads
+ * "Arc mainnet (beta), opens in mid-November" everywhere it appears (the tabs, the badge
+ * line, the cards, diagram D6, llms.txt), and every page that states something as live on
+ * mainnet carries that condition through `<Mainnet live>` / `<Mainnet pending>`.
+ * Flip it to `true` in the step-2 PR, the day the beta opens; nothing else changes by hand.
+ * tools/claims-check.mjs refuses a hard-coded "Live on Arc mainnet" while it is `false`.
+ */
+export const MAINNET_LIVE = false;
+
 export const SECTION_IDS = /** @type {const} */ (['overview', 'minimal-novi', 'novi-managed', 'novi-2', 'developers']);
 
 export const SECTIONS = {
@@ -17,8 +29,8 @@ export const SECTIONS = {
 		link: '/live/',
 		icon: 'building',
 		slIcon: 'approve-check-circle',
-		badge: 'Live on Arc mainnet (beta)',
-		short: 'live',
+		badge: MAINNET_LIVE ? 'Live on Arc mainnet (beta)' : 'Arc mainnet (beta), opens in mid-November',
+		short: MAINNET_LIVE ? 'live' : 'opens in mid-November',
 		variant: 'success',
 	},
 	'novi-managed': {

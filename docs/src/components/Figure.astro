@@ -7,6 +7,8 @@
 //
 //   <Figure name="d1" caption="The legal body links one company and one agent both ways."
 //     text={['The company ...', 'The legal body ...']} />
+import { MAINNET_LIVE } from '../sections.mjs';
+
 const files = import.meta.glob('../assets/diagrams/*.svg', {
 	query: '?raw',
 	import: 'default',
@@ -22,10 +24,15 @@ interface Props {
 }
 
 const { name, caption, text } = Astro.props;
+// A drawing may carry two forms of the Minimal Novi badge (D6): <g data-mainnet="live"> and
+// <g data-mainnet="pending">. Keep the one that matches the mainnet switch (design 2.6).
+const dropForm = MAINNET_LIVE ? 'pending' : 'live';
 const load = (variant: 'wide' | 'tall') => {
 	const svg = files[`../assets/diagrams/${name}-${variant}.svg`];
 	if (!svg) throw new Error(`Figure.astro: missing src/assets/diagrams/${name}-${variant}.svg`);
-	return svg.replace(/<!--[\s\S]*?-->\s*/g, '');
+	return svg
+		.replace(/<!--[\s\S]*?-->\s*/g, '')
+		.replace(new RegExp(`<g data-mainnet="${dropForm}">[\\s\\S]*?</g>\\s*`, 'g'), '');
 };
 const wide = load('wide');
 const tall = load('tall');

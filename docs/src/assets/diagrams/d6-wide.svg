@@ -1,5 +1,7 @@
 <!-- Novi Corpus docs diagram D6 (wide). Generated from the approved v0.5 mockup builder;
-     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro. -->
+     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro.
+     The Minimal Novi badge has two forms, data-mainnet="live" and "pending"; Figure.astro keeps
+     the one that matches MAINNET_LIVE in src/sections.mjs (design 2.6). -->
 <svg xmlns="http://www.w3.org/2000/svg" class="wide" viewBox="0 0 960 250" role="img" aria-label="The three products"><title>The three products</title><desc>Minimal Novi says who stands behind the agent; Novi Managed what it holds and pays; Novi 2.0 what it may do in the company&#x27;s name.</desc>
 <defs>
       <pattern id="d6w-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" class="dot"/></pattern>
@@ -19,9 +21,13 @@
 <text class="eb r-live" x="90" y="60">MINIMAL NOVI</text>
 <text class="tt" x="36" y="110">Who stands behind</text>
 <text class="tt" x="36" y="136">the agent</text>
-<rect class="bdg r-live" x="36" y="178" width="251" height="28" rx="14"/>
+<g data-mainnet="live"><rect class="bdg r-live" x="36" y="178" width="251" height="28" rx="14"/>
 <circle class="bdot r-live" cx="52" cy="192" r="4"/>
-<text class="bt" x="64" y="197">Live on Arc mainnet (beta)</text>
+<text class="bt" x="64" y="197">Live on Arc mainnet (beta)</text></g>
+<g data-mainnet="pending"><rect class="bdg r-live" x="36" y="158" width="218" height="50" rx="14"/>
+<circle class="bdot r-live" cx="52" cy="177" r="4"/>
+<text class="bt" x="64" y="182">Arc mainnet (beta),</text>
+<text class="bt" x="64" y="201">opens in mid-November</text></g>
 <rect class="panel" x="344" y="24" width="288" height="210" rx="16"/>
 <rect class="cbg" x="336" y="14" width="288" height="210" rx="16" fill="url(#d6w-card)"/>
 <rect class="cst r-amber" x="336.5" y="14.5" width="287" height="209" rx="16"/>
