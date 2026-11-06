@@ -369,8 +369,7 @@ describe("on production the declarant's name is written from the record, never t
   });
 
   test("a name of record that breaks the declarant rule is answered as a field problem, not a crash", async () => {
-    // Impossible through the operator's command, which holds the name to this rule before it
-    // verifies a record; written straight into the table here.
+    // Written straight into the table: the door holds the name to the rule whatever wrote it.
     passedRecord(nowMs + 365 * DAY_MS, { first: FIRST, last: "Example 2" });
     const refused = await refusalOf(
       await post(makeApp(doors()), STATEMENT_MESSAGE, await sessionOf(guardian), DECLARED),

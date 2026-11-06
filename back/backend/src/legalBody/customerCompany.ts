@@ -318,9 +318,9 @@ function prepare<T>(
   }
 
   // 4. The field rules. Every bad field is named once, in this order. On production the declarant's
-  //    name is the record's first and last names: they passed this rule when the record was
-  //    verified, and they go through it again, so a name that cannot pass reads as a field
-  //    problem rather than a crash. Step 1b returned the record there, so both are defined.
+  //    name is the record's first and last names, held to this rule here whatever wrote the
+  //    record, so a name that breaks it reads as a field problem rather than a crash. Step 1b
+  //    returned the record there, so both are defined.
   const problems: FieldProblem[] = [];
   const declarantName = sandbox
     ? SYNTHETIC_DECLARANT.name

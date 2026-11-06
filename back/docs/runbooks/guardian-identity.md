@@ -107,6 +107,16 @@ document_unverified_other"), never a person's name, address, email or document n
 7. **Redact the session** from the Stripe dashboard once the record is written, within the week.
    Our record is then the only trace of the check.
 
+### Renewal, and a change of name
+
+A guardian verifies again before the check expires (`expiresAt`, three years), or after a change of
+name, by the same procedure: a new link, a new session, and `identity:record --result passed` with
+`--expect-latest` the current check's id. The new check supersedes the current one: the guardian
+stays `verified`, and the expiry counts from the new completion. Every rule of a pass applies, the
+duplicate check and the production rules included, so a renewal that lands in review (a watchlist
+hit, a duplicate) puts the guardian in review until you decide it. A failed session over a verified
+guardian is not recorded as such: revoke first if the guardian must lose the pass.
+
 ### What `identity:record` refuses
 
 - No World ID verification for the guardian action. On production the verification must be a real
@@ -114,8 +124,9 @@ document_unverified_other"), never a person's name, address, email or document n
   refused (`the account has no production World ID verification`). The record copies its nullifier.
 - `--expect-latest` that is not the tenant's latest check: another operator wrote since, or the line
   came from the shell history. Run `identity:show` and decide again.
-- A guardian who is `verified` already: correct a name with `identity:correct-name`, or revoke
-  first (`identity:revoke`) when a new check is really needed.
+- On a guardian who is `verified` already, `--result failed` or `--result needs_review`: a renewal
+  records `--result passed` (above). Correct a name with `identity:correct-name`, or revoke first
+  (`identity:revoke`) when a failed check or a review must be recorded.
 - `FORMATION_PII_KEY` missing: the names are encrypted under it. `identity:show`, `identity:accept`
   and `identity:correct-name` refuse for the same reason.
 - On production, `--result passed` without `--liveness passed`, or with `--watchlist not_run`.
@@ -157,6 +168,12 @@ deleted.
   `duplicate_identity`, or revoke the other first.
 - `identity:refuse <tenantId>`: it was not. A failed row without names. Also for an attempt that
   never completed.
+
+On production a passed row needs the face match, the sanctions search and a name that passes the
+name rule, however it is written: `identity:accept` refuses a review recorded with `--liveness`
+other than `passed` or with `--watchlist not_run` (refuse it and record a new check), and a review
+whose name breaks the rule (correct it first with `identity:correct-name`). `identity:correct-name`
+refuses to land a check `passed` without the face match and the search in the same way.
 
 Each decision takes only its own codes, `other` in both:
 

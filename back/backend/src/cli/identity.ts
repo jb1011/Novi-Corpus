@@ -238,6 +238,32 @@ function shapeChecked(row: NewGuardianIdentityCheck): NewGuardianIdentityCheck {
   }
 }
 
+/**
+ * A row that will read `passed` on production rests on the face match, the sanctions search and
+ * the name rule, however it was built: `identity:record`, `identity:accept` or
+ * `identity:correct-name`. Each refusal names the way out. A sandbox row is held to none of it.
+ */
+function assertProductionPass(
+  row: NewGuardianIdentityCheck,
+  names: { first: string; last: string } | null,
+): void {
+  if (row.status !== "passed" || row.environment !== "production") return;
+  if (row.liveness !== "passed")
+    refuse(
+      "on production a passed check needs the face match (--liveness passed), and this check has none: refuse it with identity:refuse and record a new check",
+    );
+  if (row.watchlist !== "clear" && row.watchlist !== "hit")
+    refuse(
+      "on production a passed check needs the sanctions search (--watchlist clear or hit), and this check has none: refuse it with identity:refuse and record a new check",
+    );
+  // A passed row always holds its names (the shape check); none reads as a name with neither part.
+  const problem = nameRuleProblem(names?.first ?? "", names?.last ?? "");
+  if (problem !== null)
+    refuse(
+      `on production a passed check needs a name that passes the name rule (${problem}): correct it with identity:correct-name first`,
+    );
+}
+
 /** What a row would hold, for the dry run: never a name, the hmac or the nullifier. */
 function planOf(row: NewGuardianIdentityCheck): Record<string, unknown> {
   return {
@@ -343,7 +369,9 @@ const REASON_FLAGS: OptionTable = [
  * `needs_review`, with its reasons, when the watchlist search hit, the document was out of date,
  * its country is blocked, the name breaks the name rule, or another tenant's current passed check
  * holds the same name and country (the other check ids are printed, never the name). A provider's
- * own review (`--result needs_review`) carries `provider_flag` first.
+ * own review (`--result needs_review`) carries `provider_flag` first. On a verified guardian only
+ * `--result passed` is taken: a renewal, or a new check after a change of name, which supersedes
+ * the current pass and has its expiry from its own completion.
  */
 export function recordIdentity(
   db: Database.Database,
@@ -414,11 +442,16 @@ export function recordIdentity(
     const nullifier = guardianNullifier(world, tenantId, environment);
     const latest = repo.latest(tenantId);
     assertExpectedLatest(tenantId, latest, expected);
-    // The latest row decides the state: a new check on top of a valid pass would lock a verified
-    // guardian out of every production door until it is decided.
-    if (latest !== undefined && identityState(repo, tenantId, nowMs) === "verified")
+    // The latest row decides the state: a failed check or a review on top of a valid pass would
+    // lock a verified guardian out of every production door. A pass is a renewal, or a new check
+    // after a change of name: it supersedes the current one, under every rule of a pass below.
+    if (
+      result !== "passed" &&
+      latest !== undefined &&
+      identityState(repo, tenantId, nowMs) === "verified"
+    )
       refuse(
-        `the guardian is verified until ${isoDate(latest.expiresAt as number)}; use identity:correct-name for a name, or identity:revoke first for a new check`,
+        `the guardian is verified until ${isoDate(latest.expiresAt as number)}; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review`,
       );
     const duplicateOf =
       hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId) : [];
@@ -449,6 +482,7 @@ export function recordIdentity(
       operator,
       operatorOsUser,
     });
+    assertProductionPass(row, names);
     if (opts.yes !== true) return { latest, duplicateOf, row, check: undefined };
     const check = repo.append(row, {
       kind: "recorded",
@@ -541,6 +575,12 @@ function carriedFrom(
   };
 }
 
+/** The row a decision appends, with the names it seals in plaintext (null when it keeps none). */
+interface Built {
+  row: NewGuardianIdentityCheck;
+  names: Names | null;
+}
+
 interface Decision {
   kind: "accepted" | "refused" | "revoked" | "name_corrected";
   /** The ops line of a row written, spelled out so a grep finds its writer. */
@@ -555,13 +595,14 @@ interface Decision {
     carried: Carried,
     repo: SqliteIdentityRepository,
     nowMs: number,
-  ) => NewGuardianIdentityCheck;
+  ) => Built;
 }
 
 /**
  * The shared body of the four decisions: in ONE immediate transaction, the latest row against
- * `--expect-latest`, its status against the decision's, the new row, and (with `--yes`) its append
- * with the decision's event. Then one ops line and the output.
+ * `--expect-latest`, its status against the decision's, the new row (a passed one held to the
+ * production pass), and (with `--yes`) its append with the decision's event. Then one ops line and
+ * the output.
  */
 function decide(
   db: Database.Database,
@@ -584,9 +625,9 @@ function decide(
       refuse(
         `the latest identity check of ${tenantId} is ${latest?.status ?? "none"}: ${d.onlyFrom}`,
       );
-    const row = shapeChecked(
-      d.build(latest, carriedFrom(latest, operator, operatorOsUser), repo, nowMs),
-    );
+    const built = d.build(latest, carriedFrom(latest, operator, operatorOsUser), repo, nowMs);
+    const row = shapeChecked(built.row);
+    assertProductionPass(row, built.names);
     if (opts.yes !== true) return { latest, row, check: undefined };
     const check = repo.append(row, {
       kind: d.kind,
@@ -623,8 +664,9 @@ function decide(
  * appends a passed row carrying the review's facts and its names, sealed again under the current
  * key, with the name hmac computed again under it, so a duplicate is still found after a key
  * rotation; it is refused while another account's current passed check holds the same name and
- * country. `refuse` appends a failed row without names, over a review or an attempt that never
- * completed.
+ * country, and on production unless the check had the face match, the sanctions search and a name
+ * that passes the name rule (`assertProductionPass`). `refuse` appends a failed row without names,
+ * over a review or an attempt that never completed.
  */
 export function reviewIdentity(
   db: Database.Database,
@@ -642,14 +684,17 @@ export function reviewIdentity(
       from: ["needs_review", "started"],
       onlyFrom: "only a needs_review or started check is refused",
       build: (latest, carried, _repo, nowMs) => ({
-        ...carried,
-        status: "failed",
-        // An attempt that never completed is refused now.
-        completedAt: latest.completedAt ?? nowMs,
-        expiresAt: null,
+        row: {
+          ...carried,
+          status: "failed",
+          // An attempt that never completed is refused now.
+          completedAt: latest.completedAt ?? nowMs,
+          expiresAt: null,
+          names: null,
+          nameHmac: null,
+          reviewReasons: [],
+        },
         names: null,
-        nameHmac: null,
-        reviewReasons: [],
       }),
     });
   const pii = requirePii(cfg);
@@ -673,12 +718,15 @@ export function reviewIdentity(
           `another account holds a verified identity with the same name and document country (checks ${elsewhere.join(", ")}): refuse this one with duplicate_identity, or revoke the other first`,
         );
       return {
-        ...carried,
-        status: "passed",
-        expiresAt: latest.expiresAt,
-        names: sealNames(pii, tenantId, names),
-        nameHmac: hmac,
-        reviewReasons: [],
+        row: {
+          ...carried,
+          status: "passed",
+          expiresAt: latest.expiresAt,
+          names: sealNames(pii, tenantId, names),
+          nameHmac: hmac,
+          reviewReasons: [],
+        },
+        names,
       };
     },
   });
@@ -701,12 +749,15 @@ export function revokeIdentity(
     from: ["passed"],
     onlyFrom: "only a passed check is revoked",
     build: (_latest, carried) => ({
-      ...carried,
-      status: "revoked",
-      expiresAt: null,
+      row: {
+        ...carried,
+        status: "revoked",
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+        reviewReasons: [],
+      },
       names: null,
-      nameHmac: null,
-      reviewReasons: [],
     }),
   });
 }
@@ -714,9 +765,11 @@ export function revokeIdentity(
 /**
  * Corrects the name of record of a passed check or a review: the new names through `nameOfRecord`
  * and the name rule (refused when they break it), the full name only when a new one is given (the
- * old one is never carried over a correction), all sealed under the current key with a new hmac. The row passes when the review's reasons other
- * than `name_rule_failed` are none; since the name changed, another tenant's current passed check
- * holding the new name and country adds `duplicate_identity`, as `identity:record` would.
+ * old one is never carried over a correction), all sealed under the current key with a new hmac.
+ * The row passes when the review's reasons other than `name_rule_failed` are none (on production,
+ * only when the check had the face match and the sanctions search: `assertProductionPass`); since
+ * the name changed, another tenant's current passed check holding the new name and country adds
+ * `duplicate_identity`, as `identity:record` would.
  */
 export function correctIdentityName(
   db: Database.Database,
@@ -753,12 +806,15 @@ export function correctIdentityName(
         ? [...remaining, "duplicate_identity"]
         : remaining;
       return {
-        ...carried,
-        status: reviewReasons.length === 0 ? "passed" : "needs_review",
-        expiresAt: latest.expiresAt,
-        names: sealNames(pii, tenantId, names),
-        nameHmac: hmac,
-        reviewReasons,
+        row: {
+          ...carried,
+          status: reviewReasons.length === 0 ? "passed" : "needs_review",
+          expiresAt: latest.expiresAt,
+          names: sealNames(pii, tenantId, names),
+          nameHmac: hmac,
+          reviewReasons,
+        },
+        names,
       };
     },
   });

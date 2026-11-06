@@ -16,7 +16,13 @@ import { tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { recordIdentity, showIdentity, sweepIdentityNames } from "../../src/cli/identity";
+import {
+  correctIdentityName,
+  recordIdentity,
+  reviewIdentity,
+  showIdentity,
+  sweepIdentityNames,
+} from "../../src/cli/identity";
 import { buildCli } from "../../src/cli/index";
 import { type Config, loadConfig } from "../../src/config/env";
 import { nameHmac, parsePiiKey } from "../../src/formation/pii";
@@ -471,21 +477,84 @@ describe("identity:record", () => {
     expect(repo.list(guardian)).toHaveLength(1);
   });
 
-  test("record refuses while the guardian is verified", async () => {
+  test("a renewal pass on a verified guardian is recorded, the guardian stays verified and the expiry moves", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2027, 5, 1, 13) });
+    human(guardian, "1001");
+    const first = await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
+    expect(first.expiresAt).toBe(Date.UTC(2029, 10, 10, 12));
+
+    const renewal = await recorded(guardian, {
+      "--provider-ref": "vs_test_0002",
+      "--completed-at": "2027-06-01T12:00Z",
+      "--expect-latest": String(first.checkId),
+    });
+
+    expect(renewal).toMatchObject({
+      status: "passed",
+      reviewReasons: [],
+      // From the new completion, three calendar years on.
+      expiresAt: Date.UTC(2030, 5, 1, 12),
+    });
+    expect(latestOf(guardian)).toMatchObject({
+      checkId: renewal.checkId,
+      providerRef: "vs_test_0002",
+    });
+    expect(showIdentity(db, config(), guardian)).toMatchObject({
+      state: "verified",
+      latestCheckId: renewal.checkId,
+    });
+  });
+
+  test("a renewal pass is held to every rule of a pass, the duplicate check included", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const held = await recorded(guardian);
+    const own = await recorded(second, { "--name-first": "Ana", "--name-last": "Example" });
+
+    // The second guardian renews under the name another account's current pass holds.
+    const renewal = await recorded(second, {
+      "--provider-ref": "vs_test_0002",
+      "--expect-latest": String(own.checkId),
+    });
+
+    expect(renewal).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["duplicate_identity"],
+      duplicateOf: [held.checkId],
+    });
+  });
+
+  test("a failed or needs_review result on a verified guardian is refused", async () => {
     vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2026, 10, 10, 13) });
     human(guardian, "1001");
     const first = await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
+    const VERIFIED =
+      "refusing: the guardian is verified until 2029-11-10; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review";
 
     expect(
       await refusal(
         recordLine(guardian, {
           "--provider-ref": "vs_test_0002",
+          "--result": "needs_review",
           "--expect-latest": String(first.checkId),
         }),
       ),
-    ).toBe(
-      "refusing: the guardian is verified until 2029-11-10; use identity:correct-name for a name, or identity:revoke first for a new check",
-    );
+    ).toBe(VERIFIED);
+    expect(
+      await refusal(
+        recordLine(guardian, {
+          "--provider-ref": "vs_test_0002",
+          "--result": "failed",
+          "--name-first": null,
+          "--name-last": null,
+          "--watchlist": null,
+          "--reason-code": "selfie_mismatch",
+          "--reason": REASON,
+          "--expect-latest": String(first.checkId),
+        }),
+      ),
+    ).toBe(VERIFIED);
+    expect(repo.list(guardian)).toHaveLength(1);
   });
 
   test("record failed with --name-first refuses", async () => {
@@ -998,6 +1067,172 @@ describe("identity:correct-name", () => {
     ).toBe(
       `refusing: the names of check ${passed.checkId} were erased: record a new check instead`,
     );
+  });
+});
+
+// ── the production pass, however the row is built ─────────────────────────────────────────────
+
+describe("on production a passed row needs the face match, the sanctions search and the name rule, however it is built", () => {
+  const production = () => config({ arcNetwork: "mainnet" });
+  /** The options of a decision, as commander hands them over. */
+  const decided = (expectLatest: number, reasonCode: string) => ({
+    operator: OPERATOR,
+    expectLatest: String(expectLatest),
+    reasonCode,
+    reason: REASON,
+    yes: true,
+  });
+  const NO_FACE_MATCH =
+    "refusing: on production a passed check needs the face match (--liveness passed), and this check has none: refuse it with identity:refuse and record a new check";
+  const NO_SEARCH =
+    "refusing: on production a passed check needs the sanctions search (--watchlist clear or hit), and this check has none: refuse it with identity:refuse and record a new check";
+
+  test("accept of a production review recorded with --liveness not_run, or without the sanctions search, is refused", () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const cfg = production();
+    recordIdentity(db, cfg, guardian, recordOpts({ result: "needs_review", liveness: "not_run" }));
+    recordIdentity(
+      db,
+      cfg,
+      second,
+      recordOpts({ result: "needs_review", watchlist: "not_run", nameFirst: "Ana" }),
+    );
+    const noFace = latestOf(guardian);
+    const noSearch = latestOf(second);
+    expect(noFace).toMatchObject({ status: "needs_review", environment: "production" });
+
+    expect(
+      thrownBy(() =>
+        reviewIdentity(
+          db,
+          cfg,
+          "accept",
+          guardian,
+          decided(noFace.checkId, "provider_flag_cleared"),
+        ),
+      ),
+    ).toBe(NO_FACE_MATCH);
+    expect(
+      thrownBy(() =>
+        reviewIdentity(
+          db,
+          cfg,
+          "accept",
+          second,
+          decided(noSearch.checkId, "provider_flag_cleared"),
+        ),
+      ),
+    ).toBe(NO_SEARCH);
+    // The dry run refuses what the write would.
+    expect(
+      thrownBy(() =>
+        reviewIdentity(db, cfg, "accept", guardian, {
+          ...decided(noFace.checkId, "provider_flag_cleared"),
+          yes: false,
+        }),
+      ),
+    ).toBe(NO_FACE_MATCH);
+    expect(latestOf(guardian).checkId).toBe(noFace.checkId);
+    expect(latestOf(second).checkId).toBe(noSearch.checkId);
+    // The way out the refusal names.
+    reviewIdentity(db, cfg, "refuse", guardian, decided(noFace.checkId, "other"));
+    expect(latestOf(guardian).status).toBe("failed");
+  });
+
+  test("accept of a name_rule_failed review is refused until identity:correct-name", () => {
+    human(guardian, "1001");
+    const cfg = production();
+    recordIdentity(
+      db,
+      cfg,
+      guardian,
+      recordOpts({ nameFirst: "伟", nameLast: "王", watchlist: "hit" }),
+    );
+    const review = latestOf(guardian);
+    expect(review.reviewReasons).toEqual(["watchlist_hit", "name_rule_failed"]);
+
+    const refused = thrownBy(() =>
+      reviewIdentity(
+        db,
+        cfg,
+        "accept",
+        guardian,
+        decided(review.checkId, "watchlist_false_positive"),
+      ),
+    );
+    expect(refused).toBe(
+      "refusing: on production a passed check needs a name that passes the name rule (name must be written in the Latin script): correct it with identity:correct-name first",
+    );
+    expect(latestOf(guardian).checkId).toBe(review.checkId);
+
+    correctIdentityName(db, cfg, guardian, {
+      ...decided(review.checkId, "other_script"),
+      nameFirst: "Wei",
+      nameLast: "WANG",
+    });
+    const corrected = latestOf(guardian);
+    expect(corrected).toMatchObject({ status: "needs_review", reviewReasons: ["watchlist_hit"] });
+    reviewIdentity(
+      db,
+      cfg,
+      "accept",
+      guardian,
+      decided(corrected.checkId, "watchlist_false_positive"),
+    );
+    expect(latestOf(guardian)).toMatchObject({ status: "passed", environment: "production" });
+  });
+
+  test("correct-name onto passed on production with liveness not_run is refused", () => {
+    human(guardian, "1001");
+    const cfg = production();
+    recordIdentity(
+      db,
+      cfg,
+      guardian,
+      recordOpts({ result: "needs_review", liveness: "not_run", nameFirst: "伟", nameLast: "王" }),
+    );
+    const recordedRow = latestOf(guardian);
+    expect(recordedRow.reviewReasons).toEqual(["provider_flag", "name_rule_failed"]);
+    // A review whose one reason is the name, its face match not run: no command writes it today
+    // (such a review carries provider_flag), so it is written straight into the table, as an
+    // earlier version could have written it. Its names stay sealed to this tenant.
+    const { checkId: _checkId, namesErasedAt: _erased, ...facts } = recordedRow;
+    const review = repo.append(
+      { ...facts, supersedesCheckId: recordedRow.checkId, reviewReasons: ["name_rule_failed"] },
+      {
+        kind: "recorded",
+        at: Date.now(),
+        actor: OPERATOR,
+        actorOsUser: null,
+        reasonCode: null,
+        reason: null,
+      },
+    );
+
+    expect(
+      thrownBy(() =>
+        correctIdentityName(db, cfg, guardian, {
+          ...decided(review.checkId, "other_script"),
+          nameFirst: "Wei",
+          nameLast: "Wang",
+        }),
+      ),
+    ).toBe(NO_FACE_MATCH);
+    expect(latestOf(guardian).checkId).toBe(review.checkId);
+  });
+
+  test("on a sandbox nothing changes: a review without the face match or the search is accepted", async () => {
+    human(guardian, "1001");
+    const review = await recorded(guardian, {
+      "--result": "needs_review",
+      "--liveness": "not_run",
+      "--watchlist": "not_run",
+    });
+
+    await run(decisionLine("identity:accept", guardian, review.checkId, "provider_flag_cleared"));
+
+    expect(latestOf(guardian)).toMatchObject({ status: "passed", environment: "sandbox" });
   });
 });
 
