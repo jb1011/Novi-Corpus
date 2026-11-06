@@ -4,9 +4,12 @@ description: "Readable names for agents under novicorpus.eth."
 section: "novi-managed"
 register: "technical"
 network: "arc-testnet"
+reviewed: 2026-11-06
 ---
 
-Each onboarded agent has an ENS name:
+<!-- Sources: the HonKit page identity/ens.md, moved per design 3.4. -->
+
+Each Novi Managed agent has an ENS name:
 
 ```text
 <publicId>.novicorpus.eth
@@ -14,7 +17,7 @@ Each onboarded agent has an ENS name:
 
 Example: [`demo.novicorpus.eth`](https://sepolia.app.ens.domains/demo.novicorpus.eth).
 
-Names are on **Ethereum Sepolia**. Agent state is on **Arc**. Lookups use CCIP-Read (EIP-3668) and a wildcard resolver (ENSIP-10).
+Names are on **Ethereum Sepolia**. Agent state is on **Arc testnet**. Lookups use CCIP-Read (EIP-3668) and a wildcard resolver (ENSIP-10).
 
 ## Wildcard
 
@@ -59,7 +62,7 @@ The apex `novicorpus.eth` resolves to a configured address. It is not the `NoviC
 | `agent-endpoint[web]` | App origin. |
 | `com.novicorpus.attestor` | The address that signs [legal-body statements](/identity/legal-body-statement/), in CAIP-10 form: `eip155:<chainId>:<EIP-55 address>`, where `chainId` is the chain the statements are about. Empty when the deployment has no attestation key. |
 
-The attestor record is served by Novi's gateway and signed by its key, like every record of this name. It is a convenience: it is not independent of Novi's servers.
+The attestor record is served by Novi Corpus's gateway and signed by its key, like every record of this name. It is a convenience: it is not independent of Novi Corpus's servers. The attestors to pin are listed on [Attestors and pinned addresses](/check/attestors/) at the mainnet go-live.
 
 ## ENSIP-25
 

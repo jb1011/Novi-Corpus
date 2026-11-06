@@ -4,7 +4,10 @@ description: "Connect an agent over MCP, and the tools it can call."
 section: "novi-managed"
 register: "technical"
 network: "arc-testnet"
+reviewed: 2026-11-06
 ---
+
+<!-- Sources: the HonKit pages agents/connect.md and agents/mcp.md, moved per design 3.4, with the wording fixes of audit note D; regenerated from server.ts at step 3 (design 3.3). -->
 
 ## Connect an agent
 
@@ -35,7 +38,7 @@ The key is scoped to **that one entity** at the capability you chose.
 4. Paste into the agent. Give it the link code.
 5. Agent: `claim_connection(linkCode)` then `onboard_agent(spec, passkeyId)`.
 
-`provision` is required on bootstrap because the next call creates a new LLC, which moves platform resources, not just funds already in a treasury.
+`provision` is required on bootstrap because the next call creates a new legal body and its treasury, which moves platform resources, not just funds already in a treasury.
 
 Link codes are single use, short lived, and tenant scoped. A wrong tenant attempt fails uniformly and does not burn the owner's code.
 
@@ -70,7 +73,7 @@ Also generated: Codex, OpenClaw, Gemini CLI, Windsurf, Cline, Hermes, VS Code (`
 
 Client config formats still move. If a snippet fails, use the Claude Code CLI form or the generic `{ url, headers: { Authorization } }` object.
 
-Full operator guide in the repo: `back/docs/BYOA_INTEGRATION.md`.
+Full operator guide in the repo: [`back/docs/BYOA_INTEGRATION.md`](https://github.com/jb1011/Novi-Corpus/blob/main/back/docs/BYOA_INTEGRATION.md).
 
 ## MCP tools
 
@@ -87,13 +90,13 @@ A scope miss returns a uniform "not found" / "not authorized". That is intention
 | `get_entity(id)` | One body. Poll this after `onboard_agent`. |
 | `treasury_status(id)` | Available balance, cap, paused, allowlist |
 | `get_job(jobKey)` / `list_jobs(id)` | Job progress |
-| `resolve_agent(name)` | Public ENS + ENSIP-25 verdict for **any** Novi Corpus agent. No capability gate. |
+| `resolve_agent(name)` | Public ENS + ENSIP-25 verdict for **any** agent with a Novi Managed ENS name. No capability gate. |
 
 ### Earn (`earn` and above)
 
 | Tool | Purpose |
 | --- | --- |
-| `run_job(id, budgetUsdc?)` | Run an ERC-8183 job. Default budget `1.00` USDC. Returns `{ jobKey, status }`. Poll `get_job`. |
+| `run_job(id, budgetUsdc?)` | Run a demonstration ERC-8183 job. Default budget `1.00` USDC (a decimal string). Returns `{ jobKey, status }`. Poll `get_job`. |
 
 Platform funded. Capped by `maxJobBudget` and `maxInflightJobsPerTenant` so a loop cannot drain the job wallet.
 

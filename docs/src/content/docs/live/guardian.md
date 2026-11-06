@@ -1,94 +1,31 @@
 ---
 title: "The guardian"
-description: "The guardian's controls, and the World ID step."
+description: "The one person who answers for the company, how World ID checks them, and what they can do."
 section: "minimal-novi"
 register: "plain"
+network: "arc-mainnet"
+reviewed: 2026-11-06
 ---
 
-## Guardian controls
+<!-- Sources: the HonKit pages product/guardian.md and identity/world.md, with the fact fixes of audit note B (guardian rows 1, 15, 16; World rows 1 to 9; "the mainnet guardian"); LegalBodyFactory.sol (guardian-signed amendments, 48 hours to 30 days, only the guardian dissolves). The testnet controls moved to /testnet/treasury-product/ and AgentBook to /testnet/agentbook/. Rewritten in full at step 2 (design 3.3). -->
 
-The guardian is the natural person behind the LLC and an on chain role. The agent cannot change that role.
-
-### Powers on `AgentTreasury`
-
-| Action | What it does |
-| --- | --- |
-| `pause` / `unpause` | Stops or resumes `spend`. Immediate. |
-| `emergencyWithdraw` | Sends the full USDC balance to the **payout address** (not automatically to your wallet). |
-| `setAllowlistEntry` | Add or remove a recipient. |
-| `setOperator` | Change the spending key. |
-| `vetoPolicyUpdate` | Block a scheduled cap or policy change. |
-
-### Powers on `LegalManager`
-
-| Action | What it does |
-| --- | --- |
-| Veto a scheduled operating agreement update | Blocks that hash until you lift the veto |
-| Lift a veto | Lets the manager schedule or execute again |
-| Initiate dissolution | Starts a timelocked wind down |
-| Veto dissolution | Stops a dissolution the other role started, if it is not yet finalized |
-
-Status only moves forward: `Active` → `WindingDown` → `Dissolved`. `spend` stops when status is not `Active`. Remaining assets can be swept only while winding down.
-
-### What you sign
-
-1. **SIWE** to log into the app
-2. **WebAuthn passkey** (also the Turnkey vault root if you chose that custody)
-3. **One transaction per allowlist address** at deploy, from your wallet
-
-Funding the treasury does not need your signature. Policy updates are proposed by the manager and wait in the timelock.
-
-### World ID
-
-Onboarding requires proof of personhood, or an admin issued waiver if the deployment allows it. See [World ID](/live/guardian/#world-id-1).
-
-The stored nullifier is unique per human for this app. The same person cannot open a second guardianship.
-
-### If the agent misbehaves
-
-1. Pause.
-2. Rotate the operator if the spending key may be leaked.
-3. Emergency withdraw if funds should go to the payout address now.
-4. Veto any pending amendment you did not expect.
-
-The dashboard amendment card reads a known hash with a mapping call. Discovering hashes from logs can fail on a pruned RPC. The mapping read is what marks a hash as live.
+The guardian is the one person who answers for the company and its agents. In the record, the guardian is a wallet: the one you sign in with. World ID shows the guardian is one real person; an identity check says who. The name is held, never published.
 
 ## World ID
 
-Wyoming DAO LLCs need a natural person. A passkey proves control of a device. World ID proves the guardian is a **unique human**.
+- World ID gives Novi Corpus a number that is the same each time you prove yourself to us, and different for any other app. It sends us no name, image or document.
+- One person can hold one account. That account can be the guardian of several companies and agents, up to a limit per person.
+- A legal body needs a World ID credential from an Orb, a passport or a Japanese My Number Card. Credentials that only prove a device are refused.
+- A waiver is never accepted for a legal body.
 
-The explainer in the app is `/personhood`. `/proof` redirects there.
 
-### What is stored
+## What the guardian can do
 
-Verification returns a **nullifier**:
+- **Approve the agreement**, and sign every change to it. A change waits in public at least two days and at most a month, and the guardian can stop it. A change the guardian did not sign cannot happen.
+- **Close the legal body.** Only the guardian can start it. Closing the legal body does not dissolve the company.
 
-* The same human, proving to this app, always produces the same nullifier.
-* A different app sees a different number.
-* Name, iris, document, and face are not received.
+Novi Corpus cannot change, close or empty a legal body on its own.
 
-A second guardianship with the same human hits the same nullifier and is refused.
+## Keep the wallet safe
 
-### What is accepted
-
-The request offers **Orb** and **passport / MNC** document tiers. Device only credentials are rejected. Production entity creation uses Orb or NFC passport grade.
-
-Deployments may allow an **admin issued waiver** when the human has no World ID path. That is logged and optional.
-
-### AgentBook
-
-[AgentBook](https://docs.world.org/) is World's registry on World Chain. A lookup asks whether a paying address is linked to a verified human.
-
-* Look up the address that **signed** the payment. That is the **pocket** EOA, not the operator smart account. The operator address will read as unregistered.
-* AgentBook has no unregister.
-* Registration is a separate flow from the guardian gate. Until that flow ships, do not register the operator address. That bind cannot be undone.
-
-### Trust policy
-
-If a seller sets `X402_TRUST_POLICY=accountable-only`, a buyer with no human backing gets HTTP `403` and a remediation body, not a `402` payment challenge. No payment is taken.
-
-Rate limits that are per human apply across all agents that share that human.
-
-### Split of duties
-
-World ID does not pause the treasury, withdraw funds, or file an LLC. Those are guardian powers and formation. See [Guardian controls](/live/guardian/) and [Formation](/live/bring-your-own-agent/).
+The guardian's wallet is fixed. If you lose it, you lose the power to approve changes and to close the legal body. A hardware wallet is advised.
