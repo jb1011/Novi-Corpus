@@ -1,14 +1,15 @@
 import { userInfo } from "node:os";
 import type Database from "better-sqlite3";
 import { config as loadDotenv } from "dotenv";
+import { getAddress } from "viem";
 import { type Config, loadConfig } from "../config/env";
 import { openDatabase } from "../persistence/db";
 
 /**
- * WHAT THE OPERATOR'S COMMANDS SHARE (`company:*`, `legal-body:revoke`, `identity:*`): the rules
- * an operator's name, an expected check id and a reason are held to, the OS user recorded beside
- * the name, the one JSON object a command prints, the refusal it throws (the entry point prints
- * the message and exits non-zero), and the database the configuration names.
+ * WHAT THE OPERATOR'S COMMANDS SHARE (`company:*`, `legal-body:revoke`, `identity:*`, `email:*`):
+ * the rules an operator's name, an expected check id, a reason and a tenant are held to, the OS
+ * user recorded beside the name, the one JSON object a command prints, the refusal it throws (the
+ * entry point prints the message and exits non-zero), and the database the configuration names.
  */
 
 export const OPERATOR_NAME = /^[a-z0-9._-]{2,40}$/;
@@ -50,6 +51,27 @@ export function parseReason(value: string): string {
   return value;
 }
 
+/** A flag's value from its closed list; a missing value is refused like a wrong one. */
+export function oneOf<T extends string>(
+  flag: string,
+  value: string | undefined,
+  allowed: readonly T[],
+): T {
+  if (value === undefined || !(allowed as readonly string[]).includes(value))
+    refuse(`${flag} must be one of ${allowed.join(", ")}`);
+  return value as T;
+}
+
+/** A tenant (a guardian's account, its wallet address) in the one spelling its rows are kept
+ *  under: EIP-55 checksummed. Anything that is not an address is refused. */
+export function parseTenant(value: string): string {
+  try {
+    return getAddress(value);
+  } catch {
+    return refuse("<tenantId> must be a wallet address");
+  }
+}
+
 /** The OS user running the command, recorded on every check beside the operator's name. */
 export function osUser(): string {
   try {
@@ -71,6 +93,20 @@ export function print(output: Record<string, unknown>): void {
 export function operatorConfig(): Config {
   loadDotenv();
   return loadConfig();
+}
+
+/**
+ * Whether the database holds every table named: false on a database the API of this build has not
+ * migrated yet (the operator's commands never migrate; the API does at its start), so a command
+ * can say so instead of failing on a SQLite error.
+ */
+export function hasTables(db: Database.Database, names: readonly string[]): boolean {
+  const present = new Set(
+    (
+      db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[]
+    ).map((r) => r.name),
+  );
+  return names.every((name) => present.has(name));
 }
 
 /**

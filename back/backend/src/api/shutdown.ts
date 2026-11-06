@@ -26,11 +26,20 @@ export interface SignalSource {
   on(signal: string, handler: () => void): unknown;
 }
 
+/**
+ * A sweeper as shutdown stops it. `stop()` cancels its timers at once; a sweeper whose run may
+ * still be going when it is stopped (the scheduler) returns a promise that settles when that run
+ * has finished, and the drain awaits it, beside the tasks and under the same bound.
+ */
+export interface Stoppable {
+  stop(): void | Promise<void>;
+}
+
 export interface ShutdownDeps {
   /** Stopped FIRST, so no new work starts while the drain is running. */
-  sweeper?: { stop(): void };
+  sweeper?: Stoppable;
   /** Every other sweeper, stopped right after `sweeper`, before the drain, for the same reason. */
-  sweepers?: { stop(): void }[];
+  sweepers?: Stoppable[];
   /** Awaited, with a bound. */
   tasks?: { settled(timeoutMs?: number): Promise<boolean> };
   /** Closed after the drain: in-flight requests finish, no new connections are accepted. */
@@ -53,13 +62,28 @@ export function shouldInstallSignalHandlers(
   return !env.VITEST && env.NODE_ENV !== "test";
 }
 
+/** Whether every promise settled (either way) within `ms`. The timer never holds the process. */
+function settledWithin(promises: Promise<unknown>[], ms: number): Promise<boolean> {
+  if (promises.length === 0) return Promise.resolve(true);
+  return new Promise<boolean>((resolve) => {
+    const t = setTimeout(() => resolve(false), ms);
+    (t as { unref?: () => void }).unref?.();
+    void Promise.allSettled(promises).then(() => {
+      clearTimeout(t);
+      resolve(true);
+    });
+  });
+}
+
 /**
  * Install SIGTERM/SIGINT. Returns the shutdown routine itself, so a caller (or a test) can run it
  * without a signal.
  *
  * Order matters and is the whole point:
  *   1. stop the sweepers — no NEW work while we are trying to finish the old;
- *   2. drain tracked background tasks, bounded, so one wedged doola call cannot hang the deploy;
+ *   2. drain tracked background tasks and the runs the stopped sweepers still have going (the
+ *      promises their `stop()` returned), together and bounded, so one wedged doola call or job
+ *      cannot hang the deploy;
  *   3. close the HTTP server, letting in-flight requests finish;
  *   4. exit.
  *
@@ -78,14 +102,20 @@ export function installShutdownHandlers(d: ShutdownDeps = {}): (signal: string) 
     shuttingDown = true;
     opsLog("api_stop", { signal });
 
-    d.sweeper?.stop();
-    for (const sweeper of d.sweepers ?? []) sweeper.stop();
+    const stopping: Promise<unknown>[] = [];
+    for (const sweeper of [...(d.sweeper ? [d.sweeper] : []), ...(d.sweepers ?? [])]) {
+      const stopped = sweeper.stop();
+      if (stopped instanceof Promise) stopping.push(stopped);
+    }
 
-    if (d.tasks) {
-      const drained = await d.tasks.settled(drainMs);
+    if (d.tasks || stopping.length > 0) {
+      const [tasksDrained, runsDrained] = await Promise.all([
+        d.tasks ? d.tasks.settled(drainMs) : true,
+        settledWithin(stopping, drainMs),
+      ]);
       // Said out loud either way: "we exited with work outstanding" is exactly the line an
       // operator wants in journald when the next tick has to clean something up.
-      opsLog("api_drain", { signal, drained, drainMs });
+      opsLog("api_drain", { signal, drained: tasksDrained && runsDrained, drainMs });
     }
 
     if (d.server) {

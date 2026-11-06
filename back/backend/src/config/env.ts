@@ -3,6 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import { arcTestnet } from "../chains";
+import { SVIX_MIN_KEY_BYTES, decodeSvixSecret } from "../email/svix";
 import { type PiiKeyring, parseNameHmacKey, parsePiiKey } from "../formation/pii";
 import { usdToUnits } from "../policy/units";
 import type { Address, Hex } from "../types";
@@ -122,6 +123,31 @@ function isHttpsOrigin(raw: string): boolean {
     u.username === "" &&
     u.password === "" &&
     u.pathname === "/" &&
+    u.search === "" &&
+    u.hash === ""
+  );
+}
+
+/** An email address as the email settings accept it: something, one `@`, a dotted domain. */
+const ADDRESS_FORM = "[^\\s@<>]+@[^\\s@<>]+\\.[^\\s@<>]+";
+/** One plain address: EMAIL_REPLY_TO, and the address an operator's email command takes. */
+export const PLAIN_ADDRESS = new RegExp(`^${ADDRESS_FORM}$`);
+/** `Name <address>` or a plain address. */
+const EMAIL_FROM_FORM = new RegExp(`^(?:[^<>\\r\\n]*[^<>\\s] <${ADDRESS_FORM}>|${ADDRESS_FORM})$`);
+
+/** An http or https URL a path can be appended to: no query, fragment or userinfo. False (never a
+ *  throw) for anything `URL` cannot parse, for the reason `isHttpsUrl` gives. */
+function isLinkBase(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  return (
+    (u.protocol === "https:" || u.protocol === "http:") &&
+    u.username === "" &&
+    u.password === "" &&
     u.search === "" &&
     u.hash === ""
   );
@@ -430,6 +456,87 @@ const EnvSchema = z.object({
    *  (`SCREENING_BLOCKED_COUNTRIES=` with nothing after it) is refused on purpose, so the list
    *  cannot be cleared by accident. */
   SCREENING_BLOCKED_COUNTRIES: z.string().default("CUB,IRN,PRK"),
+
+  // --- THE EMAIL SYSTEM (trust-and-access T-A, PR 2a). ---------------------------------------
+  // Wired only where PUBLIC_APP_URL is set (`buildEmail` below): a box that sets none of these,
+  // the testnet box, has no email system and sends nothing.
+  /** Which sender delivers: the provider, or the console sender (one ops line per email, nothing
+   *  sent). */
+  EMAIL_PROVIDER: z.preprocess(blankAsUnset, z.enum(["resend", "console"]).default("console")),
+  /** The provider's API key. A secret: masked by redact(). Required with EMAIL_PROVIDER=resend.
+   *  One token of visible ASCII: it goes into a header, and a space, a control character or a
+   *  non-ASCII character there would fail every send instead of the boot. */
+  RESEND_API_KEY: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .trim()
+      .regex(
+        /^[\x21-\x7E]+$/,
+        "must be one token, with no space, control or non-ASCII character (it goes into a header)",
+      )
+      .optional(),
+  ),
+  /** The signing secret of the provider's delivery webhook, `whsec_` and the base64 secret, whose
+   *  key decodes to at least 16 bytes (`decodeSvixSecret`, the route's own reading). A secret:
+   *  masked by redact(), and never echoed by a refusal. Required with EMAIL_PROVIDER=resend. */
+  RESEND_WEBHOOK_SECRET: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .trim()
+      .regex(
+        /^whsec_[A-Za-z0-9+/]+={0,2}$/,
+        "must be the webhook signing secret: the whsec prefix, an underscore, then base64",
+      )
+      .refine(
+        (v) => decodeSvixSecret(v) !== undefined,
+        `must be the webhook signing secret: its base64 key must decode to at least ${SVIX_MIN_KEY_BYTES} bytes`,
+      )
+      .optional(),
+  ),
+  /** The sender every email names: `Name <address>` or an address. */
+  EMAIL_FROM: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .trim()
+      .regex(EMAIL_FROM_FORM, "must be an address, or a name and an address in angle brackets")
+      .optional(),
+  ),
+  /** Where replies go, when not to EMAIL_FROM: a plain address. */
+  EMAIL_REPLY_TO: z.preprocess(
+    blankAsUnset,
+    z.string().trim().regex(PLAIN_ADDRESS, "must be a plain address").optional(),
+  ),
+  /** The company's postal address, one line, printed at the foot of every email. */
+  EMAIL_POSTAL_ADDRESS: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .trim()
+      .max(300)
+      .refine((v) => !/[\r\n]/.test(v), "must be one line")
+      .optional(),
+  ),
+  /** The app's public URL (e.g. https://www.novicorpus.com): every link in an email is built on
+   *  it, and setting it is what turns the email system on. */
+  PUBLIC_APP_URL: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .trim()
+      .url()
+      .refine(isLinkBase, "must be an http or https URL with no query, fragment or credentials")
+      .optional(),
+  ),
+  /** The marketing segment a consenting address is added to. Optional: without it, contact
+   *  writes are skipped (`contact_upsert_skipped`). */
+  RESEND_MARKETING_SEGMENT_ID: z.preprocess(blankAsUnset, z.string().trim().max(128).optional()),
+  /** true|false, default false. With the console sender, each email's ops line also carries its
+   *  text body (never the address), so a staging tester can follow the link it holds. Refused with
+   *  EMAIL_PROVIDER=resend. */
+  EMAIL_CONSOLE_SHOW_BODY: z.preprocess(blankAsUnset, z.string().trim().optional()),
 
   // --- FORMATION PAYMENTS (2026-08-26 §6; B1). Built now, shipped OFF. -----------------------
   /**
@@ -1044,7 +1151,31 @@ export interface Config {
      *  when it is not set, which the boot refuses whenever the PII key is set. */
     nameHmacKey?: Buffer;
   };
+  /**
+   * The email system (trust-and-access PR 2a). Present only where PUBLIC_APP_URL is set; absent,
+   * nothing builds a sender and the box sends nothing (the testnet box). `buildEmail` holds the
+   * rules.
+   */
+  email?: EmailConfig;
 }
+
+/**
+ * The email settings: what every email needs, whichever sender delivers it, and the provider's
+ * key and webhook secret only where the provider is the sender (both are secrets, masked by
+ * redact()).
+ */
+export type EmailConfig = {
+  /** No trailing slash: a path is appended to it. */
+  publicAppUrl: string;
+  from: string;
+  replyTo?: string;
+  /** One line. */
+  postalAddress: string;
+  marketingSegmentId?: string;
+  /** EMAIL_CONSOLE_SHOW_BODY: the console sender prints each text body. Refused with the provider
+   *  sender; read by the console sender only. */
+  consoleShowBody: boolean;
+} & ({ provider: "console" } | { provider: "resend"; apiKey: string; webhookSecret: string });
 
 /** Hedera rail (design 2026-09-10), narrowed to present-and-whole. */
 export type HederaConfig = NonNullable<Config["hedera"]>;
@@ -1189,6 +1320,122 @@ function buildHedera(e: Env): Config["hedera"] {
   };
 }
 
+/** The email settings, in the order `buildEmail` reports them missing. */
+const EMAIL_SETTINGS = [
+  "EMAIL_PROVIDER",
+  "RESEND_API_KEY",
+  "RESEND_WEBHOOK_SECRET",
+  "EMAIL_FROM",
+  "EMAIL_REPLY_TO",
+  "EMAIL_POSTAL_ADDRESS",
+  "RESEND_MARKETING_SEGMENT_ID",
+  "EMAIL_CONSOLE_SHOW_BODY",
+] as const;
+
+/**
+ * The email system (trust-and-access PR 2a), wired only when configured.
+ *
+ * PUBLIC_APP_URL is the switch: every link an email carries is built on it, so without it there is
+ * nothing to send and `cfg.email` is absent. With it, every email names its sender and carries the
+ * postal address, whichever provider delivers it. The provider sender also needs its API key and
+ * its webhook secret. Each half-configured shape refuses to boot rather than send nothing quietly:
+ * an email setting with no PUBLIC_APP_URL would wire nothing, and the provider's key on a console
+ * box would send nothing. Values are never echoed: two of them are secrets.
+ */
+function buildEmail(e: Env, env: Record<string, string | undefined>): Config["email"] {
+  if (e.EMAIL_PROVIDER === "resend") {
+    const missing = (
+      [
+        ["RESEND_API_KEY", e.RESEND_API_KEY],
+        ["RESEND_WEBHOOK_SECRET", e.RESEND_WEBHOOK_SECRET],
+        ["EMAIL_FROM", e.EMAIL_FROM],
+        ["EMAIL_POSTAL_ADDRESS", e.EMAIL_POSTAL_ADDRESS],
+        ["PUBLIC_APP_URL", e.PUBLIC_APP_URL],
+      ] as const
+    )
+      .filter(([, value]) => !value)
+      .map(([name]) => name);
+    if (missing.length > 0)
+      throw new Error(`Invalid config: EMAIL_PROVIDER=resend requires ${missing.join(" and ")}`);
+  } else {
+    const keyed = (
+      [
+        ["RESEND_API_KEY", e.RESEND_API_KEY],
+        ["RESEND_WEBHOOK_SECRET", e.RESEND_WEBHOOK_SECRET],
+      ] as const
+    )
+      .filter(([, value]) => value)
+      .map(([name]) => name);
+    if (keyed.length > 0)
+      throw new Error(
+        `Invalid config: ${keyed.join(" and ")} ${keyed.length === 1 ? "is" : "are"} set with EMAIL_PROVIDER=console: the console sender sends nothing and verifies no webhook (set EMAIL_PROVIDER=resend, or unset ${keyed.length === 1 ? "it" : "them"})`,
+      );
+  }
+
+  if (!e.PUBLIC_APP_URL) {
+    // EMAIL_PROVIDER always has a value once parsed (its default), so whether it was SET is read
+    // off the raw environment; the others are unset exactly when they parsed as undefined.
+    const stray = EMAIL_SETTINGS.filter((name) =>
+      name === "EMAIL_PROVIDER" ? blankAsUnset(env[name]) !== undefined : e[name] !== undefined,
+    );
+    if (stray.length > 0)
+      throw new Error(
+        `Invalid config: ${stray.join(" and ")} ${stray.length === 1 ? "is" : "are"} set but PUBLIC_APP_URL is missing: the email system is wired only with PUBLIC_APP_URL, which every link in an email is built on`,
+      );
+    return undefined;
+  }
+
+  const needed = (
+    [
+      ["EMAIL_FROM", e.EMAIL_FROM],
+      ["EMAIL_POSTAL_ADDRESS", e.EMAIL_POSTAL_ADDRESS],
+    ] as const
+  )
+    .filter(([, value]) => !value)
+    .map(([name]) => name);
+  if (needed.length > 0)
+    throw new Error(
+      `Invalid config: PUBLIC_APP_URL turns the email system on, and every email needs EMAIL_FROM and EMAIL_POSTAL_ADDRESS (for either provider): missing ${needed.join(" and ")}`,
+    );
+
+  const common = {
+    publicAppUrl: withoutTrailingSlash(e.PUBLIC_APP_URL),
+    from: e.EMAIL_FROM as string,
+    replyTo: e.EMAIL_REPLY_TO,
+    postalAddress: e.EMAIL_POSTAL_ADDRESS as string,
+    marketingSegmentId: e.RESEND_MARKETING_SEGMENT_ID,
+    // The provider sender refuses it, below.
+    consoleShowBody: boolWithDerivedDefault(
+      e.EMAIL_CONSOLE_SHOW_BODY,
+      false,
+      "EMAIL_CONSOLE_SHOW_BODY",
+    ),
+  };
+
+  // The provider sender sends real email: its box prints no body into its log and builds its
+  // links on https only, on any deployment. Refused by the sender, not by ARC_NETWORK: a console
+  // sender in production mode is the staging proof, which shows the bodies to follow their links
+  // and may run on http://localhost; a real mainnet box runs the provider.
+  if (e.EMAIL_PROVIDER === "resend") {
+    if (common.consoleShowBody)
+      throw new Error(
+        "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused with EMAIL_PROVIDER=resend: it is the console sender's staging setting, and a box that sends real email prints no body into its log",
+      );
+    if (new URL(common.publicAppUrl).protocol !== "https:")
+      throw new Error(
+        "Invalid config: PUBLIC_APP_URL must be https with EMAIL_PROVIDER=resend: every link in a real email is built on it",
+      );
+  }
+  return e.EMAIL_PROVIDER === "resend"
+    ? {
+        ...common,
+        provider: "resend",
+        apiKey: e.RESEND_API_KEY as string,
+        webhookSecret: e.RESEND_WEBHOOK_SECRET as string,
+      }
+    : { ...common, provider: "console" };
+}
+
 export function loadConfig(env: Record<string, string | undefined> = process.env): Config {
   const parsed = EnvSchema.safeParse(env);
   if (!parsed.success) {
@@ -1271,6 +1518,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           : undefined,
       }
     : undefined;
+
+  // The email system (PR 2a): absent unless PUBLIC_APP_URL is set. Its own rules, in its builder.
+  const email = buildEmail(e, env);
 
   const cfg = {
     rpcUrl: e.ARC_TESTNET_RPC_URL,
@@ -1500,6 +1750,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         ? parseNameHmacKey(e.IDENTITY_NAME_HMAC_KEY, "IDENTITY_NAME_HMAC_KEY")
         : undefined,
     },
+    email,
   };
 
   // Formation (design §2), Circle twin: a half-configured doola block must fail at boot, not at
@@ -2213,6 +2464,13 @@ export function redact(cfg: Config): Record<string, unknown> {
           nameHmacKey: cfg.identity.nameHmacKey ? "REDACTED" : undefined,
         }
       : undefined,
+    // The provider's API key sends mail as the company and the webhook secret authenticates the
+    // delivery events: both are bearer credentials. The sender, the postal address and the link
+    // base are what an operator checks in the boot line.
+    email:
+      cfg.email?.provider === "resend"
+        ? { ...cfg.email, apiKey: "REDACTED", webhookSecret: "REDACTED" }
+        : cfg.email,
     ens: cfg.ens ? { ...cfg.ens, signerKey: "REDACTED" } : undefined,
     world: cfg.world ? { ...cfg.world, rpSigningKey: "REDACTED" } : undefined,
     // The attestation key is key material, never a log line. Its address is public and stays.
