@@ -34,6 +34,7 @@ import {
   CHAIN_ID,
   TEST_PII_RING,
   identityOver,
+  recordHuman,
   recordIdentity,
 } from "../helpers/customerCompanyFixtures";
 import {
@@ -180,6 +181,25 @@ describe("on production the body answer states guardianIdentityVerified, unsigne
     expect(TENANT.toLowerCase()).not.toBe(TENANT);
 
     expect((await answerOf(production())).guardianIdentityVerified).toBe(true);
+  });
+
+  test("a second human who verified World ID on the account since is not the record's person: false; the same human again: true", async () => {
+    linkedBody();
+    // The record copies the nullifier of the World row the fixture records for the tenant.
+    recordIdentity(identityRepo, TENANT, {
+      at: CLOCK_MS - 30 * DAY_MS,
+      expiresAt: CLOCK_MS + 3 * 365 * DAY_MS,
+      nullifier: `nullifier-${TENANT.toLowerCase()}`,
+    });
+    expect((await answerOf(production())).guardianIdentityVerified).toBe(true);
+
+    // The same human verifying again: the same nullifier, a newer row.
+    recordHuman(s.store, TENANT, `nullifier-${TENANT.toLowerCase()}`, CLOCK_MS - 30_000);
+    expect((await answerOf(production())).guardianIdentityVerified).toBe(true);
+
+    // Another person's World ID verification on the same account, newer still.
+    recordHuman(s.store, TENANT, "nullifier-second-human", CLOCK_MS - 10_000);
+    expect((await answerOf(production())).guardianIdentityVerified).toBe(false);
   });
 
   test("the identity record not wired: false", async () => {

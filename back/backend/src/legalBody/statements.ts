@@ -15,7 +15,7 @@ import type {
   StatementSnapshot,
 } from "../adapters/arc/legalBodyChain";
 import { type WorldIdDeps, realHumanState } from "../api/routes/worldId";
-import { type IdentityDeps, identityState } from "../identity/state";
+import { type IdentityDeps, agreesWithWorld, currentRecord } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
@@ -439,8 +439,9 @@ interface RecordedFacts {
  *  - whether the guardian is a verified human. A failed read of it throws: it says nothing about
  *    the guardian;
  *  - on production, whether the guardian's identity record is verified at the issue
- *    (`identityState`): false when the tenant has no record, or the record is not wired on this
- *    deployment. A sandbox never reads it, and states false. Not signed: the lookup by agent
+ *    (`currentRecord`) and is the person of the account's current World row (`agreesWithWorld`):
+ *    false when the tenant has no record, the record is another person's, or the record is not
+ *    wired on this deployment. A sandbox never reads it, and states false. Not signed: the lookup by agent
  *    states it beside the statement.
  * A database read that fails throws.
  */
@@ -474,11 +475,15 @@ function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFa
   const guardianHumanVerified = realHumanState(deps.world, row.tenantId, deps.environment).ok;
   // On the statement's own clock, so the fact is of the instant the statement is issued at. The
   // record is keyed by the checksummed tenant id, and the repository refuses any other spelling:
-  // a row an older version stored unchecksummed must not make the answer throw.
+  // a row an older version stored unchecksummed must not make the answer throw. A record of
+  // another person than the account's current World row does not count (`agreesWithWorld`).
+  const identityTenant = getAddress(row.tenantId);
+  const record =
+    deps.environment === "production" && deps.identity !== undefined
+      ? currentRecord(deps.identity.repo, identityTenant, nowMs)
+      : undefined;
   const guardianIdentityVerified =
-    deps.environment === "production" &&
-    deps.identity !== undefined &&
-    identityState(deps.identity.repo, getAddress(row.tenantId), nowMs) === "verified";
+    record !== undefined && agreesWithWorld(record, deps.world, identityTenant);
   return {
     provider: company.provider,
     attestation,

@@ -203,6 +203,23 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       expect(text).not.toContain(LAST);
     });
 
+    test("a second human who verified World ID on the account since: state none, and no names", async () => {
+      verifiedGuardian(VERIFIED);
+      // Another person's World ID verification on the same account, newer than the first.
+      recordHuman(s.store, VERIFIED, "0xnullifier-second-human", T0 + DAY);
+      const { body, text } = await me(makeApp(door, "production"), VERIFIED);
+      expect(body.identity).toEqual({ required: true, state: "none" });
+      expect(text).not.toContain(FIRST);
+      expect(text).not.toContain(LAST);
+    });
+
+    test("the same human verifying World ID again: still verified", async () => {
+      verifiedGuardian(VERIFIED);
+      recordHuman(s.store, VERIFIED, `0xnullifier-${VERIFIED}`, T0 + DAY);
+      const { body } = await me(makeApp(door, "production"), VERIFIED);
+      expect(body.identity).toMatchObject({ required: true, state: "verified", firstName: FIRST });
+    });
+
     test("on sandbox the check is not required", async () => {
       verifiedGuardian(VERIFIED);
       const app = makeApp(door, "sandbox");

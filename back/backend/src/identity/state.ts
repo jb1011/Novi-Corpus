@@ -81,6 +81,23 @@ export function identityState(
   return stateOf(repo.latest(tenantId), nowMs);
 }
 
+/**
+ * Identity design 6.9, the record and the World row must agree: a row that copied a World ID
+ * nullifier counts only while that nullifier is the one of the tenant's current World row for the
+ * guardian action (`findByTenant`, the newest). A second person who verified World ID on the
+ * account since holds the current row, and the first person's record is not theirs. A row without
+ * a nullifier (World ID optional, later) is held to its own state alone. The gate, the `/me` view
+ * and the by-agent lookup's unsigned fact all hold the record to it.
+ */
+export function agreesWithWorld(
+  record: GuardianIdentityCheck,
+  world: WorldIdDeps | undefined,
+  tenantId: string,
+): boolean {
+  if (record.nullifier === null) return true;
+  return world?.store.findByTenant(tenantId, world.cfg.action)?.nullifier === record.nullifier;
+}
+
 /** The tenant's latest row, only while `identityState` is `verified`; else undefined. One read. */
 export function currentRecord(
   repo: IdentityRepository,
@@ -98,9 +115,10 @@ export function currentRecord(
  *
  * The checks, in order: the identity record is wired (else 503 `identity_unavailable`); the tenant
  * has a World row for the guardian action (else 403 `guardian_not_verified`, the sentence
- * `assertRealHuman` answers, so the doors keep one message); its identity state is `verified`
- * (else 403 `guardian_identity_not_verified`). The doors call `assertRealHuman` first, which holds
- * the World row to its credential and environment; this one only needs the row to exist.
+ * `assertRealHuman` answers, so the doors keep one message); its identity state is `verified` and
+ * the record is that World row's person, its nullifier the row's when it holds one (else 403
+ * `guardian_identity_not_verified`). The doors call `assertRealHuman` first, which holds the World
+ * row to its credential and environment; this one reads the row for its existence and nullifier.
  *
  * Each refusal is written out here, its message one string literal: the doors answer it and the
  * legal-body tools pass it on as it is, and a test reads this function to hold every refusal to
@@ -119,14 +137,19 @@ export function assertIdentityVerified(
       503,
       "identity verification is not configured on this deployment",
     );
-  if (world?.store.findByTenant(tenantId, world.cfg.action) === undefined)
+  const worldRow = world?.store.findByTenant(tenantId, world.cfg.action);
+  if (worldRow === undefined)
     throw new ApiError(
       "guardian_not_verified",
       403,
       "the guardian must complete World ID verification first",
     );
   const record = currentRecord(identity.repo, tenantId, nowOf(identity));
-  if (record === undefined)
+  // The record and the World row must agree (`agreesWithWorld`), read from the row in hand.
+  if (
+    record === undefined ||
+    (record.nullifier !== null && record.nullifier !== worldRow.nullifier)
+  )
     throw new ApiError(
       "guardian_identity_not_verified",
       403,
@@ -189,20 +212,22 @@ export function namesOfRecordAtDoor(
 
 /**
  * The `identity` block of `GET /world-id/me`. Required on production. The state is `none` when
- * the tenant has no record or the record is not wired; on `verified` it carries the first and last
- * names and the record's dates, and never the full name, the provider, the country or a reason.
- * A verified record whose names cannot be read is answered 503 (`namesOfRecordAtDoor`).
+ * the tenant has no record, when the record is not wired, and when the latest record is another
+ * person's than the account's current World row (`agreesWithWorld`); on `verified` it carries the
+ * first and last names and the record's dates, and never the full name, the provider, the country
+ * or a reason. A verified record whose names cannot be read is answered 503
+ * (`namesOfRecordAtDoor`).
  */
 export function identityView(
   identity: IdentityDeps | undefined,
-  // Unread today; part of the contract the formed-door slice consumes, for when World ID is optional.
-  _world: WorldIdDeps | undefined,
+  world: WorldIdDeps | undefined,
   tenantId: string,
   environment: "sandbox" | "production",
 ): IdentityView {
   const required = environment === "production";
   if (identity === undefined) return { required, state: "none" };
-  const latest = identity.repo.latest(tenantId);
+  const read = identity.repo.latest(tenantId);
+  const latest = read !== undefined && agreesWithWorld(read, world, tenantId) ? read : undefined;
   const state = stateOf(latest, nowOf(identity));
   if (state !== "verified" || latest === undefined) return { required, state };
   const names = namesOfRecordAtDoor(identity, latest);

@@ -242,6 +242,40 @@ describe("on production the declared door requires a verified guardian identity 
     expect(countRows("company_declarations")).toBe(0);
   });
 
+  test("a second human who verified World ID on the account since is not the record's person: 403 guardian_identity_not_verified at the statement door", async () => {
+    verified();
+    // Another person's World ID verification on the same account, newer than the first: the World
+    // row the gate reads is theirs, while the record names the first person.
+    recordHuman(store, guardian.address, "1002", nowMs + 1000);
+
+    const refused = await refusalOf(
+      await post(makeApp(doors()), STATEMENT_MESSAGE, await sessionOf(guardian), DECLARED),
+    );
+    expect(refused).toMatchObject({
+      status: 403,
+      code: "guardian_identity_not_verified",
+      message: IDENTITY_NOT_VERIFIED_MESSAGE,
+    });
+    expect(refused.text).not.toContain(FIRST);
+    expect(refused.text).not.toContain(LAST);
+    expect(countRows("company_declarations")).toBe(0);
+  });
+
+  test("the same human verifying World ID again keeps the record: the statement is served with the name of record", async () => {
+    verified();
+    // The same nullifier, verified again later: the row is the same person's.
+    recordHuman(store, guardian.address, "1001", nowMs + 1000);
+
+    const served = await post(
+      makeApp(doors()),
+      STATEMENT_MESSAGE,
+      await sessionOf(guardian),
+      DECLARED,
+    );
+    expect(served.status).toBe(200);
+    expect((await served.json()).typedData.message.declarantName).toBe(WRITTEN);
+  });
+
   test("an expired record: 403 guardian_identity_not_verified at the statement door", async () => {
     passedRecord(nowMs - DAY_MS);
     const refused = await refusalOf(

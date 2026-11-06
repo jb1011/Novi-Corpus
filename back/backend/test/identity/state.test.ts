@@ -93,7 +93,9 @@ function row(
 ): NewGuardianIdentityCheck {
   const holdsNames = status !== "failed" && status !== "revoked";
   return {
-    nullifier: "0xnullifier",
+    // The nullifier of the World row `verifiedGuardian` records beside it: the record and the World
+    // row agree.
+    nullifier: `0xnullifier-${tenantId}`,
     tenantId,
     provider: "stripe",
     providerRef: "vs_example",
@@ -285,6 +287,28 @@ describe("assertIdentityVerified", () => {
     expect(assertIdentityVerified(identity, world, tenant(1), "production")).toEqual(passed);
   });
 
+  test("on production, a record of another human than the account's current World row: 403 guardian_identity_not_verified", () => {
+    verifiedGuardian(tenant(1));
+    // A second person verified World ID on the account since: the newer row is theirs.
+    recordHuman(store, tenant(1), "0xnullifier-second-human", T0 + DAY);
+    const e = refusalOf(() => assertIdentityVerified(identity, world, tenant(1), "production"));
+    expect([e.code, e.status, e.message]).toEqual([
+      "guardian_identity_not_verified",
+      403,
+      IDENTITY_NOT_VERIFIED_MESSAGE,
+    ]);
+  });
+
+  test("on production, the same human verifying World ID again keeps the record; a record without a nullifier is held to its state alone", () => {
+    const passed = verifiedGuardian(tenant(1));
+    recordHuman(store, tenant(1), `0xnullifier-${tenant(1)}`, T0 + DAY);
+    expect(assertIdentityVerified(identity, world, tenant(1), "production")).toEqual(passed);
+
+    recordHuman(store, tenant(2), "0xnullifier-2", T0);
+    const unbound = repo.append(row(tenant(2), "passed", { nullifier: null }), recorded);
+    expect(assertIdentityVerified(identity, world, tenant(2), "production")).toEqual(unbound);
+  });
+
   test("every refusal it throws is one of its three codes, its message one string literal", () => {
     const source = readFileSync(
       join(import.meta.dirname, "..", "..", "src", "identity", "state.ts"),
@@ -374,8 +398,9 @@ describe("identityView", () => {
   });
 
   test("a state other than verified carries no name and no date", () => {
+    recordHuman(store, tenant(1), `0xnullifier-${tenant(1)}`, T0);
     repo.append(row(tenant(1), "needs_review"), recorded);
-    repo.append(row(tenant(2), "passed", { expiresAt: NOW }), recorded);
+    verifiedGuardian(tenant(2), { expiresAt: NOW });
     erasedUnused(tenant(3));
     expect(identityView(identity, world, tenant(1), "production")).toEqual({
       required: true,
@@ -388,6 +413,26 @@ describe("identityView", () => {
     expect(identityView(identity, world, tenant(3), "production")).toEqual({
       required: true,
       state: "expired",
+    });
+  });
+
+  test("a record of another human than the account's current World row reads none, whatever its state", () => {
+    verifiedGuardian(tenant(1));
+    recordHuman(store, tenant(1), "0xnullifier-second-human", T0 + DAY);
+    recordHuman(store, tenant(2), `0xnullifier-${tenant(2)}`, T0);
+    repo.append(row(tenant(2), "needs_review"), recorded);
+    recordHuman(store, tenant(2), "0xnullifier-second-human-2", T0 + DAY);
+    for (const n of [1, 2])
+      expect(identityView(identity, world, tenant(n), "production"), `${n}`).toEqual({
+        required: true,
+        state: "none",
+      });
+    // A record without a nullifier reads its own state.
+    recordHuman(store, tenant(3), "0xnullifier-3", T0);
+    repo.append(row(tenant(3), "passed", { nullifier: null }), recorded);
+    expect(identityView(identity, world, tenant(3), "production")).toMatchObject({
+      state: "verified",
+      firstName: FIRST,
     });
   });
 
