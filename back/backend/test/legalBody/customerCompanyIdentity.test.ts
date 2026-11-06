@@ -18,6 +18,7 @@ import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { signSession } from "../../src/auth/session";
+import { parsePiiKey } from "../../src/formation/pii";
 import { IDENTITY_NOT_VERIFIED_MESSAGE, type IdentityDeps } from "../../src/identity/state";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { type CustomerCompanyDeps, SYNTHETIC_DECLARANT } from "../../src/legalBody/customerCompany";
@@ -366,6 +367,53 @@ describe("on production the declarant's name is written from the record, never t
       expect(line).not.toContain(FIRST);
       expect(line).not.toContain(LAST);
     }
+  });
+
+  test("a record sealed under a key no longer configured: 503 identity_unavailable at both doors, and a CRITICAL ops line with ids only", async () => {
+    verified();
+    // The key the record was sealed under is gone: another key is the only one configured.
+    const rotatedAway: IdentityDeps = {
+      ...identity,
+      pii: { current: parsePiiKey(Buffer.alloc(32, 9).toString("base64"), "FORMATION_PII_KEY") },
+    };
+    const app = makeApp(doors({ identity: rotatedAway }));
+    const token = await sessionOf(guardian);
+
+    const atStatement = await refusalOf(await post(app, STATEMENT_MESSAGE, token, DECLARED));
+    const atCreate = await refusalOf(
+      await post(app, CREATE, token, {
+        ...DECLARED,
+        issuedAt: String(Math.floor(nowMs / 1000)),
+        signature: `0x${"ab".repeat(65)}`,
+      }),
+    );
+
+    for (const refused of [atStatement, atCreate])
+      expect(refused).toMatchObject({
+        status: 503,
+        code: "identity_unavailable",
+        message: "identity verification is not configured on this deployment",
+      });
+    const checkId = identityRepo.latest(guardian.address)?.checkId;
+    const unreadable = printed
+      .filter((line) => line.includes('"identity_names_unreadable"'))
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(unreadable).toHaveLength(2);
+    for (const line of unreadable)
+      expect(line).toEqual({
+        opslog: "identity_names_unreadable",
+        at: expect.any(String),
+        level: "error",
+        severity: "CRITICAL",
+        checkId,
+        keyId: TEST_PII_RING.current.id,
+        tenant: guardian.address.slice(0, 10),
+      });
+    for (const line of [...printed, atStatement.text, atCreate.text]) {
+      expect(line).not.toContain(FIRST);
+      expect(line).not.toContain(LAST);
+    }
+    expect(countRows("companies")).toBe(0);
   });
 
   test("a name of record that breaks the declarant rule is answered as a field problem, not a crash", async () => {

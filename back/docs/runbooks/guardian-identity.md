@@ -241,7 +241,23 @@ run, `npm run cli -- scheduler:run identity_sweep --yes`. Each erasure is a `nam
 `system`. Every run with `--yes`, none erased included, writes one ops line,
 `identity_names_erased { count, rules }`, which holds no name.
 
-## 6. Disclosure
+## 6. Rotating the PII key
+
+The names are sealed under `FORMATION_PII_KEY`, and each row names the key it was sealed under. A
+rotation moves the old key to `FORMATION_PII_KEY_PREVIOUS` and sets a new `FORMATION_PII_KEY`: new
+rows are sealed under the new key, older rows still open under the previous one, and the duplicate
+check compares the name digest under both keys.
+
+Only the current and the previous key are supported, and there is no command that seals the older
+rows again. So `FORMATION_PII_KEY_PREVIOUS` stays configured until every passed row sealed under it
+is superseded or expired: up to three years (`IDENTITY_REVERIFY_YEARS`). A second rotation inside
+that window leaves those rows unreadable.
+
+A CRITICAL `identity_names_unreadable { checkId, keyId, tenant }` in the ops log means a row's key
+is missing on this deployment: that guardian's `GET /world-id/me` and the declared doors answer 503
+`identity_unavailable` until the key named by `keyId` is configured again. The line holds ids only.
+
+## 7. Disclosure
 
 A lawful request for the evidence file of a check is answered that none exists: the Stripe session
 is redacted once our record is written, and we hold no document, no photo, no date of birth and no

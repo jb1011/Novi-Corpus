@@ -3,7 +3,7 @@ import { type WorldIdDeps, assertRealHuman } from "../api/routes/worldId";
 import { ApiError } from "../errors";
 import { NAME_CHARSET_SOURCE } from "../formation/intake";
 import { composeDeclarantName } from "../identity/names";
-import { type IdentityDeps, assertIdentityVerified, namesOfRecord } from "../identity/state";
+import { type IdentityDeps, assertIdentityVerified, namesOfRecordAtDoor } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import {
@@ -252,9 +252,10 @@ function readSignedPart(
   return { issuedAt: BigInt(issuedAt), signature: signature as Hex };
 }
 
-/** The declarant's name of record: the first name, a space, the last name. */
+/** The declarant's name of record: the first name, a space, the last name. Names that cannot be
+ *  read are answered 503 `identity_unavailable`, after a CRITICAL ops line with ids only. */
 function writtenDeclarantName(identity: IdentityDeps, record: GuardianIdentityCheck): string {
-  const { first, last } = namesOfRecord(identity, record);
+  const { first, last } = namesOfRecordAtDoor(identity, record);
   return composeDeclarantName(first, last);
 }
 

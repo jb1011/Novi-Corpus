@@ -1,6 +1,7 @@
 import type { WorldIdDeps } from "../api/routes/worldId";
 import { ApiError } from "../errors";
 import { type EncryptedText, type PiiKeyring, decryptText } from "../formation/pii";
+import { opsLog } from "../observability/opsLog";
 import type {
   EncryptedName,
   GuardianIdentityCheck,
@@ -159,9 +160,38 @@ export function namesOfRecord(
 }
 
 /**
+ * The names of record, as a door reads them: a record whose names cannot be read (sealed under a
+ * key this deployment no longer holds, or damaged) writes one CRITICAL ops line, with ids only and
+ * never a name, and is answered 503 `identity_unavailable` rather than a bare 500. `GET
+ * /world-id/me` and the declared doors read the names through it.
+ */
+export function namesOfRecordAtDoor(
+  identity: IdentityDeps,
+  record: GuardianIdentityCheck,
+): { first: string; last: string; full: string | null } {
+  try {
+    return namesOfRecord(identity, record);
+  } catch {
+    opsLog("identity_names_unreadable", {
+      level: "error",
+      severity: "CRITICAL",
+      checkId: record.checkId,
+      keyId: record.names?.keyId ?? null,
+      tenant: record.tenantId.slice(0, 10),
+    });
+    throw new ApiError(
+      "identity_unavailable",
+      503,
+      "identity verification is not configured on this deployment",
+    );
+  }
+}
+
+/**
  * The `identity` block of `GET /world-id/me`. Required on production. The state is `none` when
  * the tenant has no record or the record is not wired; on `verified` it carries the first and last
  * names and the record's dates, and never the full name, the provider, the country or a reason.
+ * A verified record whose names cannot be read is answered 503 (`namesOfRecordAtDoor`).
  */
 export function identityView(
   identity: IdentityDeps | undefined,
@@ -175,7 +205,7 @@ export function identityView(
   const latest = identity.repo.latest(tenantId);
   const state = stateOf(latest, nowOf(identity));
   if (state !== "verified" || latest === undefined) return { required, state };
-  const names = namesOfRecord(identity, latest);
+  const names = namesOfRecordAtDoor(identity, latest);
   return {
     required,
     state,

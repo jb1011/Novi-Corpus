@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import { type Address, getAddress } from "viem";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import type { WorldIdDeps } from "../../src/api/routes/worldId";
 import { signSession } from "../../src/auth/session";
@@ -75,7 +75,10 @@ beforeEach(() => {
   };
   world = worldFor(s.store);
 });
-afterEach(() => db.close());
+afterEach(() => {
+  vi.restoreAllMocks();
+  db.close();
+});
 
 /** The tenant's names of record, encrypted as the operator's command encrypts them. */
 function sealedNames(tenantId: string) {
@@ -205,6 +208,54 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       const app = makeApp(door, "sandbox");
       expect((await me(app, VERIFIED)).body.identity.required).toBe(false);
       expect((await me(app, OTHER)).body.identity).toEqual({ required: false, state: "none" });
+    });
+
+    test("a record sealed under a key no longer configured: 503 identity_unavailable, and a CRITICAL ops line with ids only", async () => {
+      verifiedGuardian(VERIFIED);
+      const printed: string[] = [];
+      vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => {
+        printed.push(args.map(String).join(" "));
+      });
+      // The key the record was sealed under is gone: another key is the only one configured.
+      const rotatedAway: IdentityDeps = {
+        ...identity,
+        pii: { current: parsePiiKey(Buffer.alloc(32, 9).toString("base64"), "FORMATION_PII_KEY") },
+      };
+      const { token } = await signSession(
+        VERIFIED,
+        JWT_SECRET,
+        3600,
+        Math.floor(Date.now() / 1000),
+      );
+
+      const res = await makeApp(door, "production", rotatedAway).request("/world-id/me", {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(res.status).toBe(503);
+      const text = await res.text();
+      expect(JSON.parse(text).error).toMatchObject({
+        code: "identity_unavailable",
+        message: "identity verification is not configured on this deployment",
+      });
+      const ops = printed
+        .filter((line) => line.includes('"opslog"'))
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      expect(ops.filter((o) => o.opslog === "identity_names_unreadable")).toEqual([
+        {
+          opslog: "identity_names_unreadable",
+          at: expect.any(String),
+          level: "error",
+          severity: "CRITICAL",
+          checkId: repo.latest(VERIFIED)?.checkId,
+          keyId: RING.current.id,
+          tenant: VERIFIED.slice(0, 10),
+        },
+      ]);
+      for (const line of [...printed, text]) {
+        expect(line).not.toContain(FIRST);
+        expect(line).not.toContain(LAST);
+      }
     });
 
     test("without the identity record wired (a box with no PII key): the record-less answer", async () => {
