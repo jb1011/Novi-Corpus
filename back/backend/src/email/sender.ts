@@ -120,21 +120,3 @@ function withoutAddress(text: string, address: string): string {
   const escaped = address.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return text.replace(new RegExp(escaped, "gi"), "<recipient>");
 }
-
-/**
- * What the API process holds of the email system, present only where `cfg.email` is (the email
- * system is wired only when configured; the testnet box configures none of it).
- *
- * These are the fields the sender task can fill. Task 12b moves this interface into
- * `src/email/outbox.ts`, beside the outbox it adds as `outbox: EmailOutbox`, which is where the
- * plan's contract places it and where its consumers import it from.
- */
-export interface EmailDeps {
-  sender: EmailSender;
-  /** The app's public origin, no trailing slash: every link in an email is built on it. */
-  publicAppUrl: string;
-  /** One line, printed at the foot of every email. */
-  postalAddress: string;
-  /** The marketing segment contacts are added to; absent, contact writes are skipped. */
-  marketingSegmentId?: string;
-}

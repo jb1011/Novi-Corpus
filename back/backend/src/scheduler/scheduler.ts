@@ -28,7 +28,10 @@ import type { ScheduledJobRunStore } from "../persistence/scheduledJobRunReposit
  *    a write that fails writes `job_record_failed { name, error }` and leaves the run as it was;
  *  - `stop()` cancels every timer at once and returns a promise that settles when any run already
  *    going has finished (it never rejects: a failure has its own line); nothing runs after it. The
- *    API's shutdown awaits it within its bounded drain.
+ *    API's shutdown awaits it within its bounded drain;
+ *  - every run is handed the scheduler's stop signal, which `stop()` sets: a run made of items (a
+ *    batch of emails) takes no new item once it is set, so the drain waits for one item, not for
+ *    the whole batch.
  *
  * `status()` is this process's memory. An operator's CLI is another process: `scheduler:list`
  * reads each job's last run from `scheduled_job_runs`, and the run history from the ops log.
@@ -45,11 +48,12 @@ export interface Job {
    */
   quiet?: boolean;
   /**
-   * Returns the counts for the `job_ran` line. Handed the scheduler's clock. A count named `name`
+   * Returns the counts for the `job_ran` line. Handed the scheduler's clock, and its stop signal,
+   * set once `stop()` is called: a run of many items checks it between items. A count named `name`
    * or `ms` is overwritten by the line's own; the names `opslog` and `at` are reserved too, since
    * the ops line writes its own fields under them.
    */
-  run(nowMs: number): Promise<Record<string, number>>;
+  run(nowMs: number, signal?: AbortSignal): Promise<Record<string, number>>;
 }
 
 export interface SchedulerDeps {
@@ -98,6 +102,8 @@ export class Scheduler {
   private readonly entries = new Map<string, Entry>();
   private started = false;
   private stopped = false;
+  /** Set by `stop()`; handed to every run. */
+  private readonly stopping = new AbortController();
 
   constructor(private readonly deps: SchedulerDeps = {}) {}
 
@@ -140,6 +146,7 @@ export class Scheduler {
   /** Cancels every timer now; settles when every run already going has finished. */
   stop(): Promise<void> {
     this.stopped = true;
+    this.stopping.abort();
     const clear = this.deps.clearTimer ?? clearTimeout;
     const going: Promise<void>[] = [];
     for (const entry of this.entries.values()) {
@@ -214,7 +221,7 @@ export class Scheduler {
     const startedAt = this.now();
     let counts: Record<string, number>;
     try {
-      counts = await entry.job.run(startedAt);
+      counts = await entry.job.run(startedAt, this.stopping.signal);
     } catch (err) {
       entry.lastRunAt = startedAt;
       entry.lastOk = false;

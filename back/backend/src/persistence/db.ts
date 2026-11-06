@@ -1351,6 +1351,64 @@ const SCHEDULED_JOB_RUNS_DDL = `
 `;
 
 /**
+ * THE EMAIL OUTBOX (see `src/email/outbox.ts` and `emailOutboxRepository.ts`): one row for every
+ * email the product sends, and for every write of a consenting address to the provider's
+ * marketing list (`contact_upsert`). A caller enqueues a row, once per idempotency key (a second
+ * enqueue with the same key writes nothing); the scheduler's `email_deliver` job sends it and
+ * hands the provider that key, so a retry after a lost answer is never sent twice. The provider's
+ * delivery events (its webhook) land on the sent row.
+ *
+ * What a row keeps, and for how long, is the point of the CHECKs:
+ *  - while a row waits (`pending`) or has failed (`failed`, which `email:resend` can put back to
+ *    pending), it holds its address and, but for a contact write, its subject, text and HTML;
+ *  - once `sent`, it holds no address, no text and no HTML: an email carries invite codes, tokens
+ *    and links meant for one person, and those must not outlive the send in this database (the
+ *    invite table itself keeps only a hash). The subject, the kind, the ids and the states stay,
+ *    and subjects carry no personal data;
+ *  - a contact write never has a subject or a body;
+ *  - the states hang together: a pending row has its next attempt, a sent row its message id and
+ *    time, and only a sent row a delivery state (with its time).
+ * `last_error` holds an HTTP status and the provider's code, never a body the provider wrote.
+ * Times are ms. The due index serves the job's one query: pending rows by their next attempt.
+ */
+const EMAIL_OUTBOX_DDL = `
+  CREATE TABLE IF NOT EXISTS email_outbox (
+    email_id            TEXT PRIMARY KEY,
+    kind                TEXT NOT NULL CHECK (kind IN ('filing_landed', 'waitlist_confirm',
+                          'invite_code', 'identity_link', 'contact_upsert')),
+    subject_ref         TEXT,
+    idempotency_key     TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 1 AND 256),
+    to_address          TEXT CHECK (to_address IS NULL OR to_address != ''),
+    subject             TEXT,
+    text                TEXT,
+    html                TEXT,
+    status              TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
+    attempts            INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at     INTEGER,
+    provider_message_id TEXT,
+    delivery_state      TEXT CHECK (delivery_state IS NULL OR delivery_state IN ('delivered',
+                          'delayed', 'bounced', 'complained', 'failed', 'suppressed')),
+    delivery_at         INTEGER,
+    last_error          TEXT,
+    created_at          INTEGER NOT NULL,
+    sent_at             INTEGER,
+    CHECK (kind = 'contact_upsert' OR subject IS NOT NULL),
+    CHECK (kind != 'contact_upsert' OR (subject IS NULL AND text IS NULL AND html IS NULL)),
+    CHECK (status = 'sent' OR to_address IS NOT NULL),
+    CHECK (status = 'sent' OR kind = 'contact_upsert' OR (text IS NOT NULL AND html IS NOT NULL)),
+    CHECK (status != 'sent' OR (to_address IS NULL AND text IS NULL AND html IS NULL)),
+    CHECK ((status = 'pending') = (next_attempt_at IS NOT NULL)),
+    CHECK ((status = 'sent') = (provider_message_id IS NOT NULL)),
+    CHECK ((status = 'sent') = (sent_at IS NOT NULL)),
+    CHECK (delivery_state IS NULL OR status = 'sent'),
+    CHECK ((delivery_state IS NULL) = (delivery_at IS NULL))
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_outbox_due ON email_outbox(status, next_attempt_at);
+  CREATE INDEX IF NOT EXISTS idx_email_outbox_provider_message
+    ON email_outbox(provider_message_id) WHERE provider_message_id IS NOT NULL;
+`;
+
+/**
  * An agentId in the one spelling `legal_bodies` stores it (whose CHECK writes the same rule
  * inline): TEXT with no hidden bytes, decimal digits only, no leading zero except '0' itself, at
  * most 78 digits (the width of a uint256).
@@ -1855,6 +1913,8 @@ export function migrate(db: Database.Database): void {
     ${IDENTITY_CHECK_EVENTS_DDL}
     -- The in-process scheduler's last run of each job.
     ${SCHEDULED_JOB_RUNS_DDL}
+    -- Every email the product sends, until the delivery job has sent it.
+    ${EMAIL_OUTBOX_DDL}
 
     -- Anchor cycles: one row PER MANIFEST VERSION. Deliberately NOT keyed like bridge_legs
     -- (entity, step) — a bridge has exactly one of each leg, whereas an entity accumulates
