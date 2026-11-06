@@ -195,11 +195,11 @@ deleted.
 
 - `identity:accept <tenantId>`: the review was fine. A passed row with the review's facts and its
   names (sealed again under the current PII key; the name's fingerprint, computed again, is the
-  same, since that key takes no part in it). A review with `name_mismatch` is settled with
-  `identity:correct-name` (section 4), after asking the guardian. It is
-  refused while another account's current passed check holds the same name and document country,
-  however the review began: the refusal lists those checks. Refuse this one with
-  `duplicate_identity`, or revoke the other first.
+  same, since that key takes no part in it). It refuses a review with `name_mismatch`, on every
+  environment: that one is settled with `identity:correct-name` (section 4), after asking the
+  guardian. It is refused while another account's current passed check holds the same name and
+  document country, however the review began: the refusal lists those checks. Refuse this one
+  with `duplicate_identity`, or revoke the other first.
 - `identity:refuse <tenantId>`: it was not. A failed row without names. Also for an attempt that
   never completed.
 

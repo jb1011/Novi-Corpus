@@ -696,9 +696,10 @@ function decide(
  * The operator's decision on a review, each with its own part of the decision codes. `accept`
  * appends a passed row carrying the review's facts and its names, sealed again under the current
  * PII key, with the name's fingerprint computed again from them under its own secret (the same
- * digest: the PII key takes no part in it); it is refused while another account's current passed
- * check holds the same name and country, and on production unless the check had the face match,
- * the sanctions search and a name that passes the name rule (`assertProductionPass`). `refuse`
+ * digest: the PII key takes no part in it); it is refused over a `name_mismatch` review, which
+ * `identity:correct-name` settles, while another account's current passed check holds the same
+ * name and country, and on production unless the check had the face match, the sanctions search
+ * and a name that passes the name rule (`assertProductionPass`). `refuse`
  * appends a failed row without names, over a review or an attempt that never completed.
  */
 export function reviewIdentity(
@@ -739,6 +740,11 @@ export function reviewIdentity(
     from: ["needs_review"],
     onlyFrom: "only a needs_review check is accepted",
     build: (latest, carried, repo) => {
+      // The name differs from the document's: only the guardian can say which is right.
+      if (latest.reviewReasons.includes("name_mismatch"))
+        refuse(
+          "a name_mismatch review is settled with identity:correct-name, after asking the guardian",
+        );
       const names = heldNames(identityDeps(cfg, repo, pii), latest);
       const hmac = nameHmac(fingerprintKey, names.first, names.last);
       // Read again at the decision: another account may have passed with the same name and

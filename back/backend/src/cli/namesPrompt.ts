@@ -31,11 +31,32 @@ const NAME_FLAGS = [
   ["nameFull", "--name-full"],
 ] as const;
 
-/** At a terminal: three prompts on `output`, the full name optional. */
-async function askAtTerminal(input: Readable, output: Writable): Promise<string[]> {
-  const rl = createInterface({ input, output, terminal: true });
+/**
+ * At a terminal: three prompts on `output`, the full name optional. Readline echoes what is typed
+ * into `output` only when that is a terminal too: into a redirected standard error it would write
+ * the names, so there the terminal's own echo shows them instead. The input's end at a prompt
+ * (Ctrl-D) is refused, never left pending.
+ */
+async function askAtTerminal(
+  input: Readable,
+  output: Writable & { isTTY?: boolean },
+): Promise<string[]> {
+  const rl = createInterface({ input, output, terminal: output.isTTY === true });
+  let closed = false;
+  rl.once("close", () => {
+    closed = true;
+  });
   const ask = (question: string) =>
-    new Promise<string>((resolve) => rl.question(question, resolve));
+    new Promise<string>((resolve, reject) => {
+      const unanswered = () => reject(new Error("refusing: the names were not entered"));
+      // The input may have ended with the previous answer, before this prompt.
+      if (closed) return unanswered();
+      rl.once("close", unanswered);
+      rl.question(question, (answer) => {
+        rl.off("close", unanswered);
+        resolve(answer);
+      });
+    });
   try {
     return [
       await ask("First name, as the guardian gave it and the document prints it: "),
@@ -70,7 +91,7 @@ async function readLines(input: Readable, max: number): Promise<string[]> {
  */
 export async function readNames(
   input: Readable & { isTTY?: boolean },
-  output: Writable,
+  output: Writable & { isTTY?: boolean },
 ): Promise<PromptedNames> {
   const [first, last, full] =
     input.isTTY === true ? await askAtTerminal(input, output) : await readLines(input, 3);

@@ -135,8 +135,9 @@ export function currentRecord(
  * has a World row for the guardian action (else 403 `guardian_not_verified`, the sentence
  * `assertRealHuman` answers, so the doors keep one message); its identity state, read as production
  * (a test record reads `none`), is `verified` and the record is that World row's person, its
- * nullifier the row's when it holds one (else 403 `guardian_identity_not_verified`). The doors call `assertRealHuman` first, which holds the World
- * row to its credential and environment; this one reads the row for its existence and nullifier.
+ * nullifier the row's when it holds one (else 403 `guardian_identity_not_verified`). The doors
+ * call `assertRealHuman` first, which holds the World row to its credential and environment; this
+ * one reads the row for its existence and nullifier.
  *
  * Each refusal is written out here, its message one string literal: the doors answer it and the
  * legal-body tools pass it on as it is, and a test reads this function to hold every refusal to

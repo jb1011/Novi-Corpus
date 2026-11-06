@@ -1297,6 +1297,57 @@ describe("a name that differs from the document's", () => {
     });
   });
 
+  test("identity:accept refuses a name_mismatch review on every environment, writing nothing; identity:correct-name settles it to passed", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const settledElsewhere =
+      "refusing: a name_mismatch review is settled with identity:correct-name, after asking the guardian";
+
+    const review = (await run<Recorded>(recordLine(guardian, {}, ["--name-mismatch", "--yes"])))
+      .output;
+    expect(review.reviewReasons).toEqual(["name_mismatch"]);
+    for (const code of ["provider_flag_cleared", "other"])
+      expect(
+        await refusal(decisionLine("identity:accept", guardian, review.checkId, code)),
+        code,
+      ).toBe(settledElsewhere);
+    expect(repo.list(guardian).map((row) => [row.checkId, row.status])).toEqual([
+      [review.checkId, "needs_review"],
+    ]);
+
+    // Settled the one way, the guardian asked: every other rule holds, so it lands passed.
+    const corrected = await run<Recorded>(
+      decisionLine("identity:correct-name", guardian, review.checkId, "other", {
+        "--name-first": FIRST,
+        "--name-last": LAST_PRINTED,
+      }),
+    );
+    expect(corrected.output).toMatchObject({
+      status: "passed",
+      reviewReasons: [],
+      supersedesCheckId: review.checkId,
+    });
+    expect(showIdentity(db, config(), guardian)).toMatchObject({ state: "verified" });
+
+    // On production the same refusal, before anything is written.
+    const cfg = config({ arcNetwork: "mainnet" });
+    recordIdentity(db, cfg, second, recordOpts({ nameMismatch: true, nameFirst: "Ana" }));
+    const held = latestOf(second);
+    expect(held).toMatchObject({ reviewReasons: ["name_mismatch"], environment: "production" });
+    expect(
+      thrownBy(() =>
+        reviewIdentity(db, cfg, "accept", second, {
+          operator: OPERATOR,
+          expectLatest: String(held.checkId),
+          reasonCode: "other",
+          reason: REASON,
+          yes: true,
+        }),
+      ),
+    ).toBe(settledElsewhere);
+    expect(repo.list(second)).toHaveLength(1);
+  });
+
   test("identity:correct-name drops name_rule_failed and name_mismatch together, and keeps any other reason", async () => {
     human(guardian, "1001");
     human(second, "1002");
