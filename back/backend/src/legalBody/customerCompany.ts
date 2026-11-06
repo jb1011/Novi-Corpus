@@ -22,6 +22,7 @@ import {
   statementHash,
   verifyStatement,
 } from "./statement";
+import { DECLARANT_NAME, type FieldProblem, type TextRule, applyTextRule } from "./textRules";
 import { type LegalText, assertTextsServable } from "./texts/index";
 import type { StatementFields } from "./texts/statementOfAuthority";
 
@@ -120,12 +121,6 @@ export interface CustomerCompanyInput extends CustomerStatementInput {
   signature: Hex;
 }
 
-/** One field that broke a rule. `problem` names the rule, never the value. */
-interface FieldProblem {
-  field: string;
-  problem: string;
-}
-
 /** Every field a body may carry, read as what it is at run time: unknown. */
 type Body = Partial<Record<keyof CustomerCompanyInput, unknown>>;
 
@@ -137,31 +132,6 @@ const ISSUED_AT_WIRE = /^(0|[1-9][0-9]{0,15})$/;
  *  recover to the guardian) is step 7's question, not the shape's. */
 const SIGNATURE_WIRE = /^0x(?:[0-9a-fA-F]{2})+$/;
 
-/** A control, format (a zero-width character, a direction override), surrogate, private-use or
- *  unassigned character. */
-const CONTROL_OR_INVISIBLE = /\p{C}/u;
-/** A separator other than U+0020: a non-breaking space, a line separator, an ideographic space. */
-const OTHER_SPACE = /(?! )\p{Z}/u;
-const SPACES_AT_THE_ENDS = /^ +| +$/g;
-const SPACE_RUNS = / {2,}/g;
-
-export interface TextRule {
-  /** Inclusive, in code points, after the spaces are normalised. */
-  min: number;
-  max: number;
-  /** The characters the field may hold, as a whole-string test. */
-  chars: RegExp;
-  charsProblem: string;
-  /** A further pattern the value must match. */
-  also?: { pattern: RegExp; problem: string };
-}
-
-export const DECLARANT_NAME: TextRule = {
-  min: 2,
-  max: 120,
-  chars: /^[\p{L}\p{M} '.-]+$/u,
-  charsProblem: "may hold only letters, spaces, apostrophes, hyphens and full stops",
-};
 const DECLARANT_TITLE: TextRule = {
   min: 2,
   max: 80,
@@ -197,38 +167,6 @@ const SANDBOX_FILING_NUMBER: TextRule = {
     problem: "must be a test number on this deployment: TEST- then 4 to 27 of A-Z, 0-9 and hyphens",
   },
 };
-
-/**
- * One field through the field rules, in their order: NFC; then a field holding a control or
- * invisible character, a space other than U+0020, or a double quote is refused, never cleaned (a
- * tab or a non-breaking space is not turned into a space); then the U+0020 at the ends are stripped
- * and runs of them collapsed to one; then the length, in code points, and the characters.
- * Returns the normalised value, or records the problem and returns undefined.
- */
-export function applyTextRule(
-  field: string,
-  raw: unknown,
-  rule: TextRule,
-  problems: FieldProblem[],
-): string | undefined {
-  const refuse = (problem: string): undefined => {
-    problems.push({ field, problem });
-    return undefined;
-  };
-  if (raw === undefined || raw === null) return refuse("is required");
-  if (typeof raw !== "string") return refuse("must be text");
-  const nfc = raw.normalize("NFC");
-  if (CONTROL_OR_INVISIBLE.test(nfc)) return refuse("holds a control or invisible character");
-  if (OTHER_SPACE.test(nfc)) return refuse("holds a space other than a plain space");
-  if (nfc.includes('"')) return refuse("holds a double quote");
-  const value = nfc.replace(SPACES_AT_THE_ENDS, "").replace(SPACE_RUNS, " ");
-  const length = [...value].length;
-  if (length < rule.min || length > rule.max)
-    return refuse(`must be ${rule.min} to ${rule.max} characters long`);
-  if (!rule.chars.test(value)) return refuse(rule.charsProblem);
-  if (rule.also && !rule.also.pattern.test(value)) return refuse(rule.also.problem);
-  return value;
-}
 
 /** The wire half of step 4, for the create door: `issuedAt` and the signature, well-formed. */
 function readSignedPart(

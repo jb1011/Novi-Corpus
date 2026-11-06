@@ -1,4 +1,4 @@
-import { DECLARANT_NAME, applyTextRule } from "../legalBody/customerCompany";
+import { DECLARANT_NAME, applyTextRule } from "../legalBody/textRules";
 
 /**
  * THE NAME OF RECORD: how a name printed on a document becomes the name the guardian identity
