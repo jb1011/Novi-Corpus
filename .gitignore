@@ -1,7 +1,3 @@
 node_modules/
 .vite/
 .superpowers/
-
-# HonKit local preview (`npx honkit serve` / `honkit build`)
-_book/
-docs/_book/
