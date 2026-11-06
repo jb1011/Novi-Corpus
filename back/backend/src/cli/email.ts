@@ -8,6 +8,7 @@ import {
   OUTBOX_STATUSES,
   type OutboxFilter,
   type OutboxRow,
+  WARN_DELIVERY_STATES,
   buildEmailDeps,
   contactIdempotencyKey,
 } from "../email/outbox";
@@ -46,7 +47,9 @@ import { readAnswers } from "./prompt";
  *    carry neither an address (`prefilled_email` is refused: an address would sit in the body and
  *    in the provider's URL logs) nor the account id (the link carries an opaque reference), and
  *    the request for the guardian's legal name. One per guardian per UTC day: a second the same
- *    day writes nothing and names the first.
+ *    day writes nothing and names the first. With `--again`, a new one the same day under the
+ *    key's next number, only when the day's latest failed or was sent and not delivered (bounced,
+ *    complained, failed, suppressed).
  *
  * Every command refuses where the email system is not configured (`cfg.email`, which
  * PUBLIC_APP_URL turns on). The two writing commands take `--operator` (the operator rule of
@@ -79,7 +82,7 @@ const NOT_HTTPS = "--url must be the full https link of the identity check";
 /** The provider keeps a key 24 hours, and the outbox cannot tell whether a failed email's send was
  *  one the provider took (an answer lost, then refusals): the runbook's wording, word for word. */
 const SAME_KEY_NOTE =
-  "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, a new email:send-link after 24 hours; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)";
+  "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, email:send-link --again, under a new key, at once; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)";
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 1000;
 const WHOLE_NUMBER = /^[1-9][0-9]{0,3}$/;
@@ -391,13 +394,47 @@ export interface SendLinkOptions {
   to: string;
   toSource?: "--to" | "--to-prompt";
   operator: string;
+  /** A new link the same day, when the day's latest failed or was not delivered. */
+  again?: boolean;
   yes?: boolean;
+}
+
+/** The day's latest identity link, as `--again` reads it. */
+function describeLatest(row: OutboxRow): string {
+  if (row.status !== "sent") return row.status;
+  return row.deliveryState === null
+    ? "sent, with no delivery outcome yet"
+    : `sent and ${row.deliveryState}`;
+}
+
+/**
+ * The day's latest identity link to a tenant and its number (`identityLinkIdempotencyKey`'s
+ * `n`), or undefined when none was queued that day. Read in the caller's transaction.
+ */
+function latestLinkToday(
+  email: EmailDeps,
+  tenantId: string,
+  nowMs: number,
+): { row: OutboxRow; n: number } | undefined {
+  const first = email.outbox.findByKey(identityLinkIdempotencyKey(tenantId, nowMs));
+  if (first === undefined) return undefined;
+  let latest = { row: first, n: 1 };
+  for (;;) {
+    const next = email.outbox.findByKey(identityLinkIdempotencyKey(tenantId, nowMs, latest.n + 1));
+    if (next === undefined) return latest;
+    latest = { row: next, n: latest.n + 1 };
+  }
 }
 
 /**
  * The beta's identity-link email to a guardian, queued: kind `identity_link`, the tenant
  * (checksummed) as its subject, the key `identityLinkIdempotencyKey` (one per guardian per UTC
  * day). A second link for the same guardian the same day writes nothing and names the first.
+ *
+ * With `--again`, a new link the same day, under the day's key and the next number (`:2`, `:3`,
+ * ...), so the provider never answers it with an earlier send: only when the day's latest link
+ * failed, or was sent and bounced, complained, failed or was suppressed. Refused on a day with
+ * no link yet, and while the latest is pending, sent with no outcome, delayed or delivered.
  */
 export function sendIdentityLink(
   db: Database.Database,
@@ -411,7 +448,7 @@ export function sendIdentityLink(
   const link = parseLink(opts.url, to, tenantId);
   const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
   const operatorOsUser = osUser();
-  const idempotencyKey = identityLinkIdempotencyKey(tenantId, Date.now());
+  const nowMs = Date.now();
   const content = identityLinkEmail({
     link,
     publicAppUrl: email.publicAppUrl,
@@ -420,8 +457,32 @@ export function sendIdentityLink(
 
   const done = db
     .transaction(() => {
-      const existing = email.outbox.findByKey(idempotencyKey);
-      if (existing !== undefined || opts.yes !== true) return { existing, emailId: undefined };
+      let idempotencyKey = identityLinkIdempotencyKey(tenantId, nowMs);
+      let replaces: OutboxRow | undefined;
+      let existing: OutboxRow | undefined;
+      if (opts.again === true) {
+        const latest = latestLinkToday(email, tenantId, nowMs);
+        if (latest === undefined)
+          refuse(
+            "no identity link to this guardian was queued today (UTC): run the command without --again",
+          );
+        const { row } = latest;
+        const undelivered =
+          row.status === "failed" ||
+          (row.status === "sent" &&
+            row.deliveryState !== null &&
+            WARN_DELIVERY_STATES.has(row.deliveryState));
+        if (!undelivered)
+          refuse(
+            `today's identity link to this guardian (${row.emailId}) is ${describeLatest(row)}: --again queues a new one only when it failed, or was sent and bounced, complained, failed or was suppressed`,
+          );
+        idempotencyKey = identityLinkIdempotencyKey(tenantId, nowMs, latest.n + 1);
+        replaces = row;
+      } else {
+        existing = email.outbox.findByKey(idempotencyKey);
+      }
+      if (existing !== undefined || opts.yes !== true)
+        return { idempotencyKey, replaces, existing, emailId: undefined };
       const { emailId, inserted } = email.outbox.enqueue({
         kind: "identity_link",
         subjectRef: tenantId,
@@ -432,11 +493,11 @@ export function sendIdentityLink(
       // The key was read free in this immediate transaction: nothing can have taken it since.
       if (!inserted)
         throw new Error(`email outbox: ${idempotencyKey} was free and is taken by ${emailId}`);
-      return { existing: undefined, emailId };
+      return { idempotencyKey, replaces, existing: undefined, emailId };
     })
     .immediate();
 
-  const { existing } = done;
+  const { existing, replaces, idempotencyKey } = done;
   if (opts.yes !== true)
     return {
       queued: false,
@@ -448,6 +509,15 @@ export function sendIdentityLink(
         subject: content.subject,
         link,
       },
+      ...(replaces === undefined
+        ? {}
+        : {
+            replaces: {
+              emailId: replaces.emailId,
+              status: replaces.status,
+              deliveryState: replaces.deliveryState,
+            },
+          }),
       ...(existing === undefined
         ? { next: "nothing was written: run the same command with --yes to queue it" }
         : {
@@ -461,7 +531,7 @@ export function sendIdentityLink(
       emailId: existing.emailId,
       tenantId,
       status: existing.status,
-      next: "an identity link to this guardian was queued already today (UTC), and nothing was written: email:resend re-queues it if it failed; a new link waits for tomorrow",
+      next: "an identity link to this guardian was queued already today (UTC), and nothing was written: if it failed or was not delivered, run the same command with --again; otherwise a new link waits for tomorrow",
     };
   const emailId = done.emailId as string;
   opsLog("identity_link_queued", {
@@ -469,6 +539,7 @@ export function sendIdentityLink(
     tenant: tenantId.slice(0, 10),
     operator,
     operatorOsUser,
+    ...(replaces === undefined ? {} : { replaces: replaces.emailId }),
   });
   return {
     queued: true,
@@ -476,6 +547,7 @@ export function sendIdentityLink(
     tenantId,
     kind: "identity_link",
     subject: IDENTITY_LINK_SUBJECT,
+    ...(replaces === undefined ? {} : { replaces: replaces.emailId }),
     next: `${QUEUED_NEXT}: email:list --kind identity_link shows its state`,
   };
 }
@@ -530,7 +602,7 @@ export function registerEmailCommands(program: Command): void {
     .command("email:send-link")
     .argument("<tenantId>", "the guardian's account: its wallet address")
     .description(
-      "queue the identity-check email to a guardian: the link, and the request for their legal name exactly as printed on their document; the address with --to-prompt (or --to). One per guardian per UTC day; without --yes, say what would be queued",
+      "queue the identity-check email to a guardian: the link, and the request for their legal name exactly as printed on their document; the address with --to-prompt (or --to). One per guardian per UTC day (--again for a new one when the day's failed or was not delivered); without --yes, say what would be queued",
     )
     .requiredOption(
       "--url <link>",
@@ -539,6 +611,10 @@ export function registerEmailCommands(program: Command): void {
     .option("--to-prompt", TO_PROMPT_HELP)
     .option("--to <address>", `the guardian's email address; ${TO_HELP}`)
     .requiredOption("--operator <name>", `who sends: ${OPERATOR_NAME.source}`)
+    .option(
+      "--again",
+      "a new link the same day, under a new key, when today's failed or was not delivered (bounced, complained, failed, suppressed); refused while it is pending, on its way or delivered",
+    )
     .option("--yes", "confirm: queue the email")
     .action(async (tenantId: string, opts: Omit<SendLinkOptions, "to"> & AddressOptions) => {
       // Refused before anything is read at the prompt.

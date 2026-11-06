@@ -220,7 +220,7 @@ function withoutEmail(): void {
 
 const sendLink = (
   tenantId: string,
-  over: { url?: string; to?: string; operator?: string } = {},
+  over: { url?: string; to?: string; operator?: string; again?: boolean } = {},
   yes = true,
 ): string[] => [
   "email:send-link",
@@ -231,6 +231,7 @@ const sendLink = (
   over.to ?? ADDRESS,
   "--operator",
   over.operator ?? OPERATOR,
+  ...(over.again ? ["--again"] : []),
   ...(yes ? ["--yes"] : []),
 ];
 
@@ -473,7 +474,7 @@ describe("email:resend", () => {
       next: "nothing was written: run the same command with --yes to re-queue it",
     });
     expect(output.note).toBe(
-      "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, a new email:send-link after 24 hours; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)",
+      "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, email:send-link --again, under a new key, at once; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)",
     );
     expect(raw(emailId)).toEqual(before);
   });
@@ -661,7 +662,7 @@ describe("email:send-link", () => {
       emailId: first,
       tenantId: guardian,
       status: "pending",
-      next: "an identity link to this guardian was queued already today (UTC), and nothing was written: email:resend re-queues it if it failed; a new link waits for tomorrow",
+      next: "an identity link to this guardian was queued already today (UTC), and nothing was written: if it failed or was not delivered, run the same command with --again; otherwise a new link waits for tomorrow",
     });
     expect(count()).toBe(1);
 
@@ -674,6 +675,116 @@ describe("email:send-link", () => {
       `identity_link:${sha16(guardian)}:2026-11-11`,
     );
     expect(count()).toBe(3);
+  });
+
+  test("--again queues a new link the same day when today's failed, then when the new one bounced: keyed identity_link:<16 hex>:<day>:2, then :3; its line names the row it replaces", async () => {
+    at("2026-11-10T08:00:00Z");
+    const base = `identity_link:${sha16(guardian)}:2026-11-10`;
+    const first = (await run(sendLink(guardian))).output.emailId as string;
+    await deliver(senderThat("refuses").sender);
+    expect(raw(first).status).toBe("failed");
+
+    const dry = await run(sendLink(guardian, { again: true }, false));
+    expect(dry.ops).toEqual([]);
+    expect(dry.output).toEqual({
+      queued: false,
+      tenantId: guardian,
+      wouldQueue: {
+        kind: "identity_link",
+        subjectRef: guardian,
+        idempotencyKey: `${base}:2`,
+        subject: "Confirm who you are",
+        link: LINK,
+      },
+      replaces: { emailId: first, status: "failed", deliveryState: null },
+      next: "nothing was written: run the same command with --yes to queue it",
+    });
+    expect(count()).toBe(1);
+
+    const second = await run(sendLink(guardian, { again: true, to: NEW_ADDRESS }));
+    const secondId = second.output.emailId as string;
+    expect(second.output).toEqual({
+      queued: true,
+      emailId: secondId,
+      tenantId: guardian,
+      kind: "identity_link",
+      subject: "Confirm who you are",
+      replaces: first,
+      next: "the delivery job sends it within a minute: email:list --kind identity_link shows its state",
+    });
+    expect(raw(secondId)).toMatchObject({
+      idempotency_key: `${base}:2`,
+      subject_ref: guardian,
+      to_address: NEW_ADDRESS,
+      status: "pending",
+    });
+    expect(raw(first).status).toBe("failed");
+    const { at: _at, ...line } = second.ops[0] as Record<string, unknown>;
+    expect(second.ops).toHaveLength(1);
+    expect(line).toEqual({
+      opslog: "identity_link_queued",
+      emailId: secondId,
+      tenant: guardian.slice(0, 10),
+      operator: OPERATOR,
+      operatorOsUser: osUser(),
+      replaces: first,
+    });
+
+    // The new one is sent, then bounces: --again once more.
+    const accepting = senderThat("accepts");
+    await deliver(accepting.sender);
+    expect(accepting.sent.map((e) => e.idempotencyKey)).toEqual([`${base}:2`]);
+    outbox.recordDeliveryEvent("re_msg_1", "bounced", Date.now());
+    const third = await run(sendLink(guardian, { again: true }));
+    expect(third.output).toMatchObject({ queued: true, replaces: secondId });
+    expect(raw(third.output.emailId as string).idempotency_key).toBe(`${base}:3`);
+
+    // Without --again the dedupe is as before: it names the day's first row and writes nothing.
+    const plain = await run(sendLink(guardian));
+    expect(plain.output).toMatchObject({ queued: false, emailId: first, status: "failed" });
+    expect(count()).toBe(3);
+  });
+
+  test("--again is allowed after each undelivered outcome: bounced, complained, failed, suppressed", async () => {
+    const outcomes = ["bounced", "complained", "failed", "suppressed"] as const;
+    // One sender for the whole test: each email gets its own provider id.
+    const accepting = senderThat("accepts");
+    for (const [i, state] of outcomes.entries()) {
+      at(`2026-11-1${i}T08:00:00Z`);
+      const first = (await run(sendLink(guardian))).output.emailId as string;
+      await deliver(accepting.sender);
+      const providerMessageId = raw(first).provider_message_id as string;
+      outbox.recordDeliveryEvent(providerMessageId, state, Date.now());
+      const again = await run(sendLink(guardian, { again: true }));
+      expect(again.output, state).toMatchObject({ queued: true, replaces: first });
+      expect(raw(again.output.emailId as string).idempotency_key, state).toBe(
+        `identity_link:${sha16(guardian)}:2026-11-1${i}:2`,
+      );
+    }
+  });
+
+  test("--again is refused on a day with no link yet, and while today's is pending, sent with no outcome, delayed or delivered; with --yes or without, nothing is written", async () => {
+    at("2026-11-10T08:00:00Z");
+    for (const yes of [true, false])
+      expect(await refusal(sendLink(guardian, { again: true }, yes))).toBe(
+        "refusing: no identity link to this guardian was queued today (UTC): run the command without --again",
+      );
+    const first = (await run(sendLink(guardian))).output.emailId as string;
+    const refused = (what: string) =>
+      `refusing: today's identity link to this guardian (${first}) is ${what}: --again queues a new one only when it failed, or was sent and bounced, complained, failed or was suppressed`;
+    const expectRefused = async (what: string) => {
+      for (const yes of [true, false])
+        expect(await refusal(sendLink(guardian, { again: true }, yes)), what).toBe(refused(what));
+    };
+
+    await expectRefused("pending");
+    await deliver(senderThat("accepts").sender);
+    await expectRefused("sent, with no delivery outcome yet");
+    outbox.recordDeliveryEvent("re_msg_1", "delayed", Date.now() - 2000);
+    await expectRefused("sent and delayed");
+    outbox.recordDeliveryEvent("re_msg_1", "delivered", Date.now() - 1000);
+    await expectRefused("sent and delivered");
+    expect(count()).toBe(1);
   });
 
   test("the delivery job sends it to the address given, under its key", async () => {
@@ -750,6 +861,7 @@ describe("email:send-link", () => {
     const help = (flag: string) => command?.options.find((o) => o.long === flag)?.description;
     expect(help("--url")).toContain("without prefilled_email");
     expect(help("--to")).toContain("never printed");
+    expect(help("--again")).toContain("failed or was not delivered");
     expect(JSON.stringify(command?.options.map((o) => [o.flags, o.description]))).not.toMatch(
       /one-time|expire|hours/i,
     );
