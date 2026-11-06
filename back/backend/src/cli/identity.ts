@@ -3,7 +3,7 @@ import type { Command } from "commander";
 import { getAddress } from "viem";
 import { type WorldIdDeps, buildWorldIdDeps, realHumanState } from "../api/routes/worldId";
 import { type Config, legalBodyEnvironment } from "../config/env";
-import { type PiiKeyring, encryptText, nameHmac } from "../formation/pii";
+import { type PiiKeyring, encryptText, nameHmac, nameHmacs } from "../formation/pii";
 import { IDENTITY_AAD, nameOfRecord, nameRuleProblem } from "../identity/names";
 import { type IdentityDeps, identityState, namesOfRecord } from "../identity/state";
 import {
@@ -423,7 +423,9 @@ export function recordIdentity(
         last: nameOfRecord(opts.nameLast as string),
         full: opts.nameFull === undefined ? null : nameOfRecord(opts.nameFull),
       };
+  // The row keeps the current key's digest; the duplicate lookup compares every key's.
   const hmac = names === null ? null : nameHmac(pii, names.first, names.last);
+  const lookup = names === null ? [] : nameHmacs(pii, names.first, names.last);
   // The reasons the flags alone decide, in the record's order; the duplicate is read below.
   const flagged: ReviewReasonCode[] = [];
   if (names !== null) {
@@ -454,7 +456,7 @@ export function recordIdentity(
         `the guardian is verified until ${isoDate(latest.expiresAt as number)}; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review`,
       );
     const duplicateOf =
-      hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId) : [];
+      hmac !== null && country !== null ? repo.passedElsewhere(lookup, country, tenantId) : [];
     const reviewReasons: ReviewReasonCode[] =
       duplicateOf.length > 0 ? [...flagged, "duplicate_identity"] : flagged;
     const row = shapeChecked({
@@ -663,7 +665,8 @@ function decide(
  * The operator's decision on a review, each with its own part of the decision codes. `accept`
  * appends a passed row carrying the review's facts and its names, sealed again under the current
  * key, with the name hmac computed again under it, so a duplicate is still found after a key
- * rotation; it is refused while another account's current passed check holds the same name and
+ * rotation (the lookup compares the digests under the current and the previous key, `nameHmacs`);
+ * it is refused while another account's current passed check holds the same name and
  * country, and on production unless the check had the face match, the sanctions search and a name
  * that passes the name rule (`assertProductionPass`). `refuse` appends a failed row without names,
  * over a review or an attempt that never completed.
@@ -707,12 +710,17 @@ export function reviewIdentity(
     build: (latest, carried, repo) => {
       const names = heldNames(identityDeps(cfg, repo, pii), latest);
       const hmac = nameHmac(pii, names.first, names.last);
-      // Read again at the decision, under the current key: another account may have passed with
-      // the same name and country since the review was recorded.
+      // Read again at the decision, under the current key and, during a rotation, the previous
+      // one: another account may have passed with the same name and country since the review was
+      // recorded, before or after the rotation.
       const elsewhere =
         latest.documentCountry === null
           ? []
-          : repo.passedElsewhere(hmac, latest.documentCountry, tenantId);
+          : repo.passedElsewhere(
+              nameHmacs(pii, names.first, names.last),
+              latest.documentCountry,
+              tenantId,
+            );
       if (elsewhere.length > 0)
         refuse(
           `another account holds a verified identity with the same name and document country (checks ${elsewhere.join(", ")}): refuse this one with duplicate_identity, or revoke the other first`,
@@ -801,7 +809,8 @@ export function correctIdentityName(
       const duplicate =
         latest.documentCountry !== null &&
         !remaining.includes("duplicate_identity") &&
-        repo.passedElsewhere(hmac, latest.documentCountry, tenantId).length > 0;
+        repo.passedElsewhere(nameHmacs(pii, first, last), latest.documentCountry, tenantId).length >
+          0;
       const reviewReasons: ReviewReasonCode[] = duplicate
         ? [...remaining, "duplicate_identity"]
         : remaining;

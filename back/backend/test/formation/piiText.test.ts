@@ -11,6 +11,7 @@ import {
   decryptText,
   encryptText,
   nameHmac,
+  nameHmacs,
   parsePiiKey,
 } from "../../src/formation/pii";
 
@@ -99,4 +100,15 @@ test("the name HMAC is keyed by HKDF of the current key with the v1 info string"
   expect(nameHmac(k, "Jean", "Dupont")).toBe(expected);
   // Keyed by the CURRENT key: the same name under another current key is another digest.
   expect(nameHmac(ring(KEY_A), "Jean", "Dupont")).not.toBe(expected);
+});
+
+test("the duplicate lookup's digests: the current key's, then the previous key's during a rotation", () => {
+  const before = ring(KEY_A);
+  const rotated = ring(KEY_B, KEY_A);
+  expect(nameHmacs(before, "Jean", "Dupont")).toEqual([nameHmac(before, "Jean", "Dupont")]);
+  expect(nameHmacs(rotated, "Jean", "DUPONT")).toEqual([
+    nameHmac(rotated, "Jean", "Dupont"),
+    // What a row written before the rotation holds.
+    nameHmac(before, "Jean", "Dupont"),
+  ]);
 });

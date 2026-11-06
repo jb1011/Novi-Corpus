@@ -291,22 +291,39 @@ function hmacForm(name: string): string {
   return name.toLowerCase().normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
-/**
- * A keyed digest of a name, so two identity records for the same person can be found without
- * decrypting either: HMAC-SHA256, hex, over the lower-cased NFKC first and last names joined by a
- * newline.
- *
- * Keyed by HKDF-SHA256 of the CURRENT key, never the key itself: the AES key then serves one
- * purpose, and a digest reveals nothing about it. After a rotation the same name digests
- * differently, so a writer recomputes the digest under the current key rather than copying it.
- */
-export function nameHmac(keyring: PiiKeyring, first: string, last: string): string {
+/** The digest of a name under one PII key: HMAC-SHA256 keyed by HKDF-SHA256 of its material. */
+function nameHmacUnder(piiKey: PiiKey, first: string, last: string): string {
   const key = Buffer.from(
-    hkdfSync("sha256", keyring.current.key, Buffer.alloc(0), NAME_HMAC_INFO, NAME_HMAC_KEY_BYTES),
+    hkdfSync("sha256", piiKey.key, Buffer.alloc(0), NAME_HMAC_INFO, NAME_HMAC_KEY_BYTES),
   );
   return createHmac("sha256", key)
     .update(`${hmacForm(first)}\n${hmacForm(last)}`, "utf8")
     .digest("hex");
+}
+
+/**
+ * A keyed digest of a name, so two identity records for the same person can be found without
+ * decrypting either: HMAC-SHA256, hex, over the lower-cased NFKC first and last names joined by a
+ * newline. It is the digest a row stores.
+ *
+ * Keyed by HKDF-SHA256 of the CURRENT key, never the key itself: the AES key then serves one
+ * purpose, and a digest reveals nothing about it. After a rotation the same name digests
+ * differently, so a writer recomputes the digest under the current key rather than copying it,
+ * and the duplicate lookup compares `nameHmacs`.
+ */
+export function nameHmac(keyring: PiiKeyring, first: string, last: string): string {
+  return nameHmacUnder(keyring.current, first, last);
+}
+
+/**
+ * The digests the duplicate lookup compares: the current key's first, then, during a rotation
+ * window, the previous key's, so a row written before the rotation still matches. A row stores
+ * only the current one (`nameHmac`).
+ */
+export function nameHmacs(keyring: PiiKeyring, first: string, last: string): string[] {
+  const keys =
+    keyring.previous === undefined ? [keyring.current] : [keyring.current, keyring.previous];
+  return keys.map((key) => nameHmacUnder(key, first, last));
 }
 
 /**

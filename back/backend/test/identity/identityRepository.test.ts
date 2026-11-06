@@ -169,14 +169,24 @@ describe("SqliteIdentityRepository", () => {
     repo.append(row(tenant(4), "passed", { nameHmac: HMAC_B }), event("recorded")); // 5
     repo.append(row(tenant(5), "needs_review"), event("recorded")); // 6: not passed
 
-    expect(repo.passedElsewhere(HMAC_A, "FRA", tenant(9))).toEqual([1]);
-    expect(repo.passedElsewhere(HMAC_A, "FRA", tenant(1))).toEqual([]);
-    expect(repo.passedElsewhere(HMAC_A, "DEU", tenant(1))).toEqual([4]);
-    expect(repo.passedElsewhere(HMAC_B, "FRA", tenant(1))).toEqual([5]);
+    expect(repo.passedElsewhere([HMAC_A], "FRA", tenant(9))).toEqual([1]);
+    expect(repo.passedElsewhere([HMAC_A], "FRA", tenant(1))).toEqual([]);
+    expect(repo.passedElsewhere([HMAC_A], "DEU", tenant(1))).toEqual([4]);
+    expect(repo.passedElsewhere([HMAC_B], "FRA", tenant(1))).toEqual([5]);
 
     // A second account of the same person: both are found from a third.
     repo.append(row(tenant(6), "passed"), event("recorded")); // 7
-    expect(repo.passedElsewhere(HMAC_A, "FRA", tenant(9))).toEqual([1, 7]);
+    expect(repo.passedElsewhere([HMAC_A], "FRA", tenant(9))).toEqual([1, 7]);
+  });
+
+  test("passedElsewhere matches any of the digests it is handed, as a key rotation hands two, and none for an empty list", () => {
+    repo.append(row(tenant(1), "passed"), event("recorded")); // 1: HMAC_A
+    repo.append(row(tenant(2), "passed", { nameHmac: HMAC_B }), event("recorded")); // 2
+
+    expect(repo.passedElsewhere([HMAC_B, HMAC_A], "FRA", tenant(9))).toEqual([1, 2]);
+    expect(repo.passedElsewhere([HMAC_B, HMAC_A], "FRA", tenant(2))).toEqual([1]);
+    expect(repo.passedElsewhere([`${"c".repeat(64)}`, HMAC_A], "FRA", tenant(9))).toEqual([1]);
+    expect(repo.passedElsewhere([], "FRA", tenant(9))).toEqual([]);
   });
 
   test("eraseNames clears the three ciphertexts, sets names_erased_at and appends a names_erased event", () => {
@@ -350,7 +360,7 @@ describe("SqliteIdentityRepository", () => {
     expect(() => repo.append(row(lower, "passed"), event("recorded"))).toThrow(checksummed);
     expect(() => repo.latest(lower)).toThrow(checksummed);
     expect(() => repo.list(lower)).toThrow(checksummed);
-    expect(() => repo.passedElsewhere(HMAC_A, "FRA", lower)).toThrow(
+    expect(() => repo.passedElsewhere([HMAC_A], "FRA", lower)).toThrow(
       /^identity check: exceptTenantId must be an EIP-55 checksummed address$/,
     );
     expect(() => repo.latest("not an address")).toThrow(checksummed);

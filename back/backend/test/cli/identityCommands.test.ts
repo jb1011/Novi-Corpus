@@ -456,6 +456,28 @@ describe("identity:record", () => {
     expect(JSON.stringify(output)).not.toMatch(SURNAME);
   });
 
+  test("a passed row written under the old key is found as a duplicate by a record made after a key rotation", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const first = await recorded(guardian);
+    // The rotation: the new key current, the old one previous.
+    process.env.FORMATION_PII_KEY = NEW_PII_KEY;
+    process.env.FORMATION_PII_KEY_PREVIOUS = PII_KEY;
+
+    const { output } = await run<Recorded>(
+      recordLine(second, { "--name-last": LAST, "--provider-ref": "vs_test_0002" }),
+    );
+
+    expect(output).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["duplicate_identity"],
+      duplicateOf: [first.checkId],
+    });
+    // The new row keeps the current key's digest.
+    const newKey = parsePiiKey(NEW_PII_KEY, "FORMATION_PII_KEY");
+    expect(latestOf(second).nameHmac).toBe(nameHmac({ current: newKey }, FIRST, LAST));
+  });
+
   test("record with --expect-latest none when a row exists refuses", async () => {
     human(guardian, "1001");
     const first = await recorded(guardian, { "--watchlist": "hit" });
@@ -888,6 +910,31 @@ describe("the decisions", () => {
     });
   });
 
+  test("accept after a key rotation finds a pass written under the previous key as a duplicate", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    // The review comes first, so the other account's pass is recorded clean.
+    const review = await recorded(second, {
+      "--watchlist": "hit",
+      "--provider-ref": "vs_test_0002",
+    });
+    const held = await recorded(guardian);
+    expect(held.status).toBe("passed");
+    process.env.FORMATION_PII_KEY = NEW_PII_KEY;
+    process.env.FORMATION_PII_KEY_PREVIOUS = PII_KEY;
+
+    expect(
+      await refusal(
+        decisionLine("identity:accept", second, review.checkId, "watchlist_false_positive"),
+      ),
+    ).toMatch(
+      new RegExp(
+        `^refusing: another account holds a verified identity .*\\(checks ${held.checkId}\\)`,
+      ),
+    );
+    expect(latestOf(second).checkId).toBe(review.checkId);
+  });
+
   test("refuse appends failed without names", async () => {
     human(guardian, "1001");
     const review = await recorded(guardian, { "--watchlist": "hit" });
@@ -1016,6 +1063,27 @@ describe("identity:correct-name", () => {
       "--name-last": "Dupond",
       "--provider-ref": "vs_test_0002",
     });
+
+    const { output } = await run<Recorded>(
+      decisionLine("identity:correct-name", second, typo.checkId, "transliteration", {
+        "--name-first": FIRST,
+        "--name-last": LAST,
+      }),
+    );
+
+    expect(output).toMatchObject({ status: "needs_review", reviewReasons: ["duplicate_identity"] });
+  });
+
+  test("correct-name after a key rotation finds a pass written under the previous key as a duplicate", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    await recorded(guardian);
+    const typo = await recorded(second, {
+      "--name-last": "Dupond",
+      "--provider-ref": "vs_test_0002",
+    });
+    process.env.FORMATION_PII_KEY = NEW_PII_KEY;
+    process.env.FORMATION_PII_KEY_PREVIOUS = PII_KEY;
 
     const { output } = await run<Recorded>(
       decisionLine("identity:correct-name", second, typo.checkId, "transliteration", {
