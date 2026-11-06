@@ -2,7 +2,6 @@ import { type NextRequest, NextResponse } from "next/server";
 import {
   forwardedRequestHeaders,
   forwardedResponseHeaders,
-  foundingForwardedFor,
   isNoStorePath,
 } from "../../../lib/proxyHeaders";
 import { budgetMs } from "../../../lib/api/budgets";
@@ -47,12 +46,6 @@ async function proxy(
   for (const name of forwardedRequestHeaders(joined)) {
     const value = req.headers.get(name);
     if (value) headers.set(name, value);
-  }
-  // Not an allowlisted header. Set here, for this one POST, from the last platform-appended
-  // entry, so the founding limiter can tell callers apart. See foundingForwardedFor.
-  if (req.method === "POST" && joined === "founding/applications") {
-    const caller = foundingForwardedFor(req.headers.get("x-forwarded-for"));
-    if (caller) headers.set("x-forwarded-for", caller);
   }
 
   const init: RequestInit = { method: req.method, headers };

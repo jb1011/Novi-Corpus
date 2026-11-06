@@ -54,7 +54,6 @@ import { resolveFormationDeployment } from "../formation";
 import { createCompany } from "../formation/company";
 import { newChainHeadCache } from "../formation/payment";
 import { formationSummary } from "../formation/status";
-import { foundingFromEnv, foundingLimiter } from "../founding/config";
 import { HederaMirror } from "../hedera/mirror";
 import { buildJobDeps } from "../jobs/composition";
 import { expireStaleCustomerCompanies } from "../legalBody/customerCompany";
@@ -1093,13 +1092,6 @@ async function main() {
         }
       : undefined;
 
-  const foundingEnv = foundingFromEnv(process.env);
-  if (!foundingEnv.ipSalt) {
-    console.warn(
-      "[boot] FOUNDING_IP_SALT is unset — founding applications will not store an IP hash.",
-    );
-  }
-
   const app = buildApiApp({
     webOrigin: cfg.webOrigin,
     nonceStore,
@@ -1259,7 +1251,6 @@ async function main() {
     standingExposure,
     // The pilot's cases, where the pilot or the Kleros block is set.
     pilotCases,
-    founding: { ...foundingEnv, db, take: foundingLimiter() },
   });
 
   const port = Number(process.env.PORT ?? 8789);

@@ -4,7 +4,6 @@ import type { DoolaEnvironment } from "../adapters/doola/types";
 import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
-import type { FoundingDeps } from "../founding/config";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
 import type { EvidenceDeps } from "../legalBody/evidence";
 import type { GasSeedDeps } from "../legalBody/gasSeed";
@@ -27,7 +26,6 @@ import { type DoolaWebhookDeps, mountDoolaWebhookRoutes } from "./routes/doolaWe
 import { mountEnsGatewayRoutes } from "./routes/ensGateway";
 import { type ExternalRecordDeps, mountExternalRecordRoutes } from "./routes/externalRecord";
 import { mountFormationRulesRoutes } from "./routes/formationRules";
-import { mountFoundingRoutes } from "./routes/founding";
 import { mountJobRoutes } from "./routes/jobs";
 import { mountLegalBodyRoutes } from "./routes/legalBodies";
 import { mountLegalBodyOrderRoutes } from "./routes/legalBodyOrders";
@@ -320,12 +318,6 @@ export interface ApiDeps extends EntityViewDeps {
    * (404) and `/config.externalRecord.available` is false, so the card never renders.
    */
   externalRecord?: ExternalRecordDeps;
-  /**
-   * Founding 5 applications. Always wired on the API process (it is a table and a form, not a
-   * chain capability). Absent in tests that build an app without it, in which case the routes
-   * are not mounted.
-   */
-  founding?: FoundingDeps;
   /** S2 standing-float-ceiling reads for GET /entities/:id/treasury (dashboard). `read` is the same
    *  wiring as entityPayment.status()'s `standing` (payments/standingExposure.ts#buildReadExposure);
    *  `ceilingAtomic` is the configured MAX_POCKET_FLOAT_USDC, atomic USDC string. Optional for the
@@ -521,11 +513,6 @@ export function buildApiApp(deps: ApiDeps) {
   mountVerifyRoutes(app, deps);
   mountEnsGatewayRoutes(app, deps);
   if (deps.x402Demo) mountX402DemoRoutes(app, deps.x402Demo);
-  // Public apply form. The reviewer routes on the same prefix carry their own session check,
-  // so the prefix itself stays outside protect() — a blanket guard would close the form.
-  if (deps.founding) {
-    mountFoundingRoutes(app, { jwtSecret: deps.jwtSecret, founding: deps.founding });
-  }
   mountAuthRoutes(app, deps);
   mountPasskeyRoutes(app, deps);
   /**

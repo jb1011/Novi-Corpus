@@ -20,7 +20,6 @@ import {
   FORWARDED_RESPONSE_HEADERS,
   forwardedRequestHeaders,
   forwardedResponseHeaders,
-  foundingForwardedFor,
   isDocumentDownloadPath,
   isNoStorePath,
   isPublicReferencePath,
@@ -136,20 +135,4 @@ test("no-store covers every legal-body order door and the customer company doors
   expect(isNoStorePath("companies/x")).toBe(false);
   expect(isNoStorePath("companies")).toBe(false);
   expect(isNoStorePath("legal-bodies/by-agent/1")).toBe(false);
-});
-
-test("no-store covers founding applications and leaves the public config cacheable", () => {
-  expect(isNoStorePath("founding/applications")).toBe(true);
-  expect(isNoStorePath("founding/applications.csv")).toBe(true);
-  expect(isNoStorePath("founding/applications/abc")).toBe(true);
-  expect(isNoStorePath("founding/applications/abc/review")).toBe(true);
-  expect(isNoStorePath("founding/config")).toBe(false);
-});
-
-test("the founding POST forwards only the last forwarded-for entry", () => {
-  expect(foundingForwardedFor(null)).toBeNull();
-  expect(foundingForwardedFor("")).toBeNull();
-  expect(foundingForwardedFor("203.0.113.9")).toBe("203.0.113.9");
-  expect(foundingForwardedFor("1.1.1.1, 203.0.113.9")).toBe("203.0.113.9");
-  expect(foundingForwardedFor("1.1.1.1,")).toBe("1.1.1.1");
 });
