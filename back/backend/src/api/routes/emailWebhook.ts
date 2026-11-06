@@ -39,9 +39,10 @@ import { readCappedBody } from "../cappedBody";
  * a suppression) also writes the `email_bounced` WARN line when it is recorded (for an orphan,
  * when the delivery job records it), so an operator looks the same day: an undelivered filing
  * email means the customer has no way back, and the runbook says to reach them another way; an
- * event the outbox ignores (older, or redelivered) writes none. Every line carries ids, the kind, the state and codes; never the body (it holds the
- * recipient's address and the subject), an address, a signature or the secret, and an identity
- * link's subject (a tenant id) is cut to its first ten characters, as the outbox's own lines do.
+ * event the outbox ignores (older, or redelivered) writes none. Every line carries ids, the kind,
+ * the state and codes; never the body (it holds the recipient's address and the subject), an
+ * address, a signature or the secret, and an identity link's subject (a tenant id) is cut to its
+ * first ten characters, as the outbox's own lines do.
  *
  * Every answer is `Cache-Control: no-store`.
  *

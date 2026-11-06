@@ -243,7 +243,8 @@ export class Scheduler {
     entry.lastOk = true;
     entry.consecutiveFailures = 0;
     this.record(entry, startedAt, true);
-    if (!(entry.job.quiet === true && Object.values(counts).every((n) => n === 0)))
+    // `?? {}`: a quiet job that returns no counts at all has nothing to report either.
+    if (!(entry.job.quiet === true && Object.values(counts ?? {}).every((n) => n === 0)))
       opsLog("job_ran", { ...counts, name: entry.name, ms: this.now() - startedAt });
     return counts;
   }

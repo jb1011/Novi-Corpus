@@ -46,24 +46,24 @@ import { readAnswers } from "./prompt";
  *  - `email:send-link <tenantId>` queues the beta's identity-link email to a guardian
  *    (src/email/templates/identityLink.ts): the link the operator built, which must be https and
  *    carry neither an address (`prefilled_email` is refused: an address would sit in the body and
- *    in the provider's URL logs) nor the account id (the link carries an opaque reference), and
- *    the request for the guardian's legal name. One per guardian per UTC day: a second the same
- *    day writes nothing and names the first. With `--again`, a new one the same day under the
- *    key's next number, only when the day's latest failed or was sent and not delivered (bounced,
- *    complained, failed, suppressed).
+ *    in the provider's URL logs) nor the account id, nor any other wallet-shaped value (the link
+ *    carries an opaque reference), and the request for the guardian's legal name. One per
+ *    guardian per UTC day: a second the same day writes nothing and names the first. With
+ *    `--again`, a new one the same day under the key's next number, only when the day's latest
+ *    failed or was sent and not delivered (bounced, complained, failed, suppressed).
  *
  * Every command refuses where the email system is not configured (`cfg.email`, which
- * PUBLIC_APP_URL turns on), and on a database the API of this build has not migrated yet. The two writing commands take `--operator` (the operator rule of
- * `cli/operator.ts`; `system` reserved), print what they would do and write nothing without
- * `--yes`, read and write in one immediate transaction, print ONE JSON object, and throw a refusal
- * as `refusing: ...`. They are the only commands that take an address, and never print it back:
- * not in their output, not in a refusal, not in their ops line (`email_requeued`,
- * `identity_link_queued`), which carries ids, the tenant's first ten characters, the operator and
- * the OS user running the command (`operatorOsUser`: the outbox row has no column for them). The
- * address is read at a prompt with `--to-prompt` (prompt.ts: never on the command line, so never
- * in the shell history), or given with `--to`; one of the two, never both. A configuration without
- * the email system is refused before anything is read at the prompt. The delivery job sends what
- * they queue, within a minute.
+ * PUBLIC_APP_URL turns on), and on a database the API of this build has not migrated yet. The two
+ * writing commands take `--operator` (the operator rule of `cli/operator.ts`; `system` reserved),
+ * print what they would do and write nothing without `--yes`, read and write in one immediate
+ * transaction, print ONE JSON object, and throw a refusal as `refusing: ...`. They are the only
+ * commands that take an address, and never print it back: not in their output, not in a
+ * refusal, not in their ops line (`email_requeued`, `identity_link_queued`), which carries ids,
+ * the tenant's first ten characters, the operator and the OS user running the command
+ * (`operatorOsUser`: the outbox row has no column for them). The address is read at a prompt with
+ * `--to-prompt` (prompt.ts: never on the command line, so never in the shell history), or given
+ * with `--to`; one of the two, never both. A configuration without the email system is refused
+ * before anything is read at the prompt. The delivery job sends what they queue, within a minute.
  *
  * The runbook: docs/runbooks/email.md.
  */
@@ -80,6 +80,9 @@ const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const NOT_HTTPS = "--url must be the full https link of the identity check";
+/** A wallet address in any case, `0x` and 40 hex characters, anywhere in a value: an account id,
+ *  which a link never carries. */
+const WALLET_SHAPED = /0x[0-9a-f]{40}/i;
 /** The provider keeps a key 24 hours, and the outbox cannot tell whether a failed email's send was
  *  one the provider took (an answer lost, then refusals): the runbook's wording, word for word. */
 const SAME_KEY_NOTE =
@@ -194,9 +197,10 @@ function decoded(value: string): string {
 /**
  * The identity check's link, as the operator built it, normalised (`URL.href`): https, no user
  * name or password, at most 2048 characters, no address (neither a `prefilled_email` parameter,
- * its name in any case or escaped, nor the guardian's own address anywhere in it) and not the
- * guardian's account id (with or without its 0x, in any case): the link carries an opaque
- * reference, since the provider must not hold the tenant. Each part is compared decoded: the whole
+ * its name in any case or escaped, nor the guardian's own address anywhere in it), not the
+ * guardian's account id (with or without its 0x, in any case) and no wallet-shaped value at all
+ * (`0x` and 40 hex characters, anyone's): the link carries an opaque reference, since the
+ * provider must not hold an account id. Each part is compared decoded: the whole
  * link, and each path segment, query name and query value on its own, so one stray `%` that stops
  * the whole link from decoding hides nothing. Never echoed: it may hold what it is refused for.
  */
@@ -227,6 +231,8 @@ function parseLink(value: string, address: string, tenantId: string): string {
   // The 40 hex characters, so the id is found with its 0x or without it.
   if (holds(tenantId.slice(2)))
     refuse("the link must not carry the account id (use the opaque reference)");
+  if (forms.some((form) => WALLET_SHAPED.test(form)))
+    refuse("the link must not carry a wallet address (use the opaque reference)");
   return link;
 }
 

@@ -23,8 +23,9 @@ import {
  *    `validation_error`, ...) and never carry its `message`, which can quote the address.
  *  - A 10 second timeout per request (`AbortSignal.timeout`, as `monitor/alerts.ts` does), and at
  *    most 8 requests a second from one process, `send` and `upsertContact` together, under
- *    Resend's limit of 10 a second per team. Each process has its own limiter; the API process is
- *    the one that sends, because CLI commands enqueue to the outbox rather than send directly.
+ *    Resend's limit of 10 a second per team. Each process has its own limiter: the API's
+ *    `email_deliver` job and a manual `scheduler:run email_deliver` both send, each serially
+ *    (one row at a time) under its own limiter; the other email commands only enqueue.
  *
  * Nothing here logs the key, an address or a body.
  */

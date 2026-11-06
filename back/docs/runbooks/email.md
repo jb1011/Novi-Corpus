@@ -163,7 +163,7 @@ way, then refusals, look the same from here, and the provider holds the row's ke
 **Every working day**, look at what did not arrive:
 
 ```bash
-npm run cli -- email:list --status failed
+npm run cli -- email:list --status failed --since <yesterday, 2026-11-09>
 npm run cli --silent -- email:list --status sent --since <yesterday, 2026-11-09> \
   | jq '.emails[] | select(.deliveryState != null and .deliveryState != "delivered" and .deliveryState != "delayed")'
 journalctl -u legalbody-api --since yesterday | grep -E '"opslog":"(email_failed|email_bounced)"'
@@ -262,7 +262,8 @@ the inbox and the trash: the record is then the only place the name is kept.
 `--url` is the full link you built; it must be https, and it must carry neither the person's
 address (a `prefilled_email` parameter, or the address anywhere in the link, escaped or not, is
 refused: the guardian types their address in the check) nor the account id (the tenant, with or
-without its 0x, in any case: the link carries the opaque reference). `<tenantId>` is the
+without its 0x, in any case) nor any other wallet address (`0x` and 40 hex characters, anyone's,
+escaped or not): the link carries the opaque reference. `<tenantId>` is the
 guardian's wallet address in any case; anything else is refused.
 
 One link per guardian per UTC day (the idempotency key is `identity_link:`, a digest of the tenant
