@@ -1,0 +1,55 @@
+---
+// Starlight's SidebarSublist, with the group icon of design 3.2 before each group label.
+import { Badge, Icon as StarlightIcon } from '@astrojs/starlight/components';
+import SidebarRestorePoint from '@astrojs/starlight/components/SidebarRestorePoint.astro';
+import Icon from '../Icon.astro';
+import { GROUP_ICONS } from '../../sections.mjs';
+
+type Entry = (typeof Astro.locals.starlightRoute.sidebar)[number];
+
+interface Props {
+	sublist: Entry[];
+	nested?: boolean;
+}
+
+const { sublist, nested } = Astro.props;
+
+const hasCurrent = (entry: Entry): boolean =>
+	entry.type === 'link' ? entry.isCurrent : entry.entries.some(hasCurrent);
+---
+
+<ul class:list={['nc-side', { 'top-level': !nested }]}>
+	{
+		sublist.map((entry) => (
+			<li>
+				{entry.type === 'link' ? (
+					<a
+						href={entry.href}
+						aria-current={entry.isCurrent ? 'page' : undefined}
+						class:list={[{ large: !nested }, entry.attrs.class]}
+						{...entry.attrs}
+					>
+						<span>{entry.label}</span>
+						{entry.badge && (
+							<Badge variant={entry.badge.variant} class={entry.badge.class} text={entry.badge.text} />
+						)}
+					</a>
+				) : (
+					<details open={hasCurrent(entry) || !entry.collapsed}>
+						<summary>
+							<span class="group-label">
+								{GROUP_ICONS[entry.label as keyof typeof GROUP_ICONS] && (
+									<Icon name={GROUP_ICONS[entry.label as keyof typeof GROUP_ICONS]} size={16} />
+								)}
+								<span class="large">{entry.label}</span>
+							</span>
+							<StarlightIcon name="right-caret" class="caret" size="1.25rem" />
+						</summary>
+						<SidebarRestorePoint />
+						<Astro.self sublist={entry.entries} nested />
+					</details>
+				)}
+			</li>
+		))
+	}
+</ul>

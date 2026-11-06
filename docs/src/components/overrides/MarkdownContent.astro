@@ -1,0 +1,9 @@
+---
+// Starlight's markdown wrapper, inside the page's section, so step flows, cards and
+// other components take the section colour (--sc) without being told.
+import Default from '@astrojs/starlight/components/MarkdownContent.astro';
+
+const section = (Astro.locals.starlightRoute.entry.data as { section?: string }).section;
+---
+
+<div class="nc-section" data-section={section}><Default><slot /></Default></div>
