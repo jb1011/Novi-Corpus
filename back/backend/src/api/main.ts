@@ -50,6 +50,8 @@ import {
   legalBodyEnvironment,
   loadConfig,
 } from "../config/env";
+import { ResendEmailSender } from "../email/resend";
+import { ConsoleEmailSender, type EmailDeps } from "../email/sender";
 import { resolveFormationDeployment } from "../formation";
 import { createCompany } from "../formation/company";
 import { newChainHeadCache } from "../formation/payment";
@@ -453,6 +455,29 @@ async function main() {
         blockedCountries: cfg.identity.blockedCountries,
       }
     : undefined;
+  // The email system: built only where `cfg.email` is, which is only where PUBLIC_APP_URL is set.
+  // The testnet box sets none of the email settings, so it builds no sender and sends nothing. The
+  // console sender writes one ops line per email (never the address or the body) and sends
+  // nothing; the provider sender sends.
+  const email: EmailDeps | undefined = cfg.email
+    ? {
+        sender:
+          cfg.email.provider === "resend"
+            ? new ResendEmailSender({
+                apiKey: cfg.email.apiKey,
+                from: cfg.email.from,
+                replyTo: cfg.email.replyTo,
+              })
+            : new ConsoleEmailSender(),
+        publicAppUrl: cfg.email.publicAppUrl,
+        postalAddress: cfg.email.postalAddress,
+        marketingSegmentId: cfg.email.marketingSegmentId,
+      }
+    : undefined;
+  if (email)
+    console.warn(
+      `⚠ Email ENABLED (sender ${email.sender.kind}, links on ${email.publicAppUrl}${email.marketingSegmentId ? ", marketing segment set" : ", no marketing segment: contact writes are skipped"})`,
+    );
   // A customer company door needs a verified human behind the guardian. On testnet nothing else
   // stops the doors being mounted with no World block, and then every one of them refuses.
   if (cfg.legalBodyFactory && !cfg.world && legalBodyEnvironment(cfg) === "sandbox")
@@ -1244,6 +1269,7 @@ async function main() {
     ens,
     worldId,
     identity,
+    email,
     agentBook,
     /**
      * The public legal-body lookup, `GET /legal-bodies/:address` (design 2026-09-10 D3).
