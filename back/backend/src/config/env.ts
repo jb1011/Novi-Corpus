@@ -130,7 +130,8 @@ function isHttpsOrigin(raw: string): boolean {
 
 /** An email address as the email settings accept it: something, one `@`, a dotted domain. */
 const ADDRESS_FORM = "[^\\s@<>]+@[^\\s@<>]+\\.[^\\s@<>]+";
-const PLAIN_ADDRESS = new RegExp(`^${ADDRESS_FORM}$`);
+/** One plain address: EMAIL_REPLY_TO, and the address an operator's email command takes. */
+export const PLAIN_ADDRESS = new RegExp(`^${ADDRESS_FORM}$`);
 /** `Name <address>` or a plain address. */
 const EMAIL_FROM_FORM = new RegExp(`^(?:[^<>\\r\\n]*[^<>\\s] <${ADDRESS_FORM}>|${ADDRESS_FORM})$`);
 

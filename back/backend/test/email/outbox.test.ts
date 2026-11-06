@@ -435,6 +435,24 @@ describe("findSent", () => {
   });
 });
 
+describe("find and findByKey", () => {
+  test("answer the public row an email id or an idempotency key names, in any state; never the address or the content", () => {
+    const a = invite("invite:hash-0001");
+    const b = invite("invite:hash-0002");
+    failRow(b.emailId);
+    expect(outbox.find(a.emailId)).toMatchObject({ emailId: a.emailId, status: "pending" });
+    expect(outbox.find(b.emailId)).toMatchObject({ emailId: b.emailId, status: "failed" });
+    expect(outbox.findByKey("invite:hash-0002")).toEqual(outbox.find(b.emailId));
+    for (const found of [outbox.find(a.emailId), outbox.findByKey("invite:hash-0001")]) {
+      expect(Object.keys(found ?? {}).sort()).toEqual(Object.keys(outbox.list({})[0] ?? {}).sort());
+      expect(JSON.stringify(found)).not.toContain(ADDRESS);
+      expect(JSON.stringify(found)).not.toContain("INV-SECRET");
+    }
+    expect(outbox.find("em_unknown")).toBeUndefined();
+    expect(outbox.findByKey("invite:hash-unknown")).toBeUndefined();
+  });
+});
+
 describe("enqueueContactUpsert", () => {
   const deps = (o: EmailOutbox): EmailDeps => ({
     sender: new ConsoleEmailSender(),

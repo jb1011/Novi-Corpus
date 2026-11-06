@@ -153,6 +153,8 @@ export class SqliteEmailOutboxRepository {
          ON CONFLICT(idempotency_key) DO NOTHING`,
       ),
       idByKey: db.prepare("SELECT email_id FROM email_outbox WHERE idempotency_key = ?"),
+      find: db.prepare(`SELECT ${PUBLIC_COLUMNS} FROM email_outbox WHERE email_id = ?`),
+      findByKey: db.prepare(`SELECT ${PUBLIC_COLUMNS} FROM email_outbox WHERE idempotency_key = ?`),
       due: db.prepare(
         `SELECT ${PUBLIC_COLUMNS}, to_address, text, html FROM email_outbox
           WHERE status = 'pending' AND next_attempt_at <= ?
@@ -215,6 +217,18 @@ export class SqliteEmailOutboxRepository {
 
   findIdByKey(idempotencyKey: string): string | undefined {
     return (this.stmts.idByKey.get(idempotencyKey) as { email_id: string } | undefined)?.email_id;
+  }
+
+  /** The row an email id names, as anyone may read it. */
+  find(emailId: string): OutboxRow | undefined {
+    const r = this.stmts.find.get(emailId) as PublicRow | undefined;
+    return r === undefined ? undefined : toOutboxRow(r);
+  }
+
+  /** The row an idempotency key names, as anyone may read it. */
+  findByKey(idempotencyKey: string): OutboxRow | undefined {
+    const r = this.stmts.findByKey.get(idempotencyKey) as PublicRow | undefined;
+    return r === undefined ? undefined : toOutboxRow(r);
   }
 
   /** The pending rows due at `nowMs`, the longest-due first, at most `limit`. */

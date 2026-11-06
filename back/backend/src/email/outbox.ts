@@ -31,8 +31,9 @@ export type {
  * through one path, the scheduler's `email_deliver` job, which hands each row to the deployment's
  * sender (`EmailSender`, the provider or the console). A caller never sends: it enqueues, once per
  * idempotency key, and the job delivers. The provider's delivery webhook records what happened to
- * a sent email (`findSent`, `recordDelivery`: src/api/routes/emailWebhook.ts); the operator
- * commands list the rows and re-queue a failed one.
+ * a sent email (`findSent`, `recordDelivery`: src/api/routes/emailWebhook.ts); the operator's
+ * commands (src/cli/email.ts) list the rows, re-queue a failed one, and queue the beta's
+ * identity link.
  *
  * The delivery rules, each held by test/email/deliverJob.test.ts:
  *  - every 30 seconds, the pending rows that are due, the longest-due first, at most 20 a run, one
@@ -129,6 +130,10 @@ export interface EmailOutbox {
   requeue(emailId: string, to: string): boolean;
   /** Never the address, the text or the HTML. */
   list(filter: OutboxFilter): OutboxRow[];
+  /** The row an email id names, in any state, as anyone may read it; undefined for none. */
+  find(emailId: string): OutboxRow | undefined;
+  /** The row an idempotency key names, in any state, as anyone may read it; undefined for none. */
+  findByKey(idempotencyKey: string): OutboxRow | undefined;
 }
 
 /** The wait after a retryable failure, `attempts` being the failures counted with this one. */
@@ -241,6 +246,14 @@ export class SqliteEmailOutbox implements EmailOutbox {
 
   list(filter: OutboxFilter): OutboxRow[] {
     return this.repo.list(filter);
+  }
+
+  find(emailId: string): OutboxRow | undefined {
+    return this.repo.find(emailId);
+  }
+
+  findByKey(idempotencyKey: string): OutboxRow | undefined {
+    return this.repo.findByKey(idempotencyKey);
   }
 
   /** The provider's id for the email (or the contact). */

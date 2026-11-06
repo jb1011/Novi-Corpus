@@ -16,6 +16,7 @@ import { runOnboarding } from "../workflow/onboarding";
 import { OnboardingRunner } from "../workflow/runner";
 import { registerCompanyCheckCommands } from "./companyChecks";
 import { type CliContext, buildContext } from "./context";
+import { registerEmailCommands } from "./email";
 import { registerIdentityCommands } from "./identity";
 import { registerPilotCommands } from "./pilot";
 import { registerSchedulerCommands } from "./scheduler";
@@ -796,6 +797,10 @@ export function buildCli(
   // ── scheduler:* — the API's in-process scheduler: its jobs, and one run now by hand ───────────
   // DB-only, like the identity commands: each opens the configured database itself.
   registerSchedulerCommands(program);
+
+  // ── email:* — the outbox: list its emails, re-queue a failed one, queue the identity link ─────
+  // DB-only, like the scheduler commands: each opens the configured database itself.
+  registerEmailCommands(program);
 
   return program;
 }

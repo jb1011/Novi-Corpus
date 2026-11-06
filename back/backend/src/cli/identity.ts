@@ -1,6 +1,5 @@
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
-import { getAddress } from "viem";
 import { type WorldIdDeps, buildWorldIdDeps, realHumanState } from "../api/routes/worldId";
 import { type Config, legalBodyEnvironment } from "../config/env";
 import { type PiiKeyring, encryptText, nameHmac } from "../formation/pii";
@@ -41,6 +40,7 @@ import {
   parseExpectLatest,
   parseOperator,
   parseReason,
+  parseTenant,
   print,
   refuse,
   withDatabase,
@@ -106,15 +106,6 @@ const LIVENESS = ["passed", "failed", "not_run"] as const satisfies readonly Liv
 const WATCHLIST = ["clear", "hit", "not_run"] as const satisfies readonly Watchlist[];
 
 // ── parsing ──────────────────────────────────────────────────────────────────────────────────
-
-/** The tenant in the one spelling its rows are kept under: EIP-55 checksummed. */
-function parseTenant(value: string): string {
-  try {
-    return getAddress(value);
-  } catch {
-    return refuse("<tenantId> must be a wallet address");
-  }
-}
 
 function oneOf<T extends string>(
   flag: string,
