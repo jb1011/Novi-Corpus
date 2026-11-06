@@ -264,6 +264,36 @@ describe("scheduler:list", () => {
     expect(ops).toEqual([]);
   });
 
+  test("on a database the new API has not yet migrated (no scheduled_job_runs), the jobs are listed with no last run", async () => {
+    db.exec("DROP TABLE scheduled_job_runs");
+    const { output, ops } = await run<{ jobs: Record<string, unknown>[] }>(["scheduler:list"]);
+    expect(output.jobs).toEqual([
+      {
+        name: "identity_sweep",
+        everyMs: DAY,
+        schedule: "first run 30 s after boot, then every 24 h",
+        lastRunAt: null,
+        lastOk: null,
+        consecutiveFailures: null,
+      },
+    ]);
+    expect(ops).toEqual([]);
+  });
+
+  test("with the email system configured, a database without its tables yet still lists email_deliver, with no last run", async () => {
+    process.env.PUBLIC_APP_URL = "https://www.example.com";
+    process.env.EMAIL_FROM = "Novi Corpus <hello@example.com>";
+    process.env.EMAIL_POSTAL_ADDRESS = "1 Example Street, Suite 100, Dover, DE 19901, USA";
+    db.exec(
+      "DROP TABLE scheduled_job_runs; DROP TABLE email_outbox; DROP TABLE email_delivery_orphans",
+    );
+    const { output } = await run<{ jobs: Record<string, unknown>[] }>(["scheduler:list"]);
+    expect(output.jobs.map((j) => [j.name, j.lastRunAt])).toEqual([
+      ["identity_sweep", null],
+      ["email_deliver", null],
+    ]);
+  });
+
   test("without the PII key there is no job, and it says the API starts no scheduler", async () => {
     Reflect.deleteProperty(process.env, "FORMATION_PII_KEY");
     const { output } = await run(["scheduler:list"]);

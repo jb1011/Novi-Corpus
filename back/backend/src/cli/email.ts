@@ -21,6 +21,7 @@ import { opsLog } from "../observability/opsLog";
 import {
   OPERATOR_NAME,
   OTHER_CHARACTER,
+  hasTables,
   oneOf,
   operatorConfig,
   osUser,
@@ -52,7 +53,7 @@ import { readAnswers } from "./prompt";
  *    complained, failed, suppressed).
  *
  * Every command refuses where the email system is not configured (`cfg.email`, which
- * PUBLIC_APP_URL turns on). The two writing commands take `--operator` (the operator rule of
+ * PUBLIC_APP_URL turns on), and on a database the API of this build has not migrated yet. The two writing commands take `--operator` (the operator rule of
  * `cli/operator.ts`; `system` reserved), print what they would do and write nothing without
  * `--yes`, read and write in one immediate transaction, print ONE JSON object, and throw a refusal
  * as `refusing: ...`. They are the only commands that take an address, and never print it back:
@@ -96,11 +97,16 @@ const TO_PROMPT_HELP =
 // ── parsing ──────────────────────────────────────────────────────────────────────────────────
 
 const NOT_CONFIGURED = "email is not configured on this deployment (PUBLIC_APP_URL)";
+const NOT_MIGRATED = "the database has not been migrated yet: start the API once with this build";
+/** The tables the outbox reads and writes, which the API's migration creates. */
+const EMAIL_TABLES = ["email_outbox", "email_delivery_orphans"] as const;
 
-/** The email system of this deployment, or a refusal where it is not configured. */
+/** The email system of this deployment, or a refusal where it is not configured, or where the
+ *  database has not been migrated to its tables yet (the API migrates at its start). */
 function requireEmail(db: Database.Database, cfg: Config): EmailDeps {
   const email = buildEmailDeps(db, cfg);
   if (email === undefined) refuse(NOT_CONFIGURED);
+  if (!hasTables(db, EMAIL_TABLES)) refuse(NOT_MIGRATED);
   return email;
 }
 

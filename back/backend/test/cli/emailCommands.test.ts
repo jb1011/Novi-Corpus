@@ -316,6 +316,25 @@ describe("every email command needs the email system", () => {
   });
 });
 
+describe("every email command needs the migrated database", () => {
+  const NOT_MIGRATED =
+    "refusing: the database has not been migrated yet: start the API once with this build";
+
+  for (const tables of [
+    ["email_outbox", "email_delivery_orphans"],
+    // A database an earlier build of the outbox migrated.
+    ["email_delivery_orphans"],
+  ])
+    test(`without ${tables.join(" and ")} each refuses plainly, not with a SQLite error`, async () => {
+      for (const table of tables) db.exec(`DROP TABLE ${table}`);
+      expect(await refusal(["email:list"])).toBe(NOT_MIGRATED);
+      expect(await refusal(resend("em_00000000-0000-4000-8000-000000000000"))).toBe(NOT_MIGRATED);
+      expect(await refusal(sendLink(guardian))).toBe(NOT_MIGRATED);
+      piped(`${ADDRESS}\n`);
+      expect(await refusal(prompted(sendLink(guardian)))).toBe(NOT_MIGRATED);
+    });
+});
+
 // ── email:list ───────────────────────────────────────────────────────────────────────────────
 
 describe("email:list", () => {
