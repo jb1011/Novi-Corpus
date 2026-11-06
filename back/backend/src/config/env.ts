@@ -534,8 +534,8 @@ const EnvSchema = z.object({
    *  writes are skipped (`contact_upsert_skipped`). */
   RESEND_MARKETING_SEGMENT_ID: z.preprocess(blankAsUnset, z.string().trim().max(128).optional()),
   /** true|false, default false. With the console sender, each email's ops line also carries its
-   *  text body (never the address), so a staging tester can follow the link it holds. Refused on
-   *  production. */
+   *  text body (never the address), so a staging tester can follow the link it holds. Refused with
+   *  EMAIL_PROVIDER=resend. */
   EMAIL_CONSOLE_SHOW_BODY: z.preprocess(blankAsUnset, z.string().trim().optional()),
 
   // --- FORMATION PAYMENTS (2026-08-26 §6; B1). Built now, shipped OFF. -----------------------
@@ -1172,8 +1172,8 @@ export type EmailConfig = {
   /** One line. */
   postalAddress: string;
   marketingSegmentId?: string;
-  /** EMAIL_CONSOLE_SHOW_BODY: the console sender prints each text body. Never on production; read
-   *  by the console sender only. */
+  /** EMAIL_CONSOLE_SHOW_BODY: the console sender prints each text body. Refused with the provider
+   *  sender; read by the console sender only. */
   consoleShowBody: boolean;
 } & ({ provider: "console" } | { provider: "resend"; apiKey: string; webhookSecret: string });
 
@@ -1404,13 +1404,28 @@ function buildEmail(e: Env, env: Record<string, string | undefined>): Config["em
     replyTo: e.EMAIL_REPLY_TO,
     postalAddress: e.EMAIL_POSTAL_ADDRESS as string,
     marketingSegmentId: e.RESEND_MARKETING_SEGMENT_ID,
-    // Production refuses it, after `cfg` is assembled: the environment is not known here.
+    // The provider sender refuses it, below.
     consoleShowBody: boolWithDerivedDefault(
       e.EMAIL_CONSOLE_SHOW_BODY,
       false,
       "EMAIL_CONSOLE_SHOW_BODY",
     ),
   };
+
+  // The provider sender sends real email: its box prints no body into its log and builds its
+  // links on https only, on any deployment. Refused by the sender, not by ARC_NETWORK: a console
+  // sender in production mode is the staging proof, which shows the bodies to follow their links
+  // and may run on http://localhost; a real mainnet box runs the provider.
+  if (e.EMAIL_PROVIDER === "resend") {
+    if (common.consoleShowBody)
+      throw new Error(
+        "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused with EMAIL_PROVIDER=resend: it is the console sender's staging setting, and a box that sends real email prints no body into its log",
+      );
+    if (new URL(common.publicAppUrl).protocol !== "https:")
+      throw new Error(
+        "Invalid config: PUBLIC_APP_URL must be https with EMAIL_PROVIDER=resend: every link in a real email is built on it",
+      );
+  }
   return e.EMAIL_PROVIDER === "resend"
     ? {
         ...common,
@@ -1737,20 +1752,6 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
     email,
   };
-
-  // The email system on production (PR 2a). Here rather than in `buildEmail`, which runs before
-  // the deployment's environment can be read off `cfg`. A production box prints no body into
-  // its log, whichever sender it runs, and builds its links on https only.
-  if (cfg.email && legalBodyEnvironment(cfg) === "production") {
-    if (cfg.email.consoleShowBody)
-      throw new Error(
-        "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused on production (ARC_NETWORK=mainnet): it would print every email's text body, with links and codes meant for one person, into the log",
-      );
-    if (new URL(cfg.email.publicAppUrl).protocol !== "https:")
-      throw new Error(
-        "Invalid config: PUBLIC_APP_URL must be https on production (ARC_NETWORK=mainnet): every link in an email is built on it",
-      );
-  }
 
   // Formation (design §2), Circle twin: a half-configured doola block must fail at boot, not at
   // the first filing — a real Wyoming LLC and a real fee are on the other side of that call.

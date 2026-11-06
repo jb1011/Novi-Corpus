@@ -76,10 +76,10 @@ export function assertIdempotencyKey(key: string): void {
  * with the sender's kind, the subject and the idempotency key. The outbox row still ends `sent`,
  * with `console:<key>` as its message id.
  *
- * With `showBody` (EMAIL_CONSOLE_SHOW_BODY, which production refuses at boot) the line also
- * carries the text body, so a staging tester can follow the link an email holds. Never the HTML,
- * and never the address: wherever the recipient's address appears in the subject or the body it
- * is printed as `<recipient>`.
+ * With `showBody` (EMAIL_CONSOLE_SHOW_BODY, which a box with the provider sender refuses at boot)
+ * the line also carries the text body, so a staging tester can follow the link an email holds.
+ * Never the HTML, and never the address: wherever the recipient's address appears in the subject
+ * or the body it is printed as `<recipient>`.
  */
 export class ConsoleEmailSender implements EmailSender {
   readonly kind = "console" as const;

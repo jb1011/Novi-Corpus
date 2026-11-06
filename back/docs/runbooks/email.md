@@ -35,7 +35,7 @@ no webhook route, and the `email:*` commands refuse (`email is not configured on
 
 | Setting                       | Where                    | What it is                                                                                     |
 | ----------------------------- | ------------------------ | ---------------------------------------------------------------------------------------------- |
-| `PUBLIC_APP_URL`              | staging, mainnet         | The app's public origin; every link in an email is built on it. https on production.          |
+| `PUBLIC_APP_URL`              | staging, mainnet         | The app's public origin; every link in an email is built on it. https with `resend`.          |
 | `EMAIL_FROM`                  | staging, mainnet         | `Name <address>` on a sending domain (section 2), or an address.                               |
 | `EMAIL_POSTAL_ADDRESS`        | staging, mainnet         | The company's postal address, one line, at the foot of every email.                            |
 | `EMAIL_REPLY_TO`              | optional                 | A plain address for replies, when not `EMAIL_FROM`. The identity-link email asks for a reply (section 6). |
@@ -43,13 +43,14 @@ no webhook route, and the `email:*` commands refuse (`email is not configured on
 | `RESEND_API_KEY`              | mainnet only             | A secret. Required with `resend`; refused with `console`.                                      |
 | `RESEND_WEBHOOK_SECRET`       | mainnet only             | A secret, `whsec_` then base64 (section 3). Required with `resend`; refused with `console`.    |
 | `RESEND_MARKETING_SEGMENT_ID` | optional                 | The campaign's segment. Without it contact writes are skipped (section 6).                    |
-| `EMAIL_CONSOLE_SHOW_BODY`     | staging only             | `true`: the console sender prints each text body (section 7). Refused on production.           |
+| `EMAIL_CONSOLE_SHOW_BODY`     | staging only             | `true`: the console sender prints each text body (section 7). Refused with the provider sender (`resend`). |
 
 The two secrets go into the mainnet environment file only, never into a chat, a ticket, a commit
 or the staging instance. The box refuses to boot on a half-configured block: `resend` without
 its key, its secret, `EMAIL_FROM`, `EMAIL_POSTAL_ADDRESS` or `PUBLIC_APP_URL`; any email setting
-without `PUBLIC_APP_URL`; the key or the secret with `console`; on production, an http
-`PUBLIC_APP_URL` or `EMAIL_CONSOLE_SHOW_BODY`.
+without `PUBLIC_APP_URL`; the key or the secret with `console`; with `resend`, an http
+`PUBLIC_APP_URL` or `EMAIL_CONSOLE_SHOW_BODY`, on any deployment. The console sender may run in
+production mode (`ARC_NETWORK=mainnet`, the staging proof) with both.
 
 ## 2. The two sending domains and their records
 
@@ -264,8 +265,11 @@ tenant cut to its first ten characters.
 The staging instance runs the console sender: no email leaves, and each one is an `email_console`
 line with its subject and key. To click the links an email holds (the waitlist confirmation, an
 invite, an identity link), set `EMAIL_CONSOLE_SHOW_BODY=true` on the staging instance: each line
-then carries the text body, the recipient's address printed as `<recipient>`. Never on production:
-the box refuses to boot with it there, whichever sender it runs.
+then carries the text body, the recipient's address printed as `<recipient>`. It is refused with
+the provider sender: a box with `EMAIL_PROVIDER=resend` refuses to boot with it, on any
+deployment, and so does an http `PUBLIC_APP_URL` there. The staging proof, the console sender in
+production mode (`ARC_NETWORK=mainnet`), may set it and may build its links on
+`http://localhost`.
 
 ## 8. The marketing segment, and contacts from before it
 

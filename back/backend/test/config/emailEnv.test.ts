@@ -280,27 +280,40 @@ test("the console body setting is an email setting: without the link base it ref
   );
 });
 
-test("a mainnet deployment boots with the email system, and production refuses the console body", () => {
+/** The provider sender's two refusals, on any deployment (Ruling 28): a box that sends real email
+ *  prints no body into its log and builds its links on https only. */
+const BODY_REFUSED =
+  "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused with EMAIL_PROVIDER=resend: it is the console sender's staging setting, and a box that sends real email prints no body into its log";
+const HTTP_REFUSED =
+  "Invalid config: PUBLIC_APP_URL must be https with EMAIL_PROVIDER=resend: every link in a real email is built on it";
+
+test("the provider sender refuses the console body on any deployment; the console sender in production mode (the staging proof) boots with it", () => {
   expect(loadConfig(MAINNET_CONSOLE).email?.provider).toBe("console");
-  expect(thrownBy(() => loadConfig({ ...MAINNET_CONSOLE, EMAIL_CONSOLE_SHOW_BODY: "true" }))).toBe(
-    "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused on production (ARC_NETWORK=mainnet): it would print every email's text body, with links and codes meant for one person, into the log",
+  // The staging proof: production mode, the console sender, the bodies shown.
+  expect(
+    loadConfig({ ...MAINNET_CONSOLE, EMAIL_CONSOLE_SHOW_BODY: "true" }).email?.consoleShowBody,
+  ).toBe(true);
+  expect(loadConfig({ ...MAINNET_CONSOLE, ...RESEND }).email?.provider).toBe("resend");
+  expect(thrownBy(() => loadConfig({ ...RESEND, EMAIL_CONSOLE_SHOW_BODY: "true" }))).toBe(
+    BODY_REFUSED,
   );
   expect(
-    thrownBy(() =>
-      // The same refusal with the provider sender: the setting is refused on production whatever
-      // sends.
-      loadConfig({ ...MAINNET_CONSOLE, ...RESEND, EMAIL_CONSOLE_SHOW_BODY: "true" }),
-    ),
-  ).toBe(
-    "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused on production (ARC_NETWORK=mainnet): it would print every email's text body, with links and codes meant for one person, into the log",
+    thrownBy(() => loadConfig({ ...MAINNET_CONSOLE, ...RESEND, EMAIL_CONSOLE_SHOW_BODY: "true" })),
+  ).toBe(BODY_REFUSED);
+  // Set to false, it asks for nothing: the provider sender boots.
+  expect(loadConfig({ ...RESEND, EMAIL_CONSOLE_SHOW_BODY: "false" }).email?.consoleShowBody).toBe(
+    false,
   );
 });
 
-test("production refuses an http link base; a sandbox box may use one (the staging laptop)", () => {
+test("the provider sender refuses an http link base on any deployment; the console sender may use one, in production mode too", () => {
   const http = "http://localhost:5173";
   expect(loadConfig({ ...CONSOLE, PUBLIC_APP_URL: http }).email?.publicAppUrl).toBe(http);
-  expect(thrownBy(() => loadConfig({ ...MAINNET_CONSOLE, PUBLIC_APP_URL: http }))).toBe(
-    "Invalid config: PUBLIC_APP_URL must be https on production (ARC_NETWORK=mainnet): every link in an email is built on it",
+  // The staging proof on a laptop: production mode, the console sender, http://localhost.
+  expect(loadConfig({ ...MAINNET_CONSOLE, PUBLIC_APP_URL: http }).email?.publicAppUrl).toBe(http);
+  expect(thrownBy(() => loadConfig({ ...RESEND, PUBLIC_APP_URL: http }))).toBe(HTTP_REFUSED);
+  expect(thrownBy(() => loadConfig({ ...MAINNET_CONSOLE, ...RESEND, PUBLIC_APP_URL: http }))).toBe(
+    HTTP_REFUSED,
   );
 });
 
