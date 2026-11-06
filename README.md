@@ -188,6 +188,6 @@ exists because ETHGlobal's submission form only accepts repositories on the subm
 
 ## Documentation
 
-- [docs.novicorpus.com](https://docs.novicorpus.com): the public docs (source in [`docs/`](./docs/README.md))
+- [docs.novicorpus.com](https://docs.novicorpus.com): the public docs (source in [`docs/`](./docs/), an Astro Starlight site)
 - [back/README.md](./back/README.md): architecture, deployed contracts, getting started
 - [back/docs/README.md](./back/docs/README.md): the index of specs, designs and runbooks
