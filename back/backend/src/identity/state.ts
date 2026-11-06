@@ -87,7 +87,8 @@ function stateOf(
 /**
  * What the tenant's rows add up to at `nowMs`: its latest row decides. With `environment`
  * "production", a latest passed row written on a sandbox or synthetic reads `none`; without it, a
- * row reads as it is (the operator's commands read it so).
+ * row reads as it is. The operator's writers read it without the environment; `identity:show`
+ * reads it as the deployment does.
  */
 export function identityState(
   repo: IdentityRepository,

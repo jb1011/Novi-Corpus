@@ -22,7 +22,8 @@ const LATIN_NAME = /^[\p{Script=Latin}\p{M} '.-]+$/u;
  * One field: composed (NFC) first, so the record, `/me` and the declaration hold the same bytes
  * however the name was typed; trimmed, inner whitespace collapsed to one space; then, when the
  * field has letters and equals its upper-case form, each word title-cased (a new word after a
- * space, "-", "'" or "."), diacritics kept. The plain case forms, never the locale ones (those
+ * space, "-", "'" or "."), diacritics kept, and composed again: recasing can itself decompose
+ * ("İ" lower-cases to "i" and a combining dot). The plain case forms, never the locale ones (those
  * follow the process's locale, a Turkish one lower-casing "I" to a dotless "ı"), so the result
  * does not depend on the box's settings.
  */
@@ -31,7 +32,8 @@ export function nameOfRecord(printed: string): string {
   if (!HAS_LETTER.test(value) || value !== value.toUpperCase()) return value;
   return value
     .toLowerCase()
-    .replace(WORD_START, (_, before: string, first: string) => before + first.toUpperCase());
+    .replace(WORD_START, (_, before: string, first: string) => before + first.toUpperCase())
+    .normalize("NFC");
 }
 
 /** The declarant name the declared door compares with: the first name, a space, the last name. */

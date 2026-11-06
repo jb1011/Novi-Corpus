@@ -33,6 +33,22 @@ test("one spelling per name: a decomposed input (NFD) comes out composed (NFC), 
   expect(nameOfRecord("  MU\u0308LLER ")).toBe("M\u00FCller");
 });
 
+test("one spelling per name: the recased result is composed (NFC) too, and a name of record is its own name of record", () => {
+  // Lower-casing a dotted capital I gives "i" and a combining dot, which title-casing leaves
+  // decomposed; a J with a caron has no capital composed form but a lower-case one.
+  const dotted = nameOfRecord("\u0130LKER");
+  expect(dotted).toBe("\u0130lker");
+  expect(dotted).toBe(dotted.normalize("NFC"));
+  const caron = nameOfRecord("AJ\u030CA");
+  expect(caron).toBe("A\u01F0a");
+  expect(caron).toBe(caron.normalize("NFC"));
+
+  for (const printed of ["\u0130LKER", "\u00C9LODIE", "O'BRIEN", "DE LA FUENTE", "AJ\u030CA"]) {
+    const once = nameOfRecord(printed);
+    expect(nameOfRecord(once), printed).toBe(once);
+  }
+});
+
 test("title-casing starts a new word after a hyphen and after an apostrophe", () => {
   expect(nameOfRecord("JEAN-PIERRE")).toBe("Jean-Pierre");
   expect(nameOfRecord("O'BRIEN")).toBe("O'Brien");
