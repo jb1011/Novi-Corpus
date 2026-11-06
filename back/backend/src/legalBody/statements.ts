@@ -14,6 +14,7 @@ import type {
   StatementSnapshot,
 } from "../adapters/arc/legalBodyChain";
 import { type WorldIdDeps, realHumanState } from "../api/routes/worldId";
+import { type IdentityDeps, identityState } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
@@ -74,6 +75,9 @@ export interface LegalBodyStatementDeps {
   checks: CompanyCheckRepository;
   declarations: CompanyDeclarationRepository;
   world: WorldIdDeps | undefined;
+  /** The guardian identity record, read on production only, for the unsigned
+   *  `guardianIdentityVerified` fact; a sandbox never reads it. */
+  identity: IdentityDeps | undefined;
   chain: StatementChainPort;
   deployment: Deployment;
   identityRegistry: Address;
@@ -105,6 +109,10 @@ export type StatementOutcome =
       publicId: string;
       standing: Standing;
       statement: SignedStatementJson;
+      /** Not signed: whether the guardian's identity record is verified at the statement's issue,
+       *  on production; always false on a sandbox. The lookup by agent states it beside the
+       *  statement until statement v3 signs it. */
+      guardianIdentityVerified: boolean;
     };
 
 /** The stage of a statement that reads the chain, or signs. */
@@ -395,6 +403,7 @@ async function stateRow(
     publicId: row.publicId,
     standing: statement.standing,
     statement: signed,
+    guardianIdentityVerified: facts.guardianIdentityVerified,
   };
 }
 
@@ -405,6 +414,9 @@ interface RecordedFacts {
   names: { legalName: string; filingNumber: string } | null;
   filing: FilingFacts;
   guardianHumanVerified: boolean;
+  /** Not signed (statement v3 will sign it): on production, whether the guardian's identity record
+   *  is verified at the issue. */
+  guardianIdentityVerified: boolean;
   /** Unix seconds: the statement's issue, the day the filing facts are counted on. */
   issuedAt: number;
   /** The ids and values the claims rest on, for the log. */
@@ -424,7 +436,11 @@ interface RecordedFacts {
  *  - the filing facts on the Wyoming date of the issue, from the formation date and the last
  *    annual report of the latest check when it is a pass;
  *  - whether the guardian is a verified human. A failed read of it throws: it says nothing about
- *    the guardian.
+ *    the guardian;
+ *  - on production, whether the guardian's identity record is verified at the issue
+ *    (`identityState`): false when the tenant has no record, or the record is not wired on this
+ *    deployment. A sandbox never reads it, and states false. Not signed: the lookup by agent
+ *    states it beside the statement.
  * A database read that fails throws.
  */
 function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFacts {
@@ -447,25 +463,33 @@ function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFa
     passed?.lastReportPeriod === undefined
       ? null
       : { period: passed.lastReportPeriod, filedOn: passed.lastReportFiledOn ?? null };
-  const issuedAt = Math.floor((deps.now ?? Date.now)() / 1000);
+  const nowMs = (deps.now ?? Date.now)();
+  const issuedAt = Math.floor(nowMs / 1000);
   const filing = filingFacts({
     formationDate: passed?.formationDate ?? null,
     lastReport,
     today: wyomingDate(issuedAt),
   });
   const guardianHumanVerified = realHumanState(deps.world, row.tenantId, deps.environment).ok;
+  // On the statement's own clock, so the fact is of the instant the statement is issued at.
+  const guardianIdentityVerified =
+    deps.environment === "production" &&
+    deps.identity !== undefined &&
+    identityState(deps.identity.repo, row.tenantId, nowMs) === "verified";
   return {
     provider: company.provider,
     attestation,
     names,
     filing,
     guardianHumanVerified,
+    guardianIdentityVerified,
     issuedAt,
     evidence: {
       checkId: passed?.checkId ?? null,
       revocationEventId,
       companyStatus: company.status,
       humanVerified: guardianHumanVerified,
+      identityVerified: guardianIdentityVerified,
     },
   };
 }

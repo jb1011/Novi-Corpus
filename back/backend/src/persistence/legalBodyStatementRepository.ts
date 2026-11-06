@@ -45,6 +45,10 @@ export interface StatementEvidence {
   revocationEventId: number | null;
   companyStatus: "draft" | "ready" | "abandoned";
   humanVerified: boolean;
+  /** On production, whether the guardian's identity record was verified at the issue; false on a
+   *  sandbox. Not signed, so not in the claims hash: a change of it alone adds no row. Rows logged
+   *  before this field was added hold no such key. */
+  identityVerified: boolean;
 }
 
 export interface NewStatementRecord {
@@ -78,7 +82,7 @@ export interface LegalBodyStatementRepository {
   /**
    * One immediate transaction: insert only when the body's latest row differs in claims hash or
    * attestor. Answers whether a row was inserted. Addresses are stored checksummed and the hash
-   * lower-case, so both compare in any letter case; the evidence is stored as exactly its four
+   * lower-case, so both compare in any letter case; the evidence is stored as exactly its five
    * fields. A statement no row may hold throws a `LegalBodyInputError` before anything is written;
    * a body that does not exist is refused by the database's foreign key.
    */
@@ -158,7 +162,7 @@ function requireIdOrNull(field: string, value: unknown): number | null {
 }
 
 /**
- * The evidence exactly as it is stored: its four fields, in one order, and nothing a caller's
+ * The evidence exactly as it is stored: its five fields, in one order, and nothing a caller's
  * object carried besides them.
  */
 function requireEvidence(value: unknown): StatementEvidence {
@@ -172,7 +176,15 @@ function requireEvidence(value: unknown): StatementEvidence {
     );
   if (typeof e.humanVerified !== "boolean")
     throw new LegalBodyInputError("evidence.humanVerified must be a boolean");
-  return { checkId, revocationEventId, companyStatus, humanVerified: e.humanVerified };
+  if (typeof e.identityVerified !== "boolean")
+    throw new LegalBodyInputError("evidence.identityVerified must be a boolean");
+  return {
+    checkId,
+    revocationEventId,
+    companyStatus,
+    humanVerified: e.humanVerified,
+    identityVerified: e.identityVerified,
+  };
 }
 
 /**

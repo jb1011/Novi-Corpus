@@ -628,6 +628,9 @@ async function main() {
           declarations: companyDeclarations,
           checks: companyChecks,
           world: worldId,
+          // The guardian identity record built above: on production an order requires a verified
+          // one, as the declared door does; a sandbox never reads it.
+          identity,
           chain: legalBodyChain,
           // The agreements, in the file store every other document is in.
           docStore,
@@ -1087,6 +1090,9 @@ async function main() {
           checks: companyChecks,
           declarations: companyDeclarations,
           world: worldId,
+          // The guardian identity record built above: on production the lookup by agent states,
+          // unsigned, whether it is verified; a sandbox never reads it.
+          identity,
           chain: legalBodyChain,
           // The order doors' deployment: this chain id and the factory the chain reads.
           deployment: { chainId: cfg.chainId, factory: legalBodyChain.factory },

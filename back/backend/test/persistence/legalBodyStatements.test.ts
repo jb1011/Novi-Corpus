@@ -42,6 +42,7 @@ const EVIDENCE: StatementEvidence = {
   revocationEventId: null,
   companyStatus: "ready",
   humanVerified: true,
+  identityVerified: true,
 };
 
 let db: Database.Database;
@@ -182,9 +183,10 @@ describe("appendIfChanged", () => {
     });
   });
 
-  test("the evidence round-trips with numbers as numbers, stored as exactly its four fields", () => {
-    // A wider object, its keys in another order: only the four fields are stored, in one order.
+  test("the evidence round-trips with numbers as numbers, stored as exactly its five fields", () => {
+    // A wider object, its keys in another order: only the five fields are stored, in one order.
     const wider = {
+      identityVerified: true,
       humanVerified: false,
       companyName: "Example Holdings LLC",
       filingNumber: "TEST-0001",
@@ -196,7 +198,7 @@ describe("appendIfChanged", () => {
       true,
     );
     expect(db.prepare("SELECT evidence FROM statement_log").pluck().get()).toBe(
-      '{"checkId":12,"revocationEventId":3,"companyStatus":"draft","humanVerified":false}',
+      '{"checkId":12,"revocationEventId":3,"companyStatus":"draft","humanVerified":false,"identityVerified":true}',
     );
     const evidence = log.latest(bodyId)?.evidence;
     expect(evidence).toEqual({
@@ -204,6 +206,7 @@ describe("appendIfChanged", () => {
       revocationEventId: 3,
       companyStatus: "draft",
       humanVerified: false,
+      identityVerified: true,
     });
     expect(typeof evidence?.checkId).toBe("number");
     expect(typeof evidence?.revocationEventId).toBe("number");
@@ -214,6 +217,7 @@ describe("appendIfChanged", () => {
       revocationEventId: null,
       companyStatus: "abandoned",
       humanVerified: true,
+      identityVerified: false,
     };
     expect(log.appendIfChanged(record({ legalBodyId: otherBodyId, evidence: none }))).toBe(true);
     expect(log.latest(otherBodyId)?.evidence).toEqual(none);
@@ -235,6 +239,10 @@ describe("appendIfChanged", () => {
       { ...EVIDENCE, humanVerified: "true" },
       { ...EVIDENCE, humanVerified: 1 },
       { ...EVIDENCE, humanVerified: null },
+      { ...EVIDENCE, identityVerified: "true" },
+      { ...EVIDENCE, identityVerified: 1 },
+      { ...EVIDENCE, identityVerified: null },
+      { ...EVIDENCE, identityVerified: undefined },
     ];
     for (const evidence of bad)
       expect(
