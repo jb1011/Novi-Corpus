@@ -95,7 +95,7 @@ function sealedNames(tenantId: string) {
 }
 
 /** A passed identity record of the tenant, its World row beside it. */
-function verifiedGuardian(tenantId: Address): void {
+function verifiedGuardian(tenantId: Address, over: Partial<NewGuardianIdentityCheck> = {}): void {
   recordHuman(s.store, tenantId, `0xnullifier-${tenantId}`, T0);
   const check: NewGuardianIdentityCheck = {
     nullifier: `0xnullifier-${tenantId}`,
@@ -120,6 +120,7 @@ function verifiedGuardian(tenantId: Address): void {
     synthetic: false,
     operator: "ops.example",
     operatorOsUser: "ops",
+    ...over,
   };
   repo.append(check, {
     kind: "recorded",
@@ -218,6 +219,17 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       recordHuman(s.store, VERIFIED, `0xnullifier-${VERIFIED}`, T0 + DAY);
       const { body } = await me(makeApp(door, "production"), VERIFIED);
       expect(body.identity).toMatchObject({ required: true, state: "verified", firstName: FIRST });
+    });
+
+    test("a test record on production (written on a sandbox, or synthetic): state none", async () => {
+      verifiedGuardian(VERIFIED, { environment: "sandbox", synthetic: true });
+      verifiedGuardian(OTHER, { synthetic: true });
+      const app = makeApp(door, "production");
+      for (const tenantId of [VERIFIED, OTHER])
+        expect((await me(app, tenantId)).body.identity, tenantId).toEqual({
+          required: true,
+          state: "none",
+        });
     });
 
     test("on sandbox the check is not required", async () => {

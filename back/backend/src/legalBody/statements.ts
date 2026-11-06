@@ -476,11 +476,12 @@ function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFa
   // On the statement's own clock, so the fact is of the instant the statement is issued at. The
   // record is keyed by the checksummed tenant id, and the repository refuses any other spelling:
   // a row an older version stored unchecksummed must not make the answer throw. A record of
-  // another person than the account's current World row does not count (`agreesWithWorld`).
+  // another person than the account's current World row does not count (`agreesWithWorld`), nor
+  // a test record (written on a sandbox, or synthetic) on production.
   const identityTenant = getAddress(row.tenantId);
   const record =
     deps.environment === "production" && deps.identity !== undefined
-      ? currentRecord(deps.identity.repo, identityTenant, nowMs)
+      ? currentRecord(deps.identity.repo, identityTenant, nowMs, deps.environment)
       : undefined;
   const guardianIdentityVerified =
     record !== undefined && agreesWithWorld(record, deps.world, identityTenant);

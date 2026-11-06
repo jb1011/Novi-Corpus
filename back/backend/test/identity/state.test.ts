@@ -212,6 +212,23 @@ describe("identityState", () => {
     expect(identityState(repo, tenant(6), NOW - 1)).toBe("verified");
   });
 
+  test("on production a test record never counts: a passed row written on a sandbox, or synthetic, reads none", () => {
+    repo.append(row(tenant(1), "passed", { environment: "sandbox", synthetic: true }), recorded);
+    repo.append(row(tenant(2), "passed", { environment: "sandbox", synthetic: false }), recorded);
+    repo.append(row(tenant(3), "passed", { environment: "production", synthetic: true }), recorded);
+    const real = repo.append(row(tenant(4), "passed"), recorded);
+
+    for (const n of [1, 2, 3]) {
+      expect(identityState(repo, tenant(n), NOW, "production"), `${n}`).toBe("none");
+      expect(currentRecord(repo, tenant(n), NOW, "production"), `${n}`).toBeUndefined();
+      // Without the environment, or on a sandbox, the row reads as today.
+      expect(identityState(repo, tenant(n), NOW), `${n}`).toBe("verified");
+      expect(identityState(repo, tenant(n), NOW, "sandbox"), `${n}`).toBe("verified");
+    }
+    expect(identityState(repo, tenant(4), NOW, "production")).toBe("verified");
+    expect(currentRecord(repo, tenant(4), NOW, "production")).toEqual(real);
+  });
+
   test("currentRecord is the latest row only while the state is verified", () => {
     const passed = repo.append(row(tenant(1), "passed"), recorded);
     repo.append(row(tenant(2), "passed", { expiresAt: NOW }), recorded);
@@ -307,6 +324,19 @@ describe("assertIdentityVerified", () => {
     recordHuman(store, tenant(2), "0xnullifier-2", T0);
     const unbound = repo.append(row(tenant(2), "passed", { nullifier: null }), recorded);
     expect(assertIdentityVerified(identity, world, tenant(2), "production")).toEqual(unbound);
+  });
+
+  test("on production, a test record (written on a sandbox, or synthetic): 403 guardian_identity_not_verified", () => {
+    verifiedGuardian(tenant(1), { environment: "sandbox", synthetic: true });
+    verifiedGuardian(tenant(2), { synthetic: true });
+    for (const n of [1, 2]) {
+      const e = refusalOf(() => assertIdentityVerified(identity, world, tenant(n), "production"));
+      expect([e.code, e.status, e.message], `${n}`).toEqual([
+        "guardian_identity_not_verified",
+        403,
+        IDENTITY_NOT_VERIFIED_MESSAGE,
+      ]);
+    }
   });
 
   test("every refusal it throws is one of its three codes, its message one string literal", () => {
@@ -433,6 +463,20 @@ describe("identityView", () => {
     expect(identityView(identity, world, tenant(3), "production")).toMatchObject({
       state: "verified",
       firstName: FIRST,
+    });
+  });
+
+  test("on production a test record reads none; on a sandbox the same row reads verified", () => {
+    verifiedGuardian(tenant(1), { environment: "sandbox", synthetic: true });
+    verifiedGuardian(tenant(2), { synthetic: true });
+    for (const n of [1, 2])
+      expect(identityView(identity, world, tenant(n), "production"), `${n}`).toEqual({
+        required: true,
+        state: "none",
+      });
+    expect(identityView(identity, world, tenant(1), "sandbox")).toMatchObject({
+      required: false,
+      state: "verified",
     });
   });
 

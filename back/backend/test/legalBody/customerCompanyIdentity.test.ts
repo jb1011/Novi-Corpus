@@ -46,6 +46,7 @@ import {
   TEST_PII_RING,
   customerCompanyDeps,
   identityOver,
+  passedIdentityRow,
   recordHuman,
   recordIdentity,
   sandboxCustomerCompanyDeps,
@@ -274,6 +275,32 @@ describe("on production the declared door requires a verified guardian identity 
     );
     expect(served.status).toBe(200);
     expect((await served.json()).typedData.message.declarantName).toBe(WRITTEN);
+  });
+
+  test("a test record (written on a sandbox, or synthetic): 403 guardian_identity_not_verified at the statement door", async () => {
+    const at = nowMs - 30 * DAY_MS;
+    const expiresAt = nowMs + 3 * 365 * DAY_MS;
+    identityRepo.append(
+      {
+        ...passedIdentityRow(guardian.address, { at, expiresAt, nullifier: "1001" }),
+        environment: "sandbox",
+        synthetic: true,
+      },
+      {
+        kind: "recorded",
+        at,
+        actor: "ops.example",
+        actorOsUser: "ops",
+        reasonCode: null,
+        reason: null,
+      },
+    );
+    const app = makeApp(doors());
+    const token = await sessionOf(guardian);
+    expect(await refusalOf(await post(app, STATEMENT_MESSAGE, token, DECLARED))).toMatchObject({
+      status: 403,
+      code: "guardian_identity_not_verified",
+    });
   });
 
   test("an expired record: 403 guardian_identity_not_verified at the statement door", async () => {

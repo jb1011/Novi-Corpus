@@ -34,6 +34,7 @@ import {
   CHAIN_ID,
   TEST_PII_RING,
   identityOver,
+  passedIdentityRow,
   recordHuman,
   recordIdentity,
 } from "../helpers/customerCompanyFixtures";
@@ -199,6 +200,30 @@ describe("on production the body answer states guardianIdentityVerified, unsigne
 
     // Another person's World ID verification on the same account, newer still.
     recordHuman(s.store, TENANT, "nullifier-second-human", CLOCK_MS - 10_000);
+    expect((await answerOf(production())).guardianIdentityVerified).toBe(false);
+  });
+
+  test("a test record on production, written on a sandbox or synthetic: false", async () => {
+    linkedBody();
+    const at = CLOCK_MS - 30 * DAY_MS;
+    const expiresAt = CLOCK_MS + 3 * 365 * DAY_MS;
+    const event = {
+      kind: "recorded" as const,
+      at,
+      actor: "ops.example",
+      actorOsUser: "ops",
+      reasonCode: null,
+      reason: null,
+    };
+    identityRepo.append(
+      { ...passedIdentityRow(TENANT, { at, expiresAt }), environment: "sandbox", synthetic: true },
+      event,
+    );
+    expect((await answerOf(production())).guardianIdentityVerified).toBe(false);
+    identityRepo.append(
+      { ...passedIdentityRow(TENANT, { at, expiresAt }), synthetic: true },
+      event,
+    );
     expect((await answerOf(production())).guardianIdentityVerified).toBe(false);
   });
 

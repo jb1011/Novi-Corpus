@@ -48,8 +48,15 @@ export const IDENTITY_NOT_VERIFIED_MESSAGE =
 
 const nowOf = (identity: IdentityDeps): number => (identity.now ?? Date.now)();
 
-/** The state of one latest row, at `nowMs`. */
-function stateOf(latest: GuardianIdentityCheck | undefined, nowMs: number): IdentityState {
+/** The deployment a row is read on; absent, the row is read as it is, wherever it was written. */
+type ReadOn = "sandbox" | "production" | undefined;
+
+/** The state of one latest row, at `nowMs`, as a deployment of `environment` reads it. */
+function stateOf(
+  latest: GuardianIdentityCheck | undefined,
+  nowMs: number,
+  environment: ReadOn,
+): IdentityState {
   if (latest === undefined) return "none";
   switch (latest.status) {
     case "started":
@@ -61,6 +68,10 @@ function stateOf(latest: GuardianIdentityCheck | undefined, nowMs: number): Iden
     case "revoked":
       return "revoked";
     case "passed":
+      // On production a test record never counts: a pass written on a sandbox, or synthetic, names
+      // nobody a production door may write into a filing. It reads as no record at all.
+      if (environment === "production" && (latest.environment !== "production" || latest.synthetic))
+        return "none";
       // Identity design 9: a passed record unused for a year loses its names, and then names nobody.
       if (latest.names === null || latest.namesErasedAt !== null) return "expired";
       return latest.expiresAt !== null && latest.expiresAt > nowMs ? "verified" : "expired";
@@ -72,13 +83,18 @@ function stateOf(latest: GuardianIdentityCheck | undefined, nowMs: number): Iden
   }
 }
 
-/** What the tenant's rows add up to at `nowMs`: its latest row decides. */
+/**
+ * What the tenant's rows add up to at `nowMs`: its latest row decides. With `environment`
+ * "production", a latest passed row written on a sandbox or synthetic reads `none`; without it, a
+ * row reads as it is (the operator's commands read it so).
+ */
 export function identityState(
   repo: IdentityRepository,
   tenantId: string,
   nowMs: number,
+  environment?: "sandbox" | "production",
 ): IdentityState {
-  return stateOf(repo.latest(tenantId), nowMs);
+  return stateOf(repo.latest(tenantId), nowMs, environment);
 }
 
 /**
@@ -98,14 +114,16 @@ export function agreesWithWorld(
   return world?.store.findByTenant(tenantId, world.cfg.action)?.nullifier === record.nullifier;
 }
 
-/** The tenant's latest row, only while `identityState` is `verified`; else undefined. One read. */
+/** The tenant's latest row, only while `identityState` (read on `environment`) is `verified`;
+ *  else undefined. One read. */
 export function currentRecord(
   repo: IdentityRepository,
   tenantId: string,
   nowMs: number,
+  environment?: "sandbox" | "production",
 ): GuardianIdentityCheck | undefined {
   const latest = repo.latest(tenantId);
-  return stateOf(latest, nowMs) === "verified" ? latest : undefined;
+  return stateOf(latest, nowMs, environment) === "verified" ? latest : undefined;
 }
 
 /**
@@ -115,9 +133,9 @@ export function currentRecord(
  *
  * The checks, in order: the identity record is wired (else 503 `identity_unavailable`); the tenant
  * has a World row for the guardian action (else 403 `guardian_not_verified`, the sentence
- * `assertRealHuman` answers, so the doors keep one message); its identity state is `verified` and
- * the record is that World row's person, its nullifier the row's when it holds one (else 403
- * `guardian_identity_not_verified`). The doors call `assertRealHuman` first, which holds the World
+ * `assertRealHuman` answers, so the doors keep one message); its identity state, read as production
+ * (a test record reads `none`), is `verified` and the record is that World row's person, its
+ * nullifier the row's when it holds one (else 403 `guardian_identity_not_verified`). The doors call `assertRealHuman` first, which holds the World
  * row to its credential and environment; this one reads the row for its existence and nullifier.
  *
  * Each refusal is written out here, its message one string literal: the doors answer it and the
@@ -144,7 +162,8 @@ export function assertIdentityVerified(
       403,
       "the guardian must complete World ID verification first",
     );
-  const record = currentRecord(identity.repo, tenantId, nowOf(identity));
+  // Read as production whatever the spelling: every environment but a sandbox is held to its rule.
+  const record = currentRecord(identity.repo, tenantId, nowOf(identity), "production");
   // The record and the World row must agree (`agreesWithWorld`), read from the row in hand.
   if (
     record === undefined ||
@@ -212,8 +231,9 @@ export function namesOfRecordAtDoor(
 
 /**
  * The `identity` block of `GET /world-id/me`. Required on production. The state is `none` when
- * the tenant has no record, when the record is not wired, and when the latest record is another
- * person's than the account's current World row (`agreesWithWorld`); on `verified` it carries the
+ * the tenant has no record, when the record is not wired, when the latest record is another
+ * person's than the account's current World row (`agreesWithWorld`), and on production when it is
+ * a test record (a pass written on a sandbox, or synthetic); on `verified` it carries the
  * first and last names and the record's dates, and never the full name, the provider, the country
  * or a reason. A verified record whose names cannot be read is answered 503
  * (`namesOfRecordAtDoor`).
@@ -228,7 +248,7 @@ export function identityView(
   if (identity === undefined) return { required, state: "none" };
   const read = identity.repo.latest(tenantId);
   const latest = read !== undefined && agreesWithWorld(read, world, tenantId) ? read : undefined;
-  const state = stateOf(latest, nowOf(identity));
+  const state = stateOf(latest, nowOf(identity), environment);
   if (state !== "verified" || latest === undefined) return { required, state };
   const names = namesOfRecordAtDoor(identity, latest);
   return {
