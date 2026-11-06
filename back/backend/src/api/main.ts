@@ -102,6 +102,7 @@ import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
 import { SqliteOaAnchorRepository } from "../persistence/oaAnchorRepository";
 import { SqlitePasskeyStore } from "../persistence/passkeyStore";
 import { SqlitePaymentIdempotencyStore } from "../persistence/paymentIdempotencyStore";
+import { SqliteScheduledJobRunRepository } from "../persistence/scheduledJobRunRepository";
 import {
   assertCircleCoverage,
   assertPaymentAddressSeparation,
@@ -927,10 +928,14 @@ async function main() {
    * THE IN-PROCESS SCHEDULER (src/scheduler): named periodic jobs, run inside this process so the
    * box needs no cron line. Built only when the deployment registers at least one job; the
    * identity sweep is registered only where the PII key is set, so the testnet box, which cannot
-   * hold the key, starts none.
+   * hold the key, starts none. Each job's last run is kept in `scheduled_job_runs`, so the count
+   * of failures in a row survives a restart.
    */
   const scheduledJobs = buildScheduledJobs(db, cfg);
-  const scheduler = scheduledJobs.length > 0 ? new Scheduler({}) : undefined;
+  const scheduler =
+    scheduledJobs.length > 0
+      ? new Scheduler({ runs: new SqliteScheduledJobRunRepository(db) })
+      : undefined;
   for (const job of scheduledJobs) scheduler?.register(job);
 
   const jobDeps = buildJobDeps(cfg, db, repo, docStore, circleApi);

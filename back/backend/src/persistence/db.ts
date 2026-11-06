@@ -1333,6 +1333,24 @@ const IDENTITY_CHECK_EVENTS_DDL = `
 `;
 
 /**
+ * THE LAST RUN OF EACH SCHEDULED JOB (see `scheduledJobRunRepository.ts`): one row per job name,
+ * written by the API process's scheduler after every run of the job, a success or a failure, and
+ * read back when it starts. So the count of failures in a row survives a restart, and the rule
+ * that the third one is CRITICAL holds across a process that crash-loops; `scheduler:list` prints
+ * the row beside each registered job. A row is the scheduler's bookkeeping: a job's name, times
+ * and a count, never a job's output. The run history itself is in the ops log.
+ */
+const SCHEDULED_JOB_RUNS_DDL = `
+  CREATE TABLE IF NOT EXISTS scheduled_job_runs (
+    name                 TEXT PRIMARY KEY,
+    last_run_at          INTEGER NOT NULL,
+    last_ok              INTEGER NOT NULL CHECK (last_ok IN (0, 1)),
+    consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),
+    updated_at           INTEGER NOT NULL
+  );
+`;
+
+/**
  * An agentId in the one spelling `legal_bodies` stores it (whose CHECK writes the same rule
  * inline): TEXT with no hidden bytes, decimal digits only, no leading zero except '0' itself, at
  * most 78 digits (the width of a uint256).
@@ -1835,6 +1853,8 @@ export function migrate(db: Database.Database): void {
     -- The guardian's identity checks, and the trail of everything done to them.
     ${GUARDIAN_IDENTITY_CHECKS_DDL}
     ${IDENTITY_CHECK_EVENTS_DDL}
+    -- The in-process scheduler's last run of each job.
+    ${SCHEDULED_JOB_RUNS_DDL}
 
     -- Anchor cycles: one row PER MANIFEST VERSION. Deliberately NOT keyed like bridge_legs
     -- (entity, step) — a bridge has exactly one of each leg, whereas an entity accumulates

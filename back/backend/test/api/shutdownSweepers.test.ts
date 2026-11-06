@@ -9,19 +9,33 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { type MockInstance, afterEach, beforeEach, expect, test, vi } from "vitest";
 import { type SignalSource, installShutdownHandlers } from "../../src/api/shutdown";
 import { LegalBodySweeper } from "../../src/legalBody/sweeper";
 import { migrate, openDatabase } from "../../src/persistence/db";
+import { Scheduler } from "../../src/scheduler/scheduler";
 import { legalBodyOrderDeps, openLegalBodyStores } from "../helpers/legalBodyFixtures";
 
 /** A stand-in for `process` that never receives a real signal. */
 const fakeProc: SignalSource = { on: () => fakeProc };
 
+let log: MockInstance<typeof console.log>;
 beforeEach(() => {
-  // Shutdown writes its own ops lines; none of them is what these tests read.
-  vi.spyOn(console, "log").mockImplementation(() => {});
+  // Shutdown writes its own ops lines; only the drain's is read here, through `drainLines`.
+  log = vi.spyOn(console, "log").mockImplementation(() => {});
 });
+
+/** The `api_drain` lines shutdown wrote. */
+const drainLines = (): Record<string, unknown>[] =>
+  log.mock.calls
+    .map((args) => {
+      try {
+        return JSON.parse(String(args[0])) as Record<string, unknown>;
+      } catch {
+        return {};
+      }
+    })
+    .filter((o) => o.opslog === "api_drain");
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
@@ -101,6 +115,123 @@ test("shutdown stops both the formation sweeper and a running legal-body sweeper
   } finally {
     db.close();
   }
+});
+
+test("a stop() that returns a promise is awaited in the drain, beside the tasks: the server closes only once it has settled", async () => {
+  const order: string[] = [];
+  let finish: (() => void) | undefined;
+  const shutdown = installShutdownHandlers({
+    proc: fakeProc,
+    sweeper: { stop: () => void order.push("sweeper.stop") },
+    sweepers: [
+      {
+        // A scheduler with a run still going: its timers are cancelled at once, the run finishes
+        // later.
+        stop: () => {
+          order.push("sweepers[0].stop");
+          return new Promise<void>((resolve) => {
+            finish = () => {
+              order.push("run finished");
+              resolve();
+            };
+          });
+        },
+      },
+      { stop: () => void order.push("sweepers[1].stop") },
+    ],
+    drainMs: 1_000,
+    tasks: {
+      settled: async () => {
+        order.push("tasks.settled");
+        return true;
+      },
+    },
+    server: {
+      close: (cb) => {
+        order.push("server.close");
+        cb?.();
+      },
+    },
+    exit: () => void order.push("exit"),
+  });
+
+  const done = shutdown("SIGTERM");
+  await new Promise((r) => setTimeout(r, 20));
+  // Every sweeper is stopped before the drain, and the drain is waiting on the run.
+  expect(order).toEqual(["sweeper.stop", "sweepers[0].stop", "sweepers[1].stop", "tasks.settled"]);
+  finish?.();
+  await done;
+
+  expect(order).toEqual([
+    "sweeper.stop",
+    "sweepers[0].stop",
+    "sweepers[1].stop",
+    "tasks.settled",
+    "run finished",
+    "server.close",
+    "exit",
+  ]);
+  expect(drainLines()).toEqual([
+    expect.objectContaining({ signal: "SIGTERM", drained: true, drainMs: 1_000 }),
+  ]);
+});
+
+test("the wait for a stop() is bounded by the drain: a run that never ends cannot hang the deploy, and api_drain says drained: false", async () => {
+  let exited = false;
+  const shutdown = installShutdownHandlers({
+    proc: fakeProc,
+    // No tracked tasks on this deployment: the drain still waits for the sweeper, bounded.
+    sweepers: [{ stop: () => new Promise<void>(() => undefined) }],
+    drainMs: 20,
+    server: { close: (cb) => cb?.() },
+    exit: () => {
+      exited = true;
+    },
+  });
+  await shutdown("SIGINT");
+  expect(exited).toBe(true);
+  expect(drainLines()).toEqual([
+    expect.objectContaining({ signal: "SIGINT", drained: false, drainMs: 20 }),
+  ]);
+});
+
+test("shutdown waits for the scheduler's running job: the run's line is written before the server closes", async () => {
+  const order: string[] = [];
+  let finish: (() => void) | undefined;
+  const scheduler = new Scheduler({});
+  scheduler.register({
+    name: "email_deliver",
+    everyMs: 30_000,
+    run: () =>
+      new Promise((resolve) => {
+        finish = () => {
+          order.push("run finished");
+          resolve({ sent: 1 });
+        };
+      }),
+  });
+  const running = scheduler.runNow("email_deliver");
+  const shutdown = installShutdownHandlers({
+    proc: fakeProc,
+    sweepers: [scheduler],
+    drainMs: 1_000,
+    server: {
+      close: (cb) => {
+        order.push("server.close");
+        cb?.();
+      },
+    },
+    exit: () => void order.push("exit"),
+  });
+
+  const done = shutdown("SIGTERM");
+  await new Promise((r) => setTimeout(r, 20));
+  expect(order).toEqual([]);
+  finish?.();
+  await done;
+  await expect(running).resolves.toEqual({ sent: 1 });
+  expect(order).toEqual(["run finished", "server.close", "exit"]);
+  expect(drainLines()).toEqual([expect.objectContaining({ drained: true })]);
 });
 
 /**

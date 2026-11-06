@@ -22,6 +22,7 @@ import {
   type NewIdentityEvent,
   SqliteIdentityRepository,
 } from "../../src/persistence/identityRepository";
+import { SqliteScheduledJobRunRepository } from "../../src/persistence/scheduledJobRunRepository";
 import { buildScheduledJobs } from "../../src/scheduler/jobs";
 import { ANVIL_ACCOUNT_2 } from "../helpers/customerCompanyFixtures";
 
@@ -180,6 +181,8 @@ describe("buildScheduledJobs", () => {
     expect(buildScheduledJobs(db, loadConfig()).map((j) => [j.name, j.everyMs])).toEqual([
       ["identity_sweep", DAY],
     ]);
+    // Loud: its daily line, zero counts included, is the trace that the sweep ran.
+    expect(buildScheduledJobs(db, loadConfig())[0]?.quiet).not.toBe(true);
     Reflect.deleteProperty(process.env, "FORMATION_PII_KEY");
     // The testnet box: no PII key, so no job, and the API starts no scheduler.
     expect(buildScheduledJobs(db, loadConfig())).toEqual([]);
@@ -216,10 +219,48 @@ describe("scheduler:list", () => {
           name: "identity_sweep",
           everyMs: DAY,
           schedule: "first run 30 s after boot, then every 24 h",
+          // The job never ran on this deployment.
+          lastRunAt: null,
+          lastOk: null,
+          consecutiveFailures: null,
         },
       ],
-      history: "the run history is in the ops log: job_ran, job_failed",
+      history: "the run history is in the ops log: job_ran, job_failed, job_skipped",
     });
+    expect(ops).toEqual([]);
+  });
+
+  test("prints each job's last run as the API's scheduler wrote it to scheduled_job_runs, and only for a registered job", async () => {
+    const runs = new SqliteScheduledJobRunRepository(db);
+    const at = Date.UTC(2026, 10, 10, 12);
+    runs.record({
+      name: "identity_sweep",
+      lastRunAt: at,
+      lastOk: false,
+      consecutiveFailures: 3,
+      updatedAt: at + 1_200,
+    });
+    // A job this deployment no longer registers.
+    runs.record({
+      name: "retired_job",
+      lastRunAt: at,
+      lastOk: true,
+      consecutiveFailures: 0,
+      updatedAt: at,
+    });
+
+    const { output, ops } = await run<{ jobs: Record<string, unknown>[] }>(["scheduler:list"]);
+
+    expect(output.jobs).toEqual([
+      {
+        name: "identity_sweep",
+        everyMs: DAY,
+        schedule: "first run 30 s after boot, then every 24 h",
+        lastRunAt: at,
+        lastOk: false,
+        consecutiveFailures: 3,
+      },
+    ]);
     expect(ops).toEqual([]);
   });
 
@@ -228,7 +269,7 @@ describe("scheduler:list", () => {
     const { output } = await run(["scheduler:list"]);
     expect(output).toEqual({
       jobs: [],
-      history: "the run history is in the ops log: job_ran, job_failed",
+      history: "the run history is in the ops log: job_ran, job_failed, job_skipped",
       next: "no job is registered on this deployment: the API starts no scheduler",
     });
   });
@@ -271,6 +312,8 @@ describe("scheduler:run", () => {
       actor: "system",
       reasonCode: "superseded",
     });
+    // A manual run is in the ops log only: scheduled_job_runs is the API process's last run.
+    expect(new SqliteScheduledJobRunRepository(db).list()).toEqual([]);
   });
 
   test("without --yes it prints what would run and runs nothing", async () => {

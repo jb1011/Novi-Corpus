@@ -4,8 +4,19 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { FIRST_RUN_DELAY_MS, type Job, Scheduler } from "../../src/scheduler/scheduler";
+import { migrate, openDatabase } from "../../src/persistence/db";
+import {
+  type ScheduledJobRunStore,
+  SqliteScheduledJobRunRepository,
+} from "../../src/persistence/scheduledJobRunRepository";
+import {
+  CRITICAL_AFTER_SKIPS,
+  FIRST_RUN_DELAY_MS,
+  type Job,
+  Scheduler,
+} from "../../src/scheduler/scheduler";
 
 const SECOND = 1_000;
 const DAY = 86_400_000;
@@ -311,6 +322,340 @@ describe("Scheduler", () => {
   });
 });
 
+describe("Scheduler: stop, skipped ticks, quiet jobs", () => {
+  test("stop() returns a promise that settles only once the run already going has finished, and nothing runs after it", async () => {
+    let finish: (() => void) | undefined;
+    const slow = job(
+      "email_deliver",
+      30 * SECOND,
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ sent: 1 });
+        }),
+    );
+    const scheduler = new Scheduler({});
+    scheduler.register(slow);
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(30 * SECOND);
+    expect(slow.calls).toHaveLength(1);
+
+    let settled = false;
+    const stopping = scheduler.stop().then(() => {
+      settled = true;
+    });
+    // The timers are gone at once; the promise waits for the run.
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(5 * 30 * SECOND);
+    expect(settled).toBe(false);
+    expect(slow.calls).toHaveLength(1);
+    expect(lines("job_ran")).toEqual([]);
+
+    finish?.();
+    await stopping;
+    // The run's line is written before the promise settles.
+    expect(lines("job_ran")).toEqual([expect.objectContaining({ name: "email_deliver", sent: 1 })]);
+    await vi.advanceTimersByTimeAsync(DAY);
+    expect(slow.calls).toHaveLength(1);
+    expect(lines("job_skipped")).toEqual([]);
+  });
+
+  test("stop() with no run going settles at once, and a run that fails does not make it reject", async () => {
+    const idle = new Scheduler({});
+    idle.register(job("identity_sweep", DAY, async () => ({ count: 0 })));
+    idle.start();
+    await expect(idle.stop()).resolves.toBeUndefined();
+
+    let fail: (() => void) | undefined;
+    const failing = job(
+      "email_deliver",
+      30 * SECOND,
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = () => reject(new Error("provider unreachable"));
+        }),
+    );
+    const scheduler = new Scheduler({});
+    scheduler.register(failing);
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(30 * SECOND);
+    const stopping = scheduler.stop();
+    fail?.();
+    await expect(stopping).resolves.toBeUndefined();
+    expect(lines("job_failed")).toEqual([
+      expect.objectContaining({ name: "email_deliver", error: "provider unreachable" }),
+    ]);
+  });
+
+  test("a tick skipped because the last run is still going writes job_skipped; from the third in a row, and on every one after, it is CRITICAL; a finished run resets the count", async () => {
+    let finish: (() => void) | undefined;
+    const stuck = job(
+      "email_deliver",
+      30 * SECOND,
+      () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ sent: 0 });
+        }),
+    );
+    const scheduler = new Scheduler({});
+    scheduler.register(stuck);
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(30 * SECOND);
+    expect(lines("job_skipped")).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(4 * 30 * SECOND);
+    expect(stuck.calls).toHaveLength(1);
+    const skipped = lines("job_skipped");
+    expect(CRITICAL_AFTER_SKIPS).toBe(3);
+    expect(skipped.map((o) => o.consecutiveSkips)).toEqual([1, 2, 3, 4]);
+    // Ids and counts only: the job's name and how many ticks in a row found it still going.
+    expect(skipped[0]).toEqual({
+      opslog: "job_skipped",
+      at: expect.any(String),
+      level: "warn",
+      name: "email_deliver",
+      consecutiveSkips: 1,
+    });
+    expect(skipped[1]).not.toHaveProperty("severity");
+    expect(skipped[2]).toEqual({
+      opslog: "job_skipped",
+      at: expect.any(String),
+      level: "error",
+      severity: "CRITICAL",
+      name: "email_deliver",
+      consecutiveSkips: 3,
+    });
+    expect(skipped[3]).toMatchObject({ severity: "CRITICAL", consecutiveSkips: 4 });
+
+    // The run finishes: the count starts again from one.
+    finish?.();
+    await vi.advanceTimersByTimeAsync(30 * SECOND);
+    expect(stuck.calls).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(30 * SECOND);
+    expect(lines("job_skipped").at(-1)).toEqual(
+      expect.objectContaining({ level: "warn", consecutiveSkips: 1 }),
+    );
+    expect(lines("job_skipped").at(-1)).not.toHaveProperty("severity");
+    finish?.();
+    await scheduler.stop();
+  });
+
+  test("a quiet job writes no job_ran for a run whose counts are all zero; a count above zero, and a failure, are written; a loud job writes every run", async () => {
+    let next: () => Promise<Record<string, number>> = async () => ({ sent: 0, failed: 0 });
+    const deliver: Job = { ...job("email_deliver", 30 * SECOND, () => next()), quiet: true };
+    const loud = job("identity_sweep", DAY, async () => ({ count: 0 }));
+    const scheduler = new Scheduler({});
+    scheduler.register(deliver);
+    scheduler.register(loud);
+
+    await expect(scheduler.runNow("email_deliver")).resolves.toEqual({ sent: 0, failed: 0 });
+    next = async () => ({});
+    await expect(scheduler.runNow("email_deliver")).resolves.toEqual({});
+    expect(lines("job_ran")).toEqual([]);
+    // Still a run: the scheduler's memory of it is the same as for any run.
+    expect(scheduler.status()[0]).toMatchObject({ lastOk: true, consecutiveFailures: 0 });
+
+    next = async () => ({ sent: 0, failed: 2 });
+    await scheduler.runNow("email_deliver");
+    expect(lines("job_ran")).toEqual([
+      expect.objectContaining({ name: "email_deliver", sent: 0, failed: 2 }),
+    ]);
+    next = async () => {
+      throw new Error("provider unreachable");
+    };
+    await expect(scheduler.runNow("email_deliver")).rejects.toThrow("provider unreachable");
+    expect(lines("job_failed")).toEqual([
+      expect.objectContaining({ name: "email_deliver", consecutive: 1 }),
+    ]);
+
+    await scheduler.runNow("identity_sweep");
+    expect(lines("job_ran").at(-1)).toEqual(
+      expect.objectContaining({ name: "identity_sweep", count: 0 }),
+    );
+  });
+});
+
+describe("Scheduler: each job's last run, in scheduled_job_runs", () => {
+  let db: Database.Database;
+  let runs: SqliteScheduledJobRunRepository;
+  beforeEach(() => {
+    db = openDatabase(":memory:");
+    migrate(db);
+    runs = new SqliteScheduledJobRunRepository(db);
+  });
+  afterEach(() => db.close());
+
+  test("every run is written, a success and a failure alike, on the scheduler's clock", async () => {
+    let failing = false;
+    const sweep = job("identity_sweep", DAY, async () => {
+      if (failing) throw new Error("database is locked");
+      return { count: 1 };
+    });
+    const scheduler = new Scheduler({ runs });
+    scheduler.register(sweep);
+    expect(runs.list()).toEqual([]);
+
+    const first = Date.now();
+    await scheduler.runNow("identity_sweep");
+    expect(runs.list()).toEqual([
+      {
+        name: "identity_sweep",
+        lastRunAt: first,
+        lastOk: true,
+        consecutiveFailures: 0,
+        updatedAt: first,
+      },
+    ]);
+
+    failing = true;
+    vi.setSystemTime(first + 60 * SECOND);
+    await expect(scheduler.runNow("identity_sweep")).rejects.toThrow("database is locked");
+    expect(runs.list()).toEqual([
+      {
+        name: "identity_sweep",
+        lastRunAt: first + 60 * SECOND,
+        lastOk: false,
+        consecutiveFailures: 1,
+        updatedAt: first + 60 * SECOND,
+      },
+    ]);
+  });
+
+  test("the failure count survives a restart: two failures, a new scheduler over the same table, and the next failure is the third, CRITICAL", async () => {
+    const boot = Date.now();
+    const failing = () =>
+      job("identity_sweep", 60 * SECOND, async () => {
+        throw new Error("database is locked");
+      });
+    const before = new Scheduler({ runs });
+    before.register(failing());
+    before.start();
+    await vi.advanceTimersByTimeAsync(30 * SECOND + 60 * SECOND);
+    expect(lines("job_failed").map((o) => o.consecutive)).toEqual([1, 2]);
+    expect(lines("job_failed").some((o) => "severity" in o)).toBe(false);
+    await before.stop();
+
+    // The process restarts: a new scheduler, the same table.
+    const after = new Scheduler({ runs });
+    after.register(failing());
+    after.register(job("email_deliver", 30 * SECOND, async () => ({ sent: 0 })));
+    after.start();
+    // What start() read back: the last run of the job that ran, nothing for the one that did not.
+    expect(after.status()).toEqual([
+      {
+        name: "identity_sweep",
+        lastRunAt: boot + 30 * SECOND + 60 * SECOND,
+        lastOk: false,
+        consecutiveFailures: 2,
+      },
+      { name: "email_deliver", lastRunAt: null, lastOk: null, consecutiveFailures: 0 },
+    ]);
+    await vi.advanceTimersByTimeAsync(30 * SECOND);
+    expect(lines("job_failed").at(-1)).toEqual({
+      opslog: "job_failed",
+      at: expect.any(String),
+      level: "error",
+      severity: "CRITICAL",
+      name: "identity_sweep",
+      consecutive: 3,
+      error: "database is locked",
+    });
+    expect(runs.list().find((r) => r.name === "identity_sweep")).toMatchObject({
+      lastOk: false,
+      consecutiveFailures: 3,
+    });
+    await after.stop();
+  });
+
+  test("a quiet run with nothing to report writes no line but is written to the table", async () => {
+    const scheduler = new Scheduler({ runs });
+    scheduler.register({
+      name: "email_deliver",
+      everyMs: 30 * SECOND,
+      quiet: true,
+      run: async () => ({ sent: 0 }),
+    });
+    await scheduler.runNow("email_deliver");
+    expect(lines("job_ran")).toEqual([]);
+    expect(runs.list()).toEqual([
+      expect.objectContaining({ name: "email_deliver", lastOk: true, consecutiveFailures: 0 }),
+    ]);
+  });
+
+  test("a write to the table that fails leaves the run as it was and says so: job_record_failed, the message only", async () => {
+    const broken: ScheduledJobRunStore = {
+      list: () => [],
+      record: () => {
+        throw new Error("database is locked");
+      },
+    };
+    let failing = false;
+    const scheduler = new Scheduler({ runs: broken });
+    scheduler.register(
+      job("identity_sweep", DAY, async () => {
+        if (failing) throw new Error("provider unreachable");
+        return { count: 2 };
+      }),
+    );
+
+    // A success is still a success, with its line.
+    await expect(scheduler.runNow("identity_sweep")).resolves.toEqual({ count: 2 });
+    expect(lines("job_ran")).toEqual([
+      expect.objectContaining({ name: "identity_sweep", count: 2 }),
+    ]);
+    expect(lines("job_record_failed")).toEqual([
+      {
+        opslog: "job_record_failed",
+        at: expect.any(String),
+        level: "error",
+        name: "identity_sweep",
+        error: "database is locked",
+      },
+    ]);
+    // A failure is still the run's own failure.
+    failing = true;
+    await expect(scheduler.runNow("identity_sweep")).rejects.toThrow("provider unreachable");
+    expect(lines("job_failed")).toEqual([
+      expect.objectContaining({ name: "identity_sweep", error: "provider unreachable" }),
+    ]);
+    expect(lines("job_record_failed")).toHaveLength(2);
+  });
+
+  test("the table holds one row per job, upserted, and refuses a last_ok other than 0 or 1 and a negative failure count", () => {
+    runs.record({
+      name: "identity_sweep",
+      lastRunAt: 1,
+      lastOk: false,
+      consecutiveFailures: 4,
+      updatedAt: 2,
+    });
+    runs.record({
+      name: "identity_sweep",
+      lastRunAt: 3,
+      lastOk: true,
+      consecutiveFailures: 0,
+      updatedAt: 4,
+    });
+    runs.record({
+      name: "email_deliver",
+      lastRunAt: 5,
+      lastOk: true,
+      consecutiveFailures: 0,
+      updatedAt: 6,
+    });
+    expect(runs.list()).toEqual([
+      { name: "email_deliver", lastRunAt: 5, lastOk: true, consecutiveFailures: 0, updatedAt: 6 },
+      { name: "identity_sweep", lastRunAt: 3, lastOk: true, consecutiveFailures: 0, updatedAt: 4 },
+    ]);
+    const insert = db.prepare(
+      `INSERT INTO scheduled_job_runs (name, last_run_at, last_ok, consecutive_failures, updated_at)
+       VALUES (?, 1, ?, ?, 1)`,
+    );
+    expect(() => insert.run("a", 2, 0)).toThrow(/CHECK constraint failed/);
+    expect(() => insert.run("b", 1, -1)).toThrow(/CHECK constraint failed/);
+    expect(() => insert.run("c", null, 0)).toThrow(/NOT NULL constraint failed/);
+  });
+});
+
 /**
  * The composition root, read off the file (the C4 precedent in test/api/shutdown.test.ts:
  * `api/main.ts` has no injectable seam for its startup sequence).
@@ -323,6 +668,8 @@ test("main.ts builds the job list, starts the scheduler after serve() and the sw
   expect(serveAt, "serve() call not found: this guard has stopped guarding").toBeGreaterThan(0);
   expect(main).toContain("buildScheduledJobs(db, cfg)");
   expect(main).toMatch(/scheduledJobs\.length > 0\s*\?\s*new Scheduler\(/);
+  // The table of each job's last run, so the failure count survives a restart.
+  expect(main).toMatch(/new Scheduler\(\{ runs: new SqliteScheduledJobRunRepository\(db\) \}\)/);
   expect(startAt).toBeGreaterThan(serveAt);
   expect(startAt).toBeGreaterThan(sweeperAt);
   const shutdownAt = main.indexOf("installShutdownHandlers({");

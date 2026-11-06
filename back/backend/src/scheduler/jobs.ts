@@ -11,7 +11,11 @@ import type { Job } from "./scheduler";
  * of record, which exist only where the PII key is set (`cfg.pii`): the testnet box cannot hold the
  * key (its doola block is in sandbox), so it has no job, and its API starts no scheduler.
  *
- * Later jobs join here: `email_deliver`, `waitlist_sweep`, `screening_recheck`.
+ * Later jobs join here: `email_deliver` (every 30 seconds, `quiet`: a run with nothing to send
+ * writes no `job_ran` line), `waitlist_sweep`, `screening_recheck`.
+ *
+ * The API process hands its scheduler `scheduled_job_runs`, where each job's last run is kept
+ * across restarts; `scheduler:run` runs a job from this list without it.
  */
 
 export const IDENTITY_SWEEP_EVERY_MS = 24 * 60 * 60 * 1000;
@@ -23,7 +27,8 @@ export function buildScheduledJobs(db: Database.Database, cfg: Config): Job[] {
       name: "identity_sweep",
       everyMs: IDENTITY_SWEEP_EVERY_MS,
       // The retention rules' erasure, as `identity:sweep --yes` runs it; it writes its own
-      // `identity_names_erased` line, and its counts per rule ride on `job_ran`.
+      // `identity_names_erased` line, and its counts per rule ride on `job_ran`. Loud, not
+      // `quiet`: its daily line, zero counts included, is the trace that the sweep ran.
       run: async (nowMs) => {
         const swept = sweepIdentityNames(db, cfg, { yes: true, nowMs });
         return { count: swept.count, ...swept.rules };
