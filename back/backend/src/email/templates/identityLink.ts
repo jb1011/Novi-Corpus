@@ -58,11 +58,17 @@ export function escapeHtml(value: string): string {
 /**
  * The identity link's idempotency key: one link per guardian per UTC day. The tenant is a digest's
  * first 16 hex characters, never the tenant id: the console sender prints keys, and a line names
- * a tenant by at most its first ten characters.
+ * a tenant by at most its first ten characters. The day's `n`th link (`email:send-link --again`,
+ * n = 2, 3, ...) adds `:<n>`; the first has none.
  */
-export function identityLinkIdempotencyKey(tenantId: string, nowMs: number): string {
+export function identityLinkIdempotencyKey(tenantId: string, nowMs: number, n = 1): string {
+  if (!Number.isSafeInteger(n) || n < 1)
+    throw new Error(
+      `identity link: the day's link number must be a positive whole number, not ${n}`,
+    );
   const tenant = createHash("sha256").update(tenantId).digest("hex").slice(0, 16);
-  return `identity_link:${tenant}:${new Date(nowMs).toISOString().slice(0, 10)}`;
+  const day = `identity_link:${tenant}:${new Date(nowMs).toISOString().slice(0, 10)}`;
+  return n === 1 ? day : `${day}:${n}`;
 }
 
 export function identityLinkEmail(input: {

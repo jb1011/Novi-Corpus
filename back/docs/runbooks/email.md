@@ -190,7 +190,7 @@ earlier hard bounce or complaint). A **failed** delivery is the provider unable 
 | Kind               | What did not arrive                          | What to do                                                                                                       |
 | ------------------ | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | `filing_landed`    | The customer's news that their filing landed | **Reach the customer another way the same day** (the contact on the company's record, the contact mailbox): nothing else in the product tells them. |
-| `identity_link`    | The guardian's link to the identity check    | Confirm the address with the guardian another way, then send a new link with `email:send-link` (one per guardian per UTC day: a new one the next day). Meanwhile the contact mailbox may send the same link. |
+| `identity_link`    | The guardian's link to the identity check    | Confirm the address with the guardian another way, then send a new link the same day with `email:send-link --again` (section 6): it queues a new row under the day's key and the next number (`identity_link:<digest>:<day>:2`, then `:3`), so the provider never answers it with the earlier send. `--again` is taken only when the day's latest link failed, or was sent and bounced, complained, failed or was suppressed; it is refused while that link is pending, sent with no outcome yet, delayed or delivered, and on a day with no link yet. Without `--again` the command stays one link per guardian per UTC day. Meanwhile the contact mailbox may send the same link. |
 | `invite_code`      | The person's invite                          | Confirm the address another way and invite them again to the right one.                                          |
 | `waitlist_confirm` | The confirmation of a waitlist entry         | Nothing: the entry stays unconfirmed. The person typed a wrong address, or will write in.                       |
 | `contact_upsert`   | Not an email: an address for the campaign's segment | No delivery events. A failed row means the address is not in the segment; re-queue it under its own address, or leave it. |
@@ -237,8 +237,8 @@ which the provider keeps 24 hours. A failed row may still be one whose send the 
 (section 4). To the same address, such a send is answered with the first send's id and sent once.
 To **a different address within 24 hours of that send**, the provider refuses it (409
 `invalid_idempotent_request`): the row fails again, and nothing is sent twice. The fix, after 24
-hours: for an invite, a filing or any other email, the same `email:resend`; for an identity link,
-a new `email:send-link`.
+hours: for an invite, a filing or any other email, the same `email:resend`. For an identity link,
+`email:send-link --again` at once: a new key, so the provider takes it as a new email.
 
 ### `email:send-link`
 
@@ -266,7 +266,9 @@ without its 0x, in any case: the link carries the opaque reference). `<tenantId>
 guardian's wallet address in any case; anything else is refused.
 
 One link per guardian per UTC day (the idempotency key is `identity_link:`, a digest of the tenant
-and the day): a second the same day writes nothing and prints the first one's id and state.
+and the day): a second the same day writes nothing and prints the first one's id and state. When
+the day's latest link failed or was not delivered, add `--again` for a new one the same day
+(section 5, `identity_link`); its output and its ops line name the row it `replaces`.
 Without `--yes` it prints the email it would queue (subject, key, link) and writes nothing. It
 writes one ops line, `identity_link_queued { emailId, tenant, operator, operatorOsUser }`, the
 tenant cut to its first ten characters.
