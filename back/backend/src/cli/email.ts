@@ -86,7 +86,7 @@ const WALLET_SHAPED = /0x[0-9a-f]{40}/i;
 /** The provider keeps a key 24 hours, and the outbox cannot tell whether a failed email's send was
  *  one the provider took (an answer lost, then refusals): the runbook's wording, word for word. */
 const SAME_KEY_NOTE =
-  "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, email:send-link --again, under a new key, at once; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)";
+  "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, email:send-link --again the same UTC day (a plain email:send-link on a later day); for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)";
 const DEFAULT_LIST_LIMIT = 100;
 const MAX_LIST_LIMIT = 1000;
 const WHOLE_NUMBER = /^[1-9][0-9]{0,3}$/;

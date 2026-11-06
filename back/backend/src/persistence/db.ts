@@ -1419,6 +1419,7 @@ const EMAIL_OUTBOX_DDL = `
  * rules and deletes it. The rest never match (campaign emails from the same provider account
  * reach the same endpoint) and the delivery job deletes them 7 days after they arrived. A
  * provider id, a state and two times (ms): never an address or anything else the event carries.
+ * The arrival index serves that cleanup, which runs with every delivery run (every 30 seconds).
  */
 const EMAIL_DELIVERY_ORPHANS_DDL = `
   CREATE TABLE IF NOT EXISTS email_delivery_orphans (
@@ -1429,6 +1430,8 @@ const EMAIL_DELIVERY_ORPHANS_DDL = `
     received_at         INTEGER NOT NULL,
     PRIMARY KEY (provider_message_id, state)
   );
+  CREATE INDEX IF NOT EXISTS idx_email_delivery_orphans_received
+    ON email_delivery_orphans(received_at);
 `;
 
 /**

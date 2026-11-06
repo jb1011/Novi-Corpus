@@ -82,8 +82,9 @@ records are never proxied anyway.
 
 Then wait until the provider's domain page shows every record verified, and make the live send
 the merge gate asks for: one email to a founder's own address from a non-production box with the
-real key, and the same contact written twice. In the received email's headers, `dkim=pass`,
-`spf=pass` and `dmarc=pass`.
+real key, and the same contact written twice. That box runs `EMAIL_PROVIDER=resend`, so its
+`PUBLIC_APP_URL` must be an https origin: an http value is refused with the provider sender
+(section 1). In the received email's headers, `dkim=pass`, `spf=pass` and `dmarc=pass`.
 
 ## 3. The delivery webhook
 
@@ -238,7 +239,8 @@ which the provider keeps 24 hours. A failed row may still be one whose send the 
 To **a different address within 24 hours of that send**, the provider refuses it (409
 `invalid_idempotent_request`): the row fails again, and nothing is sent twice. The fix, after 24
 hours: for an invite, a filing or any other email, the same `email:resend`. For an identity link,
-`email:send-link --again` at once: a new key, so the provider takes it as a new email.
+`email:send-link --again` the same UTC day (a plain `email:send-link` on a later day): a new key,
+so the provider takes it as a new email.
 
 ### `email:send-link`
 

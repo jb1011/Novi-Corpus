@@ -55,8 +55,10 @@ document_unverified_other"), never a person's name, address, email or document n
    they will use (first name, last name, and the full name if the document prints more), and asks
    them not to attach the document or a photo of it. The address is never printed back. The link
    must not carry the tenant id either: the opaque reference stands for it. One link per guardian
-   per UTC day: a second the same day writes nothing. `email:list --kind identity_link` shows
-   whether it was sent and delivered; a bounce is handled as the email runbook says (section 5).
+   per UTC day: a second the same day writes nothing. `email:send-link --again` sends a new link
+   the same day when that day's link failed or was not delivered (see email.md, section 5).
+   `email:list --kind identity_link` shows whether it was sent and delivered; a bounce is handled
+   as the email runbook says (section 5).
 
    **The reply** goes to `EMAIL_REPLY_TO`, or to `EMAIL_FROM` where it is not set. Watch that
    mailbox before the first `email:send-link`. Once `identity:record` is written (step 5), delete
