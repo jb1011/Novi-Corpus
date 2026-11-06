@@ -73,18 +73,29 @@ export function assertIdempotencyKey(key: string): void {
 
 /**
  * The sender of a deployment that sends nothing: each email becomes one `email_console` ops line
- * with the sender's kind, the subject and the idempotency key, and nothing else. The outbox row
- * still ends `sent`, with `console:<key>` as its message id.
+ * with the sender's kind, the subject and the idempotency key. The outbox row still ends `sent`,
+ * with `console:<key>` as its message id.
+ *
+ * With `showBody` (EMAIL_CONSOLE_SHOW_BODY, which production refuses at boot) the line also
+ * carries the text body, so a staging tester can follow the link an email holds. Never the HTML,
+ * and never the address: wherever the recipient's address appears in the subject or the body it
+ * is printed as `<recipient>`.
  */
 export class ConsoleEmailSender implements EmailSender {
   readonly kind = "console" as const;
+  private readonly showBody: boolean;
+
+  constructor(opts: { showBody?: boolean } = {}) {
+    this.showBody = opts.showBody ?? false;
+  }
 
   async send(e: OutboundEmail): Promise<{ providerMessageId: string }> {
     assertIdempotencyKey(e.idempotencyKey);
     opsLog("email_console", {
       kind: this.kind,
-      subject: e.subject,
+      subject: withoutAddress(e.subject, e.to),
       idempotencyKey: e.idempotencyKey,
+      ...(this.showBody ? { text: withoutAddress(e.text, e.to) } : {}),
     });
     return { providerMessageId: `console:${e.idempotencyKey}` };
   }
@@ -101,6 +112,13 @@ export class ConsoleEmailSender implements EmailSender {
     opsLog("email_console_contact", { kind: this.kind, segmentId: c.segmentId });
     return { providerContactId: "console:contact" };
   }
+}
+
+/** `text` with every occurrence of `address` (in any case) replaced by `<recipient>`. */
+function withoutAddress(text: string, address: string): string {
+  if (address === "") return text;
+  const escaped = address.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(new RegExp(escaped, "gi"), "<recipient>");
 }
 
 /**

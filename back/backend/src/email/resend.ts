@@ -16,12 +16,15 @@ import {
  *    different payload answers 409 `invalid_idempotent_request`). The answer is `{ id }`.
  *  - `upsertContact`: `POST /contacts` with the address and its segment (`segments` is an array
  *    of `{ id }` objects; the Audiences API is deprecated, segments and topics replace it).
- *  - 429 and 5xx are retryable, every other 4xx is not; a timeout or a network error is
- *    retryable. Errors are coded by Resend's error `name` (`rate_limit_exceeded`,
+ *  - 429, 5xx and a 409 `concurrent_idempotent_requests` (the same key still in flight) are
+ *    retryable; every other 4xx is not, `invalid_idempotent_request` included. A timeout or a
+ *    network error is retryable, unless the status of a refusal had already arrived: then the
+ *    status decides. Errors are coded by Resend's error `name` (`rate_limit_exceeded`,
  *    `validation_error`, ...) and never carry its `message`, which can quote the address.
  *  - A 10 second timeout per request (`AbortSignal.timeout`, as `monitor/alerts.ts` does), and at
- *    most 8 requests a second from one process, `send` and `upsertContact` together (Resend's
- *    limit is 10 a second per team; the margin is for a CLI run beside the API).
+ *    most 8 requests a second from one process, `send` and `upsertContact` together, under
+ *    Resend's limit of 10 a second per team. Each process has its own limiter; the API process is
+ *    the one that sends, because CLI commands enqueue to the outbox rather than send directly.
  *
  * Nothing here logs the key, an address or a body.
  */
@@ -50,7 +53,7 @@ export type EmailFetch = (
 /**
  * At most `max` requests in any `windowMs`: a sliding window over the start times of the last
  * `max` requests, taken in arrival order. `acquire` resolves when the caller may start its request.
- * The clock and the sleep are injectable for tests.
+ * The clock (`performance.now` by default) and the sleep are injectable for tests.
  */
 export class RequestLimiter {
   private readonly starts: number[] = [];
@@ -59,11 +62,13 @@ export class RequestLimiter {
   private readonly sleep: (ms: number) => Promise<void>;
 
   constructor(
-    private readonly max: number,
-    private readonly windowMs: number,
+    readonly max: number,
+    readonly windowMs: number,
     seams: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
   ) {
-    this.now = seams.now ?? Date.now;
+    // Monotonic: a wall-clock step (NTP, a manual change) must neither stall sends nor let a burst
+    // through, and a test's fake timers must not desynchronise it from its own sleeps.
+    this.now = seams.now ?? (() => performance.now());
     this.sleep = seams.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
 
@@ -201,8 +206,15 @@ export class ResendEmailSender implements EmailSender {
       parsed = text ? JSON.parse(text) : undefined;
     } catch (err) {
       // An oversized or unparsable body is no body: the status alone decides. A read cut short
-      // by the timeout or the network is a request without an answer.
-      if (!(err instanceof ResponseTooLarge) && !(err instanceof SyntaxError)) throw unanswered();
+      // by the timeout or the network is a request without an answer, unless its status already
+      // says the request was refused outright: then the status decides, and a refusal is not
+      // retried because its body went missing.
+      if (
+        !(err instanceof ResponseTooLarge) &&
+        !(err instanceof SyntaxError) &&
+        !refusedOutright(res.status)
+      )
+        throw unanswered();
       parsed = undefined;
     }
 
@@ -215,6 +227,16 @@ export class ResendEmailSender implements EmailSender {
     }
     const name = (parsed as { name?: unknown } | undefined)?.name;
     const code = typeof name === "string" && ERROR_NAME.test(name) ? name : `http_${status}`;
-    throw new EmailSendError(status, code, status === 429 || status >= 500);
+    throw new EmailSendError(
+      status,
+      code,
+      !refusedOutright(status) || (status === 409 && code === "concurrent_idempotent_requests"),
+    );
   }
+}
+
+/** A 3xx or a 4xx other than 429: the request was refused, and the same request would be refused
+ *  again. (One 409 is the exception, decided by its code: `concurrent_idempotent_requests`.) */
+function refusedOutright(status: number): boolean {
+  return status >= 300 && status < 500 && status !== 429;
 }

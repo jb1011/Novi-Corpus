@@ -210,6 +210,31 @@ test("409 (the same key with a different payload) is not retryable, coded invali
   });
 });
 
+test("409 with the same key still in flight is retryable, coded concurrent_idempotent_requests", async () => {
+  const { fetch } = stubFetch({
+    status: 409,
+    body: {
+      statusCode: 409,
+      name: "concurrent_idempotent_requests",
+      message: "Same idempotency key used while original request is still in progress.",
+    },
+  });
+  const err = await sendErrorOf(() => sender(fetch).send(EMAIL));
+  expect({ status: err.status, code: err.code, retryable: err.retryable }).toEqual({
+    status: 409,
+    code: "concurrent_idempotent_requests",
+    retryable: true,
+  });
+});
+
+test("any other 409 is not retryable", async () => {
+  for (const body of [{ name: "resource_locked" }, undefined]) {
+    const { fetch } = stubFetch({ status: 409, body });
+    const err = await sendErrorOf(() => sender(fetch).send(EMAIL));
+    expect(err.retryable, JSON.stringify(body)).toBe(false);
+  }
+});
+
 test("the error never carries the provider's message, which can quote the address", async () => {
   const { fetch } = stubFetch({
     status: 422,
@@ -258,6 +283,65 @@ test("a network error is retryable, with no status", async () => {
     code: "network_error",
     retryable: true,
   });
+});
+
+/** A fetch that answers `status` with a body whose stream fails, or never ends, part way. */
+function brokenBody(status: number, how: "errors" | "hangs"): EmailFetch {
+  return async () =>
+    new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"id":'));
+          if (how === "errors") controller.error(new TypeError("terminated"));
+        },
+      }),
+      { status },
+    );
+}
+
+test("a timeout during the body read is retryable, with no status", async () => {
+  const err = await sendErrorOf(() =>
+    sender(brokenBody(200, "hangs"), { timeoutMs: 20 }).send(EMAIL),
+  );
+  expect({ status: err.status, code: err.code, retryable: err.retryable }).toEqual({
+    status: null,
+    code: "timeout",
+    retryable: true,
+  });
+});
+
+test("a body read cut short on a 2xx is a request without an answer, retryable", async () => {
+  const err = await sendErrorOf(() => sender(brokenBody(200, "errors")).send(EMAIL));
+  expect({ status: err.status, code: err.code, retryable: err.retryable }).toEqual({
+    status: null,
+    code: "network_error",
+    retryable: true,
+  });
+});
+
+test("a body read cut short on a refusal: the status decides, not retryable", async () => {
+  for (const status of [400, 403, 409, 422]) {
+    const err = await sendErrorOf(() => sender(brokenBody(status, "errors")).send(EMAIL));
+    expect(
+      { status: err.status, code: err.code, retryable: err.retryable },
+      String(status),
+    ).toEqual({ status, code: `http_${status}`, retryable: false });
+  }
+  const timedOut = await sendErrorOf(() =>
+    sender(brokenBody(422, "hangs"), { timeoutMs: 20 }).send(EMAIL),
+  );
+  expect({ status: timedOut.status, code: timedOut.code, retryable: timedOut.retryable }).toEqual({
+    status: 422,
+    code: "http_422",
+    retryable: false,
+  });
+});
+
+test("a body read cut short on 429 or 5xx stays retryable", async () => {
+  for (const status of [429, 500, 503]) {
+    const err = await sendErrorOf(() => sender(brokenBody(status, "errors")).send(EMAIL));
+    expect(err.retryable, String(status)).toBe(true);
+  }
 });
 
 test("an idempotency key outside 1 to 256 characters is refused before any request", async () => {
@@ -371,6 +455,20 @@ test("every sender in one process shares one limiter unless a test hands it its 
   expect(a.limiter).toBe(b.limiter);
 });
 
+test("the production limiter allows 8 requests a second", () => {
+  const { fetch } = stubFetch({ status: 200, body: { id: "msg_1" } });
+  const { limiter } = new ResendEmailSender({ apiKey: KEY, from: FROM, fetch });
+  expect({ max: limiter.max, windowMs: limiter.windowMs }).toEqual({ max: 8, windowMs: 1000 });
+});
+
+test("the limiter's default clock is monotonic: performance.now, never the wall clock", async () => {
+  const monotonic = vi.spyOn(performance, "now");
+  const wall = vi.spyOn(Date, "now");
+  await new RequestLimiter(1, 1000).acquire();
+  expect(monotonic).toHaveBeenCalled();
+  expect(wall).not.toHaveBeenCalled();
+});
+
 test("the provider sender's kind is its provider", () => {
   const { fetch } = stubFetch({ status: 200, body: { id: "msg_1" } });
   expect(sender(fetch).kind).toBe("resend");
@@ -420,6 +518,36 @@ test("the console sender logs its kind, the subject and the key, never the addre
     subject: EMAIL.subject,
     idempotencyKey: EMAIL.idempotencyKey,
   });
+});
+
+test("the console sender prints the text body only when asked, and never the address", async () => {
+  const email: OutboundEmail = {
+    ...EMAIL,
+    subject: `A note for ${TO}`,
+    text: `Hello ${TO.toUpperCase()}, confirm here: https://www.example.com/waitlist/confirm?token=wlc_0`,
+  };
+  for (const showBody of [undefined, false, true]) {
+    const output = await captureOutput(async () => {
+      await new ConsoleEmailSender(showBody === undefined ? undefined : { showBody }).send(email);
+    });
+    expect(output.toLowerCase(), String(showBody)).not.toContain(TO);
+    expect(output, String(showBody)).not.toContain(email.html);
+    const { opslog, at: _at, ...fields } = JSON.parse(output.trim());
+    expect(opslog).toBe("email_console");
+    if (showBody)
+      expect(fields).toEqual({
+        kind: "console",
+        subject: "A note for <recipient>",
+        idempotencyKey: EMAIL.idempotencyKey,
+        text: "Hello <recipient>, confirm here: https://www.example.com/waitlist/confirm?token=wlc_0",
+      });
+    else
+      expect(fields, String(showBody)).toEqual({
+        kind: "console",
+        subject: "A note for <recipient>",
+        idempotencyKey: EMAIL.idempotencyKey,
+      });
+  }
 });
 
 test("the console sender refuses the key the provider would refuse", async () => {

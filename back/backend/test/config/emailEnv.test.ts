@@ -35,6 +35,30 @@ const RESEND = {
   RESEND_WEBHOOK_SECRET: WEBHOOK_SECRET,
 };
 
+/** A mainnet deployment with the legal-body feature on that boots, as `identityEnv.test.ts`
+ *  builds it, with the console sender's settings on top. Every key is a placeholder or one of
+ *  anvil's published test accounts. */
+const MAINNET_CONSOLE = {
+  ...CONSOLE,
+  CONTROLLER_ADDRESS: "0x1111111111111111111111111111111111111111",
+  FACTORY_ADDRESS: "0x2222222222222222222222222222222222222222",
+  ARC_NETWORK: "mainnet",
+  ARC_CHAIN_ID: "8004",
+  WORLD_APP_ID: "app_1",
+  WORLD_RP_ID: "app.example",
+  WORLD_RP_SIGNING_KEY: "0xsigning",
+  WORLD_REQUIRE_GUARDIAN: "true",
+  WORLD_MAX_COMPANIES_PER_HUMAN: "3",
+  DOOLA_ENVIRONMENT: "production",
+  DOOLA_API_KEY: "dk_live_key",
+  DOOLA_WEBHOOK_SECRET: "whsec_live",
+  FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+  IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
+  LEGAL_BODY_FACTORY_ADDRESS: "0x3333333333333333333333333333333333333333",
+  /** anvil's published account #0. */
+  NOVI_ATTESTATION_KEY: "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+};
+
 /** The message `fn` throws, or undefined when it returns. */
 function thrownBy(fn: () => unknown): string | undefined {
   try {
@@ -62,6 +86,7 @@ test("the console sender boots with the link base, the sender and the postal add
     publicAppUrl: "https://www.example.com",
     from: "Novi Corpus <filings@example.com>",
     postalAddress: "1 Example Street, Suite 100, Dover, DE 19901, USA",
+    consoleShowBody: false,
   });
 });
 
@@ -76,6 +101,7 @@ test("the provider sender boots with its key and its secret", () => {
     publicAppUrl: "https://www.example.com",
     from: "Novi Corpus <filings@example.com>",
     postalAddress: "1 Example Street, Suite 100, Dover, DE 19901, USA",
+    consoleShowBody: false,
     apiKey: API_KEY,
     webhookSecret: WEBHOOK_SECRET,
   });
@@ -201,6 +227,68 @@ test("the link base must be an http or https URL", () => {
     ).toMatch(/^Invalid config: PUBLIC_APP_URL /);
 });
 
+test("the link base is trimmed like its siblings", () => {
+  expect(
+    loadConfig({ ...CONSOLE, PUBLIC_APP_URL: "  https://www.example.com/  " }).email?.publicAppUrl,
+  ).toBe("https://www.example.com");
+});
+
+test("the API key must be one token: whitespace or a control character inside it refuses, never echoed", () => {
+  for (const bad of ["re_ab cd", "re_ab\tcd", "re_ab\ncd", "re_ab\u0000cd", "re_ab\u007fcd"]) {
+    const message = thrownBy(() => loadConfig({ ...RESEND, RESEND_API_KEY: bad }));
+    expect(message, JSON.stringify(bad)).toMatch(/^Invalid config: RESEND_API_KEY /);
+    expect(message, JSON.stringify(bad)).not.toContain("re_ab");
+  }
+  // Surrounding whitespace is trimmed, as for every sibling.
+  expect(
+    (loadConfig({ ...RESEND, RESEND_API_KEY: `  ${API_KEY}\n` }).email as { apiKey: string })
+      .apiKey,
+  ).toBe(API_KEY);
+});
+
+test("the console body is off by default and on when asked", () => {
+  expect(loadConfig(CONSOLE).email?.consoleShowBody).toBe(false);
+  expect(loadConfig({ ...CONSOLE, EMAIL_CONSOLE_SHOW_BODY: "true" }).email?.consoleShowBody).toBe(
+    true,
+  );
+  expect(loadConfig({ ...CONSOLE, EMAIL_CONSOLE_SHOW_BODY: "" }).email?.consoleShowBody).toBe(
+    false,
+  );
+  expect(thrownBy(() => loadConfig({ ...CONSOLE, EMAIL_CONSOLE_SHOW_BODY: "maybe" }))).toMatch(
+    /^Invalid config: EMAIL_CONSOLE_SHOW_BODY /,
+  );
+});
+
+test("the console body setting is an email setting: without the link base it refuses to boot", () => {
+  expect(thrownBy(() => loadConfig({ ...BASE, EMAIL_CONSOLE_SHOW_BODY: "true" }))).toBe(
+    "Invalid config: EMAIL_CONSOLE_SHOW_BODY is set but PUBLIC_APP_URL is missing: the email system is wired only with PUBLIC_APP_URL, which every link in an email is built on",
+  );
+});
+
+test("a mainnet deployment boots with the email system, and production refuses the console body", () => {
+  expect(loadConfig(MAINNET_CONSOLE).email?.provider).toBe("console");
+  expect(thrownBy(() => loadConfig({ ...MAINNET_CONSOLE, EMAIL_CONSOLE_SHOW_BODY: "true" }))).toBe(
+    "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused on production (ARC_NETWORK=mainnet): it would print every email's text body, with links and codes meant for one person, into the log",
+  );
+  expect(
+    thrownBy(() =>
+      // The same refusal with the provider sender: the setting is refused on production whatever
+      // sends.
+      loadConfig({ ...MAINNET_CONSOLE, ...RESEND, EMAIL_CONSOLE_SHOW_BODY: "true" }),
+    ),
+  ).toBe(
+    "Invalid config: EMAIL_CONSOLE_SHOW_BODY is refused on production (ARC_NETWORK=mainnet): it would print every email's text body, with links and codes meant for one person, into the log",
+  );
+});
+
+test("production refuses an http link base; a sandbox box may use one (the staging laptop)", () => {
+  const http = "http://localhost:5173";
+  expect(loadConfig({ ...CONSOLE, PUBLIC_APP_URL: http }).email?.publicAppUrl).toBe(http);
+  expect(thrownBy(() => loadConfig({ ...MAINNET_CONSOLE, PUBLIC_APP_URL: http }))).toBe(
+    "Invalid config: PUBLIC_APP_URL must be https on production (ARC_NETWORK=mainnet): every link in an email is built on it",
+  );
+});
+
 test("redact hides the key and the secret and keeps what an operator checks", () => {
   const shown = redact(
     loadConfig({ ...RESEND, RESEND_MARKETING_SEGMENT_ID: "seg_placeholder" }),
@@ -210,6 +298,7 @@ test("redact hides the key and the secret and keeps what an operator checks", ()
     publicAppUrl: "https://www.example.com",
     from: "Novi Corpus <filings@example.com>",
     postalAddress: "1 Example Street, Suite 100, Dover, DE 19901, USA",
+    consoleShowBody: false,
     marketingSegmentId: "seg_placeholder",
     apiKey: "REDACTED",
     webhookSecret: "REDACTED",

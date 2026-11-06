@@ -457,8 +457,8 @@ async function main() {
     : undefined;
   // The email system: built only where `cfg.email` is, which is only where PUBLIC_APP_URL is set.
   // The testnet box sets none of the email settings, so it builds no sender and sends nothing. The
-  // console sender writes one ops line per email (never the address or the body) and sends
-  // nothing; the provider sender sends.
+  // console sender writes one ops line per email (never the address; the text body only with
+  // EMAIL_CONSOLE_SHOW_BODY, which production refuses) and sends nothing; the provider sender sends.
   const email: EmailDeps | undefined = cfg.email
     ? {
         sender:
@@ -468,7 +468,7 @@ async function main() {
                 from: cfg.email.from,
                 replyTo: cfg.email.replyTo,
               })
-            : new ConsoleEmailSender(),
+            : new ConsoleEmailSender({ showBody: cfg.email.consoleShowBody }),
         publicAppUrl: cfg.email.publicAppUrl,
         postalAddress: cfg.email.postalAddress,
         marketingSegmentId: cfg.email.marketingSegmentId,
@@ -476,7 +476,7 @@ async function main() {
     : undefined;
   if (email)
     console.warn(
-      `⚠ Email ENABLED (sender ${email.sender.kind}, links on ${email.publicAppUrl}${email.marketingSegmentId ? ", marketing segment set" : ", no marketing segment: contact writes are skipped"})`,
+      `⚠ Email ENABLED (sender ${email.sender.kind}, links on ${email.publicAppUrl}${email.marketingSegmentId ? ", marketing segment set" : ", no marketing segment: contact writes are skipped"}${cfg.email?.provider === "console" && cfg.email.consoleShowBody ? ", the console sender PRINTS each text body (EMAIL_CONSOLE_SHOW_BODY)" : ""})`,
     );
   // A customer company door needs a verified human behind the guardian. On testnet nothing else
   // stops the doors being mounted with no World block, and then every one of them refuses.
