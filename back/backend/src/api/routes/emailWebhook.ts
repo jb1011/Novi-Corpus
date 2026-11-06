@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import type { AuthVars } from "../../auth/middleware";
-import { type DeliveryState, type EmailDeps, subjectRefForLog } from "../../email/outbox";
+import { type DeliveryState, type EmailDeps, warnIfUndelivered } from "../../email/outbox";
 import {
   SVIX_ID_HEADER,
   SVIX_SIGNATURE_HEADER,
@@ -24,18 +24,22 @@ import { readCappedBody } from "../cappedBody";
  *     401, which writes nothing; the ops line carries the refusal's code, never the signature;
  *  3. from here the event is PROVEN to be the provider's, so every answer is a 200. The provider
  *     retries a failed delivery eight times over about a day, and a retry cannot teach us an id we
- *     never sent: an event we do not record, an id no sent email carries, or a body we cannot
- *     read is answered 200 and written nowhere.
+ *     never sent: an event we do not record, or a body we cannot read, is answered 200 and
+ *     written nowhere. A delivery event for an id no sent email carries is kept as an orphan
+ *     (`recordDeliveryEvent`): the row may still be pending, its send's answer lost and retried
+ *     under the same key, or the event raced the send; the delivery job applies it when it writes
+ *     that id on the row, and deletes it after 7 days otherwise (a campaign email from the same
+ *     provider account never matches).
  *
  * The six delivery events record their state on the row (`RESEND_DELIVERY_EVENTS`) at the
  * EVENT'S OWN TIME, the signed body's top-level `created_at` (`eventTimeMs`): never the
  * `svix-timestamp`, which is re-signed on every retry, so a retried old event would pass for a new
  * one. The outbox keeps the newest event and never lets `delayed` overwrite an outcome
  * (`recordDelivery`). Every state but `delivered` and `delayed` (a bounce, a complaint, a failure,
- * a suppression) also writes the `email_bounced` WARN line when it is recorded, so an operator
- * looks the same day: an undelivered filing email means the customer has no way back, and the
- * runbook says to reach them another way; an event the outbox ignores (older, or redelivered)
- * writes none. Every line carries ids, the kind, the state and codes; never the body (it holds the
+ * a suppression) also writes the `email_bounced` WARN line when it is recorded (for an orphan,
+ * when the delivery job records it), so an operator looks the same day: an undelivered filing
+ * email means the customer has no way back, and the runbook says to reach them another way; an
+ * event the outbox ignores (older, or redelivered) writes none. Every line carries ids, the kind, the state and codes; never the body (it holds the
  * recipient's address and the subject), an address, a signature or the secret, and an identity
  * link's subject (a tenant id) is cut to its first ten characters, as the outbox's own lines do.
  *
@@ -62,15 +66,6 @@ export const RESEND_DELIVERY_EVENTS: ReadonlyMap<string, DeliveryState> = new Ma
   ["email.complained", "complained"],
   ["email.failed", "failed"],
   ["email.suppressed", "suppressed"],
-]);
-
-/** The states an operator must act on the same day: the email did not reach the customer, or the
- *  customer refused it. */
-const WARN_STATES: ReadonlySet<DeliveryState> = new Set([
-  "bounced",
-  "complained",
-  "failed",
-  "suppressed",
 ]);
 
 /** An ISO 8601 date and time, as the provider writes `created_at`; checked before `Date.parse`,
@@ -181,9 +176,14 @@ export function mountEmailWebhookRoutes(
       return c.json(OK_BODY, 200);
     }
 
-    const row = email.outbox.findSent(event.emailId);
-    if (row === undefined) {
-      // Not an email this outbox sent: another sender on the provider's account, or a contact.
+    const result = email.outbox.recordDeliveryEvent(
+      event.emailId,
+      state,
+      eventTimeMs(event.createdAt, now()),
+    );
+    if (result.row === undefined) {
+      // No sent email has the id yet: kept, for a row still pending or one being sent; or never
+      // ours (another sender on the provider's account, a campaign, a contact).
       opsLog("email_delivery_unmatched", {
         level: "info",
         providerMessageId: event.emailId,
@@ -193,20 +193,7 @@ export function mountEmailWebhookRoutes(
     }
     // Only an event the outbox recorded warns: an older one, or the same one redelivered, is not
     // news to the operator.
-    const recorded = email.outbox.recordDelivery(
-      event.emailId,
-      state,
-      eventTimeMs(event.createdAt, now()),
-    );
-    if (recorded && WARN_STATES.has(state))
-      opsLog("email_bounced", {
-        level: "warn",
-        severity: "WARN",
-        emailId: row.emailId,
-        kind: row.kind,
-        subjectRef: subjectRefForLog(row),
-        state,
-      });
+    if (result.recorded) warnIfUndelivered(result.row, state);
     return c.json(OK_BODY, 200);
   });
 }

@@ -1,10 +1,12 @@
 /**
  * The provider's delivery webhook (`POST /email/webhook/resend`, src/api/routes/emailWebhook.ts):
  * a Svix-signed event recorded on the outbox row of the email it names. A refused signature is a
- * 401 that writes nothing; an event we do not record, or an id we do not know, is a 200 that
- * writes nothing (the provider retries eight times over about a day, and a retry cannot teach us
- * an id we never sent); a bounce or a complaint also writes the WARN line an operator acts on the
- * same day. Every answer is `no-store`.
+ * 401 that writes nothing; an event we do not record is a 200 that writes nothing (the provider
+ * retries eight times over about a day); a delivery event for an id no sent email carries is a
+ * 200 that keeps it as an orphan, which the delivery job records when it sends a row with that id
+ * (its answer was lost, or the event raced the send) and deletes after 7 days otherwise; a bounce
+ * or a complaint also writes the WARN line an operator acts on the same day. Every answer is
+ * `no-store`.
  *
  * Every address here is on example.com, and no fixture holds a readable name.
  */
@@ -18,7 +20,7 @@ import {
 } from "../../src/api/routes/emailWebhook";
 import { loadConfig } from "../../src/config/env";
 import { type EmailDeps, SqliteEmailOutbox, buildEmailDeps } from "../../src/email/outbox";
-import { ConsoleEmailSender } from "../../src/email/sender";
+import { ConsoleEmailSender, type EmailSender } from "../../src/email/sender";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 
@@ -93,6 +95,10 @@ function sentEmail(
   ).run(providerMessageId, NOW - MINUTE, emailId);
   return emailId;
 }
+
+/** The delivery events kept for an id no sent email carries. */
+const orphans = () =>
+  db.prepare("SELECT * FROM email_delivery_orphans ORDER BY provider_message_id, state").all();
 
 const row = (emailId: string) =>
   db
@@ -253,7 +259,7 @@ describe("a correctly signed event", () => {
     expect(printed).toEqual([]);
   });
 
-  test("an unknown message id answers 200 and writes nothing", async () => {
+  test("an unknown message id answers 200, records nothing on a row, and keeps the event as an orphan: its id, its state and two times", async () => {
     const emailId = sentEmail("re_msg_1");
     const res = await post(event("email.bounced", "re_never_sent_by_us"));
 
@@ -262,8 +268,55 @@ describe("a correctly signed event", () => {
     expect(row(emailId)).toEqual({ delivery_state: null, delivery_at: null });
     expect(lines("email_bounced")).toEqual([]);
     expect(lines("email_delivery_unmatched")).toEqual([
-      expect.objectContaining({ providerMessageId: "re_never_sent_by_us", type: "email.bounced" }),
+      expect.objectContaining({
+        level: "info",
+        providerMessageId: "re_never_sent_by_us",
+        type: "email.bounced",
+      }),
     ]);
+    expect(orphans()).toEqual([
+      {
+        provider_message_id: "re_never_sent_by_us",
+        state: "bounced",
+        event_at: EVENT_AT,
+        received_at: NOW,
+      },
+    ]);
+    expectNothingPrivatePrinted();
+  });
+
+  test("a bounce for an email still pending (its send's answer lost) is kept, then recorded with its WARN line when the delivery job sends the row under that id", async () => {
+    const { emailId } = outbox.enqueue({
+      kind: "filing_landed",
+      subjectRef: "cmp_0001",
+      idempotencyKey: "filing_landed:cmp_0001",
+      to: ADDRESS,
+      subject: "A subject",
+      ...BODY,
+    });
+    expect((await post(event("email.bounced", "re_msg_1"))).status).toBe(200);
+    expect(row(emailId)).toEqual({ delivery_state: null, delivery_at: null });
+    expect(lines("email_bounced")).toEqual([]);
+
+    // The retry under the same key: the provider answers the first send's id.
+    const sender: EmailSender = {
+      kind: "resend",
+      send: async () => ({ providerMessageId: "re_msg_1" }),
+      upsertContact: async () => ({ providerContactId: "ct_1" }),
+    };
+    await expect(outbox.deliverDue(sender, NOW)).resolves.toEqual({
+      sent: 1,
+      retried: 0,
+      failed: 0,
+    });
+    expect(row(emailId)).toEqual({ delivery_state: "bounced", delivery_at: EVENT_AT });
+    expect(orphans()).toEqual([]);
+    expect(lines("email_bounced")).toEqual([
+      expect.objectContaining({ emailId, kind: "filing_landed", state: "bounced" }),
+    ]);
+    // Then an older event from the provider changes nothing.
+    await post(event("email.delivered", "re_msg_1", new Date(EVENT_AT - MINUTE).toISOString()));
+    expect(row(emailId)).toEqual({ delivery_state: "bounced", delivery_at: EVENT_AT });
     expectNothingPrivatePrinted();
   });
 
