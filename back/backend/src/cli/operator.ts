@@ -1,14 +1,15 @@
 import { userInfo } from "node:os";
 import type Database from "better-sqlite3";
 import { config as loadDotenv } from "dotenv";
+import { getAddress } from "viem";
 import { type Config, loadConfig } from "../config/env";
 import { openDatabase } from "../persistence/db";
 
 /**
- * WHAT THE OPERATOR'S COMMANDS SHARE (`company:*`, `legal-body:revoke`, `identity:*`): the rules
- * an operator's name, an expected check id and a reason are held to, the OS user recorded beside
- * the name, the one JSON object a command prints, the refusal it throws (the entry point prints
- * the message and exits non-zero), and the database the configuration names.
+ * WHAT THE OPERATOR'S COMMANDS SHARE (`company:*`, `legal-body:revoke`, `identity:*`, `email:*`):
+ * the rules an operator's name, an expected check id, a reason and a tenant are held to, the OS
+ * user recorded beside the name, the one JSON object a command prints, the refusal it throws (the
+ * entry point prints the message and exits non-zero), and the database the configuration names.
  */
 
 export const OPERATOR_NAME = /^[a-z0-9._-]{2,40}$/;
@@ -48,6 +49,16 @@ export function parseReason(value: string): string {
   if (OTHER_CHARACTER.test(value))
     refuse("--reason must not hold a control, format or other invisible character");
   return value;
+}
+
+/** A tenant (a guardian's account, its wallet address) in the one spelling its rows are kept
+ *  under: EIP-55 checksummed. Anything that is not an address is refused. */
+export function parseTenant(value: string): string {
+  try {
+    return getAddress(value);
+  } catch {
+    return refuse("<tenantId> must be a wallet address");
+  }
 }
 
 /** The OS user running the command, recorded on every check beside the operator's name. */

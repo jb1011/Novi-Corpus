@@ -24,22 +24,43 @@ document_unverified_other"), never a person's name, address, email or document n
 ## 1. The procedure, one guardian
 
 1. **The link.** In the Stripe dashboard, open the guardian-check Verification Flow and copy its
-   static link. Append a fresh opaque reference and the person's email address:
+   static link. Append a fresh opaque reference, and nothing else:
 
    ```
-   <flow link>?client_reference_id=<reference>&prefilled_email=<the person's address>
+   <flow link>?client_reference_id=<reference>
    ```
 
    The reference is new for every request (`openssl rand -hex 8` is enough). It is **never** the
    tenant id and never the World ID nullifier: the session lives at Stripe, and neither belongs
    there. Note the reference beside the tenant id wherever you track the request, without the name.
 
-2. **Send it, and ask for the name.** With `email:send-link` from the box (PR 2a), or, until PR 2a
-   is deployed, from the contact mailbox. Send the flow link only: it is made to be shared. The
-   dashboard's single-use session links expire after 48 hours and are not sent by email, as Stripe
-   advises. In the same email (or a follow-up), ask the guardian for their legal name **exactly as
-   printed on the document** they will show: first name, last name, and the full name if the
-   document prints more.
+   **Never the person's email address in the link** (no `prefilled_email`): it would sit in the
+   email's body and in the provider's URL logs. The guardian types their address in Stripe's flow.
+   `email:send-link` refuses a link that carries one.
+
+2. **Send it, and ask for the name.** With `email:send-link` from the box, the address re-read
+   from where the guardian gave it (their waitlist entry, their own message), never from a ticket.
+   Start the line with a space, so the shell keeps the address out of its history
+   (docs/runbooks/email.md):
+
+   ```bash
+    npm run cli -- email:send-link <tenantId> \
+      --url '<flow link>?client_reference_id=<reference>' --to <the person's address> \
+      --operator <your operator name>
+   ```
+
+   Without `--yes` it prints the email it would queue (the subject, the key, the link) and writes
+   nothing; read it, then run the same line with `--yes`. The email ("Confirm who you are") says
+   what is checked, what we keep and what we never keep, gives the link, and asks the guardian to
+   reply with their legal name **exactly as printed on the document** they will use: first name,
+   last name, and the full name if the document prints more. The address is never printed back.
+   One link per guardian per UTC day: a second the same day writes nothing. `email:list --kind
+   identity_link` shows whether it was sent and delivered; a bounce is handled as the email
+   runbook says (section 5).
+
+   Until PR 2a is deployed, send the same words from the contact mailbox. Send the flow link only:
+   it is made to be shared. The dashboard's single-use session links expire after 48 hours and are
+   not sent by email, as Stripe advises.
 
 3. **Read the session, and compare the name.** Open the session in the dashboard once the person
    has finished. Each visit to the flow link opens a new session (`vs_…`); record each finished one
