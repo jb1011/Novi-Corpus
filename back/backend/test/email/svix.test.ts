@@ -9,7 +9,13 @@ import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { SVIX_TOLERANCE_MS, svixSigningKey, verifySvixSignature } from "../../src/email/svix";
+import {
+  SVIX_MIN_KEY_BYTES,
+  SVIX_TOLERANCE_MS,
+  decodeSvixSecret,
+  svixSigningKey,
+  verifySvixSignature,
+} from "../../src/email/svix";
 
 /** Svix's own published example, so the check is held to the scheme and not only to itself. */
 const VECTOR = {
@@ -130,9 +136,31 @@ describe("the timestamp", () => {
 });
 
 test("the signing key is the base64 after whsec_, and anything else is refused", () => {
-  expect(svixSigningKey("whsec_AAEC")).toEqual(Buffer.from([0, 1, 2]));
-  for (const bad of ["", "whsec_", "AAEC", "whsec-AAEC", "whsec_not base64", "whsec_====="])
+  const sixteen = Buffer.alloc(16, 7);
+  expect(svixSigningKey(`whsec_${sixteen.toString("base64")}`)).toEqual(sixteen);
+  const b64 = sixteen.toString("base64");
+  for (const bad of ["", "whsec_", b64, `whsec-${b64}`, "whsec_not base64", "whsec_====="])
     expect(() => svixSigningKey(bad), bad).toThrow(/whsec_/);
+});
+
+test("the key must decode to at least 16 bytes, and the refusal never quotes the secret", () => {
+  expect(SVIX_MIN_KEY_BYTES).toBe(16);
+  for (const bad of ["whsec_A", "whsec_AAEC", `whsec_${Buffer.alloc(15, 7).toString("base64")}`]) {
+    expect(decodeSvixSecret(bad), bad).toBeUndefined();
+    let message = "";
+    try {
+      svixSigningKey(bad);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message, bad).toBe(
+      "svix: the signing secret must be whsec_ followed by a base64 key of at least 16 bytes",
+    );
+    expect(message, bad).not.toContain(bad);
+  }
+  expect(decodeSvixSecret(`whsec_${Buffer.alloc(16, 7).toString("base64")}`)).toEqual(
+    Buffer.alloc(16, 7),
+  );
 });
 
 test("written with node's crypto and a constant-time compare: no Svix package", () => {

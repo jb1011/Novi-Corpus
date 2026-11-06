@@ -189,6 +189,21 @@ test("a webhook secret without the whsec_ prefix refuses to boot, and the value 
   }
 });
 
+test("a webhook secret whose key decodes to under 16 bytes refuses to boot, naming the setting, never the value", () => {
+  for (const bad of ["whsec_A", "whsec_AAEC", `whsec_${Buffer.alloc(15, 7).toString("base64")}`]) {
+    const message = thrownBy(() => loadConfig({ ...RESEND, RESEND_WEBHOOK_SECRET: bad }));
+    expect(message, bad).toBe(
+      "Invalid config: RESEND_WEBHOOK_SECRET — must be the webhook signing secret: its base64 key must decode to at least 16 bytes",
+    );
+    expect(message, bad).not.toContain(bad);
+  }
+  const sixteen = `whsec_${Buffer.alloc(16, 7).toString("base64")}`;
+  expect(
+    (loadConfig({ ...RESEND, RESEND_WEBHOOK_SECRET: sixteen }).email as { webhookSecret: string })
+      .webhookSecret,
+  ).toBe(sixteen);
+});
+
 test("the provider name must be one of the two", () => {
   expect(thrownBy(() => loadConfig({ ...CONSOLE, EMAIL_PROVIDER: "smtp" }))).toMatch(
     /^Invalid config: EMAIL_PROVIDER /,

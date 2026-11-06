@@ -117,8 +117,9 @@ export interface EmailOutbox {
     limit?: number,
     opts?: DeliverOptions,
   ): Promise<DeliverCounts>;
-  /** The provider's delivery event, on the sent email it names; false when no sent email has that
-   *  id (or a later event is recorded already). */
+  /** The provider's delivery event, on the sent email it names, at the event's own time; false
+   *  when nothing was written: no sent email has that id, an event at the same time or later is
+   *  recorded already, or the event is `delayed` and the row holds a final state. */
   recordDelivery(providerMessageId: string, state: DeliveryState, atMs: number): boolean;
   /** The sent email a provider id names, as anyone may read it (never the address or the
    *  content); undefined for an unknown id, a row not sent, or a contact write's id. */
