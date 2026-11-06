@@ -1,0 +1,77 @@
+---
+title: Status
+description: "Where each part of Novi Corpus stands, grouped by product."
+section: overview
+register: plain
+reviewed: 2026-11-06
+---
+
+{/* Sources: design 3.3 (start/status.md), 3.5 (the status table, regrouped by product section), decision 8 (the security sentence, verbatim), 2.6 (the step-1 condition: MAINNET_LIVE in src/sections.mjs), 4.6 D6. */}
+
+import { Figure, Mainnet, SectionBadge } from '~/components';
+import { SECTIONS } from '~/sections.mjs';
+
+Minimal Novi is a limited beta: invite only, for people in the US and the UK, up to ten companies formed. Founders' companies and tests are never counted.
+
+<Figure
+	name="d6"
+	caption="Minimal Novi says who stands behind the agent; Novi Managed what it holds and pays; Novi 2.0 what it may do in the company's name."
+	text={`Three products in a row. Minimal Novi, ${SECTIONS['minimal-novi'].badge}: who stands behind the agent. Novi Managed, ${SECTIONS['novi-managed'].badge.toLowerCase()}: what it holds and pays. Novi 2.0, ${SECTIONS['novi-2'].badge.toLowerCase()}: what it may do in the company's name.`}
+/>
+
+## Minimal Novi
+
+<p><SectionBadge section="minimal-novi" /></p>
+
+| Piece | In Minimal Novi |
+| --- | --- |
+| A Wyoming DAO LLC formed for your agent | By invite, up to ten; our filing provider files it and adds the DAO statement. |
+| Declare a Wyoming company you own | By invite; our team checks it. |
+| One person behind it | World ID and an identity check. |
+| Public lookup and signed answer | Yes. |
+
+## Novi Managed
+
+<p><SectionBadge section="novi-managed" /></p>
+
+| Piece | In Novi Managed |
+| --- | --- |
+| The account, payments, escrowed jobs, tools for agents | On Arc testnet, with test funds. |
+| Company and person checks | A sandbox that checks nothing; World ID only. |
+| Public lookup and signed answer | On Arc testnet; a sandbox answer is a test. |
+| Pilots | Shown as they are. |
+
+## Novi 2.0
+
+<p><SectionBadge section="novi-2" /></p>
+
+| Piece | In Novi 2.0 |
+| --- | --- |
+| Permissions | Sign, invoice and get paid in the company's name. |
+| The agent asks first | It requests a legal body over MCP. |
+| Checks | Automatic, and carried in the signed answer. |
+| The DAO LLC features | Once the DAO statement is recorded and counsel has reviewed them. |
+| Money on Arc mainnet | A new design of who holds it, or a provider the guardian names. |
+
+## Security
+
+<Mainnet pending>
+<p>For the Minimal Novi contracts on Arc mainnet, from the day the beta opens:</p>
+</Mainnet>
+
+An automated security scan by Olympix was run on the contracts and the fixes were merged. The contracts' owner is a hardware wallet. The contracts hold no customer money. There is no independent audit yet.
+
+## Numbers
+
+External companies are counted here, dated, once there are any.
+
+## Networks
+
+Minimal Novi on Arc mainnet; Novi Managed on Arc testnet. <a href="/developers/networks/">Networks and addresses</a>
+
+## What will change next
+
+<Mainnet pending>
+- **Mid-November 2026:** the Arc mainnet beta opens.
+</Mainnet>
+- **After Demo Day:** a new version of the signed answer, announced on <a href="/help/changelog/">What's new</a> first.
