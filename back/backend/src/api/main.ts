@@ -442,7 +442,8 @@ async function main() {
     );
   // The guardian identity record: World ID proves one real person; the identity check says who.
   // Built wherever the PII key is set, since the names of record are encrypted under it. The
-  // testnet box cannot hold the key, so it has none: its `/world-id/me` answers the block with
+  // testnet box has no PII key, because its doola block is in sandbox and a sandbox block refuses
+  // one (`config/env.ts`): it has no identity record, its `/world-id/me` answers the block with
   // state `none`, and its doors are sandbox, where the check is skipped.
   const identity: IdentityDeps | undefined = cfg.pii
     ? {

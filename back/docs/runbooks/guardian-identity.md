@@ -126,6 +126,11 @@ document_unverified_other"), never a person's name, address, email or document n
 
 6. **Check it.** `identity:show <tenantId>` reads `verified`, or `needs_review` with its reasons.
 
+   When `identity:show` reads `verified` but `countsAtTheDoors` is `false`, another person has
+   verified World ID on the account since the record was written: the record belongs to the
+   earlier person, and every production door refuses it. The new person needs their own check,
+   by this procedure from step 1.
+
 7. **Redact the session** from the Stripe dashboard once the record is written, within the week.
    Our record is then the only trace of the check.
 

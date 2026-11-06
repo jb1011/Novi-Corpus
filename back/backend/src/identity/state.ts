@@ -24,6 +24,7 @@ export type { IdentityState } from "./types";
 export interface IdentityDeps {
   repo: IdentityRepository;
   pii: PiiKeyring;
+  // Carried for the formed-door writers; the CLI reads `cfg.identity`.
   reverifyYears: number;
   blockedCountries: ReadonlySet<string>;
   /** Unix milliseconds; `Date.now` when absent. */
@@ -225,7 +226,7 @@ export function namesOfRecordAtDoor(
     throw new ApiError(
       "identity_unavailable",
       503,
-      "identity verification is not configured on this deployment",
+      "identity verification is unavailable on this deployment at the moment",
     );
   }
 }

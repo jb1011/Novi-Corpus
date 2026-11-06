@@ -265,7 +265,7 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       const text = await res.text();
       expect(JSON.parse(text).error).toMatchObject({
         code: "identity_unavailable",
-        message: "identity verification is not configured on this deployment",
+        message: "identity verification is unavailable on this deployment at the moment",
       });
       const ops = printed
         .filter((line) => line.includes('"opslog"'))

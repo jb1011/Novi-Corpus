@@ -23,6 +23,16 @@ test("title-casing keeps diacritics", () => {
   expect(nameOfRecord("ÉLODIE")).toBe("Élodie");
 });
 
+test("one spelling per name: a decomposed input (NFD) comes out composed (NFC), recased or not", () => {
+  const decomposedCapitals = "E\u0301LODIE";
+  const decomposed = "E\u0301lodie";
+  expect(decomposed).not.toBe(decomposed.normalize("NFC"));
+
+  expect(nameOfRecord(decomposedCapitals)).toBe("\u00C9lodie");
+  expect(nameOfRecord(decomposed)).toBe("\u00C9lodie");
+  expect(nameOfRecord("  MU\u0308LLER ")).toBe("M\u00FCller");
+});
+
 test("title-casing starts a new word after a hyphen and after an apostrophe", () => {
   expect(nameOfRecord("JEAN-PIERRE")).toBe("Jean-Pierre");
   expect(nameOfRecord("O'BRIEN")).toBe("O'Brien");

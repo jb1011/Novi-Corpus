@@ -478,7 +478,7 @@ describe("on production the declarant's name is written from the record, never t
       expect(refused).toMatchObject({
         status: 503,
         code: "identity_unavailable",
-        message: "identity verification is not configured on this deployment",
+        message: "identity verification is unavailable on this deployment at the moment",
       });
     const checkId = identityRepo.latest(guardian.address)?.checkId;
     const unreadable = printed

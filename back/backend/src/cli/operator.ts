@@ -67,16 +67,22 @@ export function print(output: Record<string, unknown>): void {
   console.log(JSON.stringify(output, null, 2));
 }
 
+/** The configuration the operator's commands run under: the `.env` file, then the environment. */
+export function operatorConfig(): Config {
+  loadDotenv();
+  return loadConfig();
+}
+
 /**
  * Opens the database the configuration names (never a path of its own: an operator who moved the
  * data directory must not open a different, empty database), runs `fn`, and closes it. `fn` is
- * handed the configuration too, for what the deployment decides.
+ * handed the configuration too, for what the deployment decides. A command that checks the
+ * configuration before it reads anything hands in the one it loaded.
  */
 export function withDatabase<T>(
   fn: (db: Database.Database, docStoreDir: string, cfg: Config) => T,
+  cfg: Config = operatorConfig(),
 ): T {
-  loadDotenv();
-  const cfg = loadConfig();
   const db = openDatabase(cfg.dbPath);
   try {
     return fn(db, cfg.docStoreDir, cfg);

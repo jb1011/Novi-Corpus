@@ -64,9 +64,10 @@ export type NameCorrectionCode =
   | "rule_failed"
   | "other";
 
-// The closed lists, for the validation and for the operator commands' --help. Each entry is
-// checked against its type; the type and the list are written side by side so they stay one list.
-// An acceptance and a refusal each take their own part of the decision codes, `other` in both.
+// The closed lists, each entry checked against its type, the two written side by side.
+// `REVIEW_REASON_CODES` is the repository's shape check on a row's review reasons; the others are
+// the `--reason-code` values the operator commands take, and list in their --help. An acceptance
+// and a refusal each take their own part of the decision codes, `other` in both.
 export const REVIEW_REASON_CODES: readonly string[] = [
   "provider_flag",
   "watchlist_hit",
@@ -76,16 +77,6 @@ export const REVIEW_REASON_CODES: readonly string[] = [
   "name_rule_failed",
   "name_mismatch",
 ] satisfies readonly ReviewReasonCode[];
-export const REVIEW_DECISION_CODES: readonly string[] = [
-  "provider_flag_cleared",
-  "watchlist_false_positive",
-  "watchlist_confirmed",
-  "country_blocked",
-  "document_expired",
-  "duplicate_identity",
-  "name_rule_failed",
-  "other",
-] satisfies readonly ReviewDecisionCode[];
 /** The decision codes of an acceptance: what the operator found that clears the review. */
 export const ACCEPT_DECISION_CODES: readonly string[] = [
   "provider_flag_cleared",

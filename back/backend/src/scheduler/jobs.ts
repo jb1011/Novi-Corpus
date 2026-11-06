@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
-import { sweepIdentityNames } from "../cli/identity";
 import type { Config } from "../config/env";
+import { sweepIdentityNames } from "../identity/sweep";
 import type { Job } from "./scheduler";
 
 /**

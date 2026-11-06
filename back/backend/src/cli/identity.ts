@@ -5,7 +5,13 @@ import { type WorldIdDeps, buildWorldIdDeps, realHumanState } from "../api/route
 import { type Config, legalBodyEnvironment } from "../config/env";
 import { type PiiKeyring, encryptText, nameHmac } from "../formation/pii";
 import { IDENTITY_AAD, nameOfRecord, nameRuleProblem } from "../identity/names";
-import { type IdentityDeps, identityState, namesOfRecord } from "../identity/state";
+import {
+  type IdentityDeps,
+  agreesWithWorld,
+  identityState,
+  namesOfRecord,
+} from "../identity/state";
+import { SYSTEM_ACTOR, sweepIdentityNames } from "../identity/sweep";
 import {
   ACCEPT_DECISION_CODES,
   type DocumentType,
@@ -21,7 +27,6 @@ import {
 } from "../identity/types";
 import { opsLog } from "../observability/opsLog";
 import {
-  type ErasureRule,
   type GuardianIdentityCheck,
   type NewGuardianIdentityCheck,
   SqliteIdentityRepository,
@@ -31,6 +36,7 @@ import { SqliteWorldStore } from "../persistence/worldStore";
 import { readNames, withPromptedNames } from "./namesPrompt";
 import {
   OPERATOR_NAME,
+  operatorConfig,
   osUser,
   parseExpectLatest,
   parseOperator,
@@ -70,15 +76,13 @@ const EXPECT_LATEST_HELP =
 const EXPECT_CHECK_HELP = "the tenant's latest identity check id, as identity:show prints it";
 const NEXT = "nothing was written: run the same command with --yes to record this";
 const TENANT_HELP = "the guardian's account: its wallet address";
-/** The sweep writes its erasures under this name, so no operator may type it. */
-const SYSTEM_ACTOR = "system";
+/** The sweep writes its erasures under `SYSTEM_ACTOR`, so no operator may type it. */
 const RESERVED_OPERATOR = { name: SYSTEM_ACTOR, purpose: "the retention sweep's own erasures" };
 
 const COUNTRY = /^[A-Za-z]{3}$/;
 /** An ISO-8601 time with its zone, so its reading never depends on the box's own zone. */
 const INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
-const DAY_MS = 86_400_000;
 
 // The values the record's columns take, as the operator types them: `identity/types.ts` exports
 // their types only (`identityRepository.ts` holds the same lists for the shape check).
@@ -167,6 +171,18 @@ function requireNameHmacKey(cfg: Config): Buffer {
   return cfg.identity.nameHmacKey;
 }
 
+/**
+ * The configuration of a command that seals names, loaded as `withDatabase` loads it and held to
+ * the two keys the command refuses without, before anything is read at the prompt: a broken
+ * configuration is reported before the operator types a name.
+ */
+function sealingConfig(): Config {
+  const cfg = operatorConfig();
+  requirePii(cfg);
+  requireNameHmacKey(cfg);
+  return cfg;
+}
+
 // ── shared rules ─────────────────────────────────────────────────────────────────────────────
 
 /** `completedAt` plus whole UTC calendar years: 10 November stays 10 November. */
@@ -177,6 +193,12 @@ function addUtcYears(ms: number, years: number): number {
 }
 
 const isoDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
+
+/** `--name-full` through `nameOfRecord`; absent, empty or blank, no full name (as at the prompt). */
+function fullNameOfRecord(value: string | undefined): string | null {
+  const full = value === undefined ? "" : nameOfRecord(value);
+  return full === "" ? null : full;
+}
 
 interface Names {
   first: string;
@@ -271,6 +293,12 @@ function assertProductionPass(
     refuse(
       `on production a passed check needs a name that passes the name rule (${problem}): correct it with identity:correct-name first`,
     );
+}
+
+/** A decision lands no pass whose expiry, carried over from the check, has already come. */
+function assertNotExpired(expiresAt: number | null, nowMs: number): void {
+  if (expiresAt !== null && expiresAt <= nowMs)
+    refuse("this check would already be expired: record a new check");
 }
 
 /** What a row would hold, for the dry run: never a name, the hmac or the nullifier. */
@@ -385,12 +413,11 @@ const REASON_FLAGS: OptionTable = [
  * watchlist search hit, the document was out of date, its country is blocked, the name breaks the
  * name rule, the guardian's name differs from the document's (`--name-mismatch`), or another
  * tenant's current passed check holds the same name and country (the other check ids are printed,
- * never the name). A provider's
- * own review (`--result needs_review`) carries `provider_flag` first. On a verified guardian only
- * `--result passed` is taken: a renewal, or a new check after a change of name, which supersedes
- * the current pass and has its expiry from its own completion. A pass recorded over a pass names
- * it (`supersedesCheckId`) and must complete after it, so an expiry never moves back; and no pass
- * is recorded that would already be expired.
+ * never the name). A provider's own review (`--result needs_review`) carries `provider_flag`
+ * first. On a verified guardian only `--result passed` is taken: a renewal, or a new check after a
+ * change of name, which supersedes the current pass and has its expiry from its own completion. A
+ * pass recorded over a pass names it (`supersedesCheckId`) and must complete after it, so an
+ * expiry never moves back; and no pass is recorded that would already be expired.
  */
 export function recordIdentity(
   db: Database.Database,
@@ -443,7 +470,7 @@ export function recordIdentity(
     : {
         first: nameOfRecord(opts.nameFirst as string),
         last: nameOfRecord(opts.nameLast as string),
-        full: opts.nameFull === undefined ? null : nameOfRecord(opts.nameFull),
+        full: fullNameOfRecord(opts.nameFull),
       };
   const hmac = names === null ? null : nameHmac(fingerprintKey, names.first, names.last);
   // The reasons the flags alone decide, in the record's order; the duplicate is read below.
@@ -696,11 +723,12 @@ function decide(
  * The operator's decision on a review, each with its own part of the decision codes. `accept`
  * appends a passed row carrying the review's facts and its names, sealed again under the current
  * PII key, with the name's fingerprint computed again from them under its own secret (the same
- * digest: the PII key takes no part in it); it is refused over a `name_mismatch` review, which
- * `identity:correct-name` settles, while another account's current passed check holds the same
- * name and country, and on production unless the check had the face match, the sanctions search
- * and a name that passes the name rule (`assertProductionPass`). `refuse`
- * appends a failed row without names, over a review or an attempt that never completed.
+ * digest: the PII key takes no part in it); it is refused once the check's expiry has come (the
+ * pass would already be expired), over a `name_mismatch` review, which `identity:correct-name`
+ * settles, while another account's current passed check holds the same name and country, and on
+ * production unless the check had the face match, the sanctions search and a name that passes the
+ * name rule (`assertProductionPass`). `refuse` appends a failed row without names, over a review
+ * or an attempt that never completed.
  */
 export function reviewIdentity(
   db: Database.Database,
@@ -739,7 +767,8 @@ export function reviewIdentity(
     codes: ACCEPT_DECISION_CODES,
     from: ["needs_review"],
     onlyFrom: "only a needs_review check is accepted",
-    build: (latest, carried, repo) => {
+    build: (latest, carried, repo, nowMs) => {
+      assertNotExpired(latest.expiresAt, nowMs);
       // The name differs from the document's: only the guardian can say which is right.
       if (latest.reviewReasons.includes("name_mismatch"))
         refuse(
@@ -808,8 +837,9 @@ export function revokeIdentity(
  * old one is never carried over a correction), all sealed under the current key with the new
  * name's fingerprint. The corrected name resolves `name_rule_failed` and `name_mismatch`.
  * The row passes when the review's reasons other than those two are none (on production,
- * only when the check had the face match and the sanctions search: `assertProductionPass`); since
- * the name changed, another tenant's current passed check holding the new name and country adds
+ * only when the check had the face match and the sanctions search: `assertProductionPass`; and
+ * never once the check's expiry has come, when the pass would already be expired); since the name
+ * changed, another tenant's current passed check holding the new name and country adds
  * `duplicate_identity`, as `identity:record` would.
  */
 export function correctIdentityName(
@@ -833,12 +863,12 @@ export function correctIdentityName(
     codes: NAME_CORRECTION_CODES,
     from: ["passed", "needs_review"],
     onlyFrom: "only a passed or needs_review check has its name corrected",
-    build: (latest, carried, repo) => {
+    build: (latest, carried, repo, nowMs) => {
       assertNamesHeld(latest);
       const names: Names = {
         first,
         last,
-        full: opts.nameFull === undefined ? null : nameOfRecord(opts.nameFull),
+        full: fullNameOfRecord(opts.nameFull),
       };
       const hmac = nameHmac(fingerprintKey, first, last);
       // The corrected name resolves the name's own reasons, and only those.
@@ -852,6 +882,7 @@ export function correctIdentityName(
       const reviewReasons: ReviewReasonCode[] = duplicate
         ? [...remaining, "duplicate_identity"]
         : remaining;
+      if (reviewReasons.length === 0) assertNotExpired(latest.expiresAt, nowMs);
       return {
         row: {
           ...carried,
@@ -890,9 +921,15 @@ function shownNames(
 }
 
 /**
- * The tenant's current state, its latest row with the names of record decrypted (the only output
- * that holds a name; `names: null` with the key id and a note when the row's key is missing), and
- * every row with its events. Writes nothing, and no ops line.
+ * What `identity:show` prints; it writes nothing, and no ops line:
+ *  - `state`, read as this deployment's doors read it (on production a test record reads `none`);
+ *  - `countsAtTheDoors`, whether the latest row is the person of the account's current World ID
+ *    row (`agreesWithWorld`; a row without a nullifier always is): false once another person has
+ *    verified World ID on the account since the record was written, for a row with a nullifier
+ *    where World ID is not configured, and when there is no row;
+ *  - the latest row with the names of record decrypted (the only output that holds a name;
+ *    `names: null` with the key id and a note when the row's key is missing);
+ *  - every row with its events.
  */
 export function showIdentity(
   db: Database.Database,
@@ -902,11 +939,13 @@ export function showIdentity(
   const tenantId = parseTenant(tenantArg);
   const pii = requirePii(cfg);
   const repo = new SqliteIdentityRepository(db);
+  const world = cfg.world ? buildWorldIdDeps(cfg.world, new SqliteWorldStore(db)) : undefined;
   const rows = repo.list(tenantId);
   const latest = rows.at(-1);
   return {
     tenantId,
-    state: identityState(repo, tenantId, Date.now()),
+    state: identityState(repo, tenantId, Date.now(), legalBodyEnvironment(cfg)),
+    countsAtTheDoors: latest !== undefined && agreesWithWorld(latest, world, tenantId),
     latestCheckId: latest?.checkId ?? null,
     /** What the next writing command takes as `--expect-latest`. */
     expectLatest: latest === undefined ? "none" : String(latest.checkId),
@@ -953,85 +992,6 @@ export function showIdentity(
       })),
     })),
   };
-}
-
-// ── identity:sweep ───────────────────────────────────────────────────────────────────────────
-
-export interface SweepOptions {
-  yes?: boolean;
-  /** Unix milliseconds; `Date.now()` when absent. The scheduler hands its own clock. */
-  nowMs?: number;
-}
-
-/** What a sweep found (and, with `yes`, erased): the count per rule is what the scheduler logs. */
-export type SweepResult = {
-  erased: boolean;
-  count: number;
-  rules: Record<ErasureRule, number>;
-  checkIds: number[];
-  next?: string;
-};
-
-/** The OS user, when it can be read: the daily run must not fail for want of it. */
-function osUserIfReadable(): string | null {
-  try {
-    return osUser();
-  } catch {
-    return null;
-  }
-}
-
-/**
- * The names due for erasure under the retention rules (`erasureCandidates`: superseded or
- * abandoned after `IDENTITY_FAILED_RETENTION_DAYS`, a passed check unused after
- * `IDENTITY_UNUSED_RETENTION_DAYS`, never a tenant with a live company, never a review), and with
- * `yes` their erasure, each with a `names_erased` event by `system`, in ONE immediate transaction.
- * The scheduler runs it daily; `identity:sweep` is the manual path.
- */
-export function sweepIdentityNames(
-  db: Database.Database,
-  cfg: Config,
-  opts: SweepOptions,
-): SweepResult {
-  const nowMs = opts.nowMs ?? Date.now();
-  const yes = opts.yes === true;
-  const repo = new SqliteIdentityRepository(db);
-  const actorOsUser = osUserIfReadable();
-  const swept = repo.transaction(() => {
-    const due = repo.erasureCandidates(
-      nowMs,
-      cfg.identity.failedRetentionDays * DAY_MS,
-      cfg.identity.unusedRetentionDays * DAY_MS,
-    );
-    if (!yes) return due;
-    const erased: typeof due = [];
-    for (const c of due) {
-      const done = repo.eraseNames(c.checkId, nowMs, {
-        kind: "names_erased",
-        at: nowMs,
-        actor: SYSTEM_ACTOR,
-        actorOsUser,
-        reasonCode: c.rule,
-        reason: null,
-      });
-      // False only for a row erased since the candidates were read: none, inside this transaction.
-      if (done) erased.push(c);
-    }
-    return erased;
-  });
-  const rules: Record<ErasureRule, number> = { superseded: 0, abandoned: 0, unused: 0 };
-  for (const c of swept) rules[c.rule] += 1;
-  const result: SweepResult = {
-    erased: yes,
-    count: swept.length,
-    rules,
-    checkIds: swept.map((c) => c.checkId),
-  };
-  if (!yes)
-    return { ...result, next: "nothing was erased: run identity:sweep --yes to erase these names" };
-  // Every run with --yes, none erased included: the line says the sweep ran.
-  opsLog("identity_names_erased", { count: result.count, rules });
-  return result;
 }
 
 // ── Registration ─────────────────────────────────────────────────────────────────────────────
@@ -1099,13 +1059,17 @@ export function registerIdentityCommands(program: Command): void {
     .requiredOption("--expect-latest <checkId|none>", EXPECT_LATEST_HELP)
     .option("--yes", "confirm: record the check")
     .action(async (tenantId: string, opts: RecordOptions) => {
-      // Refused before anything is read at the prompt.
+      // Refused before anything is read at the prompt, as is a configuration that refuses.
       if (opts.namesPrompt === true && opts.result === "failed")
         refuse("--names-prompt is not taken with --result failed: a failed check keeps no name");
+      const loaded = sealingConfig();
       const withNames = await withPromptedNames(opts, () =>
         readNames(process.stdin, process.stderr),
       );
-      withDatabase((db, _docStoreDir, cfg) => print(recordIdentity(db, cfg, tenantId, withNames)));
+      withDatabase(
+        (db, _docStoreDir, cfg) => print(recordIdentity(db, cfg, tenantId, withNames)),
+        loaded,
+      );
     });
 
   const decision = (
@@ -1178,11 +1142,14 @@ export function registerIdentityCommands(program: Command): void {
       "type the names at a prompt (or pipe them in, one per line: first, last, optional full) instead of the three name flags",
     )
     .action(async (tenantId: string, opts: CorrectNameOptions) => {
+      // A configuration that refuses is refused before anything is read at the prompt.
+      const loaded = sealingConfig();
       const withNames = await withPromptedNames(opts, () =>
         readNames(process.stdin, process.stderr),
       );
-      withDatabase((db, _docStoreDir, cfg) =>
-        print(correctIdentityName(db, cfg, tenantId, withNames)),
+      withDatabase(
+        (db, _docStoreDir, cfg) => print(correctIdentityName(db, cfg, tenantId, withNames)),
+        loaded,
       );
     });
 

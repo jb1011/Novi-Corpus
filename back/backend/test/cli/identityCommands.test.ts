@@ -22,11 +22,11 @@ import {
   recordIdentity,
   reviewIdentity,
   showIdentity,
-  sweepIdentityNames,
 } from "../../src/cli/identity";
 import { buildCli } from "../../src/cli/index";
 import { type Config, loadConfig } from "../../src/config/env";
 import { nameHmac, parsePiiKey } from "../../src/formation/pii";
+import { sweepIdentityNames } from "../../src/identity/sweep";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
   type GuardianIdentityCheck,
@@ -426,6 +426,38 @@ describe("identity:record", () => {
     });
     // The only command that prints a name writes no ops line.
     expect(ops).toEqual([]);
+  });
+
+  test("an empty or blank --name-full keeps no full name, as the prompt does: record and correct-name", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    await recorded(guardian, { "--name-full": "" });
+    await recorded(second, { "--name-full": "   " });
+    for (const tenant of [guardian, second])
+      expect((await run<Shown>(["identity:show", tenant])).output.latest?.names).toEqual({
+        first: FIRST,
+        last: LAST,
+        full: null,
+      });
+
+    await run(
+      decisionLine(
+        "identity:correct-name",
+        guardian,
+        latestOf(guardian).checkId,
+        "transliteration",
+        {
+          "--name-first": "Jean-Pierre",
+          "--name-last": LAST,
+          "--name-full": " ",
+        },
+      ),
+    );
+    expect((await run<Shown>(["identity:show", guardian])).output.latest?.names).toEqual({
+      first: "Jean-Pierre",
+      last: LAST,
+      full: null,
+    });
   });
 
   test('record with a CJK name stores needs_review with ["name_rule_failed"]', async () => {
@@ -1226,6 +1258,104 @@ describe("identity:correct-name", () => {
   });
 });
 
+// ── no pass lands already expired ─────────────────────────────────────────────────────────────
+
+test("identity:accept and identity:correct-name never land a pass that is already expired; a correction that stays in review still goes through", async () => {
+  const RECORDED_AT = Date.UTC(2026, 10, 10, 12);
+  /** Every check below is recorded at RECORDED_AT and expires three calendar years later. */
+  const EXPIRY = Date.UTC(2029, 10, 10, 12);
+  const EXPIRED = "refusing: this check would already be expired: record a new check";
+  vi.useFakeTimers({ toFake: ["Date"], now: RECORDED_AT });
+  human(guardian, "1001");
+  human(second, "1002");
+  human(third, "1003");
+  // A review on two reasons, a review on the name alone, and a pass.
+  const review = await recorded(guardian, {
+    "--name-first": "伟",
+    "--name-last": "王",
+    "--watchlist": "hit",
+  });
+  expect(review).toMatchObject({
+    reviewReasons: ["watchlist_hit", "name_rule_failed"],
+    expiresAt: EXPIRY,
+  });
+  const nameReview = await recorded(second, { "--name-first": "明", "--name-last": "李" });
+  expect(nameReview).toMatchObject({ reviewReasons: ["name_rule_failed"], expiresAt: EXPIRY });
+  const pass = await recorded(third);
+  expect(pass).toMatchObject({ status: "passed", expiresAt: EXPIRY });
+
+  // One millisecond before the expiry, a correction still lands passed.
+  vi.setSystemTime(EXPIRY - 1);
+  const corrected = await run<Recorded>(
+    decisionLine("identity:correct-name", third, pass.checkId, "transliteration", {
+      "--name-first": FIRST,
+      "--name-last": "DUPONT-EXAMPLE",
+    }),
+  );
+  expect(corrected.output).toMatchObject({ status: "passed", expiresAt: EXPIRY });
+
+  // At the expiry, no decision lands a pass: the dry run refuses what the write would.
+  vi.setSystemTime(EXPIRY);
+  const rowsBefore = [guardian, second, third].map((t) => repo.list(t).length);
+  expect(
+    await refusal(
+      decisionLine("identity:accept", guardian, review.checkId, "watchlist_false_positive"),
+    ),
+  ).toBe(EXPIRED);
+  expect(
+    await refusal(
+      decisionLine(
+        "identity:accept",
+        guardian,
+        review.checkId,
+        "watchlist_false_positive",
+        {},
+        false,
+      ),
+    ),
+  ).toBe(EXPIRED);
+  expect(
+    await refusal(
+      decisionLine("identity:correct-name", second, nameReview.checkId, "other_script", {
+        "--name-first": "Ming",
+        "--name-last": "LI",
+      }),
+    ),
+  ).toBe(EXPIRED);
+  expect(
+    await refusal(
+      decisionLine("identity:correct-name", third, corrected.output.checkId, "transliteration", {
+        "--name-first": FIRST,
+        "--name-last": LAST,
+      }),
+    ),
+  ).toBe(EXPIRED);
+  expect([guardian, second, third].map((t) => repo.list(t).length)).toEqual(rowsBefore);
+
+  // A correction that leaves the review open lands no pass, and is taken; its acceptance is not.
+  const stillInReview = await run<Recorded>(
+    decisionLine("identity:correct-name", guardian, review.checkId, "other_script", {
+      "--name-first": "Wei",
+      "--name-last": "WANG",
+    }),
+  );
+  expect(stillInReview.output).toMatchObject({
+    status: "needs_review",
+    reviewReasons: ["watchlist_hit"],
+  });
+  expect(
+    await refusal(
+      decisionLine(
+        "identity:accept",
+        guardian,
+        stillInReview.output.checkId,
+        "watchlist_false_positive",
+      ),
+    ),
+  ).toBe(EXPIRED);
+  expect(latestOf(guardian).checkId).toBe(stillInReview.output.checkId);
+});
+
 // ── the guardian's name, confirmed against the document ──────────────────────────────────────
 
 describe("a name that differs from the document's", () => {
@@ -1482,6 +1612,39 @@ describe("--names-prompt", () => {
     expect(repo.list(guardian)).toEqual([]);
   });
 
+  test("a configuration that refuses is reported before anything is read at the prompt", async () => {
+    human(guardian, "1001");
+    const review = await recorded(guardian, { "--name-first": "伟", "--name-last": "王" });
+    const stdin = vi.spyOn(process, "stdin", "get").mockImplementation(() => {
+      throw new Error("standard input was read");
+    });
+    const promptedRecord = recordLine(second, { "--name-first": null, "--name-last": null }, [
+      "--names-prompt",
+      "--yes",
+    ]);
+    const promptedCorrection = [
+      ...decisionLine("identity:correct-name", guardian, review.checkId, "other_script"),
+      "--names-prompt",
+    ];
+
+    // No PII key: the commands that seal a name refuse.
+    Reflect.deleteProperty(process.env, "FORMATION_PII_KEY");
+    const NO_KEY = "refusing: FORMATION_PII_KEY is not set on this deployment";
+    expect(await refusal(promptedRecord)).toBe(NO_KEY);
+    expect(await refusal(promptedCorrection)).toBe(NO_KEY);
+    // A configuration that does not load at all: the PII key without the fingerprint key.
+    process.env.FORMATION_PII_KEY = PII_KEY;
+    Reflect.deleteProperty(process.env, "IDENTITY_NAME_HMAC_KEY");
+    const NO_FINGERPRINT =
+      "Invalid config: IDENTITY_NAME_HMAC_KEY is required with FORMATION_PII_KEY: the identity record's duplicate check uses it";
+    expect(await refusal(promptedRecord)).toBe(NO_FINGERPRINT);
+    expect(await refusal(promptedCorrection)).toBe(NO_FINGERPRINT);
+
+    expect(stdin).not.toHaveBeenCalled();
+    expect(repo.list(second)).toEqual([]);
+    expect(latestOf(guardian).checkId).toBe(review.checkId);
+  });
+
   test("identity:correct-name reads the corrected names from standard input; without them or the prompt it refuses", async () => {
     human(guardian, "1001");
     const review = await recorded(guardian, { "--name-first": "伟", "--name-last": "王" });
@@ -1702,6 +1865,43 @@ test("identity:show on a row whose key this deployment no longer holds prints na
     namesNote: `the names are sealed under key ${oldKeyId}, which this deployment does not hold: configure it again (FORMATION_PII_KEY_PREVIOUS) to read them`,
   });
   expect(ops).toEqual([]);
+});
+
+test("identity:show says whether the record counts at the doors: after a second person verifies World ID on the account it reads verified, countsAtTheDoors false", async () => {
+  human(guardian, "1001");
+  expect((await run(["identity:show", guardian])).output).toMatchObject({
+    state: "none",
+    countsAtTheDoors: false,
+  });
+  await recorded(guardian);
+  expect((await run(["identity:show", guardian])).output).toMatchObject({
+    state: "verified",
+    countsAtTheDoors: true,
+  });
+  // The same person verifying again keeps the record theirs.
+  recordHuman(store, guardian, "1001", Date.now() + 1_000);
+  expect((await run(["identity:show", guardian])).output).toMatchObject({
+    state: "verified",
+    countsAtTheDoors: true,
+  });
+
+  // Another person verifies World ID on the same account, after the record was written.
+  recordHuman(store, guardian, "2002", Date.now() + 2_000);
+  const { output, ops } = await run(["identity:show", guardian]);
+
+  expect(output).toMatchObject({ state: "verified", countsAtTheDoors: false });
+  expect(ops).toEqual([]);
+});
+
+test("identity:show reads the state as the deployment does: on production a record written on a sandbox reads none", async () => {
+  human(guardian, "1001");
+  await recorded(guardian);
+  expect(latestOf(guardian)).toMatchObject({ environment: "sandbox", synthetic: true });
+
+  expect(showIdentity(db, config(), guardian)).toMatchObject({ state: "verified" });
+  expect(showIdentity(db, config({ arcNetwork: "mainnet" }), guardian)).toMatchObject({
+    state: "none",
+  });
 });
 
 // ── identity:sweep ────────────────────────────────────────────────────────────────────────────
