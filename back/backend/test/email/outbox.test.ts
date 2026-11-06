@@ -225,6 +225,13 @@ describe("the table's rules", () => {
       .get("idx_email_outbox_due") as { sql: string } | undefined;
     expect(index?.sql).toMatch(/email_outbox\s*\(\s*status\s*,\s*next_attempt_at\s*\)/);
   });
+
+  test("the kept delivery events are indexed by arrival, for the 7-day cleanup each run makes", () => {
+    const index = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?")
+      .get("idx_email_delivery_orphans_received") as { sql: string } | undefined;
+    expect(index?.sql).toMatch(/email_delivery_orphans\s*\(\s*received_at\s*\)/);
+  });
 });
 
 describe("list", () => {

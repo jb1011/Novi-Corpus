@@ -493,7 +493,7 @@ describe("email:resend", () => {
       next: "nothing was written: run the same command with --yes to re-queue it",
     });
     expect(output.note).toBe(
-      "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, email:send-link --again, under a new key, at once; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)",
+      "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, email:send-link --again the same UTC day (a plain email:send-link on a later day); for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)",
     );
     expect(raw(emailId)).toEqual(before);
   });
