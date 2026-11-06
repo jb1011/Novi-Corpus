@@ -1,0 +1,60 @@
+<!-- Novi Corpus docs diagram D0 (tall). Generated from the approved v0.5 mockup builder;
+     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro. -->
+<svg xmlns="http://www.w3.org/2000/svg" class="tall" viewBox="0 0 340 860" role="img" aria-label="Helper or actor"><title>Helper or actor</title><desc>A helper acts through its owner. An actor represents a company that can be checked and held to account.</desc>
+<defs>
+      <pattern id="d0t-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" class="dot"/></pattern>
+      <linearGradient id="d0t-card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g-top"/><stop offset="1" class="g-bot"/></linearGradient>
+      <radialGradient id="d0t-glow" cx="50%" cy="50%" r="60%"><stop offset="0" class="glow-in"/><stop offset="1" class="glow-out"/></radialGradient>
+      <marker id="d0t-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      <marker id="d0t-aa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-acc"/></marker>
+      <marker id="d0t-am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-amber"/></marker>
+      <marker id="d0t-al" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-live"/></marker>
+    </defs>
+<rect x="0" y="0" width="340" height="860" fill="url(#d0t-dots)"/>
+<rect class="panel" x="0" y="0" width="340" height="356" rx="16"/>
+<text class="ph" x="16" y="32">Today: a helper</text>
+<rect class="cbg" x="12" y="48" width="316" height="88" rx="14" fill="url(#d0t-card)"/>
+<rect class="cst r-mute" x="12.5" y="48.5" width="315" height="87" rx="14"/>
+<rect class="ictile r-mute" x="30" y="66" width="40" height="40" rx="10"/>
+<g class="ic r-mute" transform="translate(38 74) scale(1.0)"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></g>
+<text class="eb r-mute" x="84" y="82">OWNER</text>
+<text class="tt" x="84" y="107">Their accounts</text>
+<rect class="cbg" x="12" y="156" width="316" height="88" rx="14" fill="url(#d0t-card)"/>
+<rect class="cst r-mute" x="12.5" y="156.5" width="315" height="87" rx="14"/>
+<rect class="ictile r-mute" x="30" y="174" width="40" height="40" rx="10"/>
+<g class="ic r-mute" transform="translate(38 182) scale(1.0)"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4"/><circle cx="12" cy="3.5" r="1"/><path d="M9 13h.01M15 13h.01M9.5 17h5"/></g>
+<text class="eb r-mute" x="84" y="190">AGENT</text>
+<text class="tt" x="84" y="215">A helper</text>
+<rect class="cbg" x="12" y="264" width="316" height="88" rx="14" fill="url(#d0t-card)"/>
+<rect class="cst r-mute" x="12.5" y="264.5" width="315" height="87" rx="14"/>
+<rect class="ictile r-mute" x="30" y="282" width="40" height="40" rx="10"/>
+<g class="ic r-mute" transform="translate(38 290) scale(1.0)"><path d="M4 10v10h16V10M3 10l2-6h14l2 6M3 10h18M9 20v-6h6v6"/></g>
+<text class="eb r-mute" x="84" y="298">OTHER PARTY</text>
+<text class="tt" x="84" y="323">Nothing to check</text>
+<rect class="panel live" x="0" y="376" width="340" height="480" rx="16"/>
+<text class="ph live" x="16" y="408">With a legal body: an actor</text>
+<rect class="cbg" x="12" y="424" width="316" height="88" rx="14" fill="url(#d0t-card)"/>
+<rect class="cst r-law" x="12.5" y="424.5" width="315" height="87" rx="14"/>
+<rect class="ictile r-law" x="30" y="442" width="40" height="40" rx="10"/>
+<g class="ic r-law" transform="translate(38 450) scale(1.0)"><path d="M3 21h18M5 21V8l7-5 7 5v13M9 21v-5h6v5M9 11h.01M15 11h.01"/></g>
+<text class="eb r-law" x="84" y="458">COMPANY</text>
+<text class="tt" x="84" y="483">A Wyoming DAO LLC</text>
+<rect class="cbg" x="12" y="532" width="316" height="88" rx="14" fill="url(#d0t-card)"/>
+<rect class="cst r-ink" x="12.5" y="532.5" width="315" height="87" rx="14"/>
+<rect class="ictile r-ink" x="30" y="550" width="40" height="40" rx="10"/>
+<g class="ic r-ink" transform="translate(38 558) scale(1.0)"><circle cx="10" cy="8" r="4"/><path d="M3 21c0-4 3-7 7-7 1.5 0 2.8.4 3.9 1M15 19l2 2 4-4"/></g>
+<text class="eb r-ink" x="84" y="566">GUARDIAN</text>
+<text class="tt" x="84" y="591">One person answers</text>
+<rect class="cbg" x="12" y="640" width="316" height="88" rx="14" fill="url(#d0t-card)"/>
+<rect class="cst r-acc" x="12.5" y="640.5" width="315" height="87" rx="14"/>
+<rect class="ictile r-acc" x="30" y="658" width="40" height="40" rx="10"/>
+<g class="ic r-acc" transform="translate(38 666) scale(1.0)"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4"/><circle cx="12" cy="3.5" r="1"/><path d="M9 13h.01M15 13h.01M9.5 17h5"/></g>
+<text class="eb r-acc" x="84" y="674">AGENT</text>
+<text class="tt" x="84" y="699">An actor</text>
+<rect class="cbg" x="12" y="748" width="316" height="88" rx="14" fill="url(#d0t-card)"/>
+<rect class="cst r-live" x="12.5" y="748.5" width="315" height="87" rx="14"/>
+<rect class="ictile r-live" x="30" y="766" width="40" height="40" rx="10"/>
+<g class="ic r-live" transform="translate(38 774) scale(1.0)"><path d="M4 10v10h16V10M3 10l2-6h14l2 6M3 10h18M9 20v-6h6v6"/></g>
+<text class="eb r-live" x="84" y="782">OTHER PARTY</text>
+<text class="tt" x="84" y="807">Can check, invoice</text>
+</svg>

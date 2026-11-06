@@ -27,6 +27,8 @@ export default defineConfig({
 				'@fontsource/archivo/latin-600.css',
 				'./src/styles/tokens.css',
 				'./src/styles/theme.css',
+				'./src/styles/components.css',
+				'./src/styles/diagrams.css',
 			],
 			components: {
 				Header: './src/components/overrides/Header.astro',
@@ -38,7 +40,12 @@ export default defineConfig({
 				ThemeProvider: './src/components/overrides/ThemeProvider.astro',
 				ThemeSelect: './src/components/overrides/ThemeSelect.astro',
 			},
-			plugins: [starlightSidebarTopics(TOPICS)],
+			plugins: [
+				starlightSidebarTopics(TOPICS, {
+					// The contributor page of components is unlisted; it shows the Developers sidebar.
+					topics: { developers: ['/contributing/**'] },
+				}),
+			],
 		}),
 	],
 });

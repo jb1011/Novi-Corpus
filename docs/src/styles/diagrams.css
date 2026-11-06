@@ -1,0 +1,246 @@
+/*
+ * Diagrams (design 4.6, 4.7): the approved v0.5 mockup styles, with light-theme values.
+ * Every colour inside the SVGs comes from a class here, so dark and light are a stylesheet switch.
+ * The wide drawing shows on desktop; the tall twin at 820 px and below (as in the mockups)
+ * and whenever the figure is narrower than 720 px inside, which keeps the wide drawing's
+ * smallest text (16 units on a 960-unit viewBox) at 12 px or more.
+ */
+
+.dg {
+	container: dg / inline-size;
+	margin: 1.375rem 0 1.625rem;
+	border: 1px solid var(--nc-line);
+	border-radius: var(--nc-radius-card);
+	background: var(--nc-paper-2);
+	padding: 0.75rem 0.625rem;
+	overflow: hidden;
+}
+.dg svg {
+	display: block;
+	width: 100%;
+	height: auto;
+}
+.dg .tall {
+	display: none;
+	max-width: 420px;
+	margin: 0 auto;
+}
+@media (min-width: 821px) {
+	.dg {
+		margin-inline: -12px;
+		padding: 8px;
+	}
+}
+@media (max-width: 820px) {
+	.dg .wide {
+		display: none;
+	}
+	.dg .tall {
+		display: block;
+	}
+}
+@container dg (width < 720px) {
+	.dg .wide {
+		display: none;
+	}
+	.dg .tall {
+		display: block;
+	}
+}
+.dg figcaption {
+	font-size: 0.844rem;
+	line-height: 1.5;
+	color: var(--nc-muted);
+	margin: 0.75rem 0.375rem 0.25rem;
+}
+.dg details {
+	font-size: 0.844rem;
+	color: var(--nc-muted);
+	margin: 0.25rem 0.375rem 0.125rem;
+}
+.dg summary {
+	cursor: pointer;
+	color: var(--nc-muted-2);
+	min-height: 28px;
+}
+.dg details :is(p, ul) {
+	margin: 0.5rem 0 0.25rem;
+}
+
+/* ---- dark (default) ---- */
+.dg {
+	--dg-dot: rgba(242, 240, 234, 0.07);
+	--dg-g-top: #1c1c1e;
+	--dg-g-bot: #121213;
+	--dg-glow-in: rgba(77, 142, 247, 0.16);
+	--dg-glow-out: rgba(77, 142, 247, 0);
+	--dg-ink: var(--nc-ink);
+	--dg-muted: var(--nc-muted);
+	--dg-muted-2: var(--nc-muted-2);
+	--dg-law: #8b8ef5;
+	--dg-law-s: rgba(99, 102, 241, 0.55);
+	--dg-law-f: rgba(99, 102, 241, 0.14);
+	--dg-cream: #ede8de;
+	--dg-cream-eb: #c9c4b8;
+	--dg-cream-s: rgba(237, 232, 222, 0.28);
+	--dg-cream-f: rgba(237, 232, 222, 0.08);
+	--dg-acc: var(--nc-accent);
+	--dg-acc-t: var(--nc-accent-soft);
+	--dg-acc-s: rgba(77, 142, 247, 0.8);
+	--dg-acc-f: rgba(77, 142, 247, 0.16);
+	--dg-soft: var(--nc-accent-soft);
+	--dg-soft-s: rgba(147, 197, 253, 0.4);
+	--dg-soft-f: rgba(147, 197, 253, 0.1);
+	--dg-live: #00d294;
+	--dg-live-s: rgba(0, 210, 148, 0.6);
+	--dg-live-f: rgba(0, 210, 148, 0.12);
+	--dg-mute: #8f8c84;
+	--dg-mute-s: rgba(242, 240, 234, 0.13);
+	--dg-mute-f: rgba(242, 240, 234, 0.05);
+	--dg-amber: #e0a93a;
+	--dg-amber-s: rgba(224, 169, 58, 0.6);
+	--dg-amber-f: rgba(224, 169, 58, 0.13);
+	--dg-violet: #a78bfa;
+	--dg-violet-s: rgba(167, 139, 250, 0.6);
+	--dg-violet-f: rgba(167, 139, 250, 0.13);
+	--dg-line: rgba(242, 240, 234, 0.35);
+	--dg-head: rgba(242, 240, 234, 0.55);
+	--dg-pill: #0e0e0f;
+	--dg-pill-s: rgba(242, 240, 234, 0.18);
+	--dg-pill-t: #d6d2c8;
+	--dg-panel: rgba(242, 240, 234, 0.015);
+	--dg-panel-s: rgba(242, 240, 234, 0.08);
+	--dg-panel-live: rgba(0, 210, 148, 0.035);
+	--dg-panel-live-s: rgba(0, 210, 148, 0.32);
+	--dg-chev: rgba(242, 240, 234, 0.3);
+}
+
+/* ---- light ---- */
+[data-theme='light'] .dg {
+	--dg-dot: rgba(12, 12, 12, 0.07);
+	--dg-g-top: #ffffff;
+	--dg-g-bot: #f7f5f0;
+	--dg-glow-in: rgba(37, 99, 235, 0.08);
+	--dg-glow-out: rgba(37, 99, 235, 0);
+	--dg-law: #4f46e5;
+	--dg-law-s: rgba(79, 70, 229, 0.5);
+	--dg-law-f: rgba(79, 70, 229, 0.1);
+	--dg-cream: #3a3935;
+	--dg-cream-eb: #5b5955;
+	--dg-cream-s: rgba(12, 12, 12, 0.22);
+	--dg-cream-f: rgba(12, 12, 12, 0.06);
+	--dg-acc: #2563eb;
+	--dg-acc-t: #1e3a8a;
+	--dg-acc-s: rgba(37, 99, 235, 0.7);
+	--dg-acc-f: rgba(37, 99, 235, 0.1);
+	--dg-soft: #1e3a8a;
+	--dg-soft-s: rgba(30, 58, 138, 0.35);
+	--dg-soft-f: rgba(30, 58, 138, 0.08);
+	--dg-live: #047857;
+	--dg-live-s: rgba(4, 120, 87, 0.55);
+	--dg-live-f: rgba(4, 120, 87, 0.1);
+	--dg-mute: #6b6964;
+	--dg-mute-s: rgba(12, 12, 12, 0.12);
+	--dg-mute-f: rgba(12, 12, 12, 0.04);
+	--dg-amber: #92400e;
+	--dg-amber-s: rgba(146, 64, 14, 0.5);
+	--dg-amber-f: rgba(146, 64, 14, 0.1);
+	--dg-violet: #6d28d9;
+	--dg-violet-s: rgba(109, 40, 217, 0.5);
+	--dg-violet-f: rgba(109, 40, 217, 0.1);
+	--dg-line: rgba(12, 12, 12, 0.35);
+	--dg-head: rgba(12, 12, 12, 0.5);
+	--dg-pill: #ffffff;
+	--dg-pill-s: rgba(12, 12, 12, 0.16);
+	--dg-pill-t: #2a2926;
+	--dg-panel: rgba(12, 12, 12, 0.015);
+	--dg-panel-s: rgba(12, 12, 12, 0.08);
+	--dg-panel-live: rgba(4, 120, 87, 0.04);
+	--dg-panel-live-s: rgba(4, 120, 87, 0.3);
+	--dg-chev: rgba(12, 12, 12, 0.3);
+}
+
+/* ---- classes used inside the SVGs ---- */
+.dg .dot { fill: var(--dg-dot); }
+.dg .g-top { stop-color: var(--dg-g-top); }
+.dg .g-bot { stop-color: var(--dg-g-bot); }
+.dg .glow-in { stop-color: var(--dg-glow-in); }
+.dg .glow-out { stop-color: var(--dg-glow-out); }
+.dg .cst { fill: none; stroke-width: 1.2; }
+.dg .ic { fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.dg text { font-family: var(--nc-sans); }
+.dg .eb { font-size: 16px; letter-spacing: 1.4px; font-weight: 600; }
+.dg .tt { font-size: 20px; font-weight: 500; fill: var(--dg-ink); }
+.dg .sb { font-size: 17px; fill: var(--dg-muted); }
+.dg .rk { font-size: 16px; fill: var(--dg-muted-2); }
+.dg .rv { font-size: 17px; fill: var(--dg-ink); }
+.dg .ln { fill: none; stroke: var(--dg-line); stroke-width: 1.5; }
+.dg .ln-acc { stroke: var(--dg-acc); }
+.dg .ln-live { stroke: var(--dg-live); }
+.dg .ln-amber { stroke: var(--dg-amber); }
+.dg .ah { fill: var(--dg-head); }
+.dg .ah-acc { fill: var(--dg-acc); }
+.dg .ah-live { fill: var(--dg-live); }
+.dg .ah-amber { fill: var(--dg-amber); }
+.dg .pill { fill: var(--dg-pill); stroke: var(--dg-pill-s); }
+.dg .pill.acc { stroke: var(--dg-acc-s); }
+.dg .pill.live { stroke: var(--dg-live-s); }
+.dg .pl { font-size: 16px; fill: var(--dg-pill-t); }
+.dg .pl.acc { fill: var(--dg-acc-t); }
+.dg .pl.live { fill: var(--dg-live); }
+.dg .pl-s { font-size: 15px; fill: var(--dg-pill-t); }
+.dg .pl-s.acc { fill: var(--dg-acc-t); }
+.dg .pl-s.live { fill: var(--dg-live); }
+.dg .panel { fill: var(--dg-panel); stroke: var(--dg-panel-s); }
+.dg .panel.live { fill: var(--dg-panel-live); stroke: var(--dg-panel-live-s); }
+.dg .ph { font-size: 17px; font-weight: 600; fill: var(--dg-mute); }
+.dg .ph.live { fill: var(--dg-live); }
+.dg .chev { fill: none; stroke: var(--dg-chev); stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.dg .bdg { fill: none; stroke-width: 1; }
+.dg .bt { font-size: 16px; fill: var(--dg-ink); }
+
+/* roles: law (company), ink (guardian), acc (legal body), soft (agent identity), live (signed answer),
+   mute (the helper side), amber (Novi Managed), violet (Novi 2.0) */
+.dg .cst.r-law { stroke: var(--dg-law-s); }
+.dg .ictile.r-law { fill: var(--dg-law-f); }
+.dg .ic.r-law { stroke: var(--dg-law); }
+.dg .eb.r-law { fill: var(--dg-law); }
+.dg .cst.r-ink { stroke: var(--dg-cream-s); }
+.dg .ictile.r-ink { fill: var(--dg-cream-f); }
+.dg .ic.r-ink { stroke: var(--dg-cream); }
+.dg .eb.r-ink { fill: var(--dg-cream-eb); }
+.dg .cst.r-acc { stroke: var(--dg-acc-s); }
+.dg .ictile.r-acc { fill: var(--dg-acc-f); }
+.dg .ic.r-acc { stroke: var(--dg-acc); }
+.dg .eb.r-acc { fill: var(--dg-acc-t); }
+.dg .cst.r-soft { stroke: var(--dg-soft-s); }
+.dg .ictile.r-soft { fill: var(--dg-soft-f); }
+.dg .ic.r-soft { stroke: var(--dg-soft); }
+.dg .eb.r-soft { fill: var(--dg-soft); }
+.dg .cst.r-live { stroke: var(--dg-live-s); }
+.dg .ictile.r-live { fill: var(--dg-live-f); }
+.dg .ic.r-live { stroke: var(--dg-live); }
+.dg .eb.r-live { fill: var(--dg-live); }
+.dg .cst.r-mute { stroke: var(--dg-mute-s); }
+.dg .ictile.r-mute { fill: var(--dg-mute-f); }
+.dg .ic.r-mute { stroke: var(--dg-mute); }
+.dg .eb.r-mute { fill: var(--dg-mute); }
+.dg .cst.r-amber { stroke: var(--dg-amber-s); }
+.dg .ictile.r-amber { fill: var(--dg-amber-f); }
+.dg .ic.r-amber { stroke: var(--dg-amber); }
+.dg .eb.r-amber { fill: var(--dg-amber); }
+.dg .cst.r-violet { stroke: var(--dg-violet-s); }
+.dg .ictile.r-violet { fill: var(--dg-violet-f); }
+.dg .ic.r-violet { stroke: var(--dg-violet); }
+.dg .eb.r-violet { fill: var(--dg-violet); }
+.dg .bdg.r-live { stroke: var(--dg-live-s); }
+.dg .bdg.r-amber { stroke: var(--dg-amber-s); }
+.dg .bdg.r-violet { stroke: var(--dg-violet-s); }
+.dg .bdot.r-live { fill: var(--dg-live); }
+.dg .bdot.r-amber { fill: var(--dg-amber); }
+.dg .bdot.r-violet { fill: var(--dg-violet); }
+
+/* the tall twin's type (13 and 16 units minimum in the design; 15 and 19 here) */
+.dg .tall .eb { font-size: 15px; }
+.dg .tall .tt { font-size: 19px; }
+.dg .tall .pl-s { font-size: 15px; }

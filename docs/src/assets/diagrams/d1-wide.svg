@@ -1,0 +1,61 @@
+<!-- Novi Corpus docs diagram D1 (wide). Generated from the approved v0.5 mockup builder;
+     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro. -->
+<svg xmlns="http://www.w3.org/2000/svg" class="wide" viewBox="0 0 960 510" role="img" aria-label="How the parts fit together"><title>How the parts fit together</title><desc>The legal body links one company and one agent both ways; Novi Corpus reads the link and signs an answer about it.</desc>
+<defs>
+      <pattern id="d1w-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" class="dot"/></pattern>
+      <linearGradient id="d1w-card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g-top"/><stop offset="1" class="g-bot"/></linearGradient>
+      <radialGradient id="d1w-glow" cx="50%" cy="50%" r="60%"><stop offset="0" class="glow-in"/><stop offset="1" class="glow-out"/></radialGradient>
+      <marker id="d1w-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      <marker id="d1w-aa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-acc"/></marker>
+      <marker id="d1w-am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-amber"/></marker>
+      <marker id="d1w-al" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-live"/></marker>
+    </defs>
+<rect x="0" y="0" width="960" height="510" fill="url(#d1w-dots)" class="bgdots"/>
+<ellipse cx="362" cy="252" rx="360" ry="130" fill="url(#d1w-glow)"/>
+<rect class="cbg" x="24" y="24" width="328" height="104" rx="14" fill="url(#d1w-card)"/>
+<rect class="cst r-law" x="24.5" y="24.5" width="327" height="103" rx="14"/>
+<rect class="ictile r-law" x="42" y="42" width="40" height="40" rx="10"/>
+<g class="ic r-law" transform="translate(50 50) scale(1.0)"><path d="M3 21h18M5 21V8l7-5 7 5v13M9 21v-5h6v5M9 11h.01M15 11h.01"/></g>
+<text class="eb r-law" x="96" y="58">COMPANY</text>
+<text class="tt" x="96" y="83">A Wyoming DAO LLC</text>
+<text class="sb" x="96" y="107">invoiced, held to account</text>
+<rect class="cbg" x="372" y="24" width="328" height="104" rx="14" fill="url(#d1w-card)"/>
+<rect class="cst r-ink" x="372.5" y="24.5" width="327" height="103" rx="14"/>
+<rect class="ictile r-ink" x="390" y="42" width="40" height="40" rx="10"/>
+<g class="ic r-ink" transform="translate(398 50) scale(1.0)"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></g>
+<text class="eb r-ink" x="444" y="58">GUARDIAN</text>
+<text class="tt" x="444" y="83">One person who answers</text>
+<text class="sb" x="444" y="107">one real person, on record</text>
+<rect class="cbg" x="24" y="200" width="676" height="104" rx="14" fill="url(#d1w-card)"/>
+<rect class="cst r-acc" x="24.5" y="200.5" width="675" height="103" rx="14"/>
+<rect class="ictile r-acc" x="42" y="218" width="40" height="40" rx="10"/>
+<g class="ic r-acc" transform="translate(50 226) scale(1.0)"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.4 1.4M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.4-1.4"/></g>
+<text class="eb r-acc" x="96" y="234">LEGAL BODY</text>
+<text class="tt" x="96" y="259">The link, on a public ledger</text>
+<text class="sb" x="96" y="283">changes only with the guardian, after a public wait</text>
+<rect class="cbg" x="24" y="380" width="676" height="104" rx="14" fill="url(#d1w-card)"/>
+<rect class="cst r-soft" x="24.5" y="380.5" width="675" height="103" rx="14"/>
+<rect class="ictile r-soft" x="42" y="398" width="40" height="40" rx="10"/>
+<g class="ic r-soft" transform="translate(50 406) scale(1.0)"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 4v4"/><circle cx="12" cy="3.5" r="1"/><path d="M9 13h.01M15 13h.01M9.5 17h5"/></g>
+<text class="eb r-soft" x="96" y="414">AGENT IDENTITY</text>
+<text class="tt" x="96" y="439">The agent's number, owner, wallet</text>
+<text class="sb" x="96" y="463">its public identity on the Arc network</text>
+<rect class="cbg" x="760" y="200" width="180" height="284" rx="14" fill="url(#d1w-card)"/>
+<rect class="cst r-live" x="760.5" y="200.5" width="179" height="283" rx="14"/>
+<rect class="ictile r-live" x="778" y="218" width="40" height="40" rx="10"/>
+<g class="ic r-live" transform="translate(786 226) scale(1.0)"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M8.5 12l2.5 2.5 4.5-5"/></g>
+<text class="eb r-live" x="778" y="292">ANSWER</text>
+<text class="tt" x="778" y="317">Signed</text>
+<text class="sb" x="778" y="341">by Novi Corpus</text><text class="rk" x="778" y="392">Where it stands</text><text class="rv" x="778" y="413">in place</text><text class="rk" x="778" y="438">Good for</text><text class="rv" x="778" y="459">five minutes</text>
+<path class="ln" d="M188 129 V198" marker-end="url(#d1w-a)"/>
+<rect class="pill " x="74" y="149" width="228" height="30" rx="15"/><text class="pl " x="188" y="169.5" text-anchor="middle">named in the agreement</text>
+<path class="ln" d="M536 129 V198" marker-end="url(#d1w-a)"/>
+<rect class="pill " x="422" y="149" width="228" height="30" rx="15"/><text class="pl " x="536" y="169.5" text-anchor="middle">approves the agreement</text>
+<path class="ln ln-acc" d="M150 305 V378" marker-end="url(#d1w-aa)"/>
+<rect class="pill acc" x="68" y="327" width="164" height="30" rx="15"/><text class="pl acc" x="150" y="347.5" text-anchor="middle">names the agent</text>
+<path class="ln ln-acc" d="M380 379 V306" marker-end="url(#d1w-aa)"/>
+<rect class="pill acc" x="275" y="327" width="210" height="30" rx="15"/><text class="pl acc" x="380" y="347.5" text-anchor="middle">names its legal body</text>
+<path class="ln ln-live" d="M701 252 H730 V432 H701"/>
+<path class="ln ln-live" d="M730 342 H758" marker-end="url(#d1w-al)"/>
+<rect class="pill live" x="494" y="327" width="228" height="30" rx="15"/><text class="pl live" x="608" y="347.5" text-anchor="middle">Novi Corpus reads both</text>
+</svg>

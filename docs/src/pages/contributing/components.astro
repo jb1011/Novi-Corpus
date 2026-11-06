@@ -1,0 +1,265 @@
+---
+// Contributor reference: every docs component, rendered, with its usage.
+// Unlisted (not in a sidebar), noindex, out of the search index and of llms.txt
+// (it is a page of its own, not part of the docs collection).
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { Code, Steps } from '@astrojs/starlight/components';
+import { Address, Aside, Card, CardGrid, Figure, LinkGroup, SectionBadge, WhatsNew } from '~/components';
+
+const sections = [
+	['badges', 'Section badges'],
+	['cards', 'Icon cards'],
+	['link-groups', 'Link groups'],
+	['figures', 'Diagrams'],
+	['callouts', 'Callouts'],
+	['steps', 'Step flow'],
+	['addresses', 'Addresses'],
+	['whats-new', "What's new"],
+	['front-matter', 'Front matter'],
+] as const;
+const headings = sections.map(([slug, text]) => ({ depth: 2, slug, text }));
+
+const d1Text = [
+	'The company, a Wyoming DAO LLC, is named in the agreement its guardian approves. The guardian is one person who answers for it.',
+	"The legal body is the link between the company and the agent, kept on a public ledger. It changes only with the guardian's signature, after a public wait.",
+	"The agent's public identity on the Arc network names its legal body, and the legal body names the agent, so neither side can claim the link alone.",
+	'Novi Corpus reads both sides and signs an answer, good for five minutes, that anyone can check. It holds no money, keys or identity.',
+];
+---
+
+<StarlightPage
+	frontmatter={{
+		title: 'Docs components',
+		description: 'How each component of these docs looks, and how to use it in an MDX page.',
+		section: 'developers',
+		register: 'technical',
+		topic: 'developers',
+		pagefind: false,
+		head: [{ tag: 'meta', attrs: { name: 'robots', content: 'noindex' } }],
+	}}
+	headings={headings}
+>
+	<p>
+		For people who write these docs. Import the components in an <code>.mdx</code> page; Starlight's own
+		(<code>Steps</code>, <code>Tabs</code>, <code>Code</code>, <code>LinkCard</code>) work as usual. Colours follow the
+		page's section and the theme. This page is not listed in the sidebar and is not indexed.
+	</p>
+	<Code lang="mdx" code={`import { Card, CardGrid, Figure, Aside } from '~/components';`} />
+
+	<h2 id="badges">Section badges</h2>
+	<p>
+		The badge line under each title prints the section badge from the page's <code>section</code> front matter. The same
+		badge can be placed anywhere; the short form names the section.
+	</p>
+	<p>
+		<SectionBadge section="minimal-novi" />
+		<SectionBadge section="novi-managed" />
+		<SectionBadge section="novi-2" />
+		<SectionBadge section="minimal-novi" short />
+		<SectionBadge section="overview" text="Overview" />
+	</p>
+	<Code lang="mdx" code={`<SectionBadge section="novi-managed" />\n<SectionBadge section="minimal-novi" short />`} />
+
+	<h2 id="cards">Icon cards</h2>
+	<p>A line icon, a title, one sentence; optionally a link, a "more" line and a section badge.</p>
+	<CardGrid cols={2}>
+		<Card icon="building" title="Company" section="minimal-novi" href="/start/wyoming-dao-llc/" more="What a Wyoming DAO LLC is">
+			A Wyoming DAO LLC we form for you, or a Wyoming company you already own.
+		</Card>
+		<Card icon="personcheck" title="Guardian" section="minimal-novi" href="/live/guardian/" more="The guardian">
+			One real person, shown by World ID, with an identity check saying who. The name is not published.
+		</Card>
+	</CardGrid>
+	<CardGrid cols={3}>
+		<Card icon="search" title="Be checked" badge="minimal-novi" href="/live/">
+			Anyone looks the agent up and reads a signed answer: which company stands behind it, and where that company stands.
+		</Card>
+		<Card icon="wallet" title="Pay within limits" badge="novi-managed" href="/testnet/">
+			A USDC account with caps, an allowlist and a pause, so the agent pays within the limits its owner set.
+		</Card>
+		<Card icon="pen" title="Sign and invoice for the company" badge="novi-2" href="/next/">
+			The agent acts under permissions the company publishes, and what it earns is the company's income.
+		</Card>
+	</CardGrid>
+	<CardGrid cols={2}>
+		<Card icon="plug" title="Lookup for agents" section="overview" compact>
+			Your agent checks another agent at one web address, with no key.
+		</Card>
+		<Card icon="file" title="llms.txt" section="overview" href="/llms.txt" compact>The docs in one file for your context.</Card>
+	</CardGrid>
+	<Code
+		lang="mdx"
+		code={`<CardGrid cols={3}>
+  <Card icon="search" title="Be checked" badge="minimal-novi" href="/live/">
+    Anyone looks the agent up and reads a signed answer.
+  </Card>
+  <Card icon="building" title="Company" more="What a Wyoming DAO LLC is" href="/start/wyoming-dao-llc/">
+    A Wyoming DAO LLC we form for you, or a Wyoming company you already own.
+  </Card>
+</CardGrid>`}
+	/>
+	<p>
+		Icons: <code>src/components/icons.mjs</code> (one line set for cards, tabs, sidebar groups and diagrams). Add a glyph
+		there, on the 24 unit grid, stroke only.
+	</p>
+
+	<h2 id="link-groups">Link groups</h2>
+	<CardGrid cols={3}>
+		<LinkGroup
+			section="minimal-novi"
+			links={[
+				{ label: 'Bring your own company', href: '/live/bring-your-own-company/' },
+				{ label: 'Bring your own agent', href: '/live/bring-your-own-agent/' },
+				{ label: 'Check an agent', href: '/check/check-an-agent/' },
+			]}
+		/>
+		<LinkGroup
+			section="novi-managed"
+			links={[
+				{ label: 'The account', href: '/testnet/treasury-product/' },
+				{ label: 'Payments and jobs', href: '/testnet/payments-and-jobs/' },
+				{ label: 'MCP tools', href: '/testnet/mcp/' },
+			]}
+		/>
+		<LinkGroup
+			section="novi-2"
+			links={[
+				{ label: 'Agents as actors', href: '/next/agents-as-actors/' },
+				{ label: 'The agent asks first', href: '/next/agent-first/' },
+				{ label: 'Roadmap', href: '/next/roadmap/' },
+			]}
+		/>
+	</CardGrid>
+	<Code
+		lang="mdx"
+		code={`<LinkGroup section="minimal-novi" links={[
+  { label: 'Bring your own company', href: '/live/bring-your-own-company/' },
+  { label: 'Check an agent', href: '/check/check-an-agent/' },
+]} />`}
+	/>
+
+	<h2 id="figures">Diagrams</h2>
+	<p>
+		Each diagram is two SVG files in <code>src/assets/diagrams/</code>: <code>NAME-wide.svg</code> for desktop and
+		<code>NAME-tall.svg</code> for phones. The figure inlines both, so colours follow the theme; it swaps them at 820 px
+		and whenever the wide drawing would render its text under 12 px.
+	</p>
+	<Figure
+		name="d0"
+		caption="A helper acts through its owner. An actor represents a company that can be checked and held to account."
+		text="Today: the owner's accounts and name; the agent, a helper, acts through them; the other party has nothing to check and nobody to hold. With a legal body: a company, a Wyoming DAO LLC, with one person who answers; the agent, an actor, represents the company; the other party can check it, invoice it and hold it to account."
+	/>
+	<Figure
+		name="d1"
+		caption="The legal body links one company and one agent both ways; Novi Corpus reads the link and signs an answer about it, and holds nothing else."
+		text={d1Text}
+	/>
+	<Figure
+		name="d13"
+		caption="The owner sets the rules; the agent's account pays and takes jobs within them."
+		text="The owner sets caps, an allowlist and a pause. The agent's USDC account on the Arc network pays within the caps, only to the allowlist, and takes escrowed jobs: hire, or be hired, paid when the work is accepted."
+	/>
+	<Figure
+		name="d6"
+		caption="Minimal Novi says who stands behind the agent; Novi Managed what it holds and pays; Novi 2.0 what it may do in the company's name."
+		text="Three products in a row. Minimal Novi, live on Arc mainnet (beta): who stands behind the agent. Novi Managed, coming later: what it holds and pays. Novi 2.0, in design: what it may do in the company's name."
+	/>
+	<Code lang="mdx" code={`<Figure name="d1" caption="One sentence." text={['First line.', 'Second line.']} />`} />
+
+	<h2 id="callouts">Callouts</h2>
+	<Aside variant="law">
+		<p>
+			A DAO LLC is a Wyoming company whose founding papers carry one extra statement. <small>W.S. 17-31-104</small>
+		</p>
+	</Aside>
+	<Aside variant="agent">
+		<p>Read <a href="/llms.txt">llms.txt</a> for the docs in one file.</p>
+	</Aside>
+	<Aside variant="example">
+		<p>A sales desk receives an order from an agent and looks it up before shipping.</p>
+	</Aside>
+	<Aside variant="notsay">
+		<p>The answer says which company stands behind the agent and where it stands, and nothing more.</p>
+	</Aside>
+	<Aside variant="dev">
+		<p>The <a href="/developers/lookup-api/">Lookup API</a> and the <a href="/developers/statement-fields/">statement fields</a>.</p>
+	</Aside>
+	<Code
+		lang="mdx"
+		code={`<Aside variant="law">A DAO LLC is ... <small>W.S. 17-31-104</small></Aside>
+<Aside variant="agent">...</Aside>      <!-- also: example, dev, notsay -->
+:::note
+Starlight's own note and caution asides still work.
+:::`}
+	/>
+
+	<h2 id="steps">Step flow</h2>
+	<div data-section="minimal-novi">
+		<Steps>
+			<ol>
+				<li>Sign in and show you are one real person with World ID.</li>
+				<li>Declare your company: its name and its Wyoming filing number.</li>
+				<li>Approve the agreement and the declaration with your signature.</li>
+				<li>Link your agent: its public identity names the legal body, and the legal body names the agent.</li>
+			</ol>
+		</Steps>
+	</div>
+	<Code
+		lang="mdx"
+		code={`import { Steps } from '@astrojs/starlight/components';
+
+<Steps>
+1. Sign in ...
+2. Declare your company ...
+</Steps>`}
+	/>
+
+	<h2 id="addresses">Addresses</h2>
+	<Address
+		label="Identity registry (example)"
+		address="0x8004A818BFB912233c491871b3d84c89A494BD9e"
+		chain="Arc testnet"
+		explorer="https://explorer.testnet.arc.io/address/0x8004A818BFB912233c491871b3d84c89A494BD9e"
+	/>
+	<p>
+		Inline: <Address inline address="0x8004A818BFB912233c491871b3d84c89A494BD9e" explorer="https://explorer.testnet.arc.io/address/0x8004A818BFB912233c491871b3d84c89A494BD9e" />
+	</p>
+	<Code lang="mdx" code={`<Address label="Identity registry" address="0x8004..." chain="Arc testnet" explorer="https://..." />`} />
+
+	<h2 id="whats-new">What's new</h2>
+	<p>
+		Reads the <code>entries</code> front matter of <code>help/changelog.md</code>, newest first; pass
+		<code>limit</code> for a short list. The entries below are passed in as a sample.
+	</p>
+	<WhatsNew
+		entries={[
+			{ date: '2026-11-06', section: 'overview', text: 'One section per product: Minimal Novi, Novi Managed, Novi 2.0.' },
+		]}
+	/>
+	<Code
+		lang="yaml"
+		code={`# help/changelog.md front matter
+entries:
+  - date: 2026-11-16
+    section: minimal-novi
+    text: Arc mainnet beta opens.
+    href: /live/`}
+	/>
+
+	<h2 id="front-matter">Front matter</h2>
+	<Code
+		lang="yaml"
+		code={`---
+title: The guardian
+description: One line; it is also the subtitle under the title and the summary in llms.txt.
+section: minimal-novi        # overview | minimal-novi | novi-managed | novi-2 | developers
+register: plain              # plain | technical (design 2.7)
+network: arc-mainnet         # optional: arc-mainnet | arc-testnet, prints "Describes ..."
+reviewed: 2026-11-06         # optional: prints "Last reviewed 6 November 2026"
+---`}
+	/>
+	<p>
+		Section badges, labels, links and icons live in <code>src/sections.mjs</code>, with the sidebar of each section. The
+		tokens of both themes are in <code>src/styles/tokens.css</code>.
+	</p>
+</StarlightPage>
