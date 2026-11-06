@@ -1,0 +1,27 @@
+---
+// Common tasks (design 10.1, block 7): columns of links, each under a small eyebrow.
+// Three columns on desktop, one on phones.
+//   <Tasks groups={[{ title: 'Check an agent', links: [{ label: 'Verify a statement yourself', href: '/check/verify/' }] }]} />
+interface Props {
+	groups: { title: string; links: { label: string; href: string }[] }[];
+}
+
+const { groups } = Astro.props;
+---
+
+<div class="nc-tasks">
+	{
+		groups.map((g) => (
+			<div class="nc-tasks-col">
+				<p class="nc-eyebrow">{g.title}</p>
+				<ul>
+					{g.links.map((l) => (
+						<li>
+							<a href={l.href}>{l.label}</a>
+						</li>
+					))}
+				</ul>
+			</div>
+		))
+	}
+</div>

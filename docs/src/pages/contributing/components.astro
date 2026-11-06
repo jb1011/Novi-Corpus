@@ -4,7 +4,9 @@
 // (it is a page of its own, not part of the docs collection).
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { Code, Steps } from '@astrojs/starlight/components';
-import { Address, Aside, Card, CardGrid, Figure, LinkGroup, SectionBadge, WhatsNew } from '~/components';
+import { Address, Aside, Card, CardGrid, Figure, LinkGroup, LinkList, Mainnet, SectionBadge, Tasks, WhatsNew } from '~/components';
+import { MAINNET_LIVE } from '~/sections.mjs';
+import { SECTIONS } from '~/sections.mjs';
 
 const sections = [
 	['badges', 'Section badges'],
@@ -13,6 +15,8 @@ const sections = [
 	['figures', 'Diagrams'],
 	['callouts', 'Callouts'],
 	['steps', 'Step flow'],
+	['pieces', 'Page pieces'],
+	['mainnet', 'The mainnet switch'],
 	['addresses', 'Addresses'],
 	['whats-new', "What's new"],
 	['front-matter', 'Front matter'],
@@ -21,7 +25,7 @@ const headings = sections.map(([slug, text]) => ({ depth: 2, slug, text }));
 
 const d1Text = [
 	'The company, a Wyoming DAO LLC, is named in the agreement its guardian approves. The guardian is one person who answers for it.',
-	"The legal body is the link between the company and the agent, kept on a public ledger. It changes only with the guardian's signature, after a public wait.",
+	"The legal body is the link between the company and the agent, kept on a public ledger. A change to its agreement needs the guardian's signature, then waits in public.",
 	"The agent's public identity on the Arc network names its legal body, and the legal body names the agent, so neither side can claim the link alone.",
 	'Novi Corpus reads both sides and signs an answer, good for five minutes, that anyone can check. It holds no money, keys or identity.',
 ];
@@ -64,7 +68,7 @@ const d1Text = [
 	<p>A line icon, a title, one sentence; optionally a link, a "more" line and a section badge.</p>
 	<CardGrid cols={2}>
 		<Card icon="building" title="Company" section="minimal-novi" href="/start/wyoming-dao-llc/" more="What a Wyoming DAO LLC is">
-			A Wyoming DAO LLC we form for you, or a Wyoming company you already own.
+			A Wyoming DAO LLC we form for you, or a Wyoming LLC you already own.
 		</Card>
 		<Card icon="personcheck" title="Guardian" section="minimal-novi" href="/live/guardian/" more="The guardian">
 			One real person, shown by World ID, with an identity check saying who. The name is not published.
@@ -94,7 +98,7 @@ const d1Text = [
     Anyone looks the agent up and reads a signed answer.
   </Card>
   <Card icon="building" title="Company" more="What a Wyoming DAO LLC is" href="/start/wyoming-dao-llc/">
-    A Wyoming DAO LLC we form for you, or a Wyoming company you already own.
+    A Wyoming DAO LLC we form for you, or a Wyoming LLC you already own.
   </Card>
 </CardGrid>`}
 	/>
@@ -162,7 +166,7 @@ const d1Text = [
 	<Figure
 		name="d6"
 		caption="Minimal Novi says who stands behind the agent; Novi Managed what it holds and pays; Novi 2.0 what it may do in the company's name."
-		text="Three products in a row. Minimal Novi, live on Arc mainnet (beta): who stands behind the agent. Novi Managed, coming later: what it holds and pays. Novi 2.0, in design: what it may do in the company's name."
+		text={`Three products in a row. Minimal Novi, ${SECTIONS['minimal-novi'].badge}: who stands behind the agent. Novi Managed, coming later: what it holds and pays. Novi 2.0, in design: what it may do in the company's name.`}
 	/>
 	<Code lang="mdx" code={`<Figure name="d1" caption="One sentence." text={['First line.', 'Second line.']} />`} />
 
@@ -213,6 +217,35 @@ Starlight's own note and caution asides still work.
 2. Declare your company ...
 </Steps>`}
 	/>
+
+	<h2 id="pieces">Page pieces</h2>
+	<p>A plain list of links (a section overview's "Try it" links), the landing's common tasks, a list with ticks ("Before you start") and the "Next:" line that ends a page.</p>
+	<LinkList links={[{ label: 'The account', href: '/testnet/treasury-product/' }, { label: 'MCP tools', href: '/testnet/mcp/' }]} />
+	<Tasks groups={[{ title: 'Check an agent', links: [{ label: 'Verify a statement yourself', href: '/check/verify/' }] }, { title: 'Integrate', links: [{ label: 'Lookup API', href: '/developers/lookup-api/' }] }]} />
+	<div class="nc-ticks" data-section="minimal-novi"><ul><li>an invite code</li><li>you live in the US or the UK</li></ul></div>
+	<p class="nc-nextline">Next: <a href="/check/check-an-agent/">Check an agent</a> · <a href="/live/guardian/">The guardian</a></p>
+	<Code
+		lang="mdx"
+		code={`<LinkList links={[{ label: 'The account', href: '/testnet/treasury-product/' }]} />
+<Tasks groups={[{ title: 'Check an agent', links: [{ label: '...', href: '/check/verify/' }] }]} />
+<div class="nc-ticks">
+
+- an invite code
+
+</div>
+<p class="nc-nextline">Next: <a href="/live/guardian/">The guardian</a></p>`}
+	/>
+
+	<h2 id="mainnet">The mainnet switch</h2>
+	<p>
+		<code>MAINNET_LIVE</code> in <code>src/sections.mjs</code> is <code>{String(MAINNET_LIVE)}</code>. Until the deploy ceremony it is
+		<code>false</code>: the Minimal Novi badge, the tabs, the cards and diagram D6 read "Arc mainnet (beta), opens in mid-November", and a
+		page wraps anything it states as live on mainnet in the switch. Flip it once, in the step-2 PR.
+	</p>
+	<Mainnet pending><p>This line shows while the beta has not opened.</p></Mainnet>
+	<Mainnet live><p>This line shows once the beta is open.</p></Mainnet>
+	<Code lang="mdx" code={`<Mainnet pending>For the contracts on Arc mainnet, from the day the beta opens:</Mainnet>
+<Mainnet live>...</Mainnet>`} />
 
 	<h2 id="addresses">Addresses</h2>
 	<Address

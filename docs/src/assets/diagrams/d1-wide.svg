@@ -32,7 +32,7 @@
 <g class="ic r-acc" transform="translate(50 226) scale(1.0)"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1.4 1.4M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1.4-1.4"/></g>
 <text class="eb r-acc" x="96" y="234">LEGAL BODY</text>
 <text class="tt" x="96" y="259">The link, on a public ledger</text>
-<text class="sb" x="96" y="283">changes only with the guardian, after a public wait</text>
+<text class="sb" x="96" y="283">agreement changes wait in public</text>
 <rect class="cbg" x="24" y="380" width="676" height="104" rx="14" fill="url(#d1w-card)"/>
 <rect class="cst r-soft" x="24.5" y="380.5" width="675" height="103" rx="14"/>
 <rect class="ictile r-soft" x="42" y="398" width="40" height="40" rx="10"/>

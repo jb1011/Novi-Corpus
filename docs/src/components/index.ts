@@ -11,3 +11,6 @@ export { default as Icon } from './Icon.astro';
 export { default as LinkGroup } from './LinkGroup.astro';
 export { default as SectionBadge } from './SectionBadge.astro';
 export { default as WhatsNew } from './WhatsNew.astro';
+export { default as LinkList } from './LinkList.astro';
+export { default as Mainnet } from './Mainnet.astro';
+export { default as Tasks } from './Tasks.astro';

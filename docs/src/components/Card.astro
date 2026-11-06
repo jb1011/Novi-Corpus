@@ -28,7 +28,13 @@ interface Props {
 }
 
 const { icon, title, href, section, badge, more, compact = false } = Astro.props;
-const pageSection = (Astro.locals.starlightRoute?.entry?.data as { section?: SectionId } | undefined)?.section;
+// starlight-llms-txt renders MDX outside a Starlight page, where reading the route throws.
+let pageSection: SectionId | undefined;
+try {
+	pageSection = (Astro.locals.starlightRoute?.entry?.data as { section?: SectionId } | undefined)?.section;
+} catch {
+	pageSection = undefined;
+}
 const colour = section ?? badge ?? pageSection ?? 'overview';
 const Tag = href ? 'a' : 'div';
 ---

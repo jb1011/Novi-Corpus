@@ -312,3 +312,179 @@ a.nc-card:hover {
 	font-size: 1.125rem;
 	color: var(--nc-ink-2);
 }
+
+/* A card badge may wrap in a narrow column (design 4.8: nothing scrolls sideways at 390 px). */
+.nc-card > .nc-badge {
+	white-space: normal;
+}
+
+/* ---------- Landing (design 10.1) ---------- */
+
+/* The hero: the page title, the tagline and a search box, centred, over a faint dot grid. */
+.nc-hero {
+	position: relative;
+	text-align: center;
+	padding: 3.5rem 0 2.75rem;
+}
+.nc-hero::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	background:
+		radial-gradient(600px 260px at 50% 0%, color-mix(in srgb, var(--nc-accent) 18%, transparent), transparent 70%),
+		radial-gradient(color-mix(in srgb, var(--nc-ink) 7%, transparent) 1.1px, transparent 1.2px) 0 0 / 22px 22px;
+	-webkit-mask-image: linear-gradient(#000 40%, transparent);
+	mask-image: linear-gradient(#000 40%, transparent);
+}
+.nc-hero > * {
+	position: relative;
+}
+.content-panel .nc-hero h1#_top {
+	font-size: clamp(2.25rem, 5vw, 2.875rem);
+	margin: 0;
+}
+.nc-hero .nc-subtitle {
+	margin: 0.875rem auto 1.625rem;
+	max-width: 640px;
+	font-size: 1.15rem;
+}
+.nc-hero-search {
+	display: flex;
+	align-items: center;
+	gap: 0.625rem;
+	width: min(520px, 100%);
+	min-height: 44px;
+	margin: 0 auto;
+	padding: 0 0.875rem;
+	border: 1px solid var(--nc-line-strong);
+	border-radius: 10px;
+	background: var(--nc-paper-2);
+	color: var(--nc-muted);
+	font: inherit;
+	font-size: 0.9375rem;
+	cursor: pointer;
+}
+.nc-hero-search:hover {
+	border-color: color-mix(in srgb, var(--nc-accent) 55%, transparent);
+	color: var(--nc-ink);
+}
+.nc-hero-search kbd {
+	margin-left: auto;
+	padding: 0 0.3rem;
+	border: 1px solid var(--nc-line-strong);
+	border-radius: 5px;
+	font-family: var(--__sl-font-mono, monospace);
+	font-size: 0.75rem;
+	color: var(--nc-muted);
+}
+
+/* Common tasks: three columns of links under an eyebrow. */
+.nc-tasks {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 1.5rem;
+	margin-top: 1rem;
+}
+.sl-markdown-content .nc-tasks > *,
+.sl-markdown-content .nc-tasks-col > * {
+	margin-top: 0;
+}
+.nc-eyebrow {
+	margin: 0 0 0.375rem;
+	font-size: 0.75rem;
+	font-weight: 500;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--nc-muted-2);
+}
+.nc-tasks ul {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.nc-tasks li {
+	margin: 0;
+}
+.nc-tasks a {
+	display: flex;
+	align-items: center;
+	min-height: 44px;
+	color: var(--nc-muted);
+	font-size: 0.906rem;
+	text-decoration: none;
+}
+.nc-tasks a:hover {
+	color: var(--nc-ink);
+}
+
+/* Two blocks side by side (For agents, What's new). */
+.nc-split {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 1.75rem;
+}
+.sl-markdown-content .nc-split > * {
+	margin-top: 0;
+}
+.nc-split h2 {
+	margin-top: 0;
+}
+.nc-split .nc-grid {
+	grid-template-columns: minmax(0, 1fr);
+}
+@media (max-width: 720px) {
+	.nc-tasks,
+	.nc-split {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* ---------- Page pieces (design 10.2 to 10.6) ---------- */
+
+/* "Before you start": a list with a tick in the section colour. */
+.nc-ticks ul {
+	list-style: none;
+	padding: 0;
+}
+.nc-ticks li {
+	position: relative;
+	padding-left: 1.75rem;
+}
+.nc-ticks li::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 0.3em;
+	width: 1.05rem;
+	height: 1.05rem;
+	background: var(--sc, var(--nc-accent));
+	-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center / contain no-repeat;
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* The "Next:" line at the end of a page. */
+.sl-markdown-content .nc-nextline {
+	margin-top: 2rem;
+	padding-top: 1rem;
+	border-top: 1px solid var(--nc-line);
+	color: var(--nc-muted);
+	font-size: 0.9375rem;
+}
+
+/* A plain list of links (LinkList): the link-group rows without a heading. */
+.nc-linklist {
+	max-width: 520px;
+	padding: 0.25rem 1.125rem;
+}
+.nc-linklist ul {
+	border-top: 0;
+	margin: 0;
+}
+
+/* A badge beside a heading (the Status page's section groups). */
+.sl-markdown-content h2 .nc-badge,
+.sl-markdown-content h3 .nc-badge {
+	margin-left: 0.5rem;
+	vertical-align: 0.2em;
+}
