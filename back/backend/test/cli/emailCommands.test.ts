@@ -8,16 +8,20 @@
  * example.com, the tenant is one of anvil's published test accounts, and no fixture holds a name.
  *
  * The rule every test here holds: no line a command writes, its output or an ops line, carries the
- * address it was given or the address a row holds.
+ * address it was given or the address a row holds. The address is taken from `--to`, or read at
+ * `--to-prompt`, through the path a pipe takes (standard input that is not a terminal).
  */
 import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough, Readable } from "node:stream";
 import type Database from "better-sqlite3";
 import { getAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { readAddress } from "../../src/cli/email";
 import { buildCli } from "../../src/cli/index";
+import { osUser } from "../../src/cli/operator";
 import { SqliteEmailOutbox, contactIdempotencyKey } from "../../src/email/outbox";
 import { EmailSendError, type EmailSender, type OutboundEmail } from "../../src/email/sender";
 import {
@@ -242,6 +246,25 @@ const resend = (emailId: string, over: { to?: string; operator?: string } = {}, 
 
 const sha16 = (value: string) => createHash("sha256").update(value).digest("hex").slice(0, 16);
 
+/** Standard input, not a terminal: the lines given, then its end. */
+function piped(text: string): void {
+  vi.spyOn(process, "stdin", "get").mockReturnValue(
+    Readable.from([text]) as unknown as typeof process.stdin,
+  );
+}
+
+/** Standard input that must not be read. */
+const stdinUntouched = () =>
+  vi.spyOn(process, "stdin", "get").mockImplementation(() => {
+    throw new Error("standard input was read");
+  });
+
+/** The command line with `--to-prompt` in place of `--to <address>`. */
+const prompted = (line: string[]): string[] => {
+  const at = line.indexOf("--to");
+  return [...line.slice(0, at), "--to-prompt", ...line.slice(at + 2)];
+};
+
 /** Pins the clock's date, and only the date: the commands' timers stay real. */
 function at(iso: string): void {
   vi.useFakeTimers({ toFake: ["Date"] });
@@ -279,6 +302,16 @@ describe("every email command needs the email system", () => {
     );
     expect(await refusal(sendLink(guardian))).toBe(NOT_CONFIGURED);
     expect(count()).toBe(0);
+  });
+
+  test("with --to-prompt the configuration is refused before anything is read at the prompt", async () => {
+    withoutEmail();
+    const stdin = stdinUntouched();
+    expect(await refusal(prompted(sendLink(guardian)))).toBe(NOT_CONFIGURED);
+    expect(await refusal(prompted(resend("em_00000000-0000-4000-8000-000000000000")))).toBe(
+      NOT_CONFIGURED,
+    );
+    expect(stdin).not.toHaveBeenCalled();
   });
 });
 
@@ -359,6 +392,53 @@ describe("email:list", () => {
     expect(await ids("--status", "sent")).toEqual([]);
   });
 
+  test("--limit keeps the newest rows, printed oldest first, and says when older ones are left out; 100 by default, at most 1000", async () => {
+    for (let n = 1; n <= 5; n += 1) {
+      at(`2026-11-10T08:0${n}:00Z`);
+      invite(n);
+    }
+    const all = (await run<Listed>(["email:list"])).output;
+    expect(all.count).toBe(5);
+    expect(all).not.toHaveProperty("more");
+    const ids = all.emails.map((e) => e.emailId);
+
+    const { output } = await run<Listed & { more?: boolean; next?: string }>([
+      "email:list",
+      "--limit",
+      "2",
+    ]);
+    expect(output.emails.map((e) => e.emailId)).toEqual(ids.slice(3));
+    expect(output).toMatchObject({
+      count: 2,
+      more: true,
+      next: "older emails are left out: narrow the list with --status, --kind or --since, or raise --limit (at most 1000)",
+    });
+    expect((await run<Listed>(["email:list", "--limit", "5"])).output).not.toHaveProperty("more");
+
+    for (const bad of ["0", "1001", "-1", "2.5", "ten", "1e3"])
+      expect(await refusal(["email:list", "--limit", bad]), bad).toBe(
+        "refusing: --limit must be a whole number from 1 to 1000",
+      );
+  });
+
+  test("without --limit at most 100 rows are printed, the newest", async () => {
+    at("2026-11-10T08:00:00Z");
+    const insert = db.prepare(
+      `INSERT INTO email_outbox (email_id, kind, subject_ref, idempotency_key, to_address, subject,
+         text, html, status, attempts, next_attempt_at, created_at)
+       VALUES (?, 'invite_code', 'inv', ?, 'x@example.com', 's', 't', 'h', 'pending', 0, ?, ?)`,
+    );
+    for (let n = 0; n < 101; n += 1) {
+      const id = `em_00000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+      insert.run(id, `invite_code:bulk-${n}`, Date.now() + n, Date.now() + n);
+    }
+    const { output } = await run<Listed & { more?: boolean }>(["email:list"]);
+    expect(output.count).toBe(100);
+    expect(output.more).toBe(true);
+    expect(output.emails[0]?.emailId).toBe("em_00000000-0000-4000-8000-000000000001");
+    expect(output.emails.at(-1)?.emailId).toBe("em_00000000-0000-4000-8000-000000000100");
+  });
+
   test("refuses a status, a kind or a date it does not know", async () => {
     expect(await refusal(["email:list", "--status", "bounced"])).toBe(
       "refusing: --status must be one of pending, sent, failed",
@@ -392,11 +472,13 @@ describe("email:resend", () => {
       lastError: "422 validation_error",
       next: "nothing was written: run the same command with --yes to re-queue it",
     });
-    expect(output.note).toContain("409 invalid_idempotent_request");
+    expect(output.note).toBe(
+      "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, a new email:send-link after 24 hours; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)",
+    );
     expect(raw(emailId)).toEqual(before);
   });
 
-  test("with --yes the failed row is pending again, due now, its attempts from zero, under the address given; one email_requeued line { emailId, operator }", async () => {
+  test("with --yes the failed row is pending again, due now, its attempts from zero, under the address given; one email_requeued line { emailId, operator, operatorOsUser }", async () => {
     const emailId = await failedInvite();
     const before = Date.now();
 
@@ -420,7 +502,12 @@ describe("email:resend", () => {
     expect(row.next_attempt_at as number).toBeLessThanOrEqual(Date.now());
     expect(ops).toHaveLength(1);
     const { at: _at, ...line } = ops[0] as Record<string, unknown>;
-    expect(line).toEqual({ opslog: "email_requeued", emailId, operator: OPERATOR });
+    expect(line).toEqual({
+      opslog: "email_requeued",
+      emailId,
+      operator: OPERATOR,
+      operatorOsUser: osUser(),
+    });
 
     // The delivery job then sends it, to the new address, with the row's key.
     const accepting = senderThat("accepts");
@@ -519,7 +606,7 @@ describe("email:send-link", () => {
     });
   });
 
-  test("with --yes queues one identity_link row for the checksummed tenant, keyed identity_link:<16 hex of sha256(tenant)>:<UTC day>; its line holds the email id, the shortened tenant and the operator", async () => {
+  test("with --yes queues one identity_link row for the checksummed tenant, keyed identity_link:<16 hex of sha256(tenant)>:<UTC day>; its line holds the email id, the shortened tenant, the operator and the OS user", async () => {
     at("2026-11-10T23:59:30Z");
     const { output, ops } = await run(sendLink(guardian.toLowerCase()));
     const emailId = output.emailId as string;
@@ -553,6 +640,7 @@ describe("email:send-link", () => {
       emailId,
       tenant: guardian.slice(0, 10),
       operator: OPERATOR,
+      operatorOsUser: osUser(),
     });
   });
 
@@ -611,16 +699,28 @@ describe("email:send-link", () => {
       `${LINK}&prefilled_email=${encodeURIComponent(ADDRESS)}`,
       `${LINK}&prefilled_email=`,
       `${LINK}&Prefilled_Email=someone`,
+      `${LINK}&PREFILLED_EMAIL=someone`,
+      `${LINK}&prefilled%5Femail=someone`,
     ])
       expect(await refusal(sendLink(guardian, { url: bad })), bad).toBe(NO_ADDRESS_IN_LINK);
     for (const bad of [
       `${LINK}&email=${encodeURIComponent(ADDRESS)}`,
       `${LINK}&email=${ADDRESS.toUpperCase()}`,
       `https://verify.example.com/start/${ADDRESS}`,
+      // A stray % stops the whole link from decoding: each query value is decoded on its own.
+      `${LINK}&note=100%&email=${encodeURIComponent(ADDRESS)}`,
     ])
       expect(await refusal(sendLink(guardian, { url: bad })), "address in the link").toBe(
         "refusing: the link must not carry the person's email address",
       );
+    const accountId = "refusing: the link must not carry the account id (use the opaque reference)";
+    for (const bad of [
+      `${LINK}&ref=${guardian}`,
+      `${LINK}&ref=${guardian.toLowerCase()}`,
+      `${LINK}&ref=${guardian.slice(2).toUpperCase()}`,
+      `https://verify.example.com/start/${guardian.toLowerCase()}`,
+    ])
+      expect(await refusal(sendLink(guardian, { url: bad })), "tenant in the link").toBe(accountId);
     expect(
       await refusal(sendLink(guardian, { url: "https://someone:secret@verify.example.com/x" })),
     ).toBe("refusing: --url must not hold a user name or a password");
@@ -656,6 +756,111 @@ describe("email:send-link", () => {
   });
 });
 
+// ── the address read at a prompt, never on the command line ─────────────────────────────────
+
+describe("--to-prompt", () => {
+  test("email:send-link reads the address from standard input; no output or line holds it", async () => {
+    at("2026-11-10T08:00:00Z");
+    piped(`  ${ADDRESS}\n`);
+    const { output, ops } = await run(prompted(sendLink(guardian)));
+    expect(output.queued).toBe(true);
+    expect(ops.map((o) => o.opslog)).toEqual(["identity_link_queued"]);
+    expect(raw(output.emailId as string).to_address).toBe(ADDRESS);
+  });
+
+  test("email:send-link checks the link against the address read at the prompt", async () => {
+    piped(`${ADDRESS}\n`);
+    expect(await refusal(prompted(sendLink(guardian, { url: `${LINK}&email=${ADDRESS}` })))).toBe(
+      "refusing: the link must not carry the person's email address",
+    );
+    expect(count()).toBe(0);
+  });
+
+  test("email:resend reads the address from standard input", async () => {
+    const emailId = await failedInvite();
+    piped(`${NEW_ADDRESS}\r\n`);
+    const { output } = await run(prompted(resend(emailId)));
+    expect(output.requeued).toBe(true);
+    expect(raw(emailId)).toMatchObject({ status: "pending", to_address: NEW_ADDRESS });
+  });
+
+  test("an empty input, or a line that is not one address, is refused, and the address is not echoed", async () => {
+    const emailId = await failedInvite();
+    piped("");
+    expect(await refusal(prompted(resend(emailId)))).toBe(
+      "refusing: --to-prompt needs the address, on one line",
+    );
+    for (const bad of ["\n", "not-an-address\n", `${NEW_ADDRESS} ${ADDRESS}\n`]) {
+      piped(bad);
+      expect(await refusal(prompted(resend(emailId))), JSON.stringify(bad)).toBe(
+        "refusing: --to-prompt must be given one email address",
+      );
+    }
+    expect(raw(emailId)).toMatchObject({ status: "failed", to_address: ADDRESS });
+  });
+
+  test("it cannot be combined with --to, and one of the two is required; standard input is not read", async () => {
+    const emailId = await failedInvite();
+    const stdin = stdinUntouched();
+    const both =
+      "refusing: --to-prompt cannot be combined with --to: the address is read at the prompt";
+    expect(await refusal([...sendLink(guardian), "--to-prompt"])).toBe(both);
+    expect(await refusal([...resend(emailId), "--to-prompt"])).toBe(both);
+    const neither = "refusing: the address is required: --to-prompt (or --to)";
+    const without = (line: string[]) => {
+      const at = line.indexOf("--to");
+      return [...line.slice(0, at), ...line.slice(at + 2)];
+    };
+    expect(await refusal(without(sendLink(guardian)))).toBe(neither);
+    expect(await refusal(without(resend(emailId)))).toBe(neither);
+    expect(stdin).not.toHaveBeenCalled();
+    expect(count()).toBe(1);
+  });
+
+  test("at a terminal: one prompt on the screen, the answer read; the end of input is refused", async () => {
+    const keys = Object.assign(new PassThrough(), { isTTY: true as const });
+    const screen = Object.assign(new PassThrough(), { isTTY: true });
+    let shown = "";
+    screen.on("data", (chunk: Buffer) => {
+      shown += chunk.toString();
+    });
+    const answer = readAddress(keys, screen);
+    await vi.waitFor(() => expect(shown).toContain("Email address: "));
+    keys.write(`${ADDRESS}\n`);
+    expect(await answer).toBe(ADDRESS);
+
+    const closed = Object.assign(new PassThrough(), { isTTY: true as const });
+    const pending = readAddress(closed, Object.assign(new PassThrough(), { isTTY: true }));
+    closed.end();
+    await expect(pending).rejects.toThrow("refusing: the address was not entered");
+  });
+
+  test("at a terminal with standard error redirected, the typed address is not echoed into it", async () => {
+    const keys = Object.assign(new PassThrough(), { isTTY: true as const });
+    const file = new PassThrough();
+    let written = "";
+    file.on("data", (chunk: Buffer) => {
+      written += chunk.toString();
+    });
+    const answer = readAddress(keys, file);
+    await vi.waitFor(() => expect(written).toContain("Email address: "));
+    keys.write(`${ADDRESS}\n`);
+    expect(await answer).toBe(ADDRESS);
+    expect(written).not.toContain(ADDRESS);
+  });
+
+  test("the help offers the prompt for the address", () => {
+    const program = buildCli(noChain);
+    for (const name of ["email:send-link", "email:resend"]) {
+      const options = program.commands.find((c) => c.name() === name)?.options ?? [];
+      const toPrompt = options.find((o) => o.long === "--to-prompt");
+      expect(toPrompt?.description, name).toContain("never on the command line");
+      // Neither is a required option: one of the two is, which the command checks itself.
+      expect(options.find((o) => o.long === "--to")?.mandatory, name).toBe(false);
+    }
+  });
+});
+
 // ── every command, then the job: no line holds an address ───────────────────────────────────
 
 test("no line any email command writes, nor the console sender's delivery of it, holds an address", async () => {
@@ -679,7 +884,7 @@ describe("the identity-link email", () => {
     expect(email.subject).toBe("Confirm who you are");
   });
 
-  test("the text: one opening line, the three plain-words lines, the link, the request for the legal name, the privacy link and the postal address", () => {
+  test("the text: one opening line, the three plain-words lines, the link and how to copy it, the request for the legal name and not the document, the privacy link and the postal address", () => {
     expect(email.text).toBe(
       [
         "We verify the identity of the person in control once, through the identity check below.",
@@ -690,8 +895,10 @@ describe("the identity-link email", () => {
         "",
         "Start your identity check:",
         LINK,
+        "If the link does not open, copy this link into your browser.",
         "",
         "Please also reply with your legal name exactly as printed on the document you will use.",
+        "Please do not attach your document or a photo of it: we only need your name as it is printed.",
         "",
         `How we handle your data: ${APP_URL}/privacy`,
         "",
@@ -708,9 +915,11 @@ describe("the identity-link email", () => {
       "the result, the date, the country and type of the document, and your name, encrypted.",
       "the document itself, the photo, your date of birth or document number.",
       "reply with your legal name exactly as printed on the document you will use.",
+      "Please do not attach your document or a photo of it: we only need your name as it is printed.",
+      "If the link does not open, copy this link into your browser.",
     ])
       expect(email.html).toContain(phrase);
-    expect(email.html).toContain(`<a href="${escapeHtml(LINK)}">`);
+    expect(email.html).toContain(`<a href="${escapeHtml(LINK)}">${escapeHtml(LINK)}</a>`);
     expect(email.html).toContain(`<a href="${APP_URL}/privacy">`);
     expect(email.html).toContain(POSTAL);
     expect(email.html.startsWith("<!DOCTYPE html>")).toBe(true);

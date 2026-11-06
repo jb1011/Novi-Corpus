@@ -51,6 +51,17 @@ export function parseReason(value: string): string {
   return value;
 }
 
+/** A flag's value from its closed list; a missing value is refused like a wrong one. */
+export function oneOf<T extends string>(
+  flag: string,
+  value: string | undefined,
+  allowed: readonly T[],
+): T {
+  if (value === undefined || !(allowed as readonly string[]).includes(value))
+    refuse(`${flag} must be one of ${allowed.join(", ")}`);
+  return value as T;
+}
+
 /** A tenant (a guardian's account, its wallet address) in the one spelling its rows are kept
  *  under: EIP-55 checksummed. Anything that is not an address is refused. */
 export function parseTenant(value: string): string {

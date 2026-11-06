@@ -38,25 +38,30 @@ document_unverified_other"), never a person's name, address, email or document n
    email's body and in the provider's URL logs. The guardian types their address in Stripe's flow.
    `email:send-link` refuses a link that carries one.
 
-2. **Send it, and ask for the name.** With `email:send-link` from the box, the address re-read
-   from where the guardian gave it (their waitlist entry, their own message), never from a ticket.
-   Start the line with a space, so the shell keeps the address out of its history
-   (docs/runbooks/email.md):
+2. **Send it, and ask for the name.** With `email:send-link` from the box. `--to-prompt` asks for
+   the address (never on the command line, so never in the shell history); type it as re-read from
+   where the guardian gave it (their waitlist entry, their own message), never from a ticket:
 
    ```bash
-    npm run cli -- email:send-link <tenantId> \
-      --url '<flow link>?client_reference_id=<reference>' --to <the person's address> \
-      --operator <your operator name>
+   npm run cli -- email:send-link <tenantId> \
+     --url '<flow link>?client_reference_id=<reference>' --to-prompt \
+     --operator <your operator name>
    ```
 
    Without `--yes` it prints the email it would queue (the subject, the key, the link) and writes
-   nothing; read it, then run the same line with `--yes`. The email ("Confirm who you are") says
-   what is checked, what we keep and what we never keep, gives the link, and asks the guardian to
-   reply with their legal name **exactly as printed on the document** they will use: first name,
-   last name, and the full name if the document prints more. The address is never printed back.
-   One link per guardian per UTC day: a second the same day writes nothing. `email:list --kind
-   identity_link` shows whether it was sent and delivered; a bounce is handled as the email
-   runbook says (section 5).
+   nothing; read it, then run the same line with `--yes` (the prompt asks again). The email
+   ("Confirm who you are") says what is checked, what we keep and what we never keep, gives the
+   link, asks the guardian to reply with their legal name **exactly as printed on the document**
+   they will use (first name, last name, and the full name if the document prints more), and asks
+   them not to attach the document or a photo of it. The address is never printed back. The link
+   must not carry the tenant id either: the opaque reference stands for it. One link per guardian
+   per UTC day: a second the same day writes nothing. `email:list --kind identity_link` shows
+   whether it was sent and delivered; a bounce is handled as the email runbook says (section 5).
+
+   **The reply** goes to `EMAIL_REPLY_TO`, or to `EMAIL_FROM` where it is not set. Watch that
+   mailbox before the first `email:send-link`. Once `identity:record` is written (step 5), delete
+   the reply and any attachment it came with (a guardian may send the document anyway), from the
+   inbox and the trash: the record is then the only place the name is kept.
 
    Until PR 2a is deployed, send the same words from the contact mailbox. Send the flow link only:
    it is made to be shared. The dashboard's single-use session links expire after 48 hours and are
@@ -152,8 +157,9 @@ document_unverified_other"), never a person's name, address, email or document n
    earlier person, and every production door refuses it. The new person needs their own check,
    by this procedure from step 1.
 
-7. **Redact the session** from the Stripe dashboard once the record is written, within the week.
-   Our record is then the only trace of the check.
+7. **Redact the session** from the Stripe dashboard once the record is written, within the week,
+   and check the guardian's reply is deleted (step 2). Our record is then the only trace of the
+   check.
 
 ### Renewal, and a change of name
 

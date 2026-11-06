@@ -10,8 +10,10 @@ import { createHash } from "node:crypto";
  *  - the subject names no one and no address: "Confirm who you are";
  *  - one opening line; the three plain-words lines the guardian identity card shows (what is
  *    checked, what we keep, what we never keep: we never keep the document, the photo, the date of
- *    birth or the document number, though the provider reads them); the link; the request for the
- *    legal name; a link to the privacy page; the postal address;
+ *    birth or the document number, though the provider reads them); the link, shown in full, and
+ *    how to copy it; the request for the legal name, and not to attach the document (the reply is
+ *    read by a person and deleted once the record is written); a link to the privacy page; the
+ *    postal address;
  *  - no provider's name, and no expiry: the link is the provider's flow link, made to be shared,
  *    and it promises nothing about how long it lasts.
  *
@@ -34,8 +36,13 @@ const PLAIN_WORDS: readonly (readonly [label: string, line: string])[] = [
   ["What we never keep", "the document itself, the photo, your date of birth or document number."],
 ];
 const START = "Start your identity check";
+const COPY_LINK = "If the link does not open, copy this link into your browser.";
 const NAME_REQUEST =
   "Please also reply with your legal name exactly as printed on the document you will use.";
+/** The reply is read by a person and deleted once the record is written: it must hold no
+ *  document. */
+const NO_ATTACHMENT =
+  "Please do not attach your document or a photo of it: we only need your name as it is printed.";
 const PRIVACY = "How we handle your data";
 
 /** `&`, `<`, `>`, `"` and `'` as entities: safe in an element and in a quoted attribute. */
@@ -74,8 +81,10 @@ export function identityLinkEmail(input: {
     "",
     `${START}:`,
     input.link,
+    COPY_LINK,
     "",
     NAME_REQUEST,
+    NO_ATTACHMENT,
     "",
     `${PRIVACY}: ${privacyUrl}`,
     "",
@@ -95,9 +104,10 @@ export function identityLinkEmail(input: {
       ([label, line]) => `<li><strong>${escapeHtml(label)}:</strong> ${escapeHtml(line)}</li>`,
     ),
     "</ul>",
-    `<p><a href="${link}">${escapeHtml(START)}</a></p>`,
-    `<p>Or copy this link into your browser: ${link}</p>`,
+    `<p>${escapeHtml(START)}:<br><a href="${link}">${link}</a></p>`,
+    `<p>${escapeHtml(COPY_LINK)}</p>`,
     `<p>${escapeHtml(NAME_REQUEST)}</p>`,
+    `<p>${escapeHtml(NO_ATTACHMENT)}</p>`,
     `<p><a href="${escapeHtml(privacyUrl)}">${escapeHtml(PRIVACY)}</a></p>`,
     `<p style="color: #666666; font-size: 12px;">${escapeHtml(input.postalAddress)}</p>`,
     "</body>",
