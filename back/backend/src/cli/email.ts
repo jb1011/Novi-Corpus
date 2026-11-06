@@ -1,3 +1,4 @@
+import type { Readable, Writable } from "node:stream";
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
 import { type Config, PLAIN_ADDRESS } from "../config/env";
@@ -19,27 +20,33 @@ import { opsLog } from "../observability/opsLog";
 import {
   OPERATOR_NAME,
   OTHER_CHARACTER,
+  oneOf,
+  operatorConfig,
+  osUser,
   parseOperator,
   parseTenant,
   print,
   refuse,
   withDatabase,
 } from "./operator";
+import { readAnswers } from "./prompt";
 
 /**
  * THE OPERATOR'S EMAIL COMMANDS, over the outbox (src/email/outbox.ts), from the box:
  *  - `email:list` prints the outbox's rows: ids, kinds, states, delivery states and the last
- *    error. Never an address, a body or an idempotency key (a contact write's key is a digest of
- *    its address). It writes nothing and no ops line;
+ *    error, at most `--limit` (100 by default, 1000 at most) of the newest. Never an address, a
+ *    body or an idempotency key (a contact write's key is a digest of its address). It writes
+ *    nothing and no ops line;
  *  - `email:resend <emailId>` puts a FAILED row back to pending, due now, under the address the
  *    operator re-reads from the row the email is about (the waitlist entry, the company's party).
  *    It goes under the row's own idempotency key, so the provider never sends it twice; a contact
  *    write goes only to the address it was written for, whose consent it records;
  *  - `email:send-link <tenantId>` queues the beta's identity-link email to a guardian
  *    (src/email/templates/identityLink.ts): the link the operator built, which must be https and
- *    carry no address (`prefilled_email` is refused: an address would sit in the body and in the
- *    provider's URL logs), and the request for the guardian's legal name. One per guardian per
- *    UTC day: a second the same day writes nothing and names the first.
+ *    carry neither an address (`prefilled_email` is refused: an address would sit in the body and
+ *    in the provider's URL logs) nor the account id (the link carries an opaque reference), and
+ *    the request for the guardian's legal name. One per guardian per UTC day: a second the same
+ *    day writes nothing and names the first.
  *
  * Every command refuses where the email system is not configured (`cfg.email`, which
  * PUBLIC_APP_URL turns on). The two writing commands take `--operator` (the operator rule of
@@ -47,8 +54,12 @@ import {
  * `--yes`, read and write in one immediate transaction, print ONE JSON object, and throw a refusal
  * as `refusing: ...`. They are the only commands that take an address, and never print it back:
  * not in their output, not in a refusal, not in their ops line (`email_requeued`,
- * `identity_link_queued`), which carries ids, the tenant's first ten characters and the operator.
- * The delivery job sends what they queue, within a minute.
+ * `identity_link_queued`), which carries ids, the tenant's first ten characters, the operator and
+ * the OS user running the command (`operatorOsUser`: the outbox row has no column for them). The
+ * address is read at a prompt with `--to-prompt` (prompt.ts: never on the command line, so never
+ * in the shell history), or given with `--to`; one of the two, never both. A configuration without
+ * the email system is refused before anything is read at the prompt. The delivery job sends what
+ * they queue, within a minute.
  *
  * The runbook: docs/runbooks/email.md.
  */
@@ -65,36 +76,94 @@ const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 const INSTANT =
   /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const NOT_HTTPS = "--url must be the full https link of the identity check";
+/** The provider keeps a key 24 hours, and the outbox cannot tell whether a failed email's send was
+ *  one the provider took (an answer lost, then refusals): the runbook's wording, word for word. */
 const SAME_KEY_NOTE =
-  "the email goes again under its own idempotency key, which the provider keeps 24 hours: within 24 hours of a send the provider took, another address is refused (409 invalid_idempotent_request) and nothing is sent twice; then send a new email after 24 hours (docs/runbooks/email.md)";
+  "the email goes again under its own idempotency key, which the provider keeps 24 hours. A failed email may still be one whose send the provider took: then, to another address within 24 hours of that send, the provider refuses it (409 invalid_idempotent_request) and nothing is sent twice. The fix: for an identity link, a new email:send-link after 24 hours; for any other email, the same email:resend after 24 hours (docs/runbooks/email.md)";
+const DEFAULT_LIST_LIMIT = 100;
+const MAX_LIST_LIMIT = 1000;
+const WHOLE_NUMBER = /^[1-9][0-9]{0,3}$/;
+/** The one prompt `--to-prompt` shows at a terminal. */
+const ADDRESS_QUESTION = "Email address: ";
 const QUEUED_NEXT = "the delivery job sends it within a minute";
 const TO_HELP = "never printed back, and in no line";
+const TO_PROMPT_HELP =
+  "type the address at a prompt (or pipe it in, on one line) instead of --to: never on the command line, so never in the shell history";
 
 // ── parsing ──────────────────────────────────────────────────────────────────────────────────
+
+const NOT_CONFIGURED = "email is not configured on this deployment (PUBLIC_APP_URL)";
 
 /** The email system of this deployment, or a refusal where it is not configured. */
 function requireEmail(db: Database.Database, cfg: Config): EmailDeps {
   const email = buildEmailDeps(db, cfg);
-  if (email === undefined) refuse("email is not configured on this deployment (PUBLIC_APP_URL)");
+  if (email === undefined) refuse(NOT_CONFIGURED);
   return email;
 }
 
-function oneOf<T extends string>(flag: string, value: string, allowed: readonly T[]): T {
-  if (!(allowed as readonly string[]).includes(value))
-    refuse(`${flag} must be one of ${allowed.join(", ")}`);
-  return value as T;
+/** The configuration of a command that may prompt, held to the email system before anything is
+ *  read at the prompt: the operator types no address for a command that would refuse anyway. */
+function emailConfig(): Config {
+  const cfg = operatorConfig();
+  if (cfg.email === undefined) refuse(NOT_CONFIGURED);
+  return cfg;
 }
 
-/** One plain address, trimmed. A refusal never echoes it. */
-function parseAddress(value: string): string {
+/** One plain address, trimmed. A refusal never echoes it. `source` names where it came from. */
+function parseAddress(value: string, source: "--to" | "--to-prompt"): string {
   const address = value.trim();
   if (
     address.length > MAX_ADDRESS_LENGTH ||
     OTHER_CHARACTER.test(address) ||
     !PLAIN_ADDRESS.test(address)
   )
-    refuse("--to must be one email address");
+    refuse(
+      source === "--to"
+        ? "--to must be one email address"
+        : "--to-prompt must be given one email address",
+    );
   return address;
+}
+
+/** The two ways a writing command takes the address. */
+export interface AddressOptions {
+  to?: string;
+  toPrompt?: boolean;
+}
+
+/**
+ * The address `--to-prompt` reads: at a terminal, one prompt on `output` (standard error); from a
+ * pipe, the first line. Refused when nothing is entered.
+ */
+export async function readAddress(
+  input: Readable & { isTTY?: boolean },
+  output: Writable & { isTTY?: boolean },
+): Promise<string> {
+  const [address] = await readAnswers(
+    input,
+    output,
+    [ADDRESS_QUESTION],
+    "the address was not entered",
+  );
+  if (address === undefined) refuse("--to-prompt needs the address, on one line");
+  return address;
+}
+
+/**
+ * The options with the address resolved: read (`read`) with `--to-prompt`, which is never
+ * combined with `--to`; else `--to`. One of the two is required. The flags are checked before
+ * anything is read.
+ */
+export async function withPromptedAddress<T extends AddressOptions>(
+  opts: T,
+  read: () => Promise<string>,
+): Promise<Omit<T, "toPrompt" | "to"> & { to: string; toSource: "--to" | "--to-prompt" }> {
+  const { toPrompt, to, ...rest } = opts;
+  if (toPrompt === true && to !== undefined)
+    refuse("--to-prompt cannot be combined with --to: the address is read at the prompt");
+  if (toPrompt === true) return { ...rest, to: await read(), toSource: "--to-prompt" };
+  if (to === undefined) refuse("the address is required: --to-prompt (or --to)");
+  return { ...rest, to, toSource: "--to" };
 }
 
 /** Not echoed when malformed: an address typed in its place would be printed. */
@@ -115,11 +184,14 @@ function decoded(value: string): string {
 
 /**
  * The identity check's link, as the operator built it, normalised (`URL.href`): https, no user
- * name or password, at most 2048 characters, and no address: neither a `prefilled_email`
- * parameter (in any case) nor the guardian's own address anywhere in it, escaped or not. Never
- * echoed: it may hold the address it is refused for.
+ * name or password, at most 2048 characters, no address (neither a `prefilled_email` parameter,
+ * its name in any case or escaped, nor the guardian's own address anywhere in it) and not the
+ * guardian's account id (with or without its 0x, in any case): the link carries an opaque
+ * reference, since the provider must not hold the tenant. Each part is compared decoded: the whole
+ * link, and each path segment, query name and query value on its own, so one stray `%` that stops
+ * the whole link from decoding hides nothing. Never echoed: it may hold what it is refused for.
  */
-function parseLink(value: string, address: string): string {
+function parseLink(value: string, address: string, tenantId: string): string {
   let url: URL;
   try {
     url = new URL(value);
@@ -133,10 +205,29 @@ function parseLink(value: string, address: string): string {
   if (link.length > MAX_LINK_LENGTH) refuse(`--url must be at most ${MAX_LINK_LENGTH} characters`);
   if ([...url.searchParams.keys()].some((key) => key.toLowerCase() === "prefilled_email"))
     refuse("the link must not carry the person's email address (remove prefilled_email)");
-  const needle = address.toLowerCase();
-  if ([value, link].some((form) => decoded(form).toLowerCase().includes(needle)))
-    refuse("the link must not carry the person's email address");
+  const forms = [
+    value,
+    link,
+    url.hash,
+    ...url.pathname.split("/"),
+    // URLSearchParams decodes each name and value itself, a stray `%` left as it is.
+    ...[...url.searchParams].flat(),
+  ].map((form) => decoded(form).toLowerCase());
+  const holds = (needle: string) => forms.some((form) => form.includes(needle.toLowerCase()));
+  if (holds(address)) refuse("the link must not carry the person's email address");
+  // The 40 hex characters, so the id is found with its 0x or without it.
+  if (holds(tenantId.slice(2)))
+    refuse("the link must not carry the account id (use the opaque reference)");
   return link;
+}
+
+/** 1 to 1000, as a whole number written in digits. */
+function parseLimit(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_LIST_LIMIT;
+  const limit = WHOLE_NUMBER.test(value) ? Number(value) : Number.NaN;
+  if (!(limit >= 1 && limit <= MAX_LIST_LIMIT))
+    refuse(`--limit must be a whole number from 1 to ${MAX_LIST_LIMIT}`);
+  return limit;
 }
 
 /** A UTC date (from its midnight) or an ISO-8601 time with its zone, on a real calendar date. */
@@ -181,9 +272,14 @@ export interface ListOptions {
   status?: string;
   kind?: string;
   since?: string;
+  limit?: string;
 }
 
-/** The outbox's rows, the oldest first, filtered. Writes nothing and no ops line. */
+/**
+ * The outbox's rows, filtered: the newest `--limit` of them (100 by default), printed the oldest
+ * first, so a long history never hides today's failures; `more: true` when older ones were left
+ * out. Writes nothing and no ops line.
+ */
 export function listEmails(
   db: Database.Database,
   cfg: Config,
@@ -197,14 +293,28 @@ export function listEmails(
     ...(opts.kind === undefined ? {} : { kind: oneOf("--kind", opts.kind, OUTBOX_KINDS) }),
     ...(opts.since === undefined ? {} : { sinceMs: parseSince(opts.since) }),
   };
-  const rows = email.outbox.list(filter);
-  return { count: rows.length, emails: rows.map(listed) };
+  const limit = parseLimit(opts.limit);
+  // One more than asked: whether older rows were left out.
+  const rows = email.outbox.list({ ...filter, limit: limit + 1 });
+  const shown = rows.length > limit ? rows.slice(1) : rows;
+  return {
+    count: shown.length,
+    emails: shown.map(listed),
+    ...(rows.length > limit
+      ? {
+          more: true,
+          next: `older emails are left out: narrow the list with --status, --kind or --since, or raise --limit (at most ${MAX_LIST_LIMIT})`,
+        }
+      : {}),
+  };
 }
 
 // ── email:resend ─────────────────────────────────────────────────────────────────────────────
 
 export interface ResendOptions {
+  /** Resolved: given with `--to`, or read at `--to-prompt` (`toSource` says which). */
   to: string;
+  toSource?: "--to" | "--to-prompt";
   operator: string;
   yes?: boolean;
 }
@@ -223,8 +333,9 @@ export function resendEmail(
 ): Record<string, unknown> {
   const email = requireEmail(db, cfg);
   const emailId = parseEmailId(emailIdArg);
-  const to = parseAddress(opts.to);
+  const to = parseAddress(opts.to, opts.toSource ?? "--to");
   const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
+  const operatorOsUser = osUser();
 
   const found = db
     .transaction(() => {
@@ -262,7 +373,7 @@ export function resendEmail(
       ...note,
       next: "nothing was written: run the same command with --yes to re-queue it",
     };
-  opsLog("email_requeued", { emailId, operator });
+  opsLog("email_requeued", { emailId, operator, operatorOsUser });
   return {
     requeued: true,
     ...about,
@@ -276,7 +387,9 @@ export function resendEmail(
 
 export interface SendLinkOptions {
   url: string;
+  /** Resolved: given with `--to`, or read at `--to-prompt` (`toSource` says which). */
   to: string;
+  toSource?: "--to" | "--to-prompt";
   operator: string;
   yes?: boolean;
 }
@@ -294,9 +407,10 @@ export function sendIdentityLink(
 ): Record<string, unknown> {
   const email = requireEmail(db, cfg);
   const tenantId = parseTenant(tenantArg);
-  const to = parseAddress(opts.to);
-  const link = parseLink(opts.url, to);
+  const to = parseAddress(opts.to, opts.toSource ?? "--to");
+  const link = parseLink(opts.url, to, tenantId);
   const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
+  const operatorOsUser = osUser();
   const idempotencyKey = identityLinkIdempotencyKey(tenantId, Date.now());
   const content = identityLinkEmail({
     link,
@@ -350,7 +464,12 @@ export function sendIdentityLink(
       next: "an identity link to this guardian was queued already today (UTC), and nothing was written: email:resend re-queues it if it failed; a new link waits for tomorrow",
     };
   const emailId = done.emailId as string;
-  opsLog("identity_link_queued", { emailId, tenant: tenantId.slice(0, 10), operator });
+  opsLog("identity_link_queued", {
+    emailId,
+    tenant: tenantId.slice(0, 10),
+    operator,
+    operatorOsUser,
+  });
   return {
     queued: true,
     emailId,
@@ -363,17 +482,25 @@ export function sendIdentityLink(
 
 // ── Registration ─────────────────────────────────────────────────────────────────────────────
 
+/** Standard input and standard error: the prompt is never on standard output, which carries the
+ *  command's one JSON object. */
+const promptForAddress = () => readAddress(process.stdin, process.stderr);
+
 export function registerEmailCommands(program: Command): void {
   program
     .command("email:list")
     .description(
-      "list the outbox's emails, the oldest first: ids, kinds, states, delivery states and the last error; never an address or a body. Writes no ops line",
+      "list the outbox's emails, the newest --limit of them printed oldest first: ids, kinds, states, delivery states and the last error; never an address or a body. Writes no ops line",
     )
     .option("--status <pending|sent|failed>", "only the emails in this state")
     .option("--kind <kind>", `only this kind: ${OUTBOX_KINDS.join(", ")}`)
     .option(
       "--since <date>",
       "only the emails queued from this UTC date (2026-11-10) or ISO-8601 time with its zone",
+    )
+    .option(
+      "--limit <n>",
+      `at most this many, the newest (default ${DEFAULT_LIST_LIMIT}, at most ${MAX_LIST_LIMIT})`,
     )
     .action((opts: ListOptions) =>
       withDatabase((db, _docStoreDir, cfg) => print(listEmails(db, cfg, opts))),
@@ -383,29 +510,43 @@ export function registerEmailCommands(program: Command): void {
     .command("email:resend")
     .argument("<emailId>", "the failed email, as email:list prints it")
     .description(
-      "re-queue a failed email, under its own idempotency key, to the address you re-read from the row it is about; without --yes, say what would happen",
+      "re-queue a failed email, under its own idempotency key, to the address you re-read from the row it is about; the address with --to-prompt (or --to); without --yes, say what would happen",
     )
-    .requiredOption("--to <address>", `the address, re-read from the email's source; ${TO_HELP}`)
+    .option("--to-prompt", TO_PROMPT_HELP)
+    .option("--to <address>", `the address, re-read from the email's source; ${TO_HELP}`)
     .requiredOption("--operator <name>", `who re-queues: ${OPERATOR_NAME.source}`)
     .option("--yes", "confirm: re-queue the email")
-    .action((emailId: string, opts: ResendOptions) =>
-      withDatabase((db, _docStoreDir, cfg) => print(resendEmail(db, cfg, emailId, opts))),
-    );
+    .action(async (emailId: string, opts: Omit<ResendOptions, "to"> & AddressOptions) => {
+      // Refused before anything is read at the prompt.
+      const loaded = emailConfig();
+      const resolved = await withPromptedAddress(opts, promptForAddress);
+      withDatabase(
+        (db, _docStoreDir, cfg) => print(resendEmail(db, cfg, emailId, resolved)),
+        loaded,
+      );
+    });
 
   program
     .command("email:send-link")
     .argument("<tenantId>", "the guardian's account: its wallet address")
     .description(
-      "queue the identity-check email to a guardian: the link, and the request for their legal name exactly as printed on their document. One per guardian per UTC day; without --yes, say what would be queued",
+      "queue the identity-check email to a guardian: the link, and the request for their legal name exactly as printed on their document; the address with --to-prompt (or --to). One per guardian per UTC day; without --yes, say what would be queued",
     )
     .requiredOption(
       "--url <link>",
-      "the full https link of the identity check, with its opaque client_reference_id and without prefilled_email (the guardian types their address in the check)",
+      "the full https link of the identity check, with its opaque client_reference_id and without prefilled_email (the guardian types their address in the check) or the account id",
     )
-    .requiredOption("--to <address>", `the guardian's email address; ${TO_HELP}`)
+    .option("--to-prompt", TO_PROMPT_HELP)
+    .option("--to <address>", `the guardian's email address; ${TO_HELP}`)
     .requiredOption("--operator <name>", `who sends: ${OPERATOR_NAME.source}`)
     .option("--yes", "confirm: queue the email")
-    .action((tenantId: string, opts: SendLinkOptions) =>
-      withDatabase((db, _docStoreDir, cfg) => print(sendIdentityLink(db, cfg, tenantId, opts))),
-    );
+    .action(async (tenantId: string, opts: Omit<SendLinkOptions, "to"> & AddressOptions) => {
+      // Refused before anything is read at the prompt.
+      const loaded = emailConfig();
+      const resolved = await withPromptedAddress(opts, promptForAddress);
+      withDatabase(
+        (db, _docStoreDir, cfg) => print(sendIdentityLink(db, cfg, tenantId, resolved)),
+        loaded,
+      );
+    });
 }

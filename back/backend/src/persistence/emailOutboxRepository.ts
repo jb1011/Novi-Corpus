@@ -83,6 +83,8 @@ export interface OutboxFilter {
   kind?: OutboxKind;
   /** Rows created at or after this time (ms). */
   sinceMs?: number;
+  /** At most this many: the newest ones, still answered oldest first. Absent, every row. */
+  limit?: number;
 }
 
 /** Every column but the address and the content, which no reader but the job receives. */
@@ -200,12 +202,15 @@ export class SqliteEmailOutboxRepository {
            next_attempt_at = @at
          WHERE email_id = @emailId AND status = 'failed'`,
       ),
+      // The newest first, so a limit keeps the newest rows (a negative LIMIT is none); `list`
+      // turns them back into the oldest first.
       list: db.prepare(
         `SELECT ${PUBLIC_COLUMNS} FROM email_outbox
           WHERE (@status IS NULL OR status = @status)
             AND (@kind IS NULL OR kind = @kind)
             AND (@sinceMs IS NULL OR created_at >= @sinceMs)
-          ORDER BY created_at, email_id`,
+          ORDER BY created_at DESC, email_id DESC
+          LIMIT @limit`,
       ),
     };
   }
@@ -268,13 +273,21 @@ export class SqliteEmailOutboxRepository {
     return this.stmts.requeue.run({ emailId, to, at }).changes === 1;
   }
 
+  /** The rows the filter keeps, the oldest first; with a limit, the newest that many of them. */
   list(filter: OutboxFilter): OutboxRow[] {
+    if (filter.limit !== undefined && (!Number.isSafeInteger(filter.limit) || filter.limit < 1))
+      throw new Error(
+        `email outbox: the limit must be a positive whole number, not ${filter.limit}`,
+      );
     return (
       this.stmts.list.all({
         status: filter.status ?? null,
         kind: filter.kind ?? null,
         sinceMs: filter.sinceMs ?? null,
+        limit: filter.limit ?? -1,
       }) as PublicRow[]
-    ).map(toOutboxRow);
+    )
+      .map(toOutboxRow)
+      .reverse();
   }
 }

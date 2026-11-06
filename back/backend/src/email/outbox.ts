@@ -128,7 +128,8 @@ export interface EmailOutbox {
   /** A failed row back to pending, due now, with its attempts counted from zero and the address
    *  the caller supplies (re-read from the row the email is about); false for any other row. */
   requeue(emailId: string, to: string): boolean;
-  /** Never the address, the text or the HTML. */
+  /** The oldest first (with `limit`, the newest that many); never the address, the text or the
+   *  HTML. */
   list(filter: OutboxFilter): OutboxRow[];
   /** The row an email id names, in any state, as anyone may read it; undefined for none. */
   find(emailId: string): OutboxRow | undefined;

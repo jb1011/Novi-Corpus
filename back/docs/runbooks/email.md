@@ -16,11 +16,13 @@ npm run cli -- email:list --status failed
 in a screenshot of the provider's dashboard. Ops lines and `email:list` carry ids, kinds, states
 and codes, never an address or a body. The outbox keeps the address and the body only until the
 email is sent; a sent row keeps its subject, kind, ids and states. Only two commands take an
-address, `email:send-link` and `email:resend --to`, and neither prints it back.
+address, `email:send-link` and `email:resend`, and neither prints it back.
 
-An address you type on the command line stays in the shell history. Start the line with a space:
-the box's bash then keeps it out of the history, provided `echo $HISTCONTROL` shows
-`ignorespace` or `ignoreboth` (Ubuntu's default). Check that once per box.
+**Type the address at the prompt, `--to-prompt`**, never on the command line: an address on the
+command line stays in the shell history and shows in the process list. At a terminal the command
+asks `Email address: ` on standard error; from a pipe it reads the first line. `--to <address>`
+exists for scripts and is refused together with `--to-prompt`. A configuration without the email
+system is refused before the prompt.
 
 Code: `back/backend/src/email/` (the outbox, the senders, the identity-link template),
 `back/backend/src/api/routes/emailWebhook.ts`, `back/backend/src/cli/email.ts`.
@@ -36,7 +38,7 @@ no webhook route, and the `email:*` commands refuse (`email is not configured on
 | `PUBLIC_APP_URL`              | staging, mainnet         | The app's public origin; every link in an email is built on it. https on production.          |
 | `EMAIL_FROM`                  | staging, mainnet         | `Name <address>` on a sending domain (section 2), or an address.                               |
 | `EMAIL_POSTAL_ADDRESS`        | staging, mainnet         | The company's postal address, one line, at the foot of every email.                            |
-| `EMAIL_REPLY_TO`              | optional                 | A plain address for replies, when not `EMAIL_FROM`. The identity-link email asks for a reply. |
+| `EMAIL_REPLY_TO`              | optional                 | A plain address for replies, when not `EMAIL_FROM`. The identity-link email asks for a reply (section 6). |
 | `EMAIL_PROVIDER`              | mainnet: `resend`        | `resend` or `console` (the default).                                                           |
 | `RESEND_API_KEY`              | mainnet only             | A secret. Required with `resend`; refused with `console`.                                      |
 | `RESEND_WEBHOOK_SECRET`       | mainnet only             | A secret, `whsec_` then base64 (section 3). Required with `resend`; refused with `console`.    |
@@ -143,8 +145,10 @@ refused in between are retried by the provider (immediately, then after 5 s, 5 m
   status and the provider's code. A 429 `daily_quota_exceeded` or `monthly_quota_exceeded` will
   not clear by waiting: raise the plan, then re-queue.
 
-A row's `failed` status (the outbox's: the provider never took the email) is not a `failed`
-delivery state (the provider's event on a sent email). Both mean the customer has no email.
+A row's `failed` status (the outbox's) is not a `failed` delivery state (the provider's event on
+a sent email). A failed row may still be one whose send the provider took: an answer lost on the
+way, then refusals, look the same from here, and the provider holds the row's key for 24 hours
+(section 6, `email:resend`). Either way, treat it as an email the customer did not get.
 
 **Every working day**, look at what did not arrive:
 
@@ -193,56 +197,67 @@ check its records first (section 2).
 npm run cli -- email:list [--status pending|sent|failed] [--kind <kind>] [--since <date>]
 ```
 
-The rows, the oldest first: `emailId`, `kind`, `subjectRef`, `subject`, `status`, `attempts`,
-`nextAttemptAt`, `providerMessageId`, `deliveryState`, `deliveryAt`, `lastError`, `createdAt`,
-`sentAt`. Never an address, a body or an idempotency key. `--since` is a UTC date (`2026-11-10`,
-from its midnight) or an ISO-8601 time with its zone. It writes nothing and no ops line.
+The newest `--limit` rows (100 by default, at most 1000), printed the oldest first: `emailId`,
+`kind`, `subjectRef`, `subject`, `status`, `attempts`, `nextAttemptAt`, `providerMessageId`,
+`deliveryState`, `deliveryAt`, `lastError`, `createdAt`, `sentAt`. When older rows were left out
+the output says `more: true`: narrow the list or raise `--limit`. Never an address, a body or an
+idempotency key. `--since` is a UTC date (`2026-11-10`, from its midnight) or an ISO-8601 time
+with its zone. It writes nothing and no ops line.
 
 ### `email:resend`
 
 ```bash
- npm run cli -- email:resend <emailId> --to <address> --operator <your operator name>
+npm run cli -- email:resend <emailId> --to-prompt --operator <your operator name>
 ```
 
 Puts a **failed** row back to pending, due now, its attempts counted from zero, under the address
-you give. Re-read the address from the row the email is about (the waitlist entry, the company's
-party, the guardian's own message), never from a ticket. Without `--yes` it prints what it would do
-and writes nothing; run the same line with `--yes`. It writes one ops line,
-`email_requeued { emailId, operator }`.
+you type at the prompt. Re-read the address from the row the email is about (the waitlist entry,
+the company's party, the guardian's own message), never from a ticket. Without `--yes` it prints
+what it would do and writes nothing; run the same line with `--yes` (the prompt asks again). It
+writes one ops line, `email_requeued { emailId, operator, operatorOsUser }`.
 
 It refuses a row that is pending (it is on its way) or sent (a sent email is never sent again from
 here: section 5 says what to do), an unknown id, and a contact write under any address but the one
 it was written for (its consent is that address's).
 
 **The same idempotency key, so never a double send.** The email goes again under its row's own key,
-which the provider keeps 24 hours. To the same address, a send the provider already took is
-answered with the first send's id and sent once. To **a different address within 24 hours of a
-send the provider took**, the provider refuses it (409 `invalid_idempotent_request`): the row fails
-again, and nothing is sent twice. The fix is a new email after 24 hours (for an identity link,
-`email:send-link` the next day).
+which the provider keeps 24 hours. A failed row may still be one whose send the provider took
+(section 4). To the same address, such a send is answered with the first send's id and sent once.
+To **a different address within 24 hours of that send**, the provider refuses it (409
+`invalid_idempotent_request`): the row fails again, and nothing is sent twice. The fix, after 24
+hours: for an invite, a filing or any other email, the same `email:resend`; for an identity link,
+a new `email:send-link`.
 
 ### `email:send-link`
 
 ```bash
- npm run cli -- email:send-link <tenantId> --url '<the full link>' --to <address> \
-   --operator <your operator name>
+npm run cli -- email:send-link <tenantId> --url '<the full link>' --to-prompt \
+  --operator <your operator name>
 ```
 
 Queues the beta's identity-check email to a guardian (docs/runbooks/guardian-identity.md, step 2):
-subject "Confirm who you are", what is checked, what we keep and what we never keep, the link, the
-request for the guardian's legal name exactly as printed on the document they will use, a link to
-the privacy page, the postal address. It names no provider and promises no expiry.
+subject "Confirm who you are", what is checked, what we keep and what we never keep, the link and
+how to copy it, the request for the guardian's legal name exactly as printed on the document they
+will use, the request not to attach the document or a photo of it, a link to the privacy page, the
+postal address. It names no provider and promises no expiry.
 
-`--url` is the full link you built; it must be https, and it must not carry the person's address:
-a `prefilled_email` parameter, or the address anywhere in the link, is refused. The guardian types
-their address in the check. `<tenantId>` is the guardian's wallet address in any case; anything
-else is refused.
+**The replies.** The guardian answers with their name by replying, so the reply goes to
+`EMAIL_REPLY_TO`, or to `EMAIL_FROM` where it is not set. That mailbox must be watched before the
+first `email:send-link`, and by someone who may read a name. Once `identity:record` is written,
+delete the reply and any attachment it came with (a guardian may send the document anyway), from
+the inbox and the trash: the record is then the only place the name is kept.
+
+`--url` is the full link you built; it must be https, and it must carry neither the person's
+address (a `prefilled_email` parameter, or the address anywhere in the link, escaped or not, is
+refused: the guardian types their address in the check) nor the account id (the tenant, with or
+without its 0x, in any case: the link carries the opaque reference). `<tenantId>` is the
+guardian's wallet address in any case; anything else is refused.
 
 One link per guardian per UTC day (the idempotency key is `identity_link:`, a digest of the tenant
 and the day): a second the same day writes nothing and prints the first one's id and state.
 Without `--yes` it prints the email it would queue (subject, key, link) and writes nothing. It
-writes one ops line, `identity_link_queued { emailId, tenant, operator }`, the tenant cut to its
-first ten characters.
+writes one ops line, `identity_link_queued { emailId, tenant, operator, operatorOsUser }`, the
+tenant cut to its first ten characters.
 
 ## 7. Staging: following the links
 

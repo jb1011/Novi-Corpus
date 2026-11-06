@@ -285,6 +285,23 @@ describe("list", () => {
     ]);
     expect(outbox.list({ status: "pending", kind: "invite_code" })).toEqual([]);
   });
+
+  test("a limit keeps the newest rows, still the oldest first; a limit that is not a positive whole number throws", () => {
+    const ids: string[] = [];
+    for (let n = 1; n <= 4; n += 1) {
+      clock = T0 + n * MINUTE;
+      ids.push(invite(`invite:hash-000${n}`).emailId);
+    }
+    expect(outbox.list({ limit: 2 }).map((r) => r.emailId)).toEqual(ids.slice(2));
+    expect(outbox.list({ limit: 10 }).map((r) => r.emailId)).toEqual(ids);
+    expect(outbox.list({ sinceMs: T0 + 2 * MINUTE, limit: 1 }).map((r) => r.emailId)).toEqual([
+      ids[3],
+    ]);
+    for (const bad of [0, -1, 1.5])
+      expect(() => outbox.list({ limit: bad }), String(bad)).toThrow(
+        "email outbox: the limit must be a positive whole number",
+      );
+  });
 });
 
 describe("requeue", () => {
