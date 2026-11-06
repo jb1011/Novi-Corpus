@@ -3,11 +3,14 @@ title: "Legal-body statements"
 description: "The signed statement about an agent's legal body: how to ask for it and how to verify it."
 section: "minimal-novi"
 register: "technical"
+reviewed: 2026-11-06
 ---
+
+<!-- Sources: PR #158 (the statement reference), updated in place per design 7.1: the DAO wording of 2.1 and decision 1 (8), repo links to jb1011/Novi-Corpus, the entityType note (2.1 fact 5), "Attestors: listed at mainnet go-live". Split into check/ and developers/ pages at step 2 (design 3.2). -->
 
 Anyone can ask, with no account, whether an agent has a Novi legal body and what Novi states about it. The answer carries a statement built from chain reads made when it was signed, and signed by Novi's attestation key, so you can check it yourself instead of trusting the connection it came over.
 
-This page covers legal bodies created by Novi's legal-body factory for an ERC-8004 agent whose owner brought an existing Wyoming LLC.
+This page covers legal bodies created by Novi's legal-body factory for an ERC-8004 agent whose owner declared a company they already own: a Wyoming LLC or a Wyoming DAO LLC. The examples come from Arc testnet.
 
 ## What a statement says
 
@@ -16,7 +19,7 @@ A statement is about one legal body, one agent and one moment. It says:
 * which legal body Novi's factory created, for which agent, in which identity registry, on which chain, and who owned the agent's identity when the body was created;
 * whether the agent's identity points at that body now (`bindingState`);
 * the agent's wallet, as the identity registry returns it, and whether that wallet, or that owner, holds contract code;
-* the Wyoming LLC behind the body, once a Novi operator has checked it against the Wyoming registry: its name, its filing number, its formation date, and what an operator saw of its annual reports;
+* the company behind the body, once a Novi operator has checked it against the Wyoming registry: its name, its filing number, its formation date, and what an operator saw of its annual reports;
 * the hash of the operating agreement frozen when the body was created;
 * whether the guardian completed World ID verification;
 * `standing`: what Novi states about the legal body as a whole.
@@ -25,10 +28,10 @@ Every chain fact in a statement is read at one block, `observedAtBlock`, which w
 
 It does not say:
 
-* who owns or manages the LLC, who its registered agent is, or its EIN;
+* who owns or manages the company, who its registered agent is, or its EIN;
 * anything about money the agent holds, or limits on its spending;
 * anything about what the agent does, or how well;
-* that the LLC is in good standing with the state of Wyoming. An annual report counts as filed only when a Novi operator saw it on the registry.
+* that the company is current with the state of Wyoming. An annual report counts as filed only when a Novi operator saw it on the registry.
 
 It does not name the guardian: `identityOwnerAtCreation` is the identity's owner as the chain records it, which may be the guardian's own wallet.
 
@@ -36,8 +39,8 @@ It does not name the guardian: `identityOwnerAtCreation` is the identity's owner
 
 | Value | Meaning |
 | --- | --- |
-| `active` | Every fact holds: the body is active on chain, the agent's identity points at it, the agreement hash on chain is the frozen one, a Novi operator's check of the LLC passed (on a sandbox deployment the check is automatic; see the sandbox note below), the legal body is paid for, nothing is revoked, and no annual report is more than 60 days past due without a recorded filing. |
-| `pending` | Something to establish is still missing: the operator's check of the LLC has not passed (or must be made again), or the legal body is not paid for yet. |
+| `active` | Every fact holds: the body is active on chain, the agent's identity points at it, the agreement hash on chain is the frozen one, a Novi operator's check of the company passed (on a sandbox deployment the check is automatic; see the sandbox note below), the legal body is paid for, nothing is revoked, and no annual report is more than 60 days past due without a recorded filing. |
+| `pending` | Something to establish is still missing: the operator's check of the company has not passed (or must be made again), or the legal body is not paid for yet. |
 | `unknown` | Novi cannot state `active` from what it holds: the agreement hash on chain differs from the frozen one, there is no formation date to count annual reports from, or a report is more than 60 days past due with no filing recorded. |
 | `inactive` | A recorded fact says no: the body is winding down or dissolved, the agent's identity no longer points at it or changed hands, or Novi has revoked it. |
 
@@ -104,7 +107,7 @@ No statement could be made just now, because the chain could not be read:
 GET /legal-bodies/<address>
 ```
 
-`address` is all lower case or EIP-55. For a legal body on this page, the address must be the agent's wallet: the wallet the identity registry returns for the agent, read when you ask, and again at the block the statement is read at. The same route also answers for agents onboarded with a Novi treasury; those answers carry no statement. [The AgentKit integration guide](https://github.com/jb1011/Project-Alpha/blob/main/back/docs/integrations/agentkit-legal-body-check.md), in Novi's public repository, describes them: it shows a seller on World's AgentKit how to ask, in one call, whether a verified human vouches for an address and whether a Novi legal body stands behind it, and gives every answer of this route.
+`address` is all lower case or EIP-55. For a legal body on this page, the address must be the agent's wallet: the wallet the identity registry returns for the agent, read when you ask, and again at the block the statement is read at. The same route also answers for agents onboarded with a Novi treasury; those answers carry no statement. [The AgentKit integration guide](https://github.com/jb1011/Novi-Corpus/blob/main/back/docs/integrations/agentkit-legal-body-check.md), in Novi's public repository, describes them: it shows a seller on World's AgentKit how to ask, in one call, whether a verified human vouches for an address and whether a Novi legal body stands behind it, and gives every answer of this route.
 
 No legal body Novi states for this address:
 
@@ -267,19 +270,19 @@ A field that can be absent then holds a value it can never really take: the zero
 | `identityOwnerIsContract` | `identityOwnerAtCreation` holds contract code at `observedAtBlock`. See [Contract accounts](#contract-accounts). | `false` |
 | `agentWalletIsContract` | The same for `agentWallet`. | `false` |
 | `standing` | `pending`, `active`, `unknown` or `inactive`: see [Standing](#standing). | |
-| `attestationState` | Novi's own record of the LLC: `active` when an operator's check passed (on a sandbox deployment the check is automatic; see the sandbox note below) and the legal body is paid for, `revoked` when Novi revoked the legal body or its check of the LLC, `pending` otherwise. | |
+| `attestationState` | Novi's own record of the company: `active` when an operator's check passed (on a sandbox deployment the check is automatic; see the sandbox note below) and the legal body is paid for, `revoked` when Novi revoked the legal body or its check of the company, `pending` otherwise. | |
 | `jurisdiction` | `WY`. | |
-| `entityType` | `LLC`. | |
-| `legalName` | The LLC's name, as declared to Novi and checked by an operator against the Wyoming registry. Shown only while that check stands, the binding is `linked` and nothing is revoked. | `""` |
-| `filingNumber` | The LLC's Wyoming filing number, on the same rule. | `""` |
-| `source` | `customer`: the owner brought an existing LLC. `novi`, for an LLC Novi formed, is in no statement today. | |
+| `entityType` | `LLC`: a constant of statement version 2, the same for every company, whether or not its articles carry the DAO statement. The type of each company arrives with statement version 3, after Demo Day. | |
+| `legalName` | The company's name, as declared to Novi and checked by an operator against the Wyoming registry. Shown only while that check stands, the binding is `linked` and nothing is revoked. | `""` |
+| `filingNumber` | The company's Wyoming filing number, on the same rule. | `""` |
+| `source` | `customer`: the owner declared a company they already own. `novi`, for a Wyoming DAO LLC formed through Novi Corpus, is in no statement today. | |
 | `environment` | `production` on a mainnet deployment, `sandbox` otherwise. A sandbox statement comes from a test deployment. | |
-| `controlVerified` | An operator saw evidence that the person who declared the LLC to Novi controls it (on a sandbox deployment the check is automatic; see the sandbox note below). | `false` |
-| `existenceCheckedAt` | When the operator's check that established the LLC was made, in unix seconds. | `0` |
-| `filedAt` | The LLC's formation date. | `""` |
-| `einIssued` | Always `false`: Novi does not check an EIN for an LLC its owner brought. | `false` |
+| `controlVerified` | An operator saw evidence that the person who declared the company to Novi controls it (on a sandbox deployment the check is automatic; see the sandbox note below). | `false` |
+| `existenceCheckedAt` | When the operator's check that established the company was made, in unix seconds. | `0` |
+| `filedAt` | The company's formation date. | `""` |
+| `einIssued` | Always `false`: Novi does not check an EIN for a company its owner declared. | `false` |
 | `filingStatus` | `not_yet_due`: no annual report has come due. `filed`: a report recorded at the check covers the last one due. `past_due_unverified`: a report came due and no recorded report covers it (it may have been filed; nobody has confirmed it). `unverified`: there is no formation date to count from. | |
-| `lastFiledPeriod` | The report year of the last annual report recorded at the operator's check. A year that cannot be one of this LLC's report years is ignored. | `0` |
+| `lastFiledPeriod` | The report year of the last annual report recorded at the operator's check. A year that cannot be one of this company's report years is ignored. | `0` |
 | `lastFiledAt` | The date that report was filed, when it was recorded. | `""` |
 | `lastFiledConfirmedBy` | `operator` when a Novi operator saw that report on the registry. | `""` |
 | `nextDue` | The next annual report's due date: reports are due on the first day of the formation month, every year from the year after formation. A report due today is not yet late. | `""` |
@@ -401,7 +404,7 @@ if (!valid) throw new Error("not a valid statement");
 console.log(answer.statement.message.standing);
 ```
 
-A signature covers values, not how they are written: viem also accepts `"042"` for agent 42, or an address in lower case, under the same signature. So one signature can verify over more than one text: never use the text of a message as its identity. The reference verifier, `verifyPublicStatement` in [publicStatement.ts](https://github.com/jb1011/Project-Alpha/blob/main/back/backend/src/legalBody/publicStatement.ts), in Novi's public repository, refuses every spelling but the one the answers use. It also accepts only the canonical signature, the form the answers carry: lower-case hex, a low `s` (at most half the order of secp256k1) and `v` 27 or 28. viem alone accepts other spellings of the same signature too, so never use a signature's text as an identity either.
+A signature covers values, not how they are written: viem also accepts `"042"` for agent 42, or an address in lower case, under the same signature. So one signature can verify over more than one text: never use the text of a message as its identity. The reference verifier, `verifyPublicStatement` in [publicStatement.ts](https://github.com/jb1011/Novi-Corpus/blob/main/back/backend/src/legalBody/publicStatement.ts), in Novi's public repository, refuses every spelling but the one the answers use. It also accepts only the canonical signature, the form the answers carry: lower-case hex, a low `s` (at most half the order of secp256k1) and `v` 27 or 28. viem alone accepts other spellings of the same signature too, so never use a signature's text as an identity either.
 
 ## Contract accounts
 
@@ -415,8 +418,8 @@ When a statement you verified reads `active`, say:
 
 > a registered legal body stands behind this address, and Novi states its standing as active
 
-(asked by agent: "this agent"). Show `pending`, `unknown` and `inactive` as they are, and say that a `sandbox` statement is a test. Never "verified company", "KYC", "licensed", "human-backed" or "good standing".
+(asked by agent: "this agent"). Show `pending`, `unknown` and `inactive` as they are, and say that a `sandbox` statement is a test. Never say more than that sentence: it does not vouch for the company's finances, its filings with the state, or the identity of anyone behind it.
 
 ## Attestors
 
-Each deployment's attestor address is listed here once it is published. None is listed yet: take the attestor from the ENS record (step 1 of [How to verify](#how-to-verify)).
+Attestors: listed at mainnet go-live, on [Attestors and pinned addresses](/check/attestors/). Until then, take the attestor from the ENS record (step 1 of [How to verify](#how-to-verify)).
