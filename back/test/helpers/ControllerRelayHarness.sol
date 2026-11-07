@@ -107,10 +107,10 @@ abstract contract ControllerRelayHarness is Test {
     /// @dev The legal-body factory ceremony, pins first, then grants: pin every selector to the
     ///      factory first, then grant it to the executor.
     function _minimalCeremony(address factory_) internal {
-        bytes4[] memory s = ControllerSelectors.minimalGrants();
+        (bytes4[] memory s, address[] memory t) = ControllerSelectors.minimalPins(factory_);
         for (uint256 i = 0; i < s.length; i++) {
             vm.prank(admin);
-            controller.setBoundTarget(s[i], factory_);
+            controller.setBoundTarget(s[i], t[i]);
         }
         for (uint256 i = 0; i < s.length; i++) {
             vm.prank(admin);
