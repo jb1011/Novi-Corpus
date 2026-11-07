@@ -66,6 +66,12 @@ function makeConfig(over: Partial<Config> = {}): Config {
     platformOutflowCeiling: 200_000_000n,
     walletProviderDefault: "turnkey" as const,
     platformOutflowWindowMs: 86_400_000,
+    identity: {
+      reverifyYears: 3,
+      unusedRetentionDays: 365,
+      failedRetentionDays: 30,
+      blockedCountries: new Set(["CUB", "IRN", "PRK"]),
+    },
     ...over,
   };
 }

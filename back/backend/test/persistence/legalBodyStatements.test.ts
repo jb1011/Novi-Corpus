@@ -12,13 +12,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { type Address, getAddress, zeroAddress } from "viem";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, expectTypeOf, test, vi } from "vitest";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { type Deployment, LegalBodyInputError } from "../../src/persistence/legalBodyRepository";
 import {
   type NewStatementRecord,
   SqliteLegalBodyStatementRepository,
   type StatementEvidence,
+  type StatementRecord,
 } from "../../src/persistence/legalBodyStatementRepository";
 import { ANVIL_ACCOUNT_2, CHAIN_ID, FACTORY } from "../helpers/customerCompanyFixtures";
 import {
@@ -42,6 +43,7 @@ const EVIDENCE: StatementEvidence = {
   revocationEventId: null,
   companyStatus: "ready",
   humanVerified: true,
+  identityVerified: true,
 };
 
 let db: Database.Database;
@@ -182,9 +184,10 @@ describe("appendIfChanged", () => {
     });
   });
 
-  test("the evidence round-trips with numbers as numbers, stored as exactly its four fields", () => {
-    // A wider object, its keys in another order: only the four fields are stored, in one order.
+  test("the evidence round-trips with numbers as numbers, stored as exactly its five fields", () => {
+    // A wider object, its keys in another order: only the five fields are stored, in one order.
     const wider = {
+      identityVerified: true,
       humanVerified: false,
       companyName: "Example Holdings LLC",
       filingNumber: "TEST-0001",
@@ -196,7 +199,7 @@ describe("appendIfChanged", () => {
       true,
     );
     expect(db.prepare("SELECT evidence FROM statement_log").pluck().get()).toBe(
-      '{"checkId":12,"revocationEventId":3,"companyStatus":"draft","humanVerified":false}',
+      '{"checkId":12,"revocationEventId":3,"companyStatus":"draft","humanVerified":false,"identityVerified":true}',
     );
     const evidence = log.latest(bodyId)?.evidence;
     expect(evidence).toEqual({
@@ -204,6 +207,7 @@ describe("appendIfChanged", () => {
       revocationEventId: 3,
       companyStatus: "draft",
       humanVerified: false,
+      identityVerified: true,
     });
     expect(typeof evidence?.checkId).toBe("number");
     expect(typeof evidence?.revocationEventId).toBe("number");
@@ -214,6 +218,7 @@ describe("appendIfChanged", () => {
       revocationEventId: null,
       companyStatus: "abandoned",
       humanVerified: true,
+      identityVerified: false,
     };
     expect(log.appendIfChanged(record({ legalBodyId: otherBodyId, evidence: none }))).toBe(true);
     expect(log.latest(otherBodyId)?.evidence).toEqual(none);
@@ -235,6 +240,10 @@ describe("appendIfChanged", () => {
       { ...EVIDENCE, humanVerified: "true" },
       { ...EVIDENCE, humanVerified: 1 },
       { ...EVIDENCE, humanVerified: null },
+      { ...EVIDENCE, identityVerified: "true" },
+      { ...EVIDENCE, identityVerified: 1 },
+      { ...EVIDENCE, identityVerified: null },
+      { ...EVIDENCE, identityVerified: undefined },
     ];
     for (const evidence of bad)
       expect(
@@ -338,6 +347,20 @@ describe("the database guards the log against raw SQL", () => {
       )
       .run(row);
   }
+
+  test("a row logged before identityVerified was added reads without it, and the type says it may be absent", () => {
+    const { identityVerified: _absent, ...logged } = EVIDENCE;
+    expect(rawInsert({ evidence: JSON.stringify(logged) }).changes).toBe(1);
+
+    const evidence = log.latest(bodyId)?.evidence;
+    expect(evidence).toEqual(logged);
+    expect(evidence).not.toHaveProperty("identityVerified");
+    // What is read may lack the key; what is written must hold it.
+    expectTypeOf<StatementRecord["evidence"]["identityVerified"]>().toEqualTypeOf<
+      boolean | undefined
+    >();
+    expectTypeOf<StatementEvidence["identityVerified"]>().toEqualTypeOf<boolean>();
+  });
 
   test("UPDATE, DELETE and an INSERT over an existing row abort", () => {
     log.appendIfChanged(record());

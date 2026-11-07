@@ -55,6 +55,7 @@ import { createCompany } from "../formation/company";
 import { newChainHeadCache } from "../formation/payment";
 import { formationSummary } from "../formation/status";
 import { HederaMirror } from "../hedera/mirror";
+import type { IdentityDeps } from "../identity/state";
 import { buildJobDeps } from "../jobs/composition";
 import { expireStaleCustomerCompanies } from "../legalBody/customerCompany";
 import { expireEvidenceBytes } from "../legalBody/evidence";
@@ -92,6 +93,7 @@ import { SqliteEntityRepository } from "../persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
+import { SqliteIdentityRepository } from "../persistence/identityRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
 import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
@@ -108,6 +110,8 @@ import { SqliteWorldStore } from "../persistence/worldStore";
 import { SqlitePilotCaseRepository } from "../pilot/casesRepository";
 import { pilotExplorerBase, pilotLookupBase } from "../pilot/views";
 import { usdToUnits } from "../policy/units";
+import { buildScheduledJobs } from "../scheduler/jobs";
+import { Scheduler } from "../scheduler/scheduler";
 import { externalRecordDeps } from "../trackRecord/sources";
 import type { Address } from "../types";
 import { TaskTracker } from "../util/taskTracker";
@@ -436,6 +440,19 @@ async function main() {
     console.warn(
       `⚠ Identity attestation step-up ENABLED (action ${worldId.cfg.attestAction}, min age ${worldId.attestMinAge})`,
     );
+  // The guardian identity record: World ID proves one real person; the identity check says who.
+  // Built wherever the PII key is set, since the names of record are encrypted under it. The
+  // testnet box has no PII key, because its doola block is in sandbox and a sandbox block refuses
+  // one (`config/env.ts`): it has no identity record, its `/world-id/me` answers the block with
+  // state `none`, and its doors are sandbox, where the check is skipped.
+  const identity: IdentityDeps | undefined = cfg.pii
+    ? {
+        repo: new SqliteIdentityRepository(db),
+        pii: cfg.pii,
+        reverifyYears: cfg.identity.reverifyYears,
+        blockedCountries: cfg.identity.blockedCountries,
+      }
+    : undefined;
   // A customer company door needs a verified human behind the guardian. On testnet nothing else
   // stops the doors being mounted with no World block, and then every one of them refuses.
   if (cfg.legalBodyFactory && !cfg.world && legalBodyEnvironment(cfg) === "sandbox")
@@ -612,6 +629,9 @@ async function main() {
           declarations: companyDeclarations,
           checks: companyChecks,
           world: worldId,
+          // The guardian identity record built above: on production an order requires a verified
+          // one, as the declared door does; a sandbox never reads it.
+          identity,
           chain: legalBodyChain,
           // The agreements, in the file store every other document is in.
           docStore,
@@ -681,6 +701,9 @@ async function main() {
           // deployment is worth nothing on another.
           factory: cfg.legalBodyFactory,
           environment: legalBodyEnvironment(cfg),
+          // The guardian identity record built above: on production the doors require a verified
+          // one and write the declarant's name from it; a sandbox never reads it.
+          identity,
           text: STATEMENT_OF_AUTHORITY,
           maxOpenPerTenant: cfg.formation?.byoMaxOpenPerTenant ?? DEFAULT_BYO_MAX_OPEN_PER_TENANT,
           // The switch of the payment config built above: charging, a new company lands `draft`.
@@ -875,6 +898,16 @@ async function main() {
       })
     : undefined;
 
+  /**
+   * THE IN-PROCESS SCHEDULER (src/scheduler): named periodic jobs, run inside this process so the
+   * box needs no cron line. Built only when the deployment registers at least one job; the
+   * identity sweep is registered only where the PII key is set, so the testnet box, which cannot
+   * hold the key, starts none.
+   */
+  const scheduledJobs = buildScheduledJobs(db, cfg);
+  const scheduler = scheduledJobs.length > 0 ? new Scheduler({}) : undefined;
+  for (const job of scheduledJobs) scheduler?.register(job);
+
   const jobDeps = buildJobDeps(cfg, db, repo, docStore, circleApi);
   // Credential-less boot: a deployment with no JOB_CLIENT_PRIVATE_KEY still starts, and jobs are
   // simply unavailable. Said out loud here because there is no jobs enable flag to hang a boot
@@ -1058,6 +1091,9 @@ async function main() {
           checks: companyChecks,
           declarations: companyDeclarations,
           world: worldId,
+          // The guardian identity record built above: on production the lookup by agent states,
+          // unsigned, whether it is verified; a sandbox never reads it.
+          identity,
           chain: legalBodyChain,
           // The order doors' deployment: this chain id and the factory the chain reads.
           deployment: { chainId: cfg.chainId, factory: legalBodyChain.factory },
@@ -1207,6 +1243,7 @@ async function main() {
     x402Demo,
     ens,
     worldId,
+    identity,
     agentBook,
     /**
      * The public legal-body lookup, `GET /legal-bodies/:address` (design 2026-09-10 D3).
@@ -1280,6 +1317,14 @@ async function main() {
     legalBodySweeper.start();
     console.log(`Legal-body sweeper started (every ${legalBodySweepMs}ms)`);
   }
+  // The scheduler after them: each job's first run starts 30 seconds after this, never on the
+  // boot path.
+  if (scheduler) {
+    scheduler.start();
+    console.log(
+      `Scheduler started: ${scheduledJobs.map((j) => `${j.name} every ${j.everyMs}ms`).join(", ")}`,
+    );
+  }
 
   // ── Unresolved TREASURY TRANSFERS at boot (gate N2), after the socket for the reason C4 gives.
   //
@@ -1320,7 +1365,10 @@ async function main() {
   if (shouldInstallSignalHandlers())
     installShutdownHandlers({
       sweeper: formationSweeper,
-      sweepers: legalBodySweeper ? [legalBodySweeper] : [],
+      sweepers: [
+        ...(legalBodySweeper ? [legalBodySweeper] : []),
+        ...(scheduler ? [scheduler] : []),
+      ],
       tasks: doolaTasks,
       server,
     });

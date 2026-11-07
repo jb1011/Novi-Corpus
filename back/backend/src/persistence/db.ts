@@ -1144,6 +1144,195 @@ const COMPANY_CHECKS_DDL = `
 `;
 
 /**
+ * THE GUARDIAN'S IDENTITY CHECKS (see `identityRepository.ts`): one row per attempt and one per
+ * operator decision taken on a row (an acceptance, a refusal, a revocation, a name correction), so
+ * the latest row of a tenant is its state and the rows before it say how it got there. Keyed by
+ * the account (`tenant_id`); the guardian action nullifier of the tenant's World row is stored
+ * beside it, nullable so World ID can become optional later without a migration.
+ *
+ * The names of record are the row's only personal data: each is AES-256-GCM ciphertext with its
+ * own IV, the three under one key id, as the SSN is in `formation_parties`, so a previous key is
+ * selected rather than trial-decrypted. `name_hmac` compares two records for the same person
+ * without decrypting either. The document, the selfie, the birth date and the document number are
+ * never stored.
+ *
+ * Append-only, because a record others rely on must keep what was decided, by whom and when: a
+ * decision is a new row naming the row it was taken on (`supersedes_check_id`). The no-delete,
+ * no-replace and next-id triggers are those of `company_checks`, and the no-replace guard relies
+ * on `CHECK (check_id > 0)` for the reason given there; `check_id` is the rowid and no other index
+ * is unique. The one UPDATE allowed is the erasure of the names (retention, identity design 9):
+ * the three ciphertexts set to NULL and `names_erased_at` set, once, on a row not erased yet, with
+ * every other column unchanged (the rowid, the IVs and the key id included), as
+ * `trg_company_declarations_erase_only` has it. Every other UPDATE aborts, one that changes nothing
+ * included, and a NULL compares as a change too, so `UPDATE OR REPLACE` cannot swap a column's
+ * default in for it. So an erased row still says what was checked, when, by whom and with what
+ * result, and still counts in the duplicate check; it no longer says who was checked.
+ *
+ * A passed row carries the facts a gate reads, and its names unless they were erased; a failed or
+ * revoked row keeps no names; a row that completed says when (CHECKs).
+ */
+const GUARDIAN_IDENTITY_CHECKS_DDL = `
+  CREATE TABLE IF NOT EXISTS guardian_identity_checks (
+    check_id              INTEGER PRIMARY KEY AUTOINCREMENT CHECK (check_id > 0),
+    nullifier             TEXT,
+    tenant_id             TEXT NOT NULL,
+    provider              TEXT NOT NULL CHECK (provider IN ('stripe', 'persona', 'sumsub', 'sandbox')),
+    provider_ref          TEXT NOT NULL,
+    subject               TEXT,
+    status                TEXT NOT NULL
+      CHECK (status IN ('started', 'passed', 'failed', 'needs_review', 'revoked')),
+    supersedes_check_id   INTEGER,
+    started_at            INTEGER NOT NULL,
+    completed_at          INTEGER,
+    expires_at            INTEGER,
+    name_first_ciphertext BLOB,
+    name_first_iv         BLOB,
+    name_last_ciphertext  BLOB,
+    name_last_iv          BLOB,
+    name_full_ciphertext  BLOB,
+    name_full_iv          BLOB,
+    name_key_id           TEXT,
+    name_hmac             TEXT,
+    names_erased_at       INTEGER,
+    document_country      TEXT CHECK (document_country IS NULL OR length(document_country) = 3),
+    document_type         TEXT CHECK (document_type IS NULL
+      OR document_type IN ('passport', 'identity_card', 'driving_licence')),
+    document_expired      INTEGER CHECK (document_expired IS NULL OR document_expired IN (0, 1)),
+    liveness              TEXT CHECK (liveness IS NULL OR liveness IN ('passed', 'failed', 'not_run')),
+    watchlist             TEXT CHECK (watchlist IS NULL OR watchlist IN ('clear', 'hit', 'not_run')),
+    review_reasons        TEXT CHECK (review_reasons IS NULL OR json_valid(review_reasons)),
+    environment           TEXT NOT NULL CHECK (environment IN ('sandbox', 'production')),
+    synthetic             INTEGER NOT NULL CHECK (synthetic IN (0, 1)),
+    operator              TEXT,
+    operator_os_user      TEXT,
+    created_at            TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (status != 'passed' OR (completed_at IS NOT NULL AND expires_at IS NOT NULL
+      AND document_country IS NOT NULL AND watchlist IS NOT NULL AND name_hmac IS NOT NULL
+      AND (names_erased_at IS NOT NULL OR name_first_ciphertext IS NOT NULL))),
+    CHECK (status NOT IN ('failed', 'revoked') OR name_first_ciphertext IS NULL),
+    CHECK (status NOT IN ('passed', 'failed', 'needs_review') OR completed_at IS NOT NULL)
+  );
+  CREATE INDEX IF NOT EXISTS idx_guardian_identity_checks_tenant
+    ON guardian_identity_checks(tenant_id, check_id);
+  CREATE INDEX IF NOT EXISTS idx_guardian_identity_checks_nullifier
+    ON guardian_identity_checks(nullifier) WHERE nullifier IS NOT NULL;
+  CREATE INDEX IF NOT EXISTS idx_guardian_identity_checks_hmac
+    ON guardian_identity_checks(name_hmac, document_country) WHERE name_hmac IS NOT NULL;
+
+  CREATE TRIGGER IF NOT EXISTS trg_guardian_identity_checks_erase_only
+  BEFORE UPDATE ON guardian_identity_checks FOR EACH ROW
+  WHEN NOT (OLD.names_erased_at IS NULL AND NEW.names_erased_at IS NOT NULL
+    AND NEW.name_first_ciphertext IS NULL AND NEW.name_last_ciphertext IS NULL
+    AND NEW.name_full_ciphertext IS NULL
+    AND NEW.check_id IS OLD.check_id
+    AND NEW.nullifier IS OLD.nullifier
+    AND NEW.tenant_id IS OLD.tenant_id
+    AND NEW.provider IS OLD.provider
+    AND NEW.provider_ref IS OLD.provider_ref
+    AND NEW.subject IS OLD.subject
+    AND NEW.status IS OLD.status
+    AND NEW.supersedes_check_id IS OLD.supersedes_check_id
+    AND NEW.started_at IS OLD.started_at
+    AND NEW.completed_at IS OLD.completed_at
+    AND NEW.expires_at IS OLD.expires_at
+    AND NEW.name_first_iv IS OLD.name_first_iv
+    AND NEW.name_last_iv IS OLD.name_last_iv
+    AND NEW.name_full_iv IS OLD.name_full_iv
+    AND NEW.name_key_id IS OLD.name_key_id
+    AND NEW.name_hmac IS OLD.name_hmac
+    AND NEW.document_country IS OLD.document_country
+    AND NEW.document_type IS OLD.document_type
+    AND NEW.document_expired IS OLD.document_expired
+    AND NEW.liveness IS OLD.liveness
+    AND NEW.watchlist IS OLD.watchlist
+    AND NEW.review_reasons IS OLD.review_reasons
+    AND NEW.environment IS OLD.environment
+    AND NEW.synthetic IS OLD.synthetic
+    AND NEW.operator IS OLD.operator
+    AND NEW.operator_os_user IS OLD.operator_os_user
+    AND NEW.created_at IS OLD.created_at)
+  BEGIN
+    SELECT RAISE(ABORT, 'guardian_identity_checks: only the erasure of names may update a row');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_guardian_identity_checks_no_delete
+  BEFORE DELETE ON guardian_identity_checks
+  BEGIN
+    SELECT RAISE(ABORT, 'guardian_identity_checks is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_guardian_identity_checks_no_replace
+  BEFORE INSERT ON guardian_identity_checks FOR EACH ROW
+  WHEN EXISTS (SELECT 1 FROM guardian_identity_checks WHERE check_id = NEW.check_id)
+  BEGIN
+    SELECT RAISE(ABORT, 'guardian_identity_checks is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_guardian_identity_checks_next_id
+  BEFORE INSERT ON guardian_identity_checks FOR EACH ROW
+  WHEN NEW.check_id > (SELECT IFNULL(MAX(check_id), 0) FROM guardian_identity_checks) + 1
+  BEGIN
+    SELECT RAISE(ABORT, 'guardian_identity_checks: ids are assigned in order');
+  END;
+`;
+
+/**
+ * THE AUDIT TRAIL of the identity checks: one row for each thing done to a check (recorded,
+ * accepted, refused, revoked, name corrected, names erased), with who did it (an operator's name,
+ * or `system`), when, and the reason code. It carries ids, codes and an operator's reason, never a
+ * person's name. Written in the same transaction as the check row it describes.
+ *
+ * A provider's webhook event is applied once: `(provider, provider_event_id)` is unique where the
+ * event id is set. The four triggers are those of `company_checks`, with one difference: the
+ * no-replace guard covers that key as well as the rowid, as `company_declarations` covers its
+ * digest. REPLACE deletes the row it collides with on any unique key without firing the delete
+ * guard, so a replayed provider event would otherwise remove the event already recorded. A replay
+ * is refused, never replaced: the caller looks the event up before it writes.
+ */
+const IDENTITY_CHECK_EVENTS_DDL = `
+  CREATE TABLE IF NOT EXISTS identity_check_events (
+    event_id          INTEGER PRIMARY KEY AUTOINCREMENT CHECK (event_id > 0),
+    check_id          INTEGER NOT NULL,
+    kind              TEXT NOT NULL CHECK (kind IN ('recorded', 'accepted', 'refused', 'revoked',
+                        'name_corrected', 'names_erased')),
+    at                INTEGER NOT NULL,
+    actor             TEXT NOT NULL,
+    actor_os_user     TEXT,
+    reason_code       TEXT,
+    reason            TEXT,
+    provider          TEXT,
+    provider_event_id TEXT,
+    created_at        TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_identity_check_events_check
+    ON identity_check_events(check_id, event_id);
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_check_events_provider_event
+    ON identity_check_events(provider, provider_event_id) WHERE provider_event_id IS NOT NULL;
+
+  CREATE TRIGGER IF NOT EXISTS trg_identity_check_events_no_update
+  BEFORE UPDATE ON identity_check_events
+  BEGIN
+    SELECT RAISE(ABORT, 'identity_check_events is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_identity_check_events_no_delete
+  BEFORE DELETE ON identity_check_events
+  BEGIN
+    SELECT RAISE(ABORT, 'identity_check_events is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_identity_check_events_no_replace
+  BEFORE INSERT ON identity_check_events FOR EACH ROW
+  WHEN EXISTS (SELECT 1 FROM identity_check_events
+                WHERE event_id = NEW.event_id
+                   OR (provider = NEW.provider AND provider_event_id = NEW.provider_event_id))
+  BEGIN
+    SELECT RAISE(ABORT, 'identity_check_events is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_identity_check_events_next_id
+  BEFORE INSERT ON identity_check_events FOR EACH ROW
+  WHEN NEW.event_id > (SELECT IFNULL(MAX(event_id), 0) FROM identity_check_events) + 1
+  BEGIN
+    SELECT RAISE(ABORT, 'identity_check_events: ids are assigned in order');
+  END;
+`;
+
+/**
  * An agentId in the one spelling `legal_bodies` stores it (whose CHECK writes the same rule
  * inline): TEXT with no hidden bytes, decimal digits only, no leading zero except '0' itself, at
  * most 78 digits (the width of a uint256).
@@ -1643,6 +1832,9 @@ export function migrate(db: Database.Database): void {
     -- A customer's declaration of an existing company, and the operator's checks of it.
     ${COMPANY_DECLARATIONS_DDL}
     ${COMPANY_CHECKS_DDL}
+    -- The guardian's identity checks, and the trail of everything done to them.
+    ${GUARDIAN_IDENTITY_CHECKS_DDL}
+    ${IDENTITY_CHECK_EVENTS_DDL}
 
     -- Anchor cycles: one row PER MANIFEST VERSION. Deliberately NOT keyed like bridge_legs
     -- (entity, step) — a bridge has exactly one of each leg, whereas an entity accumulates

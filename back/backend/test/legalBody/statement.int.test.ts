@@ -297,6 +297,8 @@ function deploy(opts: DeployOptions = {}): Deployment {
     declarations,
     checks,
     world,
+    // A sandbox: the guardian identity record is never read, and the testnet box holds none.
+    identity: undefined,
     chain,
     docStore,
     deployment,
@@ -351,6 +353,8 @@ function deploy(opts: DeployOptions = {}): Deployment {
     checks,
     declarations,
     world,
+    // A sandbox: the guardian identity record is never read, and the testnet box holds none.
+    identity: undefined,
     chain,
     deployment,
     identityRegistry: stack.registry,

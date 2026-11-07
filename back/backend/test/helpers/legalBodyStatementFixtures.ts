@@ -305,7 +305,8 @@ function bodyOf(row: LegalBodyRecord): {
 }
 
 /** The statement service over these stores and this chain: a sandbox deployment, World ID wired
- *  over the stores' World store, the test attestor, and the fixed clock. */
+ *  over the stores' World store, no identity record (as on the testnet box, which holds no PII
+ *  key), the test attestor, and the fixed clock. */
 export function statementDeps(
   s: StatementStores,
   chain: StatementChainPort,
@@ -318,6 +319,7 @@ export function statementDeps(
     checks: s.checks,
     declarations: s.declarations,
     world: worldFor(s.store),
+    identity: undefined,
     chain,
     deployment: { chainId: CHAIN_ID, factory: FACTORY },
     identityRegistry: REGISTRY,

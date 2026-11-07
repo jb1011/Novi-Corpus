@@ -42,6 +42,7 @@ import {
   CHAIN_ID,
   FACTORY,
   FORMATION_PROVIDER,
+  everyGuardianVerified,
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
 import { MemoryDocumentStore } from "../helpers/formationFakes";
@@ -230,7 +231,12 @@ describe("createOrder", () => {
     const theirs = company(otherTenant, { filingNumber: "TEST-0002" });
     const unchecked = company(tenant, { checks: [], filingNumber: "TEST-0003" });
     const ofUnverified = company(unverified, { filingNumber: "TEST-0004" });
-    const production = orderDeps({ environment: "production" });
+    // Every guardian's identity is verified here: the record is not this test's subject (it is
+    // test/legalBody/ordersIdentity.test.ts's), so a verified guardian reaches the wording.
+    const production = orderDeps({
+      environment: "production",
+      identity: everyGuardianVerified(Date.now),
+    });
 
     // 1. A real human: before the wording, on a production deployment too.
     refused(

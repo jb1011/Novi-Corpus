@@ -77,9 +77,9 @@ import {
 const owner = ANVIL_ACCOUNT_2;
 const second = ANVIL_ACCOUNT_3;
 
-/** A declaration as a production caller sends it: its declarant typed, and no synthetic flag. */
+/** A declaration as a production caller sends it: its declarant's title typed, the name left to
+ *  the identity record, and no synthetic flag. */
 const PRODUCTION_TYPED: CustomerStatementInput = {
-  declarantName: "Ada Example",
   declarantTitle: "Manager",
   companyName: "Example Holdings LLC",
   filingNumber: "EX-0001",

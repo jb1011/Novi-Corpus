@@ -2,6 +2,7 @@ import type { Address, Hex } from "viem";
 import type { LegalBodyChainPort } from "../adapters/arc/legalBodyChain";
 import { type WorldIdDeps, assertRealHuman } from "../api/routes/worldId";
 import { ApiError } from "../errors";
+import { type IdentityDeps, assertIdentityVerified } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
@@ -48,6 +49,9 @@ export interface LegalBodyOrderDeps {
   declarations: CompanyDeclarationRepository;
   checks: CompanyCheckRepository;
   world: WorldIdDeps | undefined;
+  /** The guardian identity record. Production requires a verified one before an order is written
+   *  (absent there, the order door answers 503 `identity_unavailable`); a sandbox never reads it. */
+  identity: IdentityDeps | undefined;
   chain: LegalBodyChainPort;
   docStore: DocumentStore;
   /** The factory and chain new orders are made for, and the only ones an action may touch. */
@@ -245,6 +249,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * Orders a legal body for a company of the tenant, in this order:
  *  1. a real human: a verified credential, never a waiver;
+ *  1b. on production, a verified guardian identity record (`assertIdentityVerified`), the record
+ *     the declared door holds the guardian to: World ID proves one real person; the identity
+ *     check says who. A sandbox reads nothing here;
  *  2. the agreement's wording can be served (a production deployment refuses a draft);
  *  3. the company is the tenant's (one 404 for unknown and not-yours) and eligible;
  *  4. the agreement is built, before anything is written. It names the company by the declared
@@ -263,6 +270,9 @@ export function createOrder(
 
   // 1.
   assertRealHuman(deps.world, tenantId, deps.environment);
+
+  // 1b.
+  assertIdentityVerified(deps.identity, deps.world, tenantId, deps.environment);
 
   // 2.
   try {

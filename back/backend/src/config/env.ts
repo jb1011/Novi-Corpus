@@ -3,7 +3,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import { arcTestnet } from "../chains";
-import { parsePiiKey } from "../formation/pii";
+import { type PiiKeyring, parseNameHmacKey, parsePiiKey } from "../formation/pii";
 import { usdToUnits } from "../policy/units";
 import type { Address, Hex } from "../types";
 
@@ -410,6 +410,26 @@ const EnvSchema = z.object({
   /** The PREVIOUS key, during a rotation window only. Rows name the key they were written with,
    *  so this one is SELECTED for the rows that need it, never trial-decrypted. */
   FORMATION_PII_KEY_PREVIOUS: z.string().optional(),
+
+  // --- THE GUARDIAN IDENTITY RECORD (trust-and-access T-A, PR 1). ---------------------------
+  /**
+   * The name fingerprint's own secret: 32 bytes written as 64 hex characters (`openssl rand -hex
+   * 32`). The duplicate check compares a keyed digest of each name under it. REQUIRED whenever
+   * `FORMATION_PII_KEY` is set, and never rotated: a name keeps one digest for the life of the
+   * record, so a rotation of the PII key hides no duplicate. A secret: masked by redact().
+   */
+  IDENTITY_NAME_HMAC_KEY: z.string().optional(),
+  /** Years a passed identity check stays valid before the guardian verifies again. */
+  IDENTITY_REVERIFY_YEARS: z.coerce.number().int().min(1).max(10).default(3),
+  /** Days a passed check's names are kept when its tenant never forms or declares a company. */
+  IDENTITY_UNUSED_RETENTION_DAYS: z.coerce.number().int().min(30).default(365),
+  /** Days the names of a superseded or abandoned check are kept before they are erased. */
+  IDENTITY_FAILED_RETENTION_DAYS: z.coerce.number().int().min(1).default(30),
+  /** Document countries a check is never verified for without review: comma-separated ISO
+   *  3166-1 alpha-3 codes, upper case. Parsed by `parseCountryList`. An empty value
+   *  (`SCREENING_BLOCKED_COUNTRIES=` with nothing after it) is refused on purpose, so the list
+   *  cannot be cleared by accident. */
+  SCREENING_BLOCKED_COUNTRIES: z.string().default("CUB,IRN,PRK"),
 
   // --- FORMATION PAYMENTS (2026-08-26 §6; B1). Built now, shipped OFF. -----------------------
   /**
@@ -1007,6 +1027,23 @@ export interface Config {
       settleGraceMs: number;
     };
   };
+  /**
+   * The PII keyring, parsed ONCE from FORMATION_PII_KEY and FORMATION_PII_KEY_PREVIOUS; absent
+   * when no key is configured. `formation.pii` is this same object. The guardian identity record
+   * encrypts names under it, so it is not formation's alone.
+   */
+  pii?: PiiKeyring;
+  /** The guardian identity record's settings. */
+  identity: {
+    reverifyYears: number;
+    unusedRetentionDays: number;
+    failedRetentionDays: number;
+    /** ISO 3166-1 alpha-3, upper case. */
+    blockedCountries: Set<string>;
+    /** The name fingerprint's secret, parsed ONCE from IDENTITY_NAME_HMAC_KEY (32 bytes); absent
+     *  when it is not set, which the boot refuses whenever the PII key is set. */
+    nameHmacKey?: Buffer;
+  };
 }
 
 /** Hedera rail (design 2026-09-10), narrowed to present-and-whole. */
@@ -1037,6 +1074,24 @@ function parseAddressList(raw: string | undefined, varName: string): Address[] {
       throw new Error(`Invalid config: ${varName} contains "${s}" — must be a 0x address`);
     return getAddress(s) as Address;
   });
+}
+
+/**
+ * "CUB,IRN,PRK" -> a set of ISO 3166-1 alpha-3 codes. THROWS on an entry that is not three
+ * upper-case letters rather than skipping it or upper-casing it: this is a screening list, and a
+ * typo that silently drops a country would let a check through that should have gone to review.
+ */
+function parseCountryList(raw: string, varName: string): Set<string> {
+  return new Set(
+    raw.split(",").map((entry) => {
+      const s = entry.trim();
+      if (!/^[A-Z]{3}$/.test(s))
+        throw new Error(
+          `Invalid config: ${varName} contains "${s}" — each entry must be an ISO 3166-1 alpha-3 code in upper case, comma-separated`,
+        );
+      return s;
+    }),
+  );
 }
 
 /** The one definition of "this deployment can provision Turnkey vaults": core turnkey config plus
@@ -1204,6 +1259,18 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           baseUrl: e.DOOLA_BASE_URL ?? DOOLA_BASE_URLS[e.DOOLA_ENVIRONMENT],
         }
       : undefined;
+
+  // The PII keyring (§4.2), PARSED once here, so a malformed key names its variable at boot
+  // rather than throwing at the first filing. `cfg.pii` and `cfg.formation.pii` are this one
+  // object. `_PREVIOUS` alone is refused below: it would be a rotation with nothing to rotate to.
+  const pii = e.FORMATION_PII_KEY
+    ? {
+        current: parsePiiKey(e.FORMATION_PII_KEY, "FORMATION_PII_KEY"),
+        previous: e.FORMATION_PII_KEY_PREVIOUS
+          ? parsePiiKey(e.FORMATION_PII_KEY_PREVIOUS, "FORMATION_PII_KEY_PREVIOUS")
+          : undefined,
+      }
+    : undefined;
 
   const cfg = {
     rpcUrl: e.ARC_TESTNET_RPC_URL,
@@ -1394,17 +1461,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         e.DOOLA_ENVIRONMENT === "sandbox",
         "FORMATION_SANDBOX_SYNTHETIC_PII",
       ),
-      // PARSED here (§4.2), so a malformed key names its variable at boot rather than throwing
-      // at the first filing. `_PREVIOUS` alone is refused below: it would be a rotation with
-      // nothing to rotate to.
-      pii: e.FORMATION_PII_KEY
-        ? {
-            current: parsePiiKey(e.FORMATION_PII_KEY, "FORMATION_PII_KEY"),
-            previous: e.FORMATION_PII_KEY_PREVIOUS
-              ? parsePiiKey(e.FORMATION_PII_KEY_PREVIOUS, "FORMATION_PII_KEY_PREVIOUS")
-              : undefined,
-          }
-        : undefined,
+      // The keyring parsed above: the same object as `cfg.pii`.
+      pii,
       payment: {
         // FALSE unless explicitly set — unlike `required`/`sandboxSyntheticPii`, nothing derives
         // it. Charging for something is a decision an operator makes in as many words.
@@ -1427,6 +1485,20 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         quoteTtlMs: e.FORMATION_QUOTE_TTL_MS,
         settleGraceMs: e.FORMATION_SETTLE_GRACE_MS,
       },
+    },
+    pii,
+    identity: {
+      reverifyYears: e.IDENTITY_REVERIFY_YEARS,
+      unusedRetentionDays: e.IDENTITY_UNUSED_RETENTION_DAYS,
+      failedRetentionDays: e.IDENTITY_FAILED_RETENTION_DAYS,
+      blockedCountries: parseCountryList(
+        e.SCREENING_BLOCKED_COUNTRIES,
+        "SCREENING_BLOCKED_COUNTRIES",
+      ),
+      // Parsed here, once, so a malformed secret names its variable at boot.
+      nameHmacKey: e.IDENTITY_NAME_HMAC_KEY
+        ? parseNameHmacKey(e.IDENTITY_NAME_HMAC_KEY, "IDENTITY_NAME_HMAC_KEY")
+        : undefined,
     },
   };
 
@@ -1610,6 +1682,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         `Invalid config: ${because} requires WORLD_MAX_COMPANIES_PER_HUMAN — an unbounded per-human filing count is how one verified human buys a hundred LLCs`,
       );
   }
+  // The guardian identity record encrypts the guardian's names under the PII keyring, and on
+  // mainnet the identity gate is on whenever the legal-body feature is. BEFORE the doola check
+  // below, deliberately: a mainnet box always has doola in production, so that check would
+  // otherwise always answer first and name only the SSN.
+  if (legalBodyEnvironment(cfg) === "production" && cfg.legalBodyFactory && !cfg.pii)
+    throw new Error(
+      "Invalid config: a mainnet deployment with LEGAL_BODY_FACTORY_ADDRESS requires FORMATION_PII_KEY: the guardian identity record encrypts names under it",
+    );
   if (cfg.doola?.environment === "production") {
     // ── THE PII KEY (2026-08-26 §4.2) ────────────────────────────────────────────────────────
     //
@@ -1810,6 +1890,13 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (cfg.formation.pii && cfg.doola && cfg.doola.environment !== "production")
     throw new Error(
       "Invalid config: FORMATION_PII_KEY is set with DOOLA_ENVIRONMENT=sandbox — a sandbox deployment refuses the SSN field outright and has nothing to encrypt (unset it, or set DOOLA_ENVIRONMENT=production if this box really files for real people)",
+    );
+  // A box with the PII key can hold identity records, and their duplicate check compares the
+  // name's fingerprint under its own secret. AFTER the sandbox check above, deliberately: a PII
+  // key on a sandbox box is the more fundamental mistake, and the operator hears it first.
+  if (cfg.pii && cfg.identity.nameHmacKey === undefined)
+    throw new Error(
+      "Invalid config: IDENTITY_NAME_HMAC_KEY is required with FORMATION_PII_KEY: the identity record's duplicate check uses it",
     );
 
   // ARC_NETWORK vs ARC_CHAIN_ID (design §2). Two knobs describe ONE network, and nothing else
@@ -2018,6 +2105,16 @@ function rpcOrigin(url: string): string {
   }
 }
 
+/** A keyring as the boot log may print it: the key ids, never the key material. */
+function redactKeyring(ring: PiiKeyring | undefined) {
+  return ring
+    ? {
+        current: { id: ring.current.id, key: "REDACTED" },
+        previous: ring.previous ? { id: ring.previous.id, key: "REDACTED" } : undefined,
+      }
+    : undefined;
+}
+
 /**
  * Safe-to-log view: secrets replaced with "REDACTED".
  * WARNING: this spreads all Config fields. If you add a NEW secret field to Config,
@@ -2101,15 +2198,21 @@ export function redact(cfg: Config): Record<string, unknown> {
             submitterKey: cfg.formation.payment.submitterKey ? "REDACTED" : undefined,
           }
         : undefined,
-      pii: cfg.formation?.pii
-        ? {
-            current: { id: cfg.formation.pii.current.id, key: "REDACTED" },
-            previous: cfg.formation.pii.previous
-              ? { id: cfg.formation.pii.previous.id, key: "REDACTED" }
-              : undefined,
-          }
-        : undefined,
+      pii: redactKeyring(cfg.formation?.pii),
     },
+    // The same keyring at the top level (`cfg.pii` is the object `formation.pii` points at), so
+    // the same rule: the ids survive, the key material never does.
+    pii: redactKeyring(cfg.pii),
+    // A `Set` serializes to `{}`: printed as a sorted array, so the boot log shows the list.
+    // Guarded because test fixtures cast partial Config literals.
+    // The fingerprint secret is key material, never a log line.
+    identity: cfg.identity
+      ? {
+          ...cfg.identity,
+          blockedCountries: [...cfg.identity.blockedCountries].sort(),
+          nameHmacKey: cfg.identity.nameHmacKey ? "REDACTED" : undefined,
+        }
+      : undefined,
     ens: cfg.ens ? { ...cfg.ens, signerKey: "REDACTED" } : undefined,
     world: cfg.world ? { ...cfg.world, rpSigningKey: "REDACTED" } : undefined,
     // The attestation key is key material, never a log line. Its address is public and stays.

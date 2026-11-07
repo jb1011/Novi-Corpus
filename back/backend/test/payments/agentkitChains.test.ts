@@ -169,6 +169,12 @@ function makeConfig(over: Partial<Config> = {}): Config {
       environment: "sandbox" as const,
       attestMinAge: 18,
     },
+    identity: {
+      reverifyYears: 3,
+      unusedRetentionDays: 365,
+      failedRetentionDays: 30,
+      blockedCountries: new Set(["CUB", "IRN", "PRK"]),
+    },
     ...over,
   };
 }

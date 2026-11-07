@@ -55,6 +55,7 @@ const MAINNET = {
   DOOLA_API_KEY: "dk_live_key",
   DOOLA_WEBHOOK_SECRET: "whsec_live",
   FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+  IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
 };
 
 /** The same deployment, charging: somewhere to be paid and a dedicated settle submitter. */

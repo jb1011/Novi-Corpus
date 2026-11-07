@@ -35,6 +35,7 @@ import {
   ANVIL_ACCOUNT_2,
   APPROVED,
   CHAIN_ID,
+  DECLARANT_OF_RECORD,
   FACTORY,
   customerCompanyDeps,
   recordHuman,
@@ -131,14 +132,14 @@ async function ownerCompany(): Promise<{ companyId: string; control: Hex }> {
   const nowMs = Date.now();
   recordHuman(store, owner.address, "1001", nowMs);
   const issuedAt = BigInt(Math.floor(nowMs / 1000));
+  // The declarant's name is not typed: the door writes it from the guardian's identity record.
   const typed = {
-    declarantName: "Ada Example",
     declarantTitle: "Sole Example Manager",
     companyName: "Example Holdings LLC",
     filingNumber: "TEST-0001",
   };
   const message = buildStatementMessage(
-    { ...typed, jurisdiction: "WY", guardian: owner.address },
+    { ...typed, declarantName: DECLARANT_OF_RECORD, jurisdiction: "WY", guardian: owner.address },
     APPROVED,
     issuedAt,
   );
