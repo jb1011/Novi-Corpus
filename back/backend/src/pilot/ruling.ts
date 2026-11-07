@@ -2,10 +2,9 @@ import type { DisputeRead } from "../adapters/kleros/disputeService";
 import { KlerosHttpError, KlerosTransportError } from "../adapters/kleros/errors";
 import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { opsLog } from "../observability/opsLog";
-import { publicErrorMessage } from "../workflow/publicError";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage } from "./composition";
-import { withoutEmDash } from "./job";
+import { klerosTextOf } from "./klerosCheck";
 import type { PilotCaseRecord, PilotStatus } from "./types";
 
 /**
@@ -188,11 +187,13 @@ function readableRow(
  * One read with the row's `kleros_chain`, never a config value, written to the row's ruling
  * columns with the time of the read. Advances `filed` or `evidence_unknown` to `ruled` when the
  * outcome is final (pay, refund, refused, or a tie at Executed). On a row already ruled, a read
- * that is neither final nor an appeal keeps the stored ruling: only the time, the period and the
- * deadline are written, with an event naming the outcome. An appeal is written in full. A rehearsal row at ruled is refused. Refuses,
- * before any request, a
- * row of another mode than the stage's, a row without a chain or a dispute id, a row at another
- * status, and a row whose chain is not the one the stage's service reads.
+ * that is neither final nor an appeal keeps the stored ruling: only the period and the deadline
+ * are written, with an event naming the outcome. The time of the read is not written, because a
+ * settle trusts a stored ruling for ten minutes after that time and a read that failed the
+ * options check must not renew the trust. An appeal is written in full. A rehearsal row at ruled
+ * is refused. Refuses, before any request, a row of another mode than the stage's, a row without
+ * a chain or a dispute id, a row at another status, and a row whose chain is not the one the
+ * stage's service reads.
  */
 export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult> {
   const now = d.now ?? Date.now;
@@ -226,7 +227,6 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   const written: Partial<PilotCaseRecord> = keepRuling
     ? {
         rulingStatus: patch.rulingStatus,
-        rulingReadAt: patch.rulingReadAt,
         rulingDeadline: patch.rulingDeadline,
       }
     : patch;
@@ -279,8 +279,9 @@ const AUTH_REFUSED: ReadonlySet<number> = new Set([401, 403]);
 /**
  * Reads until the outcome is anything but `pending`, or until `maxMinutes` have passed on the
  * injected clock, then stops with the last outcome. A transport or HTTP error is written as the
- * ops line `pilot_poll_read_failed` and the watch goes on, up to `MAX_FAILED_READS_IN_A_ROW` in
- * a row; any other error, a refusal included, escapes. An HTTP 401 or 403 stops the watch at
+ * ops line `pilot_poll_read_failed` and a `read_failed` event on the case's trail, and the watch
+ * goes on, up to `MAX_FAILED_READS_IN_A_ROW` in a row; any other error, a refusal included,
+ * escapes. An HTTP 401 or 403 stops the watch at
  * once with the reason `auth_refused`. A stop at the cap, on failing reads or on a refused key
  * writes the ops line `pilot_poll_capped` with its reason. `reads` counts every request, failed
  * ones included. `onRead` sees every read that answered, as it is taken.
@@ -317,14 +318,23 @@ export async function pollUntilRuled(
       r = await pollOnce(d, caseId);
     } catch (e) {
       if (!(e instanceof KlerosTransportError || e instanceof KlerosHttpError)) throw e;
+      // The service's own words, redacted: a failed read is Kleros's answer, not the platform's.
+      const text = klerosTextOf(e);
+      d.cases.recordEvent(
+        caseId,
+        "ruling",
+        "read_failed",
+        d.cases.find(caseId)?.coreDisputeId ?? null,
+        text,
+      );
       if (e instanceof KlerosHttpError && AUTH_REFUSED.has(e.status))
-        return capped("auth_refused", withoutEmDash(publicErrorMessage(e)));
+        return capped("auth_refused", text);
       failedInARow++;
       opsLog("pilot_poll_read_failed", {
         caseId,
         reads,
         failedInARow,
-        error: withoutEmDash(publicErrorMessage(e)),
+        error: text,
       });
       if (failedInARow > MAX_FAILED_READS_IN_A_ROW) return capped("reads_failing");
       if (now() - start >= capMs) return capped("max_minutes");

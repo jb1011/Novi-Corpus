@@ -1,4 +1,4 @@
-import { type Hex, TransactionReceiptNotFoundError, toHex } from "viem";
+import { type Hex, TransactionReceiptNotFoundError, formatUnits, toHex } from "viem";
 import type { JobAdapter } from "../adapters/arc/jobAdapter";
 import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { ChainTxRevertedError, ChainTxUnconfirmedError } from "../errors";
@@ -56,6 +56,20 @@ export const EXPIRY_MARGIN_SECONDS = 600;
 /** A stored ruling read older than this is read again before the referee acts on it. */
 const RULING_FRESH_SECONDS = 600;
 
+/**
+ * The least native token the referee must hold to send its transaction: 0.1. The native token on
+ * Arc is USDC with 18 decimals, so this is a tenth of a dollar, enough for many transactions at
+ * the fee the network charges and far above a dust balance that could not pay for one.
+ */
+export const MIN_GAS_WEI = 10n ** 17n;
+
+/**
+ * How far past the escrow's `expiredAt` the box's clock must be before a `claimRefund` is
+ * decided. The box's clock is compared with chain time, and the two can differ by a little: a
+ * box clock that runs ahead would otherwise send a refund the contract still refuses.
+ */
+export const REFUND_CLOCK_MARGIN_SECONDS = 60n;
+
 /** The Kleros dispute id as a 32-byte number: the `reason` of `complete` and `reject`, readable
  *  on the explorer. */
 export function reasonFor(coreDisputeId: string): Hex {
@@ -66,7 +80,7 @@ const isoOf = (unixSeconds: bigint | number) => new Date(Number(unixSeconds) * 1
 
 function notYetExpired(expiredAt: bigint): Error {
   return new Error(
-    `refusing: the job expires at ${isoOf(expiredAt)}; no claimRefund before then, and nothing was sent`,
+    `refusing: the job expires at ${isoOf(expiredAt)}; no claimRefund until ${REFUND_CLOCK_MARGIN_SECONDS} seconds after that, a margin for the difference between this box's clock and chain time, and nothing was sent`,
   );
 }
 
@@ -96,7 +110,8 @@ const WAIT_FOR: Record<Exclude<RulingOutcome["kind"], "pay" | "refund">, NoActio
  * job with a pay or refund ruling is acted on, and not in the last ten minutes.
  *
  * `nowSeconds` and the escrow's `expiredAt` are unix seconds; the contract's `claimRefund` needs
- * the clock strictly past `expiredAt`. `coreDisputeId` gives the reason of a `complete` or a
+ * the clock strictly past `expiredAt`, and the decision waits a further
+ * `REFUND_CLOCK_MARGIN_SECONDS`. `coreDisputeId` gives the reason of a `complete` or a
  * `reject`. `claimRefundOnly` takes the expiry path and throws before the expiry.
  */
 export function decideSettlement(
@@ -115,7 +130,8 @@ export function decideSettlement(
   if (status !== JobStatusOnChain.funded && status !== JobStatusOnChain.submitted)
     return { action: "none", why: "unknown_status" };
   const now = BigInt(nowSeconds);
-  if (now > escrow.expiredAt) return { action: "claimRefund", reason: null, outcome: "refunded" };
+  if (now > escrow.expiredAt + REFUND_CLOCK_MARGIN_SECONDS)
+    return { action: "claimRefund", reason: null, outcome: "refunded" };
   if (opts.claimRefundOnly) throw notYetExpired(escrow.expiredAt);
   if (status !== JobStatusOnChain.submitted) return { action: "none", why: "unknown_status" };
   const r = accepted(ruling, opts.acceptRound);
@@ -222,6 +238,9 @@ export async function settleCase(
     );
   if (row.jobId === null) refuse(`case ${caseId} has no job id`);
   const jobId = BigInt(row.jobId);
+  // What needs no network is checked before any read, so a row made for another deployment is
+  // refused before Kleros is asked about it or a receipt is waited for.
+  checkOwnConfig(d.chain, row);
 
   // Our earlier send is resolved before anything else: a second transaction while the first may
   // still land is the one thing the adapter says not to do.
@@ -245,9 +264,11 @@ export async function settleCase(
   // appeal, so its stored read is trusted only while fresh, and read again after that.
   else if (row.klerosChain === "fake" && row.rulingReadAt !== null)
     ruling = rulingOfStoredRead(row);
+  // An accepted round is always read live, so the round acted on is one whose options passed.
   else if (
     row.status === "ruled" &&
     row.rulingReadAt !== null &&
+    opts.acceptRound === undefined &&
     nowSec() - row.rulingReadAt < RULING_FRESH_SECONDS
   )
     ruling = rulingOfStoredRead(row);
@@ -258,7 +279,7 @@ export async function settleCase(
     row = d.cases.find(caseId) as PilotCaseRecord;
   }
 
-  await checkOwnJob(d, row);
+  await checkConnectedChain(d, row);
   const escrow = await d.chain.job.escrowState(jobId);
   checkEscrowIsOwn(row, jobId, escrow);
   const settlement = decideSettlement(ruling, escrow, nowSec(), {
@@ -295,29 +316,45 @@ export async function settleCase(
   } catch (e) {
     refuse(`the referee's gas balance could not be read: ${publicErrorMessage(e)}`);
   }
-  if (gas === 0n) refuse(`the referee's address ${referee} holds no gas to send its transaction`);
+  if (gas < MIN_GAS_WEI)
+    refuse(
+      `the referee's address ${referee} holds ${formatUnits(gas, 18)} of the native token and the floor to send its transaction is ${formatUnits(MIN_GAS_WEI, 18)}`,
+    );
   return send(d, row, jobId, settlement, nowSec);
 }
 
 const sameAddress = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
 
-/** The chain this process is connected to and the job contract it is configured with are the
- *  row's own: a row never settles a job read from another deployment. */
-async function checkOwnJob(d: SettleDeps, row: PilotCaseRecord): Promise<void> {
+/**
+ * The job contract and the chain id this process is configured with are the row's own: a row
+ * never settles a job read from another deployment. It reads nothing from the network, so it
+ * runs before any read; the poll's preview runs it too. Refuses with the values compared.
+ */
+export function checkOwnConfig(chain: PilotChain, row: PilotCaseRecord): void {
+  if (!sameAddress(chain.jobContract, row.jobContract))
+    refuse(
+      `case ${row.caseId}'s job contract is ${row.jobContract} and the configured job contract is ${chain.jobContract}`,
+    );
+  if (chain.chainId !== row.chainId)
+    refuse(
+      `case ${row.caseId} is on chain id ${row.chainId} and the configured chain id is ${chain.chainId}`,
+    );
+}
+
+/** The node this process is connected to is on the row's chain, whatever the configuration says. */
+async function checkConnectedChain(d: SettleDeps, row: PilotCaseRecord): Promise<void> {
   const connected = await d.chain.publicClient.getChainId();
   if (connected !== row.chainId)
     refuse(
       `case ${row.caseId} is on chain id ${row.chainId} and the connected chain is ${connected}`,
     );
-  if (!sameAddress(d.chain.jobContract, row.jobContract))
-    refuse(
-      `case ${row.caseId}'s job contract is ${row.jobContract} and the configured job contract is ${d.chain.jobContract}`,
-    );
 }
 
-/** The job read from the chain is the one the case was made for: its buyer, its evaluator and
- *  its expiry are the row's. */
-function checkEscrowIsOwn(row: PilotCaseRecord, jobId: bigint, escrow: EscrowState): void {
+/**
+ * The job read from the chain is the one the case was made for: its buyer, its evaluator, its
+ * expiry and, while it holds funds, its budget are the row's. Exported for the poll's preview.
+ */
+export function checkEscrowIsOwn(row: PilotCaseRecord, jobId: bigint, escrow: EscrowState): void {
   if (!sameAddress(escrow.client, row.buyerAddress))
     refuse(`job ${jobId}'s client is ${escrow.client} and the case's buyer is ${row.buyerAddress}`);
   if (!sameAddress(escrow.evaluator, row.refereeAddress))
@@ -327,6 +364,13 @@ function checkEscrowIsOwn(row: PilotCaseRecord, jobId: bigint, escrow: EscrowSta
   if (escrow.expiredAt !== BigInt(row.expiredAt))
     refuse(
       `job ${jobId}'s expiredAt is ${escrow.expiredAt} and the case's expiredAt is ${row.expiredAt}`,
+    );
+  // A budget only means something while the escrow holds it: a settled job reads as it ends.
+  const holdsFunds =
+    escrow.status === JobStatusOnChain.funded || escrow.status === JobStatusOnChain.submitted;
+  if (holdsFunds && escrow.budget !== BigInt(row.budgetAtomic))
+    refuse(
+      `job ${jobId}'s budget is ${escrow.budget} and the case's budget is ${row.budgetAtomic}`,
     );
 }
 
@@ -373,6 +417,15 @@ async function send(
   // The row says what is about to be sent before it is sent: a crash after the broadcast leaves
   // it at settling, and the next run reads the chain before anything else.
   d.cases.transaction(() => {
+    // The decision was made from the ruling this row held. A read that came in since (an appeal,
+    // or a verdict read again) may have changed it, and the status alone would not show that.
+    const current = d.cases.find(caseId);
+    if (
+      current !== undefined &&
+      (current.rulingReadAt !== row.rulingReadAt ||
+        current.rulingRoundCount !== row.rulingRoundCount)
+    )
+      refuse(`case ${caseId}'s ruling was read again while this command ran; run it again`);
     const moved = d.cases.advance(caseId, row.status, "settling", {
       settleAction: action,
       settleReason: reason,

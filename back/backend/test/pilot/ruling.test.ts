@@ -495,9 +495,12 @@ describe("pollOnce", () => {
         rulingTied: ruled.rulingTied,
         rulingLabel: ruled.rulingLabel,
         rulingRoundCount: 1,
-        rulingReadAt: Math.floor(t.clock.now / 1000),
+        // The time of the read is the one the stored ruling was taken at: a read that kept it
+        // must not renew the trust a settle puts in it.
+        rulingReadAt: ruled.rulingReadAt,
         rulingDeadline: "2026-11-01T00:00:00.000Z",
       });
+      expect(after.rulingReadAt).not.toBe(Math.floor(t.clock.now / 1000));
       expect(t.cases.events(row.caseId).at(-1)).toMatchObject({
         step: "ruling",
         status: kind,
@@ -839,6 +842,33 @@ describe("pollUntilRuled when reads fail", () => {
     });
     expect(f.sleeps).toHaveLength(5);
     expect(f.cases.find(f.row.caseId)!.rulingReadAt).toBeNull();
+  });
+
+  test("each failed read leaves one read_failed event on the case's trail, in the service's words", async () => {
+    const f = failing((n) =>
+      n === 1 ? noAnswer() : n === 2 ? new KlerosHttpError(429, "slow down") : {},
+    );
+    await pollUntilRuled(f.deps, f.row.caseId, {});
+    const failed = f.cases.events(f.row.caseId).filter((e) => e.status === "read_failed");
+    expect(failed).toEqual([
+      expect.objectContaining({
+        step: "ruling",
+        ref: "186",
+        detail: "Kleros dispute_get: no answer in time",
+      }),
+      expect.objectContaining({
+        step: "ruling",
+        ref: "186",
+        detail: "Kleros Dispute Service answered HTTP 429",
+      }),
+    ]);
+  });
+
+  test("a refused key leaves a read_failed event too, then stops the watch", async () => {
+    const f = failing(() => new KlerosHttpError(401, "no"));
+    const r = await pollUntilRuled(f.deps, f.row.caseId, {});
+    expect(r.stop).toBe("auth_refused");
+    expect(f.cases.events(f.row.caseId).filter((e) => e.status === "read_failed")).toHaveLength(1);
   });
 
   test("any other error escapes on the first read", async () => {

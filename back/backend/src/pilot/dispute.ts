@@ -120,7 +120,7 @@ const MIN_SECONDS_TO_EXPIRY = 7_200;
  * command frozen early sends nothing (its sending mark refuses a row it no longer owns), so no
  * dispute is ever created twice; the case then waits for a human.
  */
-const FILING_IN_PROGRESS_SECONDS = 30 * 60;
+export const FILING_IN_PROGRESS_SECONDS = 30 * 60;
 /**
  * Another write on the same key was running and nothing was sent. The HTTP client has already
  * waited it out, so the filing calls once more at once; a second one is refused like any other.

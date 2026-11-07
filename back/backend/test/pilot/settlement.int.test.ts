@@ -13,7 +13,12 @@ import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
 import { type PilotChain, buildPilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
-import { type SettleDeps, reasonFor, settleCase } from "../../src/pilot/settlement";
+import {
+  REFUND_CLOCK_MARGIN_SECONDS,
+  type SettleDeps,
+  reasonFor,
+  settleCase,
+} from "../../src/pilot/settlement";
 import { type MockJobEnv, deployMockJob } from "../helpers/anvilJob";
 
 const BUDGET = 500_000n;
@@ -174,9 +179,10 @@ describe("settlement on anvil", () => {
   // Last: the warp moves anvil's clock for every later job.
   test("past the expiry claimRefund from the evaluator refunds the client", async () => {
     const { jobId, expiredAt } = await submittedJob();
-    await warp(WEEK + 60);
+    // The decision waits a clock margin past the expiry, so the warp goes past that too.
+    await warp(WEEK + 120);
     const now = await blockSeconds();
-    expect(now).toBeGreaterThan(expiredAt);
+    expect(now).toBeGreaterThan(expiredAt + Number(REFUND_CLOCK_MARGIN_SECONDS));
     const { deps, caseId, cases } = await settleDeps(jobId, expiredAt, "1", now);
     const before = await env.usdcBalanceOf(env.clientAddr);
     const r = await settleCase(deps, caseId, { send: true });
