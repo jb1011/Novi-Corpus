@@ -43,6 +43,7 @@ import {
 } from "../pilot/composition";
 import { type PilotContext, openPilotContext } from "../pilot/context";
 import {
+  FILING_IN_PROGRESS_SECONDS,
   type FileDisputeDeps,
   type FileOutcome,
   type Preflight,
@@ -943,20 +944,23 @@ function failCase(
 /** A dispute id in decimal, as Kleros numbers it. */
 function parseDisputeId(option: string, value: string): string {
   if (!CANONICAL_DECIMAL.test(value)) refuse(`${option} must be a dispute id in decimal`);
-  // Kleros numbers disputes from 1, and an id is a 256-bit number.
+  // Id 0 is never a pilot dispute, and an id is a 256-bit number.
   if (BigInt(value) === 0n || BigInt(value) >= 2n ** 256n)
     refuse(`${option} must be between 1 and 2^256 - 1`);
   return value;
 }
 
-/** How long after a filing started its transaction may still be landing. */
-const FILING_SETTLE_SECONDS = 30 * 60;
+const minuteWord = (n: number) => (n === 1 ? "minute" : "minutes");
 
 /**
  * Records the dispute ids a person read in the Kleros Court interface for a case whose filing
  * ended in doubt, and moves it from filing or filing_unknown to filed. The evidence may or may not
  * have reached the dispute, so it is recorded as unknown. The Kleros chain was written when the
  * case entered filing and is never changed: a row without one never got there and is refused.
+ * The row's mode must be the box's. A filing younger than `FILING_IN_PROGRESS_SECONDS` may still
+ * be landing and is refused. A real Kleros chain gives each dispute id to one case only; the
+ * rehearsal's fake numbers the first dispute of every process 1000, so its rows share ids. An id
+ * the row already holds is kept, and the time it was filed at is written only when it has none.
  */
 function setIds(
   ctx: PilotContext,
@@ -968,26 +972,38 @@ function setIds(
 ): Record<string, unknown> {
   return ctx.cases.transaction(() => {
     const row = findCase(ctx, caseId);
+    if (row.mode !== ctx.cfg.pilot?.mode)
+      refuse(`case ${caseId} is a ${row.mode} case and this stage is ${ctx.cfg.pilot?.mode}`);
     if (row.status !== "filing" && row.status !== "filing_unknown")
       refuse(`pilot case ${caseId} is at ${row.status}; ids are set at filing or filing_unknown`);
     if (row.klerosChain === null)
       refuse(`pilot case ${caseId} has no Kleros chain, so it was never at filing`);
     if (row.coreDisputeId !== null && row.coreDisputeId !== ids.core)
       refuse(`pilot case ${caseId} already holds dispute ${row.coreDisputeId}`);
+    if (ids.local !== undefined && row.localDisputeId !== null && row.localDisputeId !== ids.local)
+      refuse(`pilot case ${caseId} already holds local dispute ${row.localDisputeId}`);
     if (row.filingStartedAt !== null) {
       const age = deps.now() - row.filingStartedAt;
-      if (age < FILING_SETTLE_SECONDS) {
-        const left = Math.ceil((FILING_SETTLE_SECONDS - age) / 60);
+      if (age < FILING_IN_PROGRESS_SECONDS) {
+        const left = Math.ceil((FILING_IN_PROGRESS_SECONDS - age) / 60);
+        const ago = Math.floor(Math.max(age, 0) / 60);
         refuse(
-          `pilot case ${caseId}'s filing started ${Math.floor(Math.max(age, 0) / 60)} minutes ago and may still be landing; wait ${left} more minutes, then read the Court again`,
+          `pilot case ${caseId}'s filing started ${ago} ${minuteWord(ago)} ago and may still be landing; wait ${left} more ${minuteWord(left)}, then read the Court again`,
         );
       }
     }
-    const holder = ctx.cases
-      .findByDisputeId(row.klerosChain, ids.core)
-      .find((other) => other.caseId !== caseId);
+    // The rehearsal's fake gives every process's first dispute the same id, so only a real
+    // Kleros chain can tell two cases apart by the id.
+    const holder =
+      row.klerosChain === "fake"
+        ? undefined
+        : ctx.cases
+            .findByDisputeId(row.klerosChain, ids.core)
+            .find((other) => other.caseId !== caseId);
     if (holder)
-      refuse(`dispute ${ids.core} on ${row.klerosChain} is already held by case ${holder.caseId}`);
+      refuse(
+        `dispute ${ids.core} on ${row.klerosChain} is already held by case ${holder.caseId} (at ${holder.status}); correct that case by hand before recording the id here`,
+      );
     const detail = `by ${by}`;
     if (!yes)
       return {
@@ -997,18 +1013,20 @@ function setIds(
         to: "filed",
         klerosChain: row.klerosChain,
         coreDisputeId: ids.core,
-        localDisputeId: ids.local ?? null,
+        localDisputeId: ids.local ?? row.localDisputeId,
+        filingStartedAt:
+          row.filingStartedAt === null ? null : new Date(row.filingStartedAt * 1000).toISOString(),
         courtUrl: courtUrlOf({ ...row, coreDisputeId: ids.core }),
         buyerAddress: row.buyerAddress,
         sellerAddress: row.sellerAddress,
         detail,
-        next: "nothing was changed: run the same command with --yes to record the ids",
+        next: "nothing was changed: open the Court URL and check that its two alias addresses are this case's buyer and seller, printed here; then run the same command with --yes",
       };
     const moved = ctx.cases.advance(caseId, row.status, "filed", {
       coreDisputeId: ids.core,
       ...(ids.local === undefined ? {} : { localDisputeId: ids.local }),
       evidenceStatus: "unknown",
-      filedAt: deps.now(),
+      ...(row.filedAt === null ? { filedAt: deps.now() } : {}),
     });
     if (!moved) refuse(`pilot case ${caseId} moved from ${row.status} while this command ran`);
     ctx.cases.recordEvent(caseId, "set_ids", "ok", ids.core, detail);

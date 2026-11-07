@@ -22,7 +22,13 @@ import {
   pollOnce,
   pollUntilRuled,
 } from "../pilot/ruling";
-import { type Settlement, decideSettlement, settleCase } from "../pilot/settlement";
+import {
+  type Settlement,
+  checkEscrowIsOwn,
+  checkOwnConfig,
+  decideSettlement,
+  settleCase,
+} from "../pilot/settlement";
 import { publicErrorMessage } from "../workflow/publicError";
 import { parseCaseId, refuse } from "./pilotArgs";
 
@@ -112,7 +118,10 @@ function expectedOf(cfg: Config): Record<string, string> {
 
 /**
  * What `pilot:settle` would decide from this outcome and the escrow read now, for the poll's
- * output; it sends nothing. A case with no job, or an escrow that cannot be read, says why.
+ * output; it sends nothing. It runs the checks `pilot:settle` runs that the job is the case's
+ * own: the configured job contract and chain id, then the escrow's buyer, evaluator, expiry and
+ * budget. A case with no job, a job that is not the case's, or an escrow that cannot be read,
+ * says why.
  */
 async function settlementPreview(
   ctx: PilotContext,
@@ -123,7 +132,11 @@ async function settlementPreview(
   const row = ctx.cases.find(caseId);
   if (!row || row.jobId === null) return { unavailable: "the case has no job id" };
   try {
-    const escrow = await deps.buildChain(ctx).job.escrowState(BigInt(row.jobId));
+    const chain = deps.buildChain(ctx);
+    checkOwnConfig(chain, row);
+    const jobId = BigInt(row.jobId);
+    const escrow = await chain.job.escrowState(jobId);
+    checkEscrowIsOwn(row, jobId, escrow);
     return decideSettlement(outcome, escrow, Math.floor(deps.now() / 1000), {
       coreDisputeId: row.coreDisputeId ?? undefined,
     });
@@ -168,8 +181,15 @@ async function poll(
     refuse(
       `--script is required in rehearsal mode: the script the case was filed with, one of ${FAKE_SCRIPTS.join(", ")}`,
     );
+  // A one-shot poll in the rehearsal is its own process with a fresh fake, which would answer
+  // Evidence to its first read whatever the case has been through; the settle builds its stage
+  // the same way, so the one read it takes already holds the script's verdict. A watch walks
+  // the periods from Evidence on, and reads them as they come.
   const d: PollDeps = {
-    stage: deps.buildStage(ctx.cfg, { script: script ?? DEFAULT_SCRIPT }),
+    stage: deps.buildStage(ctx.cfg, {
+      script: script ?? DEFAULT_SCRIPT,
+      readsUntilAppeal: watch === null ? 1 : undefined,
+    }),
     cases: ctx.cases,
     expected: expectedOf(ctx.cfg),
     now: deps.now,

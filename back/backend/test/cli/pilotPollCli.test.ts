@@ -39,7 +39,14 @@ interface Fake {
 }
 
 async function makeFake(
-  o: { script?: FakeScript; mode?: PilotMode; stage?: KlerosStage; realStage?: boolean } = {},
+  o: {
+    script?: FakeScript;
+    mode?: PilotMode;
+    stage?: KlerosStage;
+    realStage?: boolean;
+    /** The job contract the configuration names; default the one the seeded rows were made on. */
+    jobContract?: string;
+  } = {},
 ): Promise<Fake & { caseId: string }> {
   const clock = { now: T0 };
   const fake = new FakeDisputeService({ script: o.script ?? "pay", now: () => clock.now });
@@ -84,9 +91,12 @@ async function makeFake(
                 return stage;
               },
             }),
-        // The escrow the settlement line is decided on: a submitted job a week from expiry.
+        // The escrow the settlement line is decided on: a submitted job a week from expiry, made
+        // for the seeded rows' buyer, referee, expiry and budget, on their chain and contract.
         buildChain: () =>
           ({
+            jobContract: o.jobContract ?? JOB_CONTRACT,
+            chainId: 5042002,
             job: {
               escrowState: async () => ({
                 status: 2,
@@ -117,6 +127,8 @@ async function makeFake(
   return { ...out, caseId };
 }
 
+const JOB_CONTRACT = "0x0000000000000000000000000000000000000b0b";
+
 let jobIds = 0;
 
 function seed(
@@ -129,7 +141,7 @@ function seed(
     label: "test case 1",
     mode: o.mode,
     chainId: 5042002,
-    jobContract: "0x0000000000000000000000000000000000000b0b",
+    jobContract: JOB_CONTRACT,
     buyerAddress: "0x0000000000000000000000000000000000000001",
     buyerAgentId: "11",
     sellerAddress: "0x0000000000000000000000000000000000000002",
@@ -184,6 +196,20 @@ describe("pilot:poll: one read", () => {
     const outs = await f.run(["pilot:poll", "--case", f.caseId, "--script", "stalled"]);
     expect(outs).toHaveLength(1);
     expect(disputeGets(f)).toHaveLength(1);
+  });
+});
+
+describe("pilot:poll: the settlement line checks the job is the case's own", () => {
+  test("a job contract that is not the configured one prints unavailable, naming it, and sends nothing", async () => {
+    const other = "0x00000000000000000000000000000000000000f1";
+    const f = await makeFake({ jobContract: other });
+    const [out] = await f.run(["pilot:poll", "--case", f.caseId, "--script", "pay"]);
+    const settlement = (out as { settlement: { unavailable?: string } }).settlement;
+    expect(Object.keys(settlement)).toEqual(["unavailable"]);
+    expect(settlement.unavailable).toContain(JOB_CONTRACT);
+    expect(settlement.unavailable).toContain(other);
+    expect(settlement.unavailable).toMatch(/job contract/);
+    expect(f.cases.find(f.caseId)!.settleTxHash).toBeNull();
   });
 });
 
@@ -450,6 +476,17 @@ describe("pilot:poll --watch when reads keep failing", () => {
 });
 
 describe("pilot:poll --script: a rehearsal poll from a fresh process", () => {
+  test("a one-shot poll reads past Evidence at once, and rules the case on the script's verdict", async () => {
+    const f = await makeFake({ realStage: true });
+    const [out] = await f.run(["pilot:poll", "--case", f.caseId, "--script", "refund"]);
+    expect(out).toMatchObject({
+      read: { status: "Appeal", ruling: "2" },
+      outcome: { kind: "refund" },
+      status: "ruled",
+      settlement: { action: "reject" },
+    });
+  });
+
   test("the command's own fake finds a case it did not file and walks the named script", async () => {
     const f = await makeFake({ realStage: true });
     const outs = await f.run(["pilot:poll", "--case", f.caseId, "--watch", "--script", "refund"]);
