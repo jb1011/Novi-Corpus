@@ -1,0 +1,55 @@
+<!-- Novi Corpus docs diagram D6 (wide). Generated from the approved v0.5 mockup builder;
+     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro.
+     The Minimal Novi badge has two forms, data-mainnet="live" and "pending"; Figure.astro keeps
+     the one that matches MAINNET_LIVE in src/sections.mjs (design 2.6). -->
+<svg xmlns="http://www.w3.org/2000/svg" class="wide" viewBox="0 0 960 250" role="img" aria-label="The three products"><title>The three products</title><desc>Minimal Novi says who stands behind the agent; Novi Managed what it holds and pays; Novi 2.0 what it may do in the company&#x27;s name.</desc>
+<defs>
+      <pattern id="d6w-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" class="dot"/></pattern>
+      <linearGradient id="d6w-card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g-top"/><stop offset="1" class="g-bot"/></linearGradient>
+      <radialGradient id="d6w-glow" cx="50%" cy="50%" r="60%"><stop offset="0" class="glow-in"/><stop offset="1" class="glow-out"/></radialGradient>
+      <marker id="d6w-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      <marker id="d6w-aa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-acc"/></marker>
+      <marker id="d6w-am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-amber"/></marker>
+      <marker id="d6w-al" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-live"/></marker>
+    </defs>
+<rect x="0" y="0" width="960" height="250" fill="url(#d6w-dots)"/>
+<rect class="panel" x="24" y="24" width="288" height="210" rx="16"/>
+<rect class="cbg" x="16" y="14" width="288" height="210" rx="16" fill="url(#d6w-card)"/>
+<rect class="cst r-live" x="16.5" y="14.5" width="287" height="209" rx="16"/>
+<rect class="ictile r-live" x="36" y="34" width="40" height="40" rx="10"/>
+<g class="ic r-live" transform="translate(44 42) scale(1.0)"><path d="M3 21h18M5 21V8l7-5 7 5v13M9 21v-5h6v5M9 11h.01M15 11h.01"/></g>
+<text class="eb r-live" x="90" y="60">MINIMAL NOVI</text>
+<text class="tt" x="36" y="110">Who stands behind</text>
+<text class="tt" x="36" y="136">the agent</text>
+<g data-mainnet="live"><rect class="bdg r-live" x="36" y="178" width="251" height="28" rx="14"/>
+<circle class="bdot r-live" cx="52" cy="192" r="4"/>
+<text class="bt" x="64" y="197">Live on Arc mainnet (beta)</text></g>
+<g data-mainnet="pending"><rect class="bdg r-live" x="36" y="158" width="218" height="50" rx="14"/>
+<circle class="bdot r-live" cx="52" cy="177" r="4"/>
+<text class="bt" x="64" y="182">Arc mainnet (beta),</text>
+<text class="bt" x="64" y="201">opens in mid-November</text></g>
+<rect class="panel" x="344" y="24" width="288" height="210" rx="16"/>
+<rect class="cbg" x="336" y="14" width="288" height="210" rx="16" fill="url(#d6w-card)"/>
+<rect class="cst r-amber" x="336.5" y="14.5" width="287" height="209" rx="16"/>
+<rect class="ictile r-amber" x="356" y="34" width="40" height="40" rx="10"/>
+<g class="ic r-amber" transform="translate(364 42) scale(1.0)"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 10h18M16 15h2"/></g>
+<text class="eb r-amber" x="410" y="60">NOVI MANAGED</text>
+<text class="tt" x="356" y="110">What it holds</text>
+<text class="tt" x="356" y="136">and pays</text>
+<rect class="bdg r-amber" x="356" y="178" width="141" height="28" rx="14"/>
+<circle class="bdot r-amber" cx="372" cy="192" r="4"/>
+<text class="bt" x="384" y="197">Coming later</text>
+<rect class="panel" x="664" y="24" width="288" height="210" rx="16"/>
+<rect class="cbg" x="656" y="14" width="288" height="210" rx="16" fill="url(#d6w-card)"/>
+<rect class="cst r-violet" x="656.5" y="14.5" width="287" height="209" rx="16"/>
+<rect class="ictile r-violet" x="676" y="34" width="40" height="40" rx="10"/>
+<g class="ic r-violet" transform="translate(684 42) scale(1.0)"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8zM19 16l.7 1.8 1.8.7-1.8.7L19 21l-.7-1.8-1.8-.7 1.8-.7z"/></g>
+<text class="eb r-violet" x="730" y="60">NOVI 2.0</text>
+<text class="tt" x="676" y="110">What it may do in</text>
+<text class="tt" x="676" y="136">the company's name</text>
+<rect class="bdg r-violet" x="676" y="178" width="117" height="28" rx="14"/>
+<circle class="bdot r-violet" cx="692" cy="192" r="4"/>
+<text class="bt" x="704" y="197">In design</text>
+<path class="chev" d="M312 108 l10 11 -10 11"/>
+<path class="chev" d="M632 108 l10 11 -10 11"/>
+</svg>

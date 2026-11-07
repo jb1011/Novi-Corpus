@@ -57,6 +57,19 @@ contract LegalBodyFactoryRelayTest is ControllerRelayHarness {
         assertEq(s[1], LegalBodyFactory.scheduleOperatingAgreementUpdate.selector);
     }
 
+    function test_minimalPinsPairEverySelectorWithTheFactory() public view {
+        bytes4[] memory grants = ControllerSelectors.minimalGrants();
+        (bytes4[] memory s, address[] memory t) = ControllerSelectors.minimalPins(address(factory));
+        assertEq(s.length, grants.length);
+        assertEq(t.length, grants.length);
+        assertEq(s[0], LegalBodyFactory.createLegalBody.selector);
+        assertEq(s[1], LegalBodyFactory.scheduleOperatingAgreementUpdate.selector);
+        for (uint256 i = 0; i < s.length; i++) {
+            assertEq(s[i], grants[i]);
+            assertEq(t[i], address(factory));
+        }
+    }
+
     function test_ceremony_pinsAndGrants() public view {
         bytes4[] memory s = ControllerSelectors.minimalGrants();
         for (uint256 i = 0; i < s.length; i++) {

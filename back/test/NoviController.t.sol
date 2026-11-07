@@ -1017,19 +1017,25 @@ contract BreakGlassOneShotTest is ControllerTestBase {
         helper.execute();
     }
 
-    /// @notice An ungranted helper is not a special case: the controller's fallback is the
-    ///         authority, so the ceremony simply comes back `ok == false` carrying NotAuthorized —
-    ///         and is spent, because a helper that could retry after a missing grant is a helper
-    ///         that outlives its ceremony.
-    function test_executeWithoutGrantReportsNotAuthorizedAndIsSpent() public {
+    /// @notice A helper that holds no role is refused before it spends itself: firing it would
+    ///         burn the single shot on a relay the controller is certain to refuse, and a grant
+    ///         made afterwards could never be renounced by the spent helper. The admin grants,
+    ///         then fires, and the same helper still works.
+    function test_executeWithoutGrantRevertsAndStaysUnspent() public {
         BreakGlassOneShot helper = new BreakGlassOneShot(controller, address(echo), abi.encodeCall(Echo.ping, (1)));
-        (bool ok, bytes memory ret) = helper.execute();
-        assertFalse(ok);
-        assertEq(
-            ret, abi.encodeWithSelector(NoviController.NotAuthorized.selector, Echo.ping.selector, address(helper))
-        );
-        assertTrue(helper.used());
+        vm.expectRevert(BreakGlassOneShot.NotGranted.selector);
+        helper.execute();
+        assertFalse(helper.used());
         assertEq(echo.lastX(), 0);
+
+        vm.prank(admin);
+        controller.grantRole(bytes32(Echo.ping.selector), address(helper));
+        (bool ok,) = helper.execute();
+        assertTrue(ok);
+        assertTrue(helper.used());
+        assertEq(echo.lastX(), 1);
+        assertFalse(controller.hasRole(bytes32(Echo.ping.selector), address(helper)));
+        assertFalse(controller.hasRole(WILDCARD, address(helper)));
     }
 
     function test_executeWorksViaWildcardAndRevokesIt() public {

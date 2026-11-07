@@ -102,7 +102,7 @@ answer `no-store`.
 brought an existing Wyoming LLC. The lookup answers for it by the agent's wallet: the address must be
 the wallet the identity registry returns for the agent, read fresh. Its 200 has the keys above and a
 `statement`, the statement Novi signed about the body;
-[the legal-body statement](../../../docs/identity/legal-body-statement.md) gives each of its fields and
+[the legal-body statement](../../../docs/src/content/docs/identity/legal-body-statement.md) gives each of its fields and
 how to verify it. `name` is the LLC name the statement carries, empty until the statement may show it;
 `links.metadata` and `formation` are always `null`; `links.statement` is the same statement by agent:
 
@@ -150,7 +150,7 @@ until then the address answers `legalBody: false`.
 The same statement is served by agent id, with no address:
 `GET <lookupBaseUrl>/legal-bodies/by-agent/<agentId>`. It has its own 15-second memo, and shares
 both token buckets, so a client's allowance is one for the two routes. Its answers are on
-[the statement's page](../../../docs/identity/legal-body-statement.md).
+[the statement's page](../../../docs/src/content/docs/identity/legal-body-statement.md).
 
 ## What you may say
 

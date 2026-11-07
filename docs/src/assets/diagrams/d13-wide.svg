@@ -1,0 +1,45 @@
+<!-- Novi Corpus docs diagram D13 (wide). Generated from the approved v0.5 mockup builder;
+     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro. -->
+<svg xmlns="http://www.w3.org/2000/svg" class="wide" viewBox="0 0 960 330" role="img" aria-label="The managed account"><title>The managed account</title><desc>The owner sets the rules; the agent&#x27;s account pays and takes jobs within them.</desc>
+<defs>
+      <pattern id="d13w-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" class="dot"/></pattern>
+      <linearGradient id="d13w-card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g-top"/><stop offset="1" class="g-bot"/></linearGradient>
+      <radialGradient id="d13w-glow" cx="50%" cy="50%" r="60%"><stop offset="0" class="glow-in"/><stop offset="1" class="glow-out"/></radialGradient>
+      <marker id="d13w-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      <marker id="d13w-aa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-acc"/></marker>
+      <marker id="d13w-am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-amber"/></marker>
+      <marker id="d13w-al" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-live"/></marker>
+    </defs>
+<rect x="0" y="0" width="960" height="330" fill="url(#d13w-dots)"/>
+<rect class="cbg" x="20" y="110" width="270" height="110" rx="14" fill="url(#d13w-card)"/>
+<rect class="cst r-ink" x="20.5" y="110.5" width="269" height="109" rx="14"/>
+<rect class="ictile r-ink" x="38" y="128" width="40" height="40" rx="10"/>
+<g class="ic r-ink" transform="translate(46 136) scale(1.0)"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></g>
+<text class="eb r-ink" x="92" y="144">OWNER</text>
+<text class="tt" x="92" y="169">Sets the rules</text>
+<text class="sb" x="92" y="193">caps, allowlist, pause</text>
+<rect class="cbg" x="344" y="110" width="280" height="110" rx="14" fill="url(#d13w-card)"/>
+<rect class="cst r-amber" x="344.5" y="110.5" width="279" height="109" rx="14"/>
+<rect class="ictile r-amber" x="362" y="128" width="40" height="40" rx="10"/>
+<g class="ic r-amber" transform="translate(370 136) scale(1.0)"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 10h18M16 15h2"/></g>
+<text class="eb r-amber" x="416" y="144">USDC ACCOUNT</text>
+<text class="tt" x="416" y="169">The agent's account</text>
+<text class="sb" x="416" y="193">on the Arc network</text>
+<rect class="cbg" x="680" y="30" width="260" height="110" rx="14" fill="url(#d13w-card)"/>
+<rect class="cst r-amber" x="680.5" y="30.5" width="259" height="109" rx="14"/>
+<rect class="ictile r-amber" x="698" y="48" width="40" height="40" rx="10"/>
+<g class="ic r-amber" transform="translate(706 56) scale(1.0)"><path d="M21 3L3 10l7 3 3 7zM10 13l11-10"/></g>
+<text class="eb r-amber" x="752" y="64">PAYMENTS</text>
+<text class="tt" x="752" y="89">Within the caps</text>
+<text class="sb" x="752" y="113">to the allowlist</text>
+<rect class="cbg" x="680" y="190" width="260" height="110" rx="14" fill="url(#d13w-card)"/>
+<rect class="cst r-amber" x="680.5" y="190.5" width="259" height="109" rx="14"/>
+<rect class="ictile r-amber" x="698" y="208" width="40" height="40" rx="10"/>
+<g class="ic r-amber" transform="translate(706 216) scale(1.0)"><path d="M3 12l4-4 5 3 5-3 4 4-9 7z"/><path d="M8 13l3 2M11 11l3 2"/></g>
+<text class="eb r-amber" x="752" y="224">ESCROWED JOBS</text>
+<text class="tt" x="752" y="249">Hire, be hired</text>
+<text class="sb" x="752" y="273">paid on acceptance</text>
+<path class="ln" d="M291 165 H342" marker-end="url(#d13w-a)"/>
+<path class="ln ln-amber" d="M625 150 H652 V85 H678" marker-end="url(#d13w-am)"/>
+<path class="ln ln-amber" d="M625 180 H652 V245 H678" marker-end="url(#d13w-am)"/>
+</svg>

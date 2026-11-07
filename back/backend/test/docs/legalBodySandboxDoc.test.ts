@@ -9,13 +9,17 @@ import { join } from "node:path";
 import { expect, test } from "vitest";
 import { LEGAL_BODY_STATEMENT_TYPE_STRING } from "../../src/legalBody/publicStatement";
 
-/** The page, found from this file: back/backend/test/docs, up to the repository's docs/identity. */
+/** The page, found from this file: back/backend/test/docs, up to the repository's docs site
+ *  (Astro Starlight since PR #201: its pages live under docs/src/content/docs). */
 const PAGE = join(
   import.meta.dirname,
   "..",
   "..",
   "..",
   "..",
+  "docs",
+  "src",
+  "content",
   "docs",
   "identity",
   "legal-body-statement.md",

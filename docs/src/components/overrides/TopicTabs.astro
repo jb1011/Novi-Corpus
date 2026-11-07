@@ -1,0 +1,29 @@
+---
+// The five product tabs (design 2.8), read from starlight-sidebar-topics route data.
+// The active tab is underlined in its section colour; on phones the row scrolls inside itself.
+import Icon from '../Icon.astro';
+import { SECTIONS, sectionByLink } from '../../sections.mjs';
+
+const topics = Astro.locals.starlightSidebarTopics?.topics ?? [];
+---
+
+<nav class="nc-tabs print:hidden" aria-label="Product sections">
+	{
+		topics.map((topic) => {
+			const id = sectionByLink(topic.link);
+			const s = id ? SECTIONS[id] : undefined;
+			return (
+				<a
+					class="nc-tab"
+					href={topic.link}
+					data-section={id}
+					aria-current={topic.isCurrent ? 'true' : undefined}
+					title={topic.badge ? `${topic.label}: ${topic.badge.text}` : undefined}
+				>
+					{s && <Icon name={s.icon} size={16} />}
+					<span>{topic.label}</span>
+				</a>
+			);
+		})
+	}
+</nav>

@@ -1,0 +1,57 @@
+---
+// Icon card (design 4.4): a line icon on a tile, a title, one sentence, an optional
+// "more" line and an optional section badge. A link when `href` is set.
+//
+//   <Card icon="building" title="Company" href="/start/wyoming-dao-llc/" more="What a Wyoming DAO LLC is">
+//     A Wyoming DAO LLC we form for you, or a Wyoming company you already own.
+//   </Card>
+//   <Card icon="wallet" title="Pay within limits" badge="novi-managed" href="/testnet/">...</Card>
+import Icon from './Icon.astro';
+import SectionBadge from './SectionBadge.astro';
+import type { ICONS } from './icons.mjs';
+import type { SECTIONS } from '../sections.mjs';
+
+type SectionId = keyof typeof SECTIONS;
+
+interface Props {
+	icon: keyof typeof ICONS;
+	title: string;
+	href?: string;
+	/** Colour of the tile. Default: the badge's section, else the page's section. */
+	section?: SectionId;
+	/** Show this section's short badge ("Novi Managed · coming later") at the foot of the card. */
+	badge?: SectionId;
+	/** A "read more" line at the foot of the card. */
+	more?: string;
+	/** Icon beside the text instead of above it (small cards). */
+	compact?: boolean;
+}
+
+const { icon, title, href, section, badge, more, compact = false } = Astro.props;
+// starlight-llms-txt renders MDX outside a Starlight page, where reading the route throws.
+let pageSection: SectionId | undefined;
+try {
+	pageSection = (Astro.locals.starlightRoute?.entry?.data as { section?: SectionId } | undefined)?.section;
+} catch {
+	pageSection = undefined;
+}
+const colour = section ?? badge ?? pageSection ?? 'overview';
+const Tag = href ? 'a' : 'div';
+---
+
+<Tag class:list={['nc-card', { 'nc-card-compact': compact }]} href={href} data-section={colour}>
+	<span class="nc-card-tile"><Icon name={icon} /></span>
+	<div class="nc-card-text">
+		<div class="nc-card-title">{title}</div>
+		{Astro.slots.has('default') && <div class="nc-card-body"><slot /></div>}
+	</div>
+	{
+		more && (
+			<span class="nc-card-more">
+				{more}
+				<Icon name="arrow" size={14} />
+			</span>
+		)
+	}
+	{badge && <SectionBadge section={badge} short />}
+</Tag>

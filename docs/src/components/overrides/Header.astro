@@ -1,0 +1,25 @@
+---
+// Header: the bar (lockup, search, quick links, theme) over one row of product tabs.
+// The tab row is part of --sl-nav-height (src/styles/tokens.css).
+import Search from '@astrojs/starlight/components/Search.astro';
+import SiteTitle from './SiteTitle.astro';
+import ThemeSelect from './ThemeSelect.astro';
+import TopicTabs from './TopicTabs.astro';
+import { REPO_URL, SITE_LINKS } from '../../site.mjs';
+---
+
+<div class="nc-header">
+	<div class="nc-bar">
+		<div class="nc-title"><SiteTitle /></div>
+		<div class="nc-search print:hidden"><Search /></div>
+		<div class="nc-right sl-hidden md:sl-flex print:hidden">
+			<nav class="nc-toplinks" aria-label="Quick links">
+				<a href="/check/check-an-agent/">Check an agent</a>
+				<a href={SITE_LINKS.home}>novicorpus.com</a>
+				<a href={REPO_URL}>GitHub</a>
+			</nav>
+			<ThemeSelect />
+		</div>
+	</div>
+	<TopicTabs />
+</div>
