@@ -222,11 +222,11 @@ const SEND_TRAIL: ReadonlySet<string> = new Set([
  * Refuses while the case's latest `settle/sending` event is younger than
  * {SEND_IN_FLIGHT_SECONDS} on the settle's clock, whatever the row's status. With
  * `outcomeEndsSend`, a sending event that its outcome (sent, reverted, unconfirmed, failed, ok,
- * adopted or dropped) already follows holds nothing: for a row whose hash reverted, where this run's own revert ended
- * its send but another run's newer one has not ended yet. The database stamps the event; a stamp
- * that cannot be read refuses too, since an unknown age never lets a second send through. Run it
- * before any read and again inside the transaction that records the next `settle/sending` event,
- * so two runs cannot both pass it.
+ * adopted or dropped) already follows holds nothing: for a row whose hash reverted, where this
+ * run's own revert ended its send but another run's newer one has not ended yet. The database
+ * stamps the event; a stamp that cannot be read refuses too, since an unknown age never lets a
+ * second send through. Run it before any read and again inside the transaction that records the
+ * next `settle/sending` event, so two runs cannot both pass it.
  */
 export function refuseWhileSendMayRun(
   cases: PilotCaseRepository,
@@ -847,7 +847,9 @@ async function provenSettleCall(
  *  settled row the one it chose or none. */
 function checkActionFits(row: PilotCaseRecord, action: SendAction, hash: Hex): void {
   if (row.status === "settling" && action !== row.settleAction)
-    refuse(`case ${row.caseId} chose ${row.settleAction} and ${hash} is a ${action}`);
+    refuse(
+      `case ${row.caseId} chose ${row.settleAction ?? "no action"} and ${hash} is a ${action}`,
+    );
   if (row.status === "settled" && row.settleAction !== "none" && action !== row.settleAction)
     refuse(
       `case ${row.caseId} is settled with the action ${row.settleAction ?? "none recorded"} and ${hash} is a ${action}`,
@@ -1038,7 +1040,8 @@ export interface DropResult {
   written: boolean;
 }
 
-/** Whether the node knows the transaction, mined or pending; any failure but "not found" escapes. */
+/** Whether the node knows the transaction, mined or pending; a failure other than "not found"
+ *  escapes. */
 async function transactionKnown(d: SettleDeps, hash: Hex): Promise<boolean> {
   try {
     await d.chain.publicClient.getTransaction({ hash });

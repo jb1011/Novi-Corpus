@@ -368,7 +368,8 @@ async function adopt(
   });
 }
 
-/** `pilot:settle --dropped`: what proved the drop and the write it leads to; written with `--yes`. */
+/** `pilot:settle --dropped`: what proved the drop and the write it leads to; written with
+ *  `--yes`. */
 async function dropped(
   ctx: PilotContext,
   deps: PilotSettlementDeps,
