@@ -633,7 +633,68 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
     expect(f.sent).toEqual([]);
     expect(f.cases.find(caseId)).toMatchObject({ status: "funded", settleTxHash: null });
   });
+
+  test("--dropped on a claimRefund hash whose escrow another transaction refunded says the refund records it, and it does, sending nothing", async () => {
+    const f = makeFake({ chainStatus: 5, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "funded", { settleAction: "claimRefund", settleTxHash: TX });
+    agedSend(f, caseId, "claimRefund");
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--dropped", "--yes"]);
+    expect(out).toMatchObject({
+      status: "funded",
+      read: { escrowStatus: "Expired" },
+      wrote: { status: "funded", settleTxHash: null, settleAction: "claimRefund" },
+      next: `run pilot:settle --case ${caseId} --claim-refund to record the refund the chain shows`,
+    });
+    const [, refund] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
+    expect(refund).toMatchObject({ status: "failed", settlement: { why: "refunded_elsewhere" } });
+    expect(f.sent).toEqual([]);
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      escrowOutcome: "refunded",
+      error: "expired; escrow refunded elsewhere",
+    });
+  });
+
+  test("--dropped on a failed case's reject clears it and says the refund takes the escrow back, which it then does once", async () => {
+    const f = makeFake({ chainStatus: 2, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "failed", {
+      klerosChain: "fake",
+      coreDisputeId: "287",
+      filingStartedAt: NOW - 100,
+      settleAction: "reject",
+      settleReason: reasonFor("287"),
+      settleTxHash: TX,
+      error: "stuck",
+    });
+    agedSend(f, caseId, `reject ${reasonFor("287")}`);
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--dropped", "--yes"]);
+    expect(out).toMatchObject({
+      status: "failed",
+      wrote: { status: "failed", settleTxHash: null, settleAction: "reject" },
+      next: `run pilot:settle --case ${caseId} --claim-refund to refund it from the chain`,
+    });
+    expect(f.sent).toEqual([]);
+    const [, refund] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
+    expect(refund).toMatchObject({ status: "failed", txHash: TX });
+    expect(f.sent.map((x) => x.call)).toEqual(["claimRefund"]);
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      settleAction: "claimRefund",
+      escrowOutcome: "refunded",
+      error: "stuck",
+    });
+  });
 });
+
+/** A settle/sending event on the case, stamped the drop's grace before the refund's time. */
+function agedSend(f: Fake, caseId: string, detail: string): void {
+  f.cases.recordEvent(caseId, "settle", "sending", null, detail);
+  f.db
+    .prepare(
+      "UPDATE pilot_case_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM pilot_case_events WHERE case_id = ?)",
+    )
+    .run(sqliteUtcTimestamp((REFUND_TIME - DROP_GRACE_SECONDS) * 1000), caseId);
+}
 
 /** The referee's complete of job 7 with the case's reason, as the node holds it once mined. */
 function minedComplete(f: Fake, receipt: "success" | "reverted" = "success"): void {
@@ -904,7 +965,7 @@ describe("pilot:settle --tx and --dropped: the options", () => {
       "adopt a settle transaction the case lost, once it is proven to be the referee's settle of the case's job; sends nothing",
     );
     expect(help("--dropped")).toBe(
-      "clear the transaction hash of a settling case, or the claimRefund hash of a funded, submitted, contested or failed case, once the network is proven to have dropped it, so the next run decides again; sends nothing",
+      "clear the transaction hash of a settling case, the claimRefund hash of a funded, submitted, contested or failed case, or the complete or reject hash of a failed case, once the network is proven to have dropped it, so the next run decides again; sends nothing",
     );
   });
 

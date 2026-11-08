@@ -487,11 +487,15 @@ async function dropped(
     });
     return;
   }
-  // A settling case is decided again; a case of the expiry refund claims its refund again.
+  // A settling case is decided again. Any other is the expiry refund's: it claims the refund,
+  // again for a dropped claimRefund, or records one the chain already shows.
+  const refundedElsewhere = r.read.escrowStatus === "Expired" || r.read.escrowStatus === "Rejected";
   const again =
     r.write.status === "settling"
       ? `run pilot:settle --case ${caseId} to decide again from the chain`
-      : `run pilot:settle --case ${caseId} --claim-refund to refund it again from the chain`;
+      : refundedElsewhere
+        ? `run pilot:settle --case ${caseId} --claim-refund to record the refund the chain shows`
+        : `run pilot:settle --case ${caseId} --claim-refund to refund it${r.read.action === "claimRefund" ? " again" : ""} from the chain`;
   print({ ...base, read: r.read, wrote: r.write, next: again });
 }
 
@@ -553,7 +557,7 @@ export function registerPilotSettlementCommands(
     )
     .option(
       "--dropped",
-      "clear the transaction hash of a settling case, or the claimRefund hash of a funded, submitted, contested or failed case, once the network is proven to have dropped it, so the next run decides again; sends nothing",
+      "clear the transaction hash of a settling case, the claimRefund hash of a funded, submitted, contested or failed case, or the complete or reject hash of a failed case, once the network is proven to have dropped it, so the next run decides again; sends nothing",
     )
     .option("--yes", "confirm: send the transaction, or with --tx or --dropped write the row")
     .action(

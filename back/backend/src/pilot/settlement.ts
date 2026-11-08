@@ -1156,7 +1156,8 @@ export interface DropRead {
   transaction: null;
   /** Seconds since the case's latest settle/sending event, on the settle's clock. */
   sendAgeSeconds: number;
-  escrowStatus: "Funded" | "Submitted";
+  /** Expired or Rejected only for the claimRefund of a case of the expiry refund. */
+  escrowStatus: "Funded" | "Submitted" | "Expired" | "Rejected";
 }
 
 /** The row as a cleared drop leaves it, at its own status with the action and the reason kept,
@@ -1188,13 +1189,31 @@ async function transactionKnown(d: SettleDeps, hash: Hex): Promise<boolean> {
 }
 
 /**
+ * Whether `pilot:settle --dropped` takes the hash a row holds: a settling row's; the claimRefund
+ * of a row of the expiry refund (funded, submitted, contested or failed); or the complete or
+ * reject a failed row holds from a settle sent before it was failed.
+ */
+function dropTakes(row: PilotCaseRecord): boolean {
+  if (row.status === "settling") return true;
+  if (!UNFILED_REFUND_STATUSES.has(row.status)) return false;
+  if (row.settleAction === "claimRefund") return true;
+  return (
+    row.status === "failed" && (row.settleAction === "complete" || row.settleAction === "reject")
+  );
+}
+
+/**
  * `pilot:settle --dropped`: the hash of a send, cleared once the network is proven to have
  * dropped it, so the next run decides again. It sends nothing. A settling row that holds a hash,
- * or a row of the expiry refund (funded, submitted, contested or failed) that holds the hash of
- * its claimRefund; the proof, in order: at least {DROP_GRACE_SECONDS} since the case's latest
+ * a row of the expiry refund (funded, submitted, contested or failed) that holds the hash of its
+ * claimRefund, or a failed row that holds the hash of a complete or a reject sent before it was
+ * failed; the proof, in order: at least {DROP_GRACE_SECONDS} since the case's latest
  * settle/sending event (before any read), the connected chain is the row's, the node has no
  * receipt for the hash and no transaction under it, mined or pending, and the escrow, read as
- * the case's own job, is still Funded or Submitted. Any of them failing refuses, naming it. The
+ * the case's own job, is still Funded or Submitted. A claimRefund of the expiry refund is cleared
+ * on an escrow the chain shows Expired or Rejected too: a transaction proven never mined moved
+ * nothing, and the next refund records the refund another transaction made. Any of them failing
+ * refuses, naming it, and on a row that is not settling naming the expiry refund's command. The
  * write, in one transaction, compares the row's status and hash with the ones this run read,
  * clears the hash, keeps the action and the reason, and records settle/dropped with the old hash;
  * the row stays at its status. With `write` false nothing is written.
@@ -1212,17 +1231,22 @@ export async function clearDroppedSettleTx(
   if (row.jobId === null) refuse(`case ${caseId} has no job id`);
   const jobId = BigInt(row.jobId);
   checkOwnConfig(d.chain, row);
-  // The expiry refund records its claimRefund at the row's own status, not at settling.
-  const refundsByExpiry =
-    UNFILED_REFUND_STATUSES.has(row.status) && row.settleAction === "claimRefund";
-  if (row.status !== "settling" && !refundsByExpiry) {
+  // The expiry refund records its claimRefund at the row's own status, not at settling, and a
+  // failed row may hold the settle sent before it was failed.
+  if (!dropTakes(row)) {
+    const actions = row.status === "failed" ? "claimRefund, complete or reject" : "claimRefund";
     const action = UNFILED_REFUND_STATUSES.has(row.status)
-      ? ` and its action is ${row.settleAction ?? "not recorded"}, not claimRefund`
+      ? ` and its action is ${row.settleAction ?? "not recorded"}, not ${actions}`
       : "";
     refuse(
-      `case ${caseId} is ${row.status}${action}; a hash is cleared as dropped on a settling case, or on a funded, submitted, contested or failed case whose claimRefund it is`,
+      `case ${caseId} is ${row.status}${action}; a hash is cleared as dropped on a settling case, on a funded, submitted, contested or failed case whose claimRefund it is, or on a failed case whose complete or reject it is`,
     );
   }
+  // A row that is not settling is read again by the expiry refund, never by the plain settle.
+  const settling = row.status === "settling";
+  const reader = settling ? "pilot:settle" : `pilot:settle --case ${caseId} --claim-refund`;
+  // Only the expiry refund's claimRefund is cleared on an escrow already refunded.
+  const refundMayBeElsewhere = !settling && row.settleAction === "claimRefund";
   if (row.settleTxHash === null) refuse(`case ${caseId} holds no settle transaction hash to clear`);
   const hash = row.settleTxHash as Hex;
   // The send as the refusals and the event name it: its action, or words for a row with none.
@@ -1249,7 +1273,7 @@ export async function clearDroppedSettleTx(
   const receipt = await readOrRefuse(`the receipt of ${hash}`, () => receiptOf(d, hash));
   if (receipt !== null)
     refuse(
-      `${what} has a receipt (${receipt.status}): it was mined, not dropped; run pilot:settle to read it`,
+      `${what} has a receipt (${receipt.status}): it was mined, not dropped; run ${reader} to read it`,
     );
   if (await readOrRefuse(`the transaction ${hash}`, () => transactionKnown(d, hash)))
     refuse(
@@ -1257,10 +1281,21 @@ export async function clearDroppedSettleTx(
     );
   const escrow = await readOrRefuse(`job ${jobId}'s escrow`, () => d.chain.job.escrowState(jobId));
   checkEscrowIsOwn(row, jobId, escrow);
-  if (escrow.status !== JobStatusOnChain.funded && escrow.status !== JobStatusOnChain.submitted)
+  const waits =
+    escrow.status === JobStatusOnChain.funded || escrow.status === JobStatusOnChain.submitted;
+  const refundedElsewhere =
+    escrow.status === JobStatusOnChain.expired || escrow.status === JobStatusOnChain.rejected;
+  if (!waits && !(refundMayBeElsewhere && refundedElsewhere)) {
+    const name = statusName(escrow.status);
+    const allowed = refundMayBeElsewhere
+      ? "Funded, Submitted, Expired or Rejected"
+      : "Funded or Submitted";
     refuse(
-      `job ${jobId} is ${statusName(escrow.status)}, not Funded or Submitted, so ${hash} is not cleared; run pilot:settle to read the chain`,
+      settling
+        ? `job ${jobId} is ${name}, not ${allowed}, so ${hash} is not cleared; run pilot:settle to read the chain`
+        : `job ${jobId} is ${name}, not ${allowed}, so ${hash} is not cleared, and ${reader} refuses the case while it holds the hash; read the chain before acting`,
     );
+  }
   const escrowStatus = statusName(escrow.status) as DropRead["escrowStatus"];
   const read: DropRead = {
     hash,
@@ -1279,7 +1314,7 @@ export async function clearDroppedSettleTx(
       step: "settle",
       status: "dropped",
       ref: hash,
-      detail: `${sent} not mined and not pending ${age} s after its send; the escrow is ${escrowStatus}`,
+      detail: `${sent} not mined and not pending ${age} s after its send; the escrow is ${escrowStatus}${waits ? "" : ", refunded by another transaction"}`,
     },
   };
   if (!opts.write) return { read, write, written: false };
@@ -1406,8 +1441,8 @@ export async function refundUnfiledCase(
     const receipt = await receiptStatus(d, hash);
     if (receipt === null)
       refuse(
-        held === "claimRefund"
-          ? `case ${caseId}'s claimRefund ${hash} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again`
+        dropTakes(row)
+          ? `case ${caseId}'s ${held} ${hash} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again`
           : `case ${caseId}'s ${held ?? "settle transaction"} ${hash} has no receipt yet; wait until it is mined, then run again`,
       );
     if (receipt === "success") landed = hash;
