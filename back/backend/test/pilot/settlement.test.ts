@@ -360,7 +360,7 @@ function setup(
     expected: EXPECTED,
     now: () => clock.sec * 1000,
   };
-  return { node, cases, fake, stage, deps, clock, expiredAt };
+  return { node, db, cases, fake, stage, deps, clock, expiredAt };
 }
 
 type Setup = ReturnType<typeof setup>;
@@ -777,6 +777,130 @@ describe("settleCase: once only", () => {
     expect(s.cases.find(caseId)!.status).toBe("settling");
     expect(s.node.sends).toHaveLength(1);
   });
+});
+
+/** The case's settle events as [status, ref, detail], in the order they were written. */
+const settleTrail = (s: Setup, caseId: string) =>
+  s.cases
+    .events(caseId)
+    .filter((e) => e.step === "settle")
+    .map((e) => [e.status, e.ref, e.detail]);
+
+describe("settleCase: the hash is written the moment it exists", () => {
+  test("the row holds the hash, with a sent event, before the receipt is waited for", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s, { status: "ruled", patch: STORED_PAY });
+    const atWait: (PilotCaseRecord | undefined)[] = [];
+    const wait = s.node.publicClient.waitForTransactionReceipt;
+    vi.spyOn(s.node.publicClient, "waitForTransactionReceipt").mockImplementation(async (args) => {
+      atWait.push(s.cases.find(caseId));
+      return wait(args);
+    });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(atWait).toEqual([
+      expect.objectContaining({ status: "settling", settleTxHash: r.txHash }),
+    ]);
+    expect(settleTrail(s, caseId)).toEqual([
+      ["sending", null, `complete ${reasonFor(DISPUTE)}`],
+      ["sent", r.txHash, "complete"],
+      ["ok", r.txHash, "complete"],
+    ]);
+  });
+
+  test("a transport error during the receipt wait leaves the hash on the row, and the next run reads its receipt first", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s, { status: "ruled", patch: STORED_PAY });
+    vi.spyOn(s.node.publicClient, "waitForTransactionReceipt").mockRejectedValueOnce(
+      new Error("socket hang up"),
+    );
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow("socket hang up");
+    const hash = s.node.sends[0]!.hash;
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleAction: "complete",
+      settleTxHash: hash,
+    });
+    expect(settleTrail(s, caseId)).toEqual([
+      ["sending", null, `complete ${reasonFor(DISPUTE)}`],
+      ["sent", hash, "complete"],
+      ["failed", hash, "socket hang up"],
+    ]);
+    // The transaction was mined: the next run finds its receipt and records it, sending nothing.
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement).toMatchObject({ why: "released_elsewhere" });
+    expect(s.node.sends).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "complete",
+      settleTxHash: hash,
+      escrowOutcome: "released",
+    });
+  });
+
+  test("a row another command moved off settling before the broadcast keeps the hash on its trail, and the hook does not throw", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s, { status: "ruled", patch: STORED_PAY });
+    const job = s.deps.chain.job;
+    const real = job.complete.bind(job);
+    job.complete = async (...a: Parameters<typeof job.complete>) => {
+      s.cases.advance(caseId, "settling", "failed", { error: "marked failed by another command" });
+      return real(...a);
+    };
+    // The send succeeds, so what stops the run is the settled write, not the hook.
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(/left settling/);
+    const hash = s.node.sends[0]!.hash;
+    expect(s.cases.find(caseId)).toMatchObject({ status: "failed", settleTxHash: null });
+    expect(settleTrail(s, caseId)).toEqual([
+      ["sending", null, `complete ${reasonFor(DISPUTE)}`],
+      ["sent", hash, "complete"],
+      ["sent", hash, "complete succeeded after the row left settling"],
+    ]);
+  });
+
+  test("a hook whose write fails is reported, and the hash is written with the failure", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s, { status: "ruled", patch: STORED_PAY });
+    const record = s.cases.recordEvent.bind(s.cases);
+    let refused = false;
+    vi.spyOn(s.cases, "recordEvent").mockImplementation((id, step, status, ref, detail) => {
+      if (step === "settle" && status === "sent" && !refused) {
+        refused = true;
+        throw new Error("database is locked");
+      }
+      record(id, step, status, ref, detail);
+    });
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow("database is locked");
+    const hash = s.node.sends[0]!.hash;
+    // The hook's transaction rolled back as a whole; the failure's own record wrote the hash.
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: hash });
+    expect(settleTrail(s, caseId)).toEqual([
+      ["sending", null, `complete ${reasonFor(DISPUTE)}`],
+      ["failed", hash, "database is locked"],
+    ]);
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement).toMatchObject({ why: "released_elsewhere" });
+    expect(s.node.sends).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settled", settleTxHash: hash });
+  });
+
+  test.each<["reject" | "claimRefund"]>([["reject"], ["claimRefund"]])(
+    "a %s writes its hash before the receipt wait too",
+    async (action) => {
+      const s = setup({ script: action === "reject" ? "refund" : "pay" });
+      const caseId = seed(s, {
+        status: "ruled",
+        patch: { ...STORED_PAY, rulingValue: action === "reject" ? "2" : "1" },
+      });
+      if (action === "claimRefund") s.clock.sec = EXPIRES + Number(REFUND_CLOCK_MARGIN_SECONDS) + 1;
+      vi.spyOn(s.node.publicClient, "waitForTransactionReceipt").mockRejectedValueOnce(
+        new Error("socket hang up"),
+      );
+      await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow("socket hang up");
+      const hash = s.node.sends[0]!.hash;
+      expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: hash });
+      expect(settleTrail(s, caseId)).toContainEqual(["sent", hash, action]);
+    },
+  );
 });
 
 describe("settleCase: refusals and the ruling read", () => {

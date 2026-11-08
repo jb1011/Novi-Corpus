@@ -405,11 +405,32 @@ function recordElsewhere(
   return { settlement };
 }
 
+/** The three transactions a settlement sends. */
+type SendAction = Extract<Settlement, { action: "complete" | "reject" | "claimRefund" }>["action"];
+
+/**
+ * The hash of a settle's transaction, written the moment the node accepted it and before its
+ * receipt is waited for: on the row while the row is at settling, and as a `settle/sent` event
+ * with the action, whatever the row's status, so a row another command moved keeps the hash on
+ * its trail. One transaction; it throws only when the database write fails.
+ */
+export function recordBroadcast(
+  cases: PilotCaseRepository,
+  caseId: string,
+  action: SendAction,
+  hash: Hex,
+): void {
+  cases.transaction(() => {
+    cases.advance(caseId, "settling", "settling", { settleTxHash: hash });
+    cases.recordEvent(caseId, "settle", "sent", hash, action);
+  });
+}
+
 async function send(
   d: SettleDeps,
   row: PilotCaseRecord,
   jobId: bigint,
-  settlement: Extract<Settlement, { action: "complete" | "reject" | "claimRefund" }>,
+  settlement: Extract<Settlement, { action: SendAction }>,
   nowSec: () => number,
 ): Promise<{ settlement: Settlement; txHash: Hex }> {
   const { caseId } = row;
@@ -439,15 +460,28 @@ async function send(
       reason === null ? action : `${action} ${reason}`,
     );
   });
+  // The hash is written as soon as it exists: a transport error or a stop during the receipt
+  // wait then leaves it on the row, and the next run reads its receipt before anything else.
+  let broadcast: Hex | null = null;
+  const hook = {
+    onBroadcast: (hash: Hex) => {
+      broadcast = hash;
+      recordBroadcast(d.cases, caseId, action, hash);
+    },
+  };
   let txHash: Hex;
   try {
-    if (action === "complete") txHash = await d.chain.job.complete(jobId, reason as Hex);
+    if (action === "complete") txHash = await d.chain.job.complete(jobId, reason as Hex, hook);
     else if (action === "reject")
-      txHash = await d.chain.job.reject(jobId, reason as Hex, d.chain.wallets.referee);
-    else txHash = await d.chain.job.claimRefund(jobId, d.chain.wallets.referee);
+      txHash = await d.chain.job.reject(jobId, reason as Hex, d.chain.wallets.referee, hook);
+    else txHash = await d.chain.job.claimRefund(jobId, d.chain.wallets.referee, hook);
   } catch (e) {
+    // The hash the error names, or the one the broadcast gave: written again here, so a hook
+    // whose own write failed does not lose it.
     const sent =
-      e instanceof ChainTxRevertedError || e instanceof ChainTxUnconfirmedError ? e.txHash : null;
+      e instanceof ChainTxRevertedError || e instanceof ChainTxUnconfirmedError
+        ? e.txHash
+        : broadcast;
     d.cases.transaction(() => {
       // Only while the row is still ours to write: a concurrent run may have settled it.
       if (sent !== null) d.cases.advance(caseId, "settling", "settling", { settleTxHash: sent });
