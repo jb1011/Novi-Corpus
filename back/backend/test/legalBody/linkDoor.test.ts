@@ -279,6 +279,7 @@ function draftOnText(text: LegalText<AgreementFields>): LegalBodyRecord {
       identityRegistry: REGISTRY,
     },
     text,
+    { source: "customer" },
   );
   storeAgreement(s.docStore, created.legalBodyId, built);
   expect(

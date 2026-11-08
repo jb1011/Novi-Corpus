@@ -138,7 +138,7 @@ export function legalBodyOrderDeps(
 /** The order's view as a door answers it for the row as stored now, its facts read from the
  *  stores. */
 export function orderViewOf(
-  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations">,
+  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations" | "companies">,
   row: LegalBodyRecord,
 ): LegalBodyOrderView {
   return toOrderView(row, orderViewFacts(deps, row));
@@ -147,7 +147,7 @@ export function orderViewOf(
 /** The order's binding as a door answers it for the row as stored now, its facts read from the
  *  stores. */
 export function bindingViewOf(
-  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations">,
+  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations" | "companies">,
   row: LegalBodyRecord,
 ): BindingView {
   return toBindingView(row, orderViewFacts(deps, row));

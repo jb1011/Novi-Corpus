@@ -23,7 +23,7 @@ import type {
 import { buildAgreement, storeAgreement } from "./agreement";
 import { filedCompanyNames, publicCompanyNames } from "./attestation";
 import { filedNamesPrintable } from "./companyFields";
-import { CUSTOMER_PROVIDER } from "./provider";
+import { CUSTOMER_PROVIDER, companySourceOf } from "./provider";
 import { refusal } from "./sentences";
 import { LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "./texts/operatingAgreement";
@@ -125,9 +125,9 @@ export function takeDoorTokens(deps: LegalBodyOrderDeps, tenantId: string): void
 }
 
 /**
- * What the event log and the company's declaration say about an order, beside its row: why it is
- * in its state, and which company it is for. Each fact is read only for the states it can
- * describe (`orderViewFacts`).
+ * What the event log and the company say about an order, beside its row: why it is in its state,
+ * and which company it is for. Each fact is read only for the states it can describe
+ * (`orderViewFacts`).
  */
 export interface OrderViewFacts {
   /** Why the reservation was closed without a body, for a `lapsed` order; null otherwise. */
@@ -144,20 +144,25 @@ export interface OrderViewFacts {
   /** The id of the order whose body was linked in this one's place, when the latest break is
    *  `replaced`; null otherwise. */
   replacedBy: string | null;
-  /** The company name its declaration states; null when the declaration is missing. */
+  /** The company's name: for a customer's own company, the one its declaration states; for a
+   *  company Novi formed, the filed name its row holds. Null when there is none (no declaration, or
+   *  no filed name written yet). */
   companyName: string | null;
 }
 
 /**
  * The facts of `row`, read by state: the lapse only for `lapsed`, the latest break for `broken`
  * and `superseded` (a superseded body that never broke has no break to read), the superseding
- * order only for `superseded`; the revocation and the declaration always. So at most three reads
- * of the event log and one of the declarations per row, which keeps a tenant's list cheap.
+ * order only for `superseded`; the revocation and the declaration always, and the company only
+ * when there is no declaration (only a customer's own company has one). So at most three reads of
+ * the event log, one of the declarations and one of the companies per row, and a declared
+ * company's row reads no company at all, which keeps a tenant's list cheap.
  */
 export function orderViewFacts(
   deps: {
     repo: LegalBodyRepository & LegalBodyReasonReads;
     declarations: CompanyDeclarationRepository;
+    companies: CompanyRepository;
   },
   row: LegalBodyRecord,
 ): OrderViewFacts {
@@ -173,8 +178,21 @@ export function orderViewFacts(
     revoked: deps.repo.isRevoked(id),
     supersededBy: state === "superseded" ? deps.repo.supersededBy(id) : null,
     replacedBy: lastBreak?.reason === "replaced" ? lastBreak.by : null,
-    companyName: deps.declarations.find(row.companyId)?.companyName ?? null,
+    companyName: companyNameOf(deps, row.companyId),
   };
+}
+
+/** The declaration's company name; failing a declaration, a formed company's filed name. */
+function companyNameOf(
+  deps: { declarations: CompanyDeclarationRepository; companies: CompanyRepository },
+  companyId: string,
+): string | null {
+  const declared = deps.declarations.find(companyId);
+  if (declared !== undefined) return declared.companyName;
+  const company = deps.companies.find(companyId);
+  return company !== undefined && company.provider !== CUSTOMER_PROVIDER
+    ? company.legalNameFiled
+    : null;
 }
 
 /**
@@ -295,7 +313,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *     `companyNamesForOrder` reads, and nothing else: a customer's company by the declared name
  *     and filing number its passed check stands behind; a formed company by the filed name and
  *     filing number its row holds, printed as they stand, so a filed fact the agreement cannot
- *     print (`filedNamesPrintable`) is refused, never cleaned;
+ *     print (`filedNamesPrintable`) is refused, never cleaned. Its manifest states the company's
+ *     source: `customer` or `novi` (`companySourceOf`);
  *  5. one transaction: the two caps are counted, the draft is created, the agreement is stored
  *     and frozen, and the tenant's `ordered` note is written.
  * A throw anywhere in step 5 rolls the row back. The files are written inside it, so a failure
@@ -347,6 +366,7 @@ export function createOrder(
       identityRegistry: deps.identityRegistry,
     },
     LEGAL_BODY_OPERATING_AGREEMENT,
+    { source: companySourceOf(owned.provider) },
   );
 
   // 5. The caps are counted inside the transaction that writes, which holds the write lock from

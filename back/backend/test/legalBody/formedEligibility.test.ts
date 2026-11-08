@@ -20,6 +20,7 @@ import {
   companyNamesForOrder,
   createOrder,
 } from "../../src/legalBody/orders";
+import type { CompanySource } from "../../src/legalBody/provider";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "../../src/legalBody/texts/operatingAgreement";
 import type { CompanyCheckResult } from "../../src/persistence/companyCheckRepository";
@@ -127,8 +128,12 @@ function refusalOf(run: () => unknown): ApiError {
   throw new Error("no refusal");
 }
 
-/** The agreement an order for `names` must carry: built from the same fields `createOrder` uses. */
-function expectedAgreement(names: { legalName: string; filingNumber: string }) {
+/** The agreement an order for `names` must carry: built from the same fields `createOrder` uses,
+ *  its manifest stating the company's source (`novi` for a company Novi formed). */
+function expectedAgreement(
+  names: { legalName: string; filingNumber: string },
+  source: CompanySource,
+) {
   return buildAgreement(
     {
       companyName: names.legalName,
@@ -141,6 +146,7 @@ function expectedAgreement(names: { legalName: string; filingNumber: string }) {
       identityRegistry: REGISTRY,
     },
     LEGAL_BODY_OPERATING_AGREEMENT,
+    { source },
   );
 }
 
@@ -168,7 +174,10 @@ describe("a company formed for a legal body", () => {
     expect(view.state).toBe("draft");
     expect(view.companyId).toBe(companyId);
 
-    const expected = expectedAgreement({ legalName: FILED_NAME, filingNumber: FILING_NUMBER });
+    const expected = expectedAgreement(
+      { legalName: FILED_NAME, filingNumber: FILING_NUMBER },
+      "novi",
+    );
     expect(view.agreement).toEqual({ hash: expected.manifestHash, version: 1 });
     const terms = s.docStore.get(agreementDocNames(view.id).terms);
     expect(terms).toBe(expected.termsDoc);
@@ -275,8 +284,10 @@ describe("a declared company, as before", () => {
     });
     const view = createOrder(deps, tenant, { companyId });
     expect(view.agreement?.hash).toBe(
-      expectedAgreement({ legalName: "Example Holdings LLC", filingNumber: "TEST-0001" })
-        .manifestHash,
+      expectedAgreement(
+        { legalName: "Example Holdings LLC", filingNumber: "TEST-0001" },
+        "customer",
+      ).manifestHash,
     );
     expect(steps).toEqual([]);
   });

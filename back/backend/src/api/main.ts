@@ -1093,6 +1093,8 @@ async function main() {
           companies,
           checks: companyChecks,
           declarations: companyDeclarations,
+          // The order doors' reader: whether the State filed a company Novi formed, and its EIN.
+          formationSteps: (companyId: string) => formationRequests.stepsOf(companyId),
           world: worldId,
           // The guardian identity record built above: on production the lookup by agent states,
           // unsigned, whether it is verified; a sandbox never reads it.

@@ -15,7 +15,7 @@ import { canonicalizeJcs } from "../oa/manifest";
 import { isCalendarDate } from "../util/wyomingCalendar";
 import { ATTESTATION_STATES, type Attestation, type AttestationState } from "./attestation";
 import { FILING_STATUSES, type FilingFacts, type FilingStatus } from "./filings";
-import { CUSTOMER_PROVIDER } from "./provider";
+import { CUSTOMER_PROVIDER, type CompanySource, companySourceOf } from "./provider";
 import {
   PUBLIC_BINDING_STATES,
   type PublicBindingState,
@@ -143,7 +143,8 @@ export interface LegalBodyStatement {
   /** "" unless the names may be shown (see {@link assembleStatement}). */
   legalName: string;
   filingNumber: string;
-  source: "customer" | "novi";
+  /** `customer` for a customer's own company, `novi` for one Novi formed. */
+  source: CompanySource;
   environment: "sandbox" | "production";
   /** The operator saw evidence that the declarant controls the company. */
   controlVerified: boolean;
@@ -151,6 +152,8 @@ export interface LegalBodyStatement {
   existenceCheckedAt: bigint;
   /** The formation date, or "". */
   filedAt: string;
+  /** The IRS issued the EIN of a company Novi formed; always false for a customer's own company,
+   *  whose EIN Novi does not check. */
   einIssued: boolean;
   filingStatus: FilingStatus;
   /** The year of the recorded report that counts; 0 when none does. */
@@ -191,8 +194,7 @@ export interface SignedStatementJson {
 /**
  * The chain disagrees with the row on what the body is, or the body is not one this deployment
  * states. Nothing is signed. `problem` is a code (`body_mismatch`, `not_ours`, `agent_mismatch`,
- * `unsupported_provider`, or a caller's own), never a name, a number or an address, so it can go
- * into an ops line as it is.
+ * or a caller's own), never a name, a number or an address, so it can go into an ops line as it is.
  */
 export class StatementIntegrityError extends Error {
   constructor(readonly problem: string) {
@@ -220,12 +222,16 @@ export interface StatementInputs {
   /** The code at the body's creator, and at the agent's wallet, at `observedAtBlock`. */
   ownerCode: CodeKind;
   walletCode: CodeKind;
-  /** The company's provider: only a customer's own company is stated. */
+  /** The company's provider: the statement's `source` (`companySourceOf`). */
   provider: string;
   attestation: Attestation;
-  /** The names a public surface may show, or null (`publicCompanyNames`). */
+  /** The names a public surface may show, or null: a customer's checked names
+   *  (`publicCompanyNames`), or a formed company's filed ones (`filedCompanyNames`). */
   names: { legalName: string; filingNumber: string } | null;
   filing: FilingFacts;
+  /** For a company Novi formed: the IRS issued its EIN (`einIssued` of its formation steps). Never
+   *  stated for a customer's own company. */
+  einIssued: boolean;
   guardianHumanVerified: boolean;
   environment: "sandbox" | "production";
   /** Unix seconds. */
@@ -238,12 +244,14 @@ export interface StatementInputs {
  * REFUSED with a StatementIntegrityError, checked in this order, when:
  *  1. `body_mismatch`: the body read is not the row's;
  *  2. `not_ours`: the factory recorded no creator for it, or another than the row's identity owner;
- *  3. `agent_mismatch`: the agent read, or the agent the body names itself, is not the row's;
- *  4. `unsupported_provider`: the company is not a customer's own.
+ *  3. `agent_mismatch`: the agent read, or the agent the body names itself, is not the row's.
  *
- * THE NAMES are stated only while the binding is linked, the attestation is not revoked, and a
- * passed check made them public (`names` is not null); otherwise both are "". A broken binding or a
- * revocation takes them off the next statement.
+ * THE SOURCE is the provider's (`companySourceOf`): `customer` for a customer's own company, `novi`
+ * for one Novi formed. The EIN is stated only for a company Novi formed.
+ *
+ * THE NAMES are stated only while the binding is linked, the attestation is not revoked, and the
+ * caller made them public (`names` is not null: a passed check, or a confirmed filing); otherwise
+ * both are "". A broken binding or a revocation takes them off the next statement.
  *
  * THE FLAGS are true only for contract code. A delegated account (EIP-7702) is not a contract here:
  * its key still signs with plain ECDSA, which is what a flag tells a reader. The zero wallet is no
@@ -264,7 +272,6 @@ export function assembleStatement(p: StatementInputs): {
   // A row's agent id is a canonical decimal, compared as text: no other spelling names the agent.
   if (agent.agentId.toString() !== row.agentId || body.metaAgentId.toString() !== row.agentId)
     throw new StatementIntegrityError("agent_mismatch");
-  if (p.provider !== CUSTOMER_PROVIDER) throw new StatementIntegrityError("unsupported_provider");
 
   const bindingState: PublicBindingState =
     agent.linked !== undefined && isAddressEqual(agent.linked, row.bodyAddress)
@@ -295,13 +302,13 @@ export function assembleStatement(p: StatementInputs): {
       entityType: PUBLIC_STATEMENT_ENTITY_TYPE,
       legalName: names?.legalName ?? "",
       filingNumber: names?.filingNumber ?? "",
-      source: "customer",
+      source: companySourceOf(p.provider),
       environment: p.environment,
       controlVerified: p.attestation.controlVerified,
       existenceCheckedAt: BigInt(p.attestation.existenceCheckedAt ?? 0),
       filedAt: p.filing.filedAt,
       // Novi checks no EIN for a company its customer brought.
-      einIssued: false,
+      einIssued: p.provider !== CUSTOMER_PROVIDER && p.einIssued,
       filingStatus: p.filing.filingStatus,
       lastFiledPeriod: BigInt(p.filing.lastFiledPeriod),
       lastFiledAt: p.filing.lastFiledAt,

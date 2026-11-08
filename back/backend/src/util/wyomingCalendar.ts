@@ -40,6 +40,24 @@ export function wyomingDate(unixSeconds: number): string {
   return date;
 }
 
+/**
+ * The calendar date a STORED date stands for: a reported day kept as the unix seconds of its
+ * midnight in UTC (`companies.filed_at`, written by `filingDateToUnix` from the day doola reports).
+ * Never `wyomingDate` of it: Wyoming's clock reads a UTC midnight as the evening before.
+ *
+ * Null for any value not in that form: not a whole number of seconds, zero or more, not a UTC
+ * midnight, or past the year 9999. A stored fact that is not a date is no date, never a day guessed
+ * from it; and a reader that cannot use it says so, where a throw would end a list over one row.
+ */
+export function calendarDateOfUtcMidnight(unixSeconds: number): string | null {
+  if (!Number.isSafeInteger(unixSeconds) || unixSeconds < 0 || unixSeconds % (DAY_MS / 1000) !== 0)
+    return null;
+  const midnight = new Date(unixSeconds * 1000);
+  if (Number.isNaN(midnight.getTime())) return null;
+  const date = `${pad(midnight.getUTCFullYear(), 4)}-${pad(midnight.getUTCMonth() + 1, 2)}-${pad(midnight.getUTCDate(), 2)}`;
+  return isCalendarDate(date) ? date : null;
+}
+
 /** A real date of the Gregorian calendar, written YYYY-MM-DD: no 30 February, no year 0. */
 export function isCalendarDate(s: string): boolean {
   if (typeof s !== "string") return false;
