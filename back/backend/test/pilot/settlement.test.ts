@@ -10,6 +10,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { iErc8183JobAbi } from "../../src/abis/generated";
 import { JobAdapter } from "../../src/adapters/arc/jobAdapter";
+import { RECEIPT_TIMEOUT_MS } from "../../src/adapters/arc/receipts";
 import { resetSenderNonces } from "../../src/adapters/arc/senderLock";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
@@ -26,12 +27,14 @@ import {
   type EscrowState,
   MIN_GAS_WEI,
   REFUND_CLOCK_MARGIN_SECONDS,
+  SEND_IN_FLIGHT_SECONDS,
   type SettleDeps,
   decideSettlement,
   reasonFor,
   settleCase,
 } from "../../src/pilot/settlement";
 import type { PilotCaseRecord, PilotMode, PilotStatus } from "../../src/pilot/types";
+import { sqliteUtcTimestamp } from "../../src/util/sqliteTime";
 import {
   JOB_CONTRACT,
   USDC,
@@ -901,6 +904,155 @@ describe("settleCase: the hash is written the moment it exists", () => {
       expect(settleTrail(s, caseId)).toContainEqual(["sent", hash, action]);
     },
   );
+});
+
+/** A settling row on job 7 that chose `complete` and holds no hash: a send that stopped before
+ *  its hash was written, or one that may still be running. */
+function seedSettlingNoHash(s: Setup, o: Parameters<typeof seed>[1] = {}): string {
+  return seed(s, {
+    ...o,
+    status: "settling",
+    patch: {
+      ...STORED_PAY,
+      settleAction: "complete",
+      settleReason: reasonFor(DISPUTE),
+      ...o.patch,
+    },
+  });
+}
+
+/** A settle/sending event on the case, stamped `secondsAgo` before the settle's clock in the
+ *  database's own format, or with `stamp` as given. */
+function sendingEvent(s: Setup, caseId: string, secondsAgo: number, stamp?: string): void {
+  s.cases.recordEvent(caseId, "settle", "sending", null, `complete ${reasonFor(DISPUTE)}`);
+  s.db
+    .prepare(
+      "UPDATE pilot_case_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM pilot_case_events WHERE case_id = ?)",
+    )
+    .run(stamp ?? sqliteUtcTimestamp((s.clock.sec - secondsAgo) * 1000), caseId);
+}
+
+describe("settleCase: a send that may still be running is never sent again", () => {
+  test("the window is the receipt wait and two minutes more", () => {
+    expect(SEND_IN_FLIGHT_SECONDS).toBe(RECEIPT_TIMEOUT_MS / 1000 + 120);
+    expect(SEND_IN_FLIGHT_SECONDS).toBe(180);
+  });
+
+  test("a settling row with no hash whose send started inside the window is refused with zero reads and zero sends", async () => {
+    const reads: unknown[] = [];
+    const service = {
+      deployment: "testnet",
+      getDispute: async (p: unknown): Promise<DisputeRead> => {
+        reads.push(p);
+        return appealRead("1");
+      },
+    } as unknown as KlerosDisputeService;
+    const s = setup({ service, stageMode: "testnet", deployment: deploymentFor("testnet") });
+    // A stale stored read on a real deployment: a run that went on would read Kleros.
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { klerosChain: "arbitrum-sepolia-testnet", rulingReadAt: NOW - 3600 },
+    });
+    sendingEvent(s, caseId, 30);
+    const chainReads = [
+      vi.spyOn(s.deps.chain.publicClient, "getChainId"),
+      vi.spyOn(s.deps.chain.publicClient, "getTransactionReceipt"),
+      vi.spyOn(s.deps.chain.publicClient, "getBalance"),
+      vi.spyOn(s.deps.chain.job, "escrowState"),
+    ];
+    for (const send of [true, false])
+      await expect(settleCase(s.deps, caseId, { send })).rejects.toThrow(
+        new RegExp(
+          `^refusing: a settle may still be running on case ${caseId}: its send started 30 s ago, and a send is treated as running for 180 s; wait, then run again; nothing was sent$`,
+        ),
+      );
+    expect(reads).toEqual([]);
+    for (const spy of chainReads) expect(spy).not.toHaveBeenCalled();
+    expect(s.node.sends).toEqual([]);
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: null });
+  });
+
+  test("the window's last second still refuses, and the next one decides again from the chain", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    sendingEvent(s, caseId, SEND_IN_FLIGHT_SECONDS - 1);
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      /a settle may still be running on case .*: its send started 179 s ago/,
+    );
+    expect(s.node.sends).toEqual([]);
+    s.clock.sec += 1;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement.action).toBe("complete");
+    expect(s.node.sends).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settled", settleTxHash: r.txHash });
+  });
+
+  test("the latest send is the one measured: an old attempt then a recent one is refused", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    sendingEvent(s, caseId, 3600);
+    sendingEvent(s, caseId, 60);
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      /a settle may still be running on case .*: its send started 60 s ago/,
+    );
+    expect(s.node.sends).toEqual([]);
+  });
+
+  test("a send whose start time cannot be read is refused, since an unknown age never lets a second send through", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    sendingEvent(s, caseId, 0, "not a time");
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `a settle may still be running on case ${caseId}: the time its send started cannot be read; .*nothing was sent`,
+      ),
+    );
+    expect(s.node.sends).toEqual([]);
+  });
+
+  test("a settling row with no hash and no send on its trail is decided again from the chain", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement.action).toBe("complete");
+    expect(s.node.sends).toHaveLength(1);
+  });
+
+  test("two settles at once on a settling row with no hash and an old send: exactly one sends", async () => {
+    const s = setup({ script: "pay" });
+    // The settle's clock follows the database's here: each run's sending event is stamped by the
+    // database, and the run that moves second measures the first one's against this clock.
+    s.clock.sec = Math.floor(Date.now() / 1000);
+    const caseId = seedSettlingNoHash(s);
+    sendingEvent(s, caseId, 3600);
+    const results = await Promise.allSettled([
+      settleCase(s.deps, caseId, { send: true }),
+      settleCase(s.deps, caseId, { send: true }),
+    ]);
+    expect(s.node.sends).toHaveLength(1);
+    expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    const refused = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason)).toMatch(
+      new RegExp(`a settle may still be running on case ${caseId}: its send started -?\\d+ s ago`),
+    );
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleTxHash: s.node.sends[0]!.hash,
+    });
+  });
+
+  test("a re-send after a reverted receipt is not held by the window: the revert ended that send", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    // On the database's clock, so the reverted run's own sending event is seconds old.
+    s.clock.sec = Math.floor(Date.now() / 1000);
+    const caseId = seed(s);
+    const err = await settleCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ChainTxRevertedError);
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement.action).toBe("reject");
+    expect(s.node.hashesOf("reject")).toHaveLength(2);
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settled", settleTxHash: r.txHash });
+  });
 });
 
 describe("settleCase: refusals and the ruling read", () => {

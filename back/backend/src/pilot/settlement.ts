@@ -1,9 +1,11 @@
 import { type Hex, TransactionReceiptNotFoundError, formatUnits, toHex } from "viem";
 import type { JobAdapter } from "../adapters/arc/jobAdapter";
+import { RECEIPT_TIMEOUT_MS } from "../adapters/arc/receipts";
 import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { ChainTxRevertedError, ChainTxUnconfirmedError } from "../errors";
 import { JobStatusOnChain } from "../jobs/refund";
 import { opsLog } from "../observability/opsLog";
+import { parseSqliteUtc } from "../util/sqliteTime";
 import { publicErrorMessage } from "../workflow/publicError";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage, PilotChain } from "./composition";
@@ -55,6 +57,14 @@ export const EXPIRY_MARGIN_SECONDS = 600;
 
 /** A stored ruling read older than this is read again before the referee acts on it. */
 const RULING_FRESH_SECONDS = 600;
+
+/**
+ * How long a settle's send may still be running after its `settle/sending` event, in seconds:
+ * the adapter's receipt wait, and two minutes more for the broadcast before it and the writes
+ * after it. A settling row with no hash is never sent on again while its latest send is younger
+ * than this; past it, the next run decides again from the chain.
+ */
+export const SEND_IN_FLIGHT_SECONDS = RECEIPT_TIMEOUT_MS / 1000 + 120;
 
 /**
  * The least native token the referee must hold to send its transaction: 0.1. The native token on
@@ -169,6 +179,30 @@ function refuse(message: string): never {
   throw new Error(`refusing: ${message}; nothing was sent`);
 }
 
+/**
+ * Refuses while the case's latest `settle/sending` event is younger than
+ * {SEND_IN_FLIGHT_SECONDS} on the settle's clock. The database stamps the event; a stamp that
+ * cannot be read refuses too, since an unknown age never lets a second send through.
+ */
+function refuseWhileSendMayRun(cases: PilotCaseRepository, caseId: string, nowSec: number): void {
+  const last = cases
+    .events(caseId)
+    .filter((e) => e.step === "settle" && e.status === "sending")
+    .at(-1);
+  if (last === undefined) return;
+  const startedMs = parseSqliteUtc(last.createdAt);
+  // The parser reads a stamp it cannot read as 0.
+  if (startedMs === 0)
+    refuse(
+      `a settle may still be running on case ${caseId}: the time its send started cannot be read; read the chain and the case's trail before it is sent on again`,
+    );
+  const age = nowSec - Math.floor(startedMs / 1000);
+  if (age < SEND_IN_FLIGHT_SECONDS)
+    refuse(
+      `a settle may still be running on case ${caseId}: its send started ${age} s ago, and a send is treated as running for ${SEND_IN_FLIGHT_SECONDS} s; wait, then run again`,
+    );
+}
+
 /** The ruling a row at `settling` was acting on, from the action it chose: the decision is taken
  *  again against the chain and the clock, never against a new read. */
 function rulingOfAction(action: PilotCaseRecord["settleAction"]): RulingOutcome {
@@ -243,7 +277,11 @@ export async function settleCase(
   checkOwnConfig(d.chain, row);
 
   // Our earlier send is resolved before anything else: a second transaction while the first may
-  // still land is the one thing the adapter says not to do.
+  // still land is the one thing the adapter says not to do. A row with no hash may be another
+  // run's send, still before its broadcast or its hash's write: it waits out the window, checked
+  // here before any read and again inside the move to settling, so two runs cannot both pass.
+  if (row.status === "settling" && row.settleTxHash === null)
+    refuseWhileSendMayRun(d.cases, caseId, nowSec());
   let landed: Hex | null = null;
   if (row.status === "settling" && row.settleTxHash !== null) {
     const hash = row.settleTxHash as Hex;
@@ -438,6 +476,10 @@ async function send(
   // The row says what is about to be sent before it is sent: a crash after the broadcast leaves
   // it at settling, and the next run reads the chain before anything else.
   d.cases.transaction(() => {
+    // Measured on the row as this run read it: another run's send that started since leaves its
+    // sending event, and its hash may already be on the row.
+    if (row.status === "settling" && row.settleTxHash === null)
+      refuseWhileSendMayRun(d.cases, caseId, nowSec());
     // The decision was made from the ruling this row held. A read that came in since (an appeal,
     // or a verdict read again) may have changed it, and the status alone would not show that.
     const current = d.cases.find(caseId);
