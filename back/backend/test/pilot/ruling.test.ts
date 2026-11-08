@@ -881,6 +881,24 @@ describe("pollUntilRuled when reads fail", () => {
     ]);
   });
 
+  test("a failed read's text is the service's own, redacted: never the platform's sentence, never a file path", async () => {
+    const f = failing((n) =>
+      n === 1
+        ? new KlerosTransportError(
+            "Kleros dispute_get: insufficient funds for gas at /var/lib/kleros/transport/client.js",
+          )
+        : {},
+    );
+    await pollUntilRuled(f.deps, f.row.caseId, {});
+    const text = "Kleros dispute_get: insufficient funds for gas at client.js";
+    expect(f.logs.filter((l) => l.opslog === "pilot_poll_read_failed")).toEqual([
+      expect.objectContaining({ error: text }),
+    ]);
+    expect(f.cases.events(f.row.caseId).filter((e) => e.status === "read_failed")).toEqual([
+      expect.objectContaining({ step: "ruling", detail: text }),
+    ]);
+  });
+
   test("a refused key leaves a read_failed event too, then stops the watch", async () => {
     const f = failing(() => new KlerosHttpError(401, "no"));
     const r = await pollUntilRuled(f.deps, f.row.caseId, {});

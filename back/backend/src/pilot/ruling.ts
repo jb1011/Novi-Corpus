@@ -280,6 +280,41 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   return behind > 0 ? { read, outcome, overdueMs: behind } : { read, outcome };
 }
 
+/** Whether `e` is a Kleros read that failed: no usable answer (a transport error) or an HTTP
+ *  status. Any other error is a refusal or a bug, never a failed read. */
+export function isKlerosReadFailure(e: unknown): e is KlerosTransportError | KlerosHttpError {
+  return e instanceof KlerosTransportError || e instanceof KlerosHttpError;
+}
+
+/**
+ * A failed Kleros read as the case's trail keeps it: one `ruling/read_failed` event, in the
+ * service's own words, redacted (`klerosTextOf`), which it returns. A failed read is Kleros's
+ * answer, not the platform's, so never `publicErrorMessage`'s fixed sentences.
+ */
+export function recordReadFailed(
+  cases: PilotCaseRepository,
+  caseId: string,
+  e: KlerosTransportError | KlerosHttpError,
+): string {
+  const text = klerosTextOf(e);
+  cases.recordEvent(
+    caseId,
+    "ruling",
+    "read_failed",
+    cases.find(caseId)?.coreDisputeId ?? null,
+    text,
+  );
+  return text;
+}
+
+/**
+ * A refusal because the ruling could not be read. Its words hold the service's, already
+ * redacted by `klerosTextOf`, so a command prints them as they are: through
+ * `publicErrorMessage`, a fee wallet's "insufficient funds" in Kleros's answer would read as the
+ * platform's own wallet. The name stays `Error`, as every other refusal's.
+ */
+export class RulingReadRefusal extends Error {}
+
 const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_MAX_MINUTES = 180;
 /** A watch rides out this many failed reads in a row (an outage of the service or the network,
@@ -336,16 +371,8 @@ export async function pollUntilRuled(
     try {
       r = await pollOnce(d, caseId);
     } catch (e) {
-      if (!(e instanceof KlerosTransportError || e instanceof KlerosHttpError)) throw e;
-      // The service's own words, redacted: a failed read is Kleros's answer, not the platform's.
-      const text = klerosTextOf(e);
-      d.cases.recordEvent(
-        caseId,
-        "ruling",
-        "read_failed",
-        d.cases.find(caseId)?.coreDisputeId ?? null,
-        text,
-      );
+      if (!isKlerosReadFailure(e)) throw e;
+      const text = recordReadFailed(d.cases, caseId, e);
       if (e instanceof KlerosHttpError && AUTH_REFUSED.has(e.status))
         return capped("auth_refused", text);
       failedInARow++;

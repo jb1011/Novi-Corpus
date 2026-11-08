@@ -21,8 +21,11 @@ import { jobCallOf, withoutEmDash } from "./job";
 import { klerosTextOf } from "./klerosCheck";
 import {
   type RulingOutcome,
+  RulingReadRefusal,
+  isKlerosReadFailure,
   pollOnce,
   readRuling,
+  recordReadFailed,
   rulingOfStoredRead,
   stageChainProblem,
 } from "./ruling";
@@ -236,6 +239,12 @@ function refuse(message: string): never {
   throw new Error(`refusing: ${message}; nothing was sent`);
 }
 
+/** A refusal because the ruling could not be read, its words already in the service's redacted
+ *  ones: the command prints it as it is. */
+function refuseUnread(message: string): never {
+  throw new RulingReadRefusal(`refusing: ${message}; nothing was sent`);
+}
+
 /** The settle events that are a send or the outcome of one, as opposed to a read or the chain's.
  *  A hash adopted through its proof, or cleared as dropped, is a send's outcome too. */
 const SEND_TRAIL: ReadonlySet<string> = new Set([
@@ -320,7 +329,7 @@ function readsBeforeResend(
  * from the stage's Dispute Service once the stage is shown to read that chain, decided by
  * `readRuling` with the stage's expected options. Nothing is written to the row's status or
  * ruling columns; a `settle/reread` event names the outcome. A read that fails refuses, in the
- * service's redacted words.
+ * service's redacted words, and a transport or HTTP failure leaves a `ruling/read_failed` event.
  */
 async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<RulingOutcome> {
   const { caseId, klerosChain, coreDisputeId } = row;
@@ -334,7 +343,8 @@ async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<Ruling
   try {
     read = await d.stage.service.getDispute({ chain: klerosChain, coreDisputeId });
   } catch (e) {
-    refuse(`case ${caseId}'s ruling could not be read again before a new send: ${klerosTextOf(e)}`);
+    const text = isKlerosReadFailure(e) ? recordReadFailed(d.cases, caseId, e) : klerosTextOf(e);
+    refuseUnread(`case ${caseId}'s ruling could not be read again before a new send: ${text}`);
   }
   const outcome = readRuling(read, d.expected);
   d.cases.recordEvent(caseId, "settle", "reread", coreDisputeId, outcome.kind);
@@ -479,9 +489,17 @@ export async function settleCase(
   )
     ruling = rulingOfStoredRead(row);
   else {
-    ruling = (
-      await pollOnce({ stage: d.stage, cases: d.cases, expected: d.expected, now: nowMs }, caseId)
-    ).outcome;
+    try {
+      ruling = (
+        await pollOnce({ stage: d.stage, cases: d.cases, expected: d.expected, now: nowMs }, caseId)
+      ).outcome;
+    } catch (e) {
+      if (!isKlerosReadFailure(e)) throw e;
+      // As the poll's watch does: the failed read leaves its line on the case's trail.
+      refuseUnread(
+        `case ${caseId}'s ruling could not be read: ${recordReadFailed(d.cases, caseId, e)}`,
+      );
+    }
     row = d.cases.find(caseId) as PilotCaseRecord;
   }
 

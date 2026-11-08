@@ -14,6 +14,7 @@ import {
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { iErc8183JobAbi } from "../../src/abis/generated";
 import { klerosCaseUrl } from "../../src/adapters/kleros/deployments";
+import { KlerosTransportError } from "../../src/adapters/kleros/errors";
 import { FakeDisputeService } from "../../src/adapters/kleros/fakeDisputeService";
 import { registerPilotCommands } from "../../src/cli/pilot";
 import { registerPilotSettlementCommands } from "../../src/cli/pilotSettlement";
@@ -25,6 +26,7 @@ import type { PilotContext } from "../../src/pilot/context";
 import { DROP_GRACE_SECONDS, reasonFor } from "../../src/pilot/settlement";
 import type { PilotCaseRecord, PilotMode, PilotStatus } from "../../src/pilot/types";
 import { sqliteUtcTimestamp } from "../../src/util/sqliteTime";
+import { PLATFORM_FUNDS_MESSAGE } from "../../src/workflow/publicError";
 
 /** Spelled by code point: the repository keeps the character itself out of its sources. */
 const EM_DASH = String.fromCodePoint(0x2014);
@@ -144,6 +146,7 @@ function makeFake(o: { chainStatus?: number; mode?: PilotMode; nowSec?: number }
     db,
     cases,
     fake,
+    job,
     sent,
     escrow,
     node,
@@ -325,6 +328,61 @@ describe("pilot:settle", () => {
     expect(f.sent).toEqual([]);
     expect(f.closed()).toBe(1);
   });
+
+  test("a ruling read that fails at Kleros refuses in the service's redacted words, leaves one read_failed event, and sends nothing", async () => {
+    const f = makeFake();
+    const caseId = seed(f);
+    vi.spyOn(f.fake, "getDispute").mockRejectedValue(
+      new KlerosTransportError(
+        "Kleros dispute_get: insufficient funds for gas at /var/lib/kleros/transport/client.js",
+      ),
+    );
+    const err = await f
+      .run(["pilot:settle", "--case", caseId, "--script", "pay", "--yes"])
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe(
+      `refusing: case ${caseId}'s ruling could not be read: Kleros dispute_get: insufficient funds for gas at client.js; nothing was sent`,
+    );
+    expect((err as Error).message).not.toContain("/var/lib");
+    expect((err as Error).message).not.toContain(PLATFORM_FUNDS_MESSAGE);
+    expect(f.cases.events(caseId)).toEqual([
+      expect.objectContaining({
+        step: "ruling",
+        status: "read_failed",
+        ref: "287",
+        detail: "Kleros dispute_get: insufficient funds for gas at client.js",
+      }),
+    ]);
+    expect(f.sent).toEqual([]);
+    expect(f.cases.find(caseId)).toMatchObject({ status: "filed", rulingReadAt: null });
+    expect(f.closed()).toBe(1);
+  });
+
+  test.each<[string, string, string]>([
+    // On a chain read, a node's "insufficient funds" is the platform's own wallet.
+    ["insufficient funds for gas * price + value", PLATFORM_FUNDS_MESSAGE, "insufficient funds"],
+    [
+      "could not read /var/lib/arc/node/state.json in time",
+      "could not read state.json in time",
+      "/var/lib",
+    ],
+  ])(
+    "an escrow read that fails with %j is reported in the platform's public words, with no file path",
+    async (message, printed, absent) => {
+      const f = makeFake();
+      const caseId = seed(f, {
+        status: "ruled",
+        patch: { rulingValue: "1", rulingTied: 0, rulingRoundCount: 1, rulingReadAt: NOW },
+      });
+      vi.spyOn(f.job, "escrowState").mockRejectedValue(new Error(message));
+      const err = await f.run(["pilot:settle", "--case", caseId, "--yes"]).catch((e: Error) => e);
+      expect((err as Error).message).toBe(printed);
+      expect((err as Error).message).not.toContain(absent);
+      expect(f.sent).toEqual([]);
+      expect(f.cases.events(caseId)).toEqual([]);
+    },
+  );
 });
 
 /** The first second past the expiry and the clock margin. */

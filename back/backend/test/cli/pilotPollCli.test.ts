@@ -8,7 +8,7 @@ import { Command } from "commander";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
-import { KlerosTransportError } from "../../src/adapters/kleros/errors";
+import { KlerosHttpError, KlerosTransportError } from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import { registerPilotSettlementCommands } from "../../src/cli/pilotSettlement";
 import type { Config } from "../../src/config/env";
@@ -18,6 +18,7 @@ import type { KlerosStage, PilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
 import { type EscrowState, reasonFor } from "../../src/pilot/settlement";
 import type { KlerosChainOnRow, PilotCaseRecord, PilotMode } from "../../src/pilot/types";
+import { PLATFORM_FUNDS_MESSAGE } from "../../src/workflow/publicError";
 
 /** Spelled by code point: the repository keeps the character itself out of its sources. */
 const EM_DASH = String.fromCodePoint(0x2014);
@@ -494,6 +495,49 @@ describe("pilot:poll: the read's note", () => {
     const f = await testnetWith(() => voteRead(null));
     const [out] = await f.run(["pilot:poll", "--case", f.caseId]);
     expect(out).toMatchObject({ read: { deadline: null, note: null } });
+  });
+});
+
+describe("pilot:poll: one read that fails at Kleros", () => {
+  test("is reported in the service's redacted words, never the platform's sentence or a file path, and leaves one read_failed event", async () => {
+    const f = await testnetWith(() => {
+      throw new KlerosTransportError(
+        "Kleros dispute_get: insufficient funds for gas at /var/lib/kleros/transport/client.js",
+      );
+    });
+    const err = await f.run(["pilot:poll", "--case", f.caseId]).catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe(
+      "Kleros dispute_get: insufficient funds for gas at client.js",
+    );
+    expect((err as Error).message).not.toContain("/var/lib");
+    expect((err as Error).message).not.toContain(PLATFORM_FUNDS_MESSAGE);
+    expect(f.cases.events(f.caseId)).toEqual([
+      expect.objectContaining({
+        step: "ruling",
+        status: "read_failed",
+        ref: "186",
+        detail: "Kleros dispute_get: insufficient funds for gas at client.js",
+      }),
+    ]);
+    expect(f.cases.find(f.caseId)).toMatchObject({ status: "filed", rulingReadAt: null });
+    expect(f.closed()).toBe(1);
+  });
+
+  test("an HTTP status leaves one read_failed event, in the service's words", async () => {
+    const f = await testnetWith(() => {
+      throw new KlerosHttpError(503, "upstream unavailable");
+    });
+    await expect(f.run(["pilot:poll", "--case", f.caseId])).rejects.toThrow(
+      /^Kleros Dispute Service answered HTTP 503$/,
+    );
+    expect(f.cases.events(f.caseId)).toEqual([
+      expect.objectContaining({
+        step: "ruling",
+        status: "read_failed",
+        detail: "Kleros Dispute Service answered HTTP 503",
+      }),
+    ]);
   });
 });
 

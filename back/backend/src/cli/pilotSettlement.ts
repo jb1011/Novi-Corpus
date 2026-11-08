@@ -14,13 +14,17 @@ import {
 } from "../pilot/composition";
 import { type PilotContext, openPilotContext } from "../pilot/context";
 import { withoutEmDash } from "../pilot/job";
+import { klerosTextOf, withoutPaths } from "../pilot/klerosCheck";
 import {
   PERIOD_OVERDUE_GRACE_MS,
   type PollDeps,
   type PollResult,
   type RulingOutcome,
+  RulingReadRefusal,
+  isKlerosReadFailure,
   pollOnce,
   pollUntilRuled,
+  recordReadFailed,
 } from "../pilot/ruling";
 import {
   CLAIM_REFUND_UNFILED_ROUTE,
@@ -104,6 +108,19 @@ const ROUND = /^[1-9][0-9]{0,2}$/;
 
 function print(output: Record<string, unknown>): void {
   console.log(JSON.stringify(output, null, 2));
+}
+
+/**
+ * The words a command fails with. A failed Kleros read, or a refusal built on one, is in the
+ * service's own words, redacted (`klerosTextOf`): `publicErrorMessage`'s fixed sentences would
+ * read a fee wallet's "insufficient funds" in Kleros's answer as the platform's own wallet. Any
+ * other failure, a chain or an escrow read's included, goes through `publicErrorMessage`, with
+ * every absolute file path cut to its file name.
+ */
+function failureText(e: unknown): string {
+  if (e instanceof RulingReadRefusal) return withoutEmDash(e.message);
+  if (isKlerosReadFailure(e)) return klerosTextOf(e);
+  return withoutEmDash(withoutPaths(publicErrorMessage(e)));
 }
 
 function parseMaxMinutes(value: string | undefined, watch: boolean): number {
@@ -206,7 +223,14 @@ async function poll(
     sleep: deps.sleep,
   };
   if (watch === null) {
-    const r = await pollOnce(d, caseId);
+    let r: PollResult;
+    try {
+      r = await pollOnce(d, caseId);
+    } catch (e) {
+      // As the watch does: a failed read leaves its line on the case's trail.
+      if (isKlerosReadFailure(e)) recordReadFailed(ctx.cases, caseId, e);
+      throw e;
+    }
     print({
       caseId,
       ...readLine(r),
@@ -500,7 +524,7 @@ export function registerPilotSettlementCommands(
         try {
           await poll(ctx, deps, caseId, opts.watch ? { maxMinutes } : null, script);
         } catch (e) {
-          throw new Error(withoutEmDash(publicErrorMessage(e)));
+          throw new Error(failureText(e));
         } finally {
           ctx.close();
         }
@@ -569,7 +593,7 @@ export function registerPilotSettlementCommands(
               yes,
             });
         } catch (e) {
-          throw new Error(withoutEmDash(publicErrorMessage(e)));
+          throw new Error(failureText(e));
         } finally {
           ctx.close();
         }

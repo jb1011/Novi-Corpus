@@ -14,7 +14,7 @@ import { RECEIPT_TIMEOUT_MS } from "../../src/adapters/arc/receipts";
 import { resetSenderNonces } from "../../src/adapters/arc/senderLock";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
-import { KlerosTransportError } from "../../src/adapters/kleros/errors";
+import { KlerosHttpError, KlerosTransportError } from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import type { Config } from "../../src/config/env";
 import { ChainTxRevertedError, ChainTxUnconfirmedError } from "../../src/errors";
@@ -22,7 +22,7 @@ import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
 import { type KlerosStage, type PilotChain, buildPilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
-import { type RulingOutcome, pollOnce } from "../../src/pilot/ruling";
+import { type RulingOutcome, RulingReadRefusal, pollOnce } from "../../src/pilot/ruling";
 import {
   DROP_GRACE_SECONDS,
   EXPIRY_MARGIN_SECONDS,
@@ -1414,6 +1414,25 @@ describe("settleCase: a re-send on a real deployment reads Kleros again", () => 
     expect(settleTrail(s, caseId)).toEqual([]);
   });
 
+  test("a failed read before a re-send leaves one read_failed event in the service's words, never the platform's", async () => {
+    const { s } = testnetStage(() => {
+      throw new KlerosTransportError(
+        "Kleros dispute_get: insufficient funds for gas at /var/lib/kleros/transport/client.js",
+      );
+    });
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    const err = await settleCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
+    const text = "Kleros dispute_get: insufficient funds for gas at client.js";
+    expect(err).toBeInstanceOf(RulingReadRefusal);
+    expect((err as Error).message).toBe(
+      `refusing: case ${caseId}'s ruling could not be read again before a new send: ${text}; nothing was sent`,
+    );
+    expect(s.cases.events(caseId).filter((e) => e.status === "read_failed")).toEqual([
+      expect.objectContaining({ step: "ruling", ref: DISPUTE, detail: text }),
+    ]);
+    expect(s.node.sends).toEqual([]);
+  });
+
   test("a stored claimRefund needs no read: the expiry path does not depend on the ruling", async () => {
     const { s, reads } = testnetStage(() => appealRead("1"));
     const caseId = seedSettlingNoHash(s, {
@@ -1971,6 +1990,47 @@ describe("settleCase: refusals and the ruling read", () => {
     expect(r.settlement.action).toBe("complete");
     expect(reads).toEqual([{ chain: "arbitrum-sepolia-testnet", coreDisputeId: DISPUTE }]);
   });
+
+  test.each<[string, () => Error, string]>([
+    [
+      "a transport error",
+      () =>
+        new KlerosTransportError(
+          "Kleros dispute_get: insufficient funds for gas at /var/lib/kleros/transport/client.js",
+        ),
+      "Kleros dispute_get: insufficient funds for gas at client.js",
+    ],
+    [
+      "an HTTP status",
+      () => new KlerosHttpError(503, "upstream unavailable"),
+      "Kleros Dispute Service answered HTTP 503",
+    ],
+  ])(
+    "a ruling read that fails with %s refuses in the service's redacted words, leaves one read_failed event per run, and sends nothing",
+    async (_name, failure, text) => {
+      const { s, reads } = testnetStage(() => {
+        throw failure();
+      });
+      const caseId = seed(s, {
+        mode: "testnet",
+        patch: { klerosChain: "arbitrum-sepolia-testnet" },
+      });
+      for (const send of [true, false]) {
+        const err = await settleCase(s.deps, caseId, { send }).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(RulingReadRefusal);
+        expect((err as Error).message).toBe(
+          `refusing: case ${caseId}'s ruling could not be read: ${text}; nothing was sent`,
+        );
+      }
+      expect(reads).toHaveLength(2);
+      expect(s.cases.events(caseId)).toEqual([
+        expect.objectContaining({ step: "ruling", status: "read_failed", detail: text }),
+        expect.objectContaining({ step: "ruling", status: "read_failed", detail: text }),
+      ]);
+      expect(s.node.sends).toEqual([]);
+      expect(s.cases.find(caseId)).toMatchObject({ status: "filed", rulingReadAt: null });
+    },
+  );
 
   test.each<[PilotStatus]>([["contested"], ["filing"], ["failed"], ["filing_unknown"]])(
     "a row at %s is refused before any read or send",
