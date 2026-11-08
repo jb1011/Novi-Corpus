@@ -35,7 +35,9 @@ const TX = `0x${"ab".repeat(32)}` as Hex;
 
 afterEach(() => vi.restoreAllMocks());
 
-function makeFake(o: { chainStatus?: number; mode?: PilotMode } = {}) {
+function makeFake(o: { chainStatus?: number; mode?: PilotMode; nowSec?: number } = {}) {
+  /** The commands' clock, in seconds. */
+  const clock = o.nowSec ?? NOW;
   const db = new Database(":memory:");
   migrate(db);
   const cases = new SqlitePilotCaseRepository(db);
@@ -119,13 +121,13 @@ function makeFake(o: { chainStatus?: number; mode?: PilotMode } = {}) {
       return ctx;
     };
     // `pilot:case` lives with the other pilot commands; settle and poll take the fakes.
-    if (argv[0] === "pilot:case") registerPilotCommands(program, open, { now: () => NOW });
+    if (argv[0] === "pilot:case") registerPilotCommands(program, open, { now: () => clock });
     else
       registerPilotSettlementCommands(program, {
         open,
         buildStage: () => stage,
         buildChain: () => chain,
-        now: () => NOW * 1000,
+        now: () => clock * 1000,
         sleep: async () => {},
       });
     const logs: string[] = [];
@@ -322,6 +324,134 @@ describe("pilot:settle", () => {
     );
     expect(f.sent).toEqual([]);
     expect(f.closed()).toBe(1);
+  });
+});
+
+/** The first second past the expiry and the clock margin. */
+const REFUND_TIME = EXPIRES + 61;
+
+/** A case at `status` that was never filed: no Kleros chain, no dispute id, no filing time. */
+const seedUnfiled = (f: Fake, status: PilotStatus, patch: Partial<PilotCaseRecord> = {}) =>
+  seed(f, { status, patch: { klerosChain: null, coreDisputeId: null, ...patch } });
+
+describe("pilot:settle --claim-refund on a case funded but never filed", () => {
+  test("without --yes it prints the escrow it read and what it would send, and sends nothing", async () => {
+    const f = makeFake({ chainStatus: 1, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "funded");
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund"]);
+    expect(out).toEqual({
+      dryRun: true,
+      caseId,
+      mode: "rehearsal",
+      status: "funded",
+      settlement: { action: "claimRefund", reason: null, outcome: "refunded" },
+      escrow: {
+        status: "Funded",
+        budgetAtomic: "500000",
+        expiredAt: EXPIRES,
+        expiresAt: "2026-11-04T00:00:00.000Z",
+        refundMarginSeconds: 60,
+      },
+      send: {
+        action: "claimRefund",
+        jobId: "7",
+        from: "0x0000000000000000000000000000000000000003",
+        to: "0x0000000000000000000000000000000000000b0b",
+      },
+      next: "nothing was sent: run the same command with --yes to send it",
+    });
+    expect(f.sent).toEqual([]);
+    expect(f.cases.find(caseId)).toMatchObject({ status: "funded", settleAction: null });
+    expect(f.cases.events(caseId)).toEqual([]);
+  });
+
+  test("with --yes it sends claimRefund from the referee and the case ends failed, refunded", async () => {
+    const f = makeFake({ chainStatus: 2, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "contested");
+    const [line, out] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
+    expect(line).toMatchObject({ opslog: "pilot_case_settled", caseId, action: "claimRefund" });
+    expect(out).toMatchObject({
+      caseId,
+      status: "failed",
+      settlement: { action: "claimRefund" },
+      escrow: { status: "Submitted" },
+      txHash: TX,
+    });
+    expect(f.sent).toEqual([
+      {
+        call: "claimRefund",
+        args: [7n, { name: "referee" }, { onBroadcast: expect.any(Function) }],
+      },
+    ]);
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      settleAction: "claimRefund",
+      settleTxHash: TX,
+      settledAt: REFUND_TIME,
+      escrowOutcome: "refunded",
+      error: "expired; escrow refunded by claimRefund",
+    });
+  });
+
+  test("an escrow the chain already refunded is recorded and nothing is sent", async () => {
+    const f = makeFake({ chainStatus: 5, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "submitted");
+    const [line, out] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
+    expect(line).toMatchObject({ opslog: "pilot_case_settled", caseId, action: "none" });
+    expect(out).toMatchObject({
+      caseId,
+      status: "failed",
+      settlement: { action: "none", why: "refunded_elsewhere" },
+      escrow: { status: "Expired" },
+      next: "nothing to send: the escrow is already refunded to the client",
+    });
+    expect(f.sent).toEqual([]);
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      escrowOutcome: "refunded",
+      error: "expired; escrow refunded elsewhere",
+    });
+  });
+
+  test("before the expiry and its margin it is refused with the expiry time, and nothing is sent", async () => {
+    const f = makeFake({ chainStatus: 1, nowSec: EXPIRES + 60 });
+    const caseId = seedUnfiled(f, "funded");
+    await expect(
+      f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]),
+    ).rejects.toThrow(/expires at 2026-11-04T00:00:00.000Z; no claimRefund until 60 seconds after/);
+    expect(f.sent).toEqual([]);
+    expect(f.closed()).toBe(1);
+  });
+
+  test("a case whose filing started is refused: its ruling settles it", async () => {
+    const f = makeFake({ chainStatus: 2, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "contested", { filingStartedAt: NOW - 100 });
+    await expect(
+      f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]),
+    ).rejects.toThrow(
+      new RegExp(
+        `^refusing: case ${caseId} is contested and its filing started; settle it through its ruling; nothing was sent$`,
+      ),
+    );
+    expect(f.sent).toEqual([]);
+  });
+
+  test("without --claim-refund a case never filed is refused, as before", async () => {
+    const f = makeFake({ chainStatus: 1, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "funded");
+    await expect(f.run(["pilot:settle", "--case", caseId, "--yes"])).rejects.toThrow(
+      new RegExp(`case ${caseId} is funded; a settlement starts at filed`),
+    );
+    expect(f.sent).toEqual([]);
+  });
+
+  test("the option says it also takes back the escrow of a case never filed", () => {
+    const program = new Command();
+    registerPilotSettlementCommands(program, {});
+    const settle = program.commands.find((c) => c.name() === "pilot:settle")!;
+    expect(settle.options.find((o) => o.long === "--claim-refund")?.description).toBe(
+      "take the expiry path: claimRefund, refused before the expiry; on a case funded but never filed it takes the escrow back and the case ends failed",
+    );
   });
 });
 

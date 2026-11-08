@@ -25,11 +25,14 @@ import {
 import {
   type SettleDeps,
   type Settlement,
+  UNFILED_REFUND_STATUSES,
+  type UnfiledEscrowRead,
   adoptSettleTx,
   checkEscrowIsOwn,
   checkOwnConfig,
   clearDroppedSettleTx,
   decideSettlement,
+  refundUnfiledCase,
   settleCase,
 } from "../pilot/settlement";
 import { publicErrorMessage } from "../workflow/publicError";
@@ -42,9 +45,10 @@ import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
  * Like the other pilot commands, each one parses its options before it opens its own narrow
  * context, prints JSON objects and throws on a refusal. `pilot:poll` only reads Kleros and the
  * escrow and writes the row: it sends no transaction. `pilot:settle` prints its decision and
- * sends it only with `--yes`. Its two recovery options send nothing: `--tx` adopts a settle hash
- * the case lost once the chain proves it, and `--dropped` clears one the network dropped; each
- * prints what it read and writes only with `--yes`.
+ * sends it only with `--yes`; with `--claim-refund` on a case funded but never filed it takes the
+ * escrow back after the expiry, and the case ends failed. Its two recovery options send nothing:
+ * `--tx` adopts a settle hash the case lost once the chain proves it, and `--dropped` clears one
+ * the network dropped; each prints what it read and writes only with `--yes`.
  */
 export interface PilotSettlementDeps {
   open: () => PilotContext;
@@ -283,9 +287,12 @@ async function settle(
   o: SettleOptions,
 ): Promise<void> {
   checkScriptMode(ctx, o.script);
+  const row = ctx.cases.find(caseId);
+  // A case never filed has no ruling: only the expiry gives its escrow back.
+  if (o.claimRefundOnly && row !== undefined && UNFILED_REFUND_STATUSES.has(row.status))
+    return refundUnfiled(ctx, deps, caseId, o);
   // A rehearsal case that holds a read is settled from it. One with none yet is read once, from
   // a fresh fake that answers its script's verdict at once, so the script must be the filing's.
-  const row = ctx.cases.find(caseId);
   if (
     row !== undefined &&
     row.mode === "rehearsal" &&
@@ -326,6 +333,48 @@ async function settle(
 }
 
 const isoOf = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString();
+
+/** The escrow a refund read, as it prints: the expiry also as a date. */
+const escrowView = (e: UnfiledEscrowRead) => ({
+  status: e.status,
+  budgetAtomic: e.budgetAtomic,
+  expiredAt: e.expiredAt,
+  expiresAt: isoOf(e.expiredAt),
+  refundMarginSeconds: e.refundMarginSeconds,
+});
+
+/** `pilot:settle --claim-refund` on a case funded but never filed: the escrow read and the
+ *  claimRefund it leads to; sent with `--yes`. */
+async function refundUnfiled(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  caseId: string,
+  o: SettleOptions,
+): Promise<void> {
+  const r = await refundUnfiledCase(settleDepsOf(ctx, deps, o.script), caseId, { send: o.yes });
+  const after = ctx.cases.find(caseId);
+  const base = {
+    caseId,
+    mode: after?.mode,
+    status: after?.status,
+    settlement: r.settlement,
+    escrow: escrowView(r.escrow),
+  };
+  if (r.settlement.action === "none") {
+    print({ ...base, next: `nothing to send: ${NOTHING_TO_SEND[r.settlement.why]}` });
+    return;
+  }
+  if (!o.yes) {
+    print({
+      dryRun: true,
+      ...base,
+      send: r.send,
+      next: "nothing was sent: run the same command with --yes to send it",
+    });
+    return;
+  }
+  print({ ...base, send: r.send, txHash: r.txHash });
+}
 
 /** `pilot:settle --tx`: the proof of the hash and the write it leads to; written with `--yes`. */
 async function adopt(
@@ -443,7 +492,10 @@ export function registerPilotSettlementCommands(
       "carry a pilot case's ruling out on Arc (test data): pay the provider, refund the client, or refund by expiry; prints the decision and sends it with --yes",
     )
     .requiredOption("--case <caseId>", "the pilot case")
-    .option("--claim-refund", "take the expiry path: claimRefund, refused before the expiry")
+    .option(
+      "--claim-refund",
+      "take the expiry path: claimRefund, refused before the expiry; on a case funded but never filed it takes the escrow back and the case ends failed",
+    )
     .option("--accept-round <n>", "act on an appealed case's ruling when round <n> is the one read")
     .option(
       "--script <name>",
