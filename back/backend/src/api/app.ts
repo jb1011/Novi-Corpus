@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
+import type { EmailDeps } from "../email/outbox";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
 import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
@@ -24,6 +25,7 @@ import { mountConnectionRoutes } from "./routes/connection";
 import { mountCustomerCompanyRoutes } from "./routes/customerCompanies";
 import { mountDocumentRoutes } from "./routes/documents";
 import { type DoolaWebhookDeps, mountDoolaWebhookRoutes } from "./routes/doolaWebhook";
+import { mountEmailWebhookRoutes } from "./routes/emailWebhook";
 import { mountEnsGatewayRoutes } from "./routes/ensGateway";
 import { type ExternalRecordDeps, mountExternalRecordRoutes } from "./routes/externalRecord";
 import { mountFormationRulesRoutes } from "./routes/formationRules";
@@ -282,6 +284,13 @@ export interface ApiDeps extends EntityViewDeps {
    * and `assertIdentityVerified` refuses a production door with `identity_unavailable`.
    */
   identity?: IdentityDeps;
+  /**
+   * The email system: the outbox every email is enqueued to, the sender its delivery job sends
+   * with, and what every email is built with (the link base, the postal address, the marketing
+   * segment). Present only where `cfg.email` is, which is only where PUBLIC_APP_URL is set; absent
+   * on a box that configures no email (the testnet box), which then sends nothing.
+   */
+  email?: EmailDeps;
   /** AgentBook (design 2026-08-25 v3). Present wherever the World Chain READ config is, which is
    *  everywhere — reading "is this agent human-backed?" needs nothing but an RPC URL. Its
    *  `registrar` is the optional WRITE half, present iff `canRegisterAgentBook(cfg)`; that
@@ -505,6 +514,17 @@ export function buildApiApp(deps: ApiDeps) {
   // Mounted BEFORE the /entities auth middleware for the same reason every other public route is,
   // and gated on the credentials that make verification possible at all.
   if (deps.doola) mountDoolaWebhookRoutes(app, { ...deps, doola: deps.doola });
+  // PUBLIC for the same reason: the email provider signs its delivery events (Svix), and the
+  // signature is the authentication. Mounted only where the email system is wired with the
+  // provider's sender, which is what carries the webhook secret: a console box has no secret (the
+  // boot refuses one there) and a box with no email system (the testnet box) has neither, so on
+  // both the path is not mounted and answers 404.
+  if (deps.email?.webhookSecret)
+    mountEmailWebhookRoutes(
+      app,
+      { ...deps.email, webhookSecret: deps.email.webhookSecret },
+      deps.now ?? Date.now,
+    );
   mountMetadataRoutes(app, deps);
   // The HCS-11 profile beside the metadata it cross-links, public for the same reason: it is what
   // a Hedera account's `hcs-11:` memo points at, read by agents holding no key of ours (task 11).

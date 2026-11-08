@@ -1,6 +1,5 @@
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
-import { getAddress } from "viem";
 import { type WorldIdDeps, buildWorldIdDeps, realHumanState } from "../api/routes/worldId";
 import { type Config, legalBodyEnvironment } from "../config/env";
 import { type PiiKeyring, encryptText, nameHmac } from "../formation/pii";
@@ -36,11 +35,13 @@ import { SqliteWorldStore } from "../persistence/worldStore";
 import { readNames, withPromptedNames } from "./namesPrompt";
 import {
   OPERATOR_NAME,
+  oneOf,
   operatorConfig,
   osUser,
   parseExpectLatest,
   parseOperator,
   parseReason,
+  parseTenant,
   print,
   refuse,
   withDatabase,
@@ -106,25 +107,6 @@ const LIVENESS = ["passed", "failed", "not_run"] as const satisfies readonly Liv
 const WATCHLIST = ["clear", "hit", "not_run"] as const satisfies readonly Watchlist[];
 
 // ── parsing ──────────────────────────────────────────────────────────────────────────────────
-
-/** The tenant in the one spelling its rows are kept under: EIP-55 checksummed. */
-function parseTenant(value: string): string {
-  try {
-    return getAddress(value);
-  } catch {
-    return refuse("<tenantId> must be a wallet address");
-  }
-}
-
-function oneOf<T extends string>(
-  flag: string,
-  value: string | undefined,
-  allowed: readonly T[],
-): T {
-  if (value === undefined || !(allowed as readonly string[]).includes(value))
-    refuse(`${flag} must be one of ${allowed.join(", ")}`);
-  return value as T;
-}
 
 function optionalOneOf<T extends string>(
   flag: string,

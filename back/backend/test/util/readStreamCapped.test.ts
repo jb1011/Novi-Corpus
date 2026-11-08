@@ -102,12 +102,22 @@ test("M4: all three readers use the shared one, and none keeps a private copy", 
     readFileSync(join(import.meta.dirname, "..", "..", "src", ...rel), "utf8");
   for (const [file, path] of [
     ["doola client", ["adapters", "doola", "doolaClient.ts"]],
-    ["webhook receiver", ["api", "routes", "doolaWebhook.ts"]],
+    ["webhook receivers' reader", ["api", "cappedBody.ts"]],
     ["document downloader", ["workflow", "documentDownloader.ts"]],
   ] as const) {
     const s = src(...path);
     expect(s, file).toContain("util/readStreamCapped");
     // The tell-tale of a private copy: its own reader loop.
+    expect(s, file).not.toContain("body.getReader()");
+  }
+  // Both inbound webhooks read their body through that one reader, and neither keeps its own.
+  for (const [file, path] of [
+    ["doola webhook", ["api", "routes", "doolaWebhook.ts"]],
+    ["email webhook", ["api", "routes", "emailWebhook.ts"]],
+  ] as const) {
+    const s = src(...path);
+    expect(s, file).toMatch(/import \{ readCappedBody \} from "\.\.\/cappedBody";/);
+    expect(s, file).not.toContain("async function readCappedBody");
     expect(s, file).not.toContain("body.getReader()");
   }
 });

@@ -1333,6 +1333,108 @@ const IDENTITY_CHECK_EVENTS_DDL = `
 `;
 
 /**
+ * THE LAST RUN OF EACH SCHEDULED JOB (see `scheduledJobRunRepository.ts`): one row per job name,
+ * written by the API process's scheduler after every run of the job, a success or a failure, and
+ * read back when it starts. So the count of failures in a row survives a restart, and the rule
+ * that the third one is CRITICAL holds across a process that crash-loops; `scheduler:list` prints
+ * the row beside each registered job. A row is the scheduler's bookkeeping: a job's name, times
+ * and a count, never a job's output. The run history itself is in the ops log.
+ */
+const SCHEDULED_JOB_RUNS_DDL = `
+  CREATE TABLE IF NOT EXISTS scheduled_job_runs (
+    name                 TEXT PRIMARY KEY,
+    last_run_at          INTEGER NOT NULL,
+    last_ok              INTEGER NOT NULL CHECK (last_ok IN (0, 1)),
+    consecutive_failures INTEGER NOT NULL CHECK (consecutive_failures >= 0),
+    updated_at           INTEGER NOT NULL
+  );
+`;
+
+/**
+ * THE EMAIL OUTBOX (see `src/email/outbox.ts` and `emailOutboxRepository.ts`): one row for every
+ * email the product sends, and for every write of a consenting address to the provider's
+ * marketing list (`contact_upsert`). A caller enqueues a row, once per idempotency key (a second
+ * enqueue with the same key writes nothing); the scheduler's `email_deliver` job sends it and
+ * hands the provider that key, so a retry after a lost answer is never sent twice. The provider's
+ * delivery events (its webhook) land on the sent row.
+ *
+ * What a row keeps, and for how long, is the point of the CHECKs:
+ *  - while a row waits (`pending`) or has failed (`failed`, which `email:resend` can put back to
+ *    pending), it holds its address and, but for a contact write, its subject, text and HTML;
+ *  - once `sent`, it holds no address, no text and no HTML: an email carries invite codes, tokens
+ *    and links meant for one person, and those must not outlive the send in this database (the
+ *    invite table itself keeps only a hash). The subject, the kind, the ids and the states stay,
+ *    and subjects carry no personal data;
+ *  - a contact write never has a subject or a body;
+ *  - the states hang together: a pending row has its next attempt, a sent row its message id and
+ *    time, and only a sent row a delivery state (with its time).
+ * `last_error` holds an HTTP status and the provider's code, never a body the provider wrote.
+ * Times are ms. The due index serves the job's one query: pending rows by their next attempt.
+ */
+const EMAIL_OUTBOX_DDL = `
+  CREATE TABLE IF NOT EXISTS email_outbox (
+    email_id            TEXT PRIMARY KEY,
+    kind                TEXT NOT NULL CHECK (kind IN ('filing_landed', 'waitlist_confirm',
+                          'invite_code', 'identity_link', 'contact_upsert')),
+    subject_ref         TEXT,
+    idempotency_key     TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) BETWEEN 1 AND 256),
+    to_address          TEXT CHECK (to_address IS NULL OR to_address != ''),
+    subject             TEXT,
+    text                TEXT,
+    html                TEXT,
+    status              TEXT NOT NULL CHECK (status IN ('pending', 'sent', 'failed')),
+    attempts            INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_attempt_at     INTEGER,
+    provider_message_id TEXT,
+    delivery_state      TEXT CHECK (delivery_state IS NULL OR delivery_state IN ('delivered',
+                          'delayed', 'bounced', 'complained', 'failed', 'suppressed')),
+    delivery_at         INTEGER,
+    last_error          TEXT,
+    created_at          INTEGER NOT NULL,
+    sent_at             INTEGER,
+    CHECK (kind = 'contact_upsert' OR subject IS NOT NULL),
+    CHECK (kind != 'contact_upsert' OR (subject IS NULL AND text IS NULL AND html IS NULL)),
+    CHECK (status = 'sent' OR to_address IS NOT NULL),
+    CHECK (status = 'sent' OR kind = 'contact_upsert' OR (text IS NOT NULL AND html IS NOT NULL)),
+    CHECK (status != 'sent' OR (to_address IS NULL AND text IS NULL AND html IS NULL)),
+    CHECK ((status = 'pending') = (next_attempt_at IS NOT NULL)),
+    CHECK ((status = 'sent') = (provider_message_id IS NOT NULL)),
+    CHECK ((status = 'sent') = (sent_at IS NOT NULL)),
+    CHECK (delivery_state IS NULL OR status = 'sent'),
+    CHECK ((delivery_state IS NULL) = (delivery_at IS NULL))
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_outbox_due ON email_outbox(status, next_attempt_at);
+  CREATE INDEX IF NOT EXISTS idx_email_outbox_provider_message
+    ON email_outbox(provider_message_id) WHERE provider_message_id IS NOT NULL;
+`;
+
+/**
+ * THE DELIVERY EVENTS NO SENT EMAIL CLAIMS YET (`email_delivery_orphans`, see
+ * `src/email/outbox.ts`): a signed delivery event whose provider id no sent row carries. Two ways
+ * it happens to one of ours: the send's answer was lost (the provider took the email, the row is
+ * still pending and is retried under the same key, which the provider answers with the same id),
+ * or an event such as `email.suppressed` arrives before the row is marked sent. It is kept, one
+ * row per id and state (a redelivered event keeps the later event time), and when the delivery
+ * job writes that id on a row, the same transaction applies it through the outbox's ordering
+ * rules and deletes it. The rest never match (campaign emails from the same provider account
+ * reach the same endpoint) and the delivery job deletes them 7 days after they arrived. A
+ * provider id, a state and two times (ms): never an address or anything else the event carries.
+ * The arrival index serves that cleanup, which runs with every delivery run (every 30 seconds).
+ */
+const EMAIL_DELIVERY_ORPHANS_DDL = `
+  CREATE TABLE IF NOT EXISTS email_delivery_orphans (
+    provider_message_id TEXT NOT NULL,
+    state               TEXT NOT NULL CHECK (state IN ('delivered', 'delayed', 'bounced',
+                          'complained', 'failed', 'suppressed')),
+    event_at            INTEGER NOT NULL,
+    received_at         INTEGER NOT NULL,
+    PRIMARY KEY (provider_message_id, state)
+  );
+  CREATE INDEX IF NOT EXISTS idx_email_delivery_orphans_received
+    ON email_delivery_orphans(received_at);
+`;
+
+/**
  * An agentId in the one spelling `legal_bodies` stores it (whose CHECK writes the same rule
  * inline): TEXT with no hidden bytes, decimal digits only, no leading zero except '0' itself, at
  * most 78 digits (the width of a uint256).
@@ -1835,6 +1937,12 @@ export function migrate(db: Database.Database): void {
     -- The guardian's identity checks, and the trail of everything done to them.
     ${GUARDIAN_IDENTITY_CHECKS_DDL}
     ${IDENTITY_CHECK_EVENTS_DDL}
+    -- The in-process scheduler's last run of each job.
+    ${SCHEDULED_JOB_RUNS_DDL}
+    -- Every email the product sends, until the delivery job has sent it.
+    ${EMAIL_OUTBOX_DDL}
+    -- The delivery events that arrived before their email's row was sent.
+    ${EMAIL_DELIVERY_ORPHANS_DDL}
 
     -- Anchor cycles: one row PER MANIFEST VERSION. Deliberately NOT keyed like bridge_legs
     -- (entity, step) — a bridge has exactly one of each leg, whereas an entity accumulates

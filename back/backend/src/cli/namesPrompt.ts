@@ -1,12 +1,13 @@
-import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { refuse } from "./operator";
+import { readAnswers } from "./prompt";
 
 /**
  * THE NAMES OF RECORD, TYPED AT A PROMPT (`--names-prompt` on `identity:record` and
  * `identity:correct-name`): read from the operator's terminal or from standard input, never from
  * the command line, so a name stays out of the shell history and the process list. What is read is
- * handed to the command and written into no ops line.
+ * handed to the command and written into no ops line. The terminal and the pipe are read as
+ * prompt.ts reads them.
  */
 
 /** The names as the operator typed them; the command applies `nameOfRecord` and the name rule. */
@@ -31,57 +32,12 @@ const NAME_FLAGS = [
   ["nameFull", "--name-full"],
 ] as const;
 
-/**
- * At a terminal: three prompts on `output`, the full name optional. Readline echoes what is typed
- * into `output` only when that is a terminal too: into a redirected standard error it would write
- * the names, so there the terminal's own echo shows them instead. The input's end at a prompt
- * (Ctrl-D) is refused, never left pending.
- */
-async function askAtTerminal(
-  input: Readable,
-  output: Writable & { isTTY?: boolean },
-): Promise<string[]> {
-  const rl = createInterface({ input, output, terminal: output.isTTY === true });
-  let closed = false;
-  rl.once("close", () => {
-    closed = true;
-  });
-  const ask = (question: string) =>
-    new Promise<string>((resolve, reject) => {
-      const unanswered = () => reject(new Error("refusing: the names were not entered"));
-      // The input may have ended with the previous answer, before this prompt.
-      if (closed) return unanswered();
-      rl.once("close", unanswered);
-      rl.question(question, (answer) => {
-        rl.off("close", unanswered);
-        resolve(answer);
-      });
-    });
-  try {
-    return [
-      await ask("First name, as the guardian gave it and the document prints it: "),
-      await ask("Last name, as the guardian gave it and the document prints it: "),
-      await ask("Full name, optional (Enter to skip): "),
-    ];
-  } finally {
-    rl.close();
-  }
-}
-
-/** Not a terminal: up to `max` lines of `input`, in order. */
-async function readLines(input: Readable, max: number): Promise<string[]> {
-  const rl = createInterface({ input, crlfDelay: Number.POSITIVE_INFINITY, terminal: false });
-  const lines: string[] = [];
-  try {
-    for await (const line of rl) {
-      lines.push(line);
-      if (lines.length === max) break;
-    }
-  } finally {
-    rl.close();
-  }
-  return lines;
-}
+/** The three prompts at a terminal, the full name optional. */
+const NAME_QUESTIONS = [
+  "First name, as the guardian gave it and the document prints it: ",
+  "Last name, as the guardian gave it and the document prints it: ",
+  "Full name, optional (Enter to skip): ",
+] as const;
 
 /**
  * The first name, the last name and an optional full name: prompted for when `input` is a
@@ -93,8 +49,12 @@ export async function readNames(
   input: Readable & { isTTY?: boolean },
   output: Writable & { isTTY?: boolean },
 ): Promise<PromptedNames> {
-  const [first, last, full] =
-    input.isTTY === true ? await askAtTerminal(input, output) : await readLines(input, 3);
+  const [first, last, full] = await readAnswers(
+    input,
+    output,
+    NAME_QUESTIONS,
+    "the names were not entered",
+  );
   if (first === undefined || last === undefined)
     refuse("--names-prompt needs the first name and the last name, one per line");
   return full === undefined || full.trim() === "" ? { first, last } : { first, last, full };
