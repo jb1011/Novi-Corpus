@@ -21,7 +21,8 @@ import type Database from "better-sqlite3";
  * evidence upload (`source = 'customer'`), whose bytes expire: its row records when they were
  * deleted, and when the same bytes come back it takes a new expiry and a new `created_at`, as the
  * new upload it then is. Its other columns never change, and its hash stays after its bytes have
- * gone.
+ * gone. A document the operator records (`source = 'operator'`) is immutable too: a later one is a
+ * new row, and the index keeps both.
  */
 export interface DocumentIndexRecord {
   /** Our stable, URL-safe id — see `documentIndexId`. This is what the download route takes. */
@@ -44,9 +45,11 @@ export interface DocumentIndexRecord {
   /** Name inside the DocumentStore (not a filesystem path the caller may dictate). */
   path: string;
   createdAt: string | null;
-  /** Who supplied the bytes: the formation provider, or the customer as evidence for the
-   *  operator. A customer's upload has no provider to re-fetch it from. */
-  source: "provider" | "customer";
+  /** Who supplied the bytes: the formation provider; the customer, as evidence for the operator;
+   *  or the operator, recording a document the provider sends outside its API (doola's amended
+   *  articles, `DAO_SUPPLEMENT_DOC_TYPE`). Neither of the last two has a provider to re-fetch it
+   *  from. */
+  source: "provider" | "customer" | "operator";
   /** Unix seconds from which a customer upload's bytes may be deleted. Null on a provider's
    *  document, whose bytes never expire. */
   expiresAt: number | null;
@@ -59,7 +62,7 @@ export interface DocumentIndexRecord {
 export type NewDocumentIndexRecord = Omit<
   DocumentIndexRecord,
   "createdAt" | "entityKey" | "source" | "expiresAt" | "bytesDeletedAt"
-> & { entityKey?: null; source?: "provider" | "customer"; expiresAt?: number | null };
+> & { entityKey?: null; source?: DocumentIndexRecord["source"]; expiresAt?: number | null };
 
 interface Row {
   id: string;
@@ -95,12 +98,13 @@ function toRecord(r: Row): DocumentIndexRecord {
   };
 }
 
-const SOURCES: readonly DocumentIndexRecord["source"][] = ["provider", "customer"];
+const SOURCES: readonly DocumentIndexRecord["source"][] = ["provider", "customer", "operator"];
 
 /**
  * The doc type of the DAO supplement: doola's amended articles, which add the DAO supplement to a
- * formed company's articles by hand. An operator records them (design §6.5); the company view
- * reads the latest such row as `daoSupplement`.
+ * formed company's articles by hand. An operator records them (design §6.5) with
+ * `company:dao-supplement`, as a row of `source = 'operator'`; the company view reads the latest
+ * such row as `daoSupplement`.
  */
 export const DAO_SUPPLEMENT_DOC_TYPE = "dao_supplement";
 
@@ -171,7 +175,8 @@ export function documentFileName(docType: string): string {
 export interface DocumentIndexRepository {
   /**
    * Index a stored document. Returns false when the row already existed (idempotent re-fetch).
-   * `source` defaults to `provider` and `expiresAt` to none; a customer's upload passes both.
+   * `source` defaults to `provider` and `expiresAt` to none; a customer's upload passes both, and
+   * an operator's document its source alone (its bytes never expire).
    */
   insert(rec: NewDocumentIndexRecord): boolean;
   listByCompany(companyId: string): DocumentIndexRecord[];
