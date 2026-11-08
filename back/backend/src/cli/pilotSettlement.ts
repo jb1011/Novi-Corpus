@@ -23,14 +23,17 @@ import {
   pollUntilRuled,
 } from "../pilot/ruling";
 import {
+  type SettleDeps,
   type Settlement,
+  adoptSettleTx,
   checkEscrowIsOwn,
   checkOwnConfig,
+  clearDroppedSettleTx,
   decideSettlement,
   settleCase,
 } from "../pilot/settlement";
 import { publicErrorMessage } from "../workflow/publicError";
-import { parseCaseId, refuse } from "./pilotArgs";
+import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
 
 /**
  * THE PILOT'S SETTLEMENT COMMANDS: reading a filed case's ruling from Kleros, and carrying it
@@ -39,7 +42,9 @@ import { parseCaseId, refuse } from "./pilotArgs";
  * Like the other pilot commands, each one parses its options before it opens its own narrow
  * context, prints JSON objects and throws on a refusal. `pilot:poll` only reads Kleros and the
  * escrow and writes the row: it sends no transaction. `pilot:settle` prints its decision and
- * sends it only with `--yes`.
+ * sends it only with `--yes`. Its two recovery options send nothing: `--tx` adopts a settle hash
+ * the case lost once the chain proves it, and `--dropped` clears one the network dropped; each
+ * prints what it read and writes only with `--yes`.
  */
 export interface PilotSettlementDeps {
   open: () => PilotContext;
@@ -227,6 +232,29 @@ interface SettleOptions {
   yes: boolean;
 }
 
+/** `--script` names the rehearsal fake's script, so it means nothing in another mode. */
+function checkScriptMode(ctx: PilotContext, script: FakeScript | undefined): void {
+  const mode = ctx.cfg.pilot?.mode;
+  if (script !== undefined && mode !== "rehearsal")
+    refuse(`--script is accepted in rehearsal mode only, and this box is in ${mode} mode`);
+}
+
+/** The settle's dependencies: the Kleros stage the box's mode selects, then the chain. */
+function settleDepsOf(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  script: FakeScript | undefined,
+): SettleDeps {
+  const stage = deps.buildStage(ctx.cfg, { script: script ?? DEFAULT_SCRIPT, readsUntilAppeal: 1 });
+  return {
+    chain: deps.buildChain(ctx),
+    cases: ctx.cases,
+    stage,
+    expected: expectedOf(ctx.cfg),
+    now: deps.now,
+  };
+}
+
 /** Why nothing is sent, for each decision that sends nothing. */
 const NOTHING_TO_SEND: Record<Extract<Settlement, { action: "none" }>["why"], string> = {
   released_elsewhere: "the escrow is already released to the provider",
@@ -254,9 +282,7 @@ async function settle(
   caseId: string,
   o: SettleOptions,
 ): Promise<void> {
-  const mode = ctx.cfg.pilot?.mode;
-  if (o.script !== undefined && mode !== "rehearsal")
-    refuse(`--script is accepted in rehearsal mode only, and this box is in ${mode} mode`);
+  checkScriptMode(ctx, o.script);
   // A rehearsal case that holds a read is settled from it. One with none yet is read once, from
   // a fresh fake that answers its script's verdict at once, so the script must be the filing's.
   const row = ctx.cases.find(caseId);
@@ -272,21 +298,11 @@ async function settle(
     refuse(
       `case ${caseId} has no ruling read yet: pass --script with the script the case was filed with`,
     );
-  const stage = deps.buildStage(ctx.cfg, {
-    script: o.script ?? DEFAULT_SCRIPT,
-    readsUntilAppeal: 1,
+  const r = await settleCase(settleDepsOf(ctx, deps, o.script), caseId, {
+    send: o.yes,
+    acceptRound: o.acceptRound,
+    claimRefundOnly: o.claimRefundOnly,
   });
-  const r = await settleCase(
-    {
-      chain: deps.buildChain(ctx),
-      cases: ctx.cases,
-      stage,
-      expected: expectedOf(ctx.cfg),
-      now: deps.now,
-    },
-    caseId,
-    { send: o.yes, acceptRound: o.acceptRound, claimRefundOnly: o.claimRefundOnly },
-  );
   const after = ctx.cases.find(caseId);
   const base = { caseId, mode: after?.mode, settlement: r.settlement, status: after?.status };
   if (r.settlement.action === "none") {
@@ -307,6 +323,80 @@ async function settle(
     return;
   }
   print({ ...base, txHash: r.txHash });
+}
+
+const isoOf = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString();
+
+/** `pilot:settle --tx`: the proof of the hash and the write it leads to; written with `--yes`. */
+async function adopt(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  caseId: string,
+  hash: `0x${string}`,
+  o: { script: FakeScript | undefined; yes: boolean },
+): Promise<void> {
+  checkScriptMode(ctx, o.script);
+  const r = await adoptSettleTx(settleDepsOf(ctx, deps, o.script), caseId, hash, {
+    write: o.yes,
+  });
+  const after = ctx.cases.find(caseId);
+  const base = { caseId, mode: after?.mode, status: after?.status };
+  if (r.unchanged) {
+    print({ ...base, txHash: r.hash, next: "nothing to change: the case already holds this hash" });
+    return;
+  }
+  const proof = { ...r.proof, blockTime: isoOf(r.proof.blockTime) };
+  if (!o.yes) {
+    print({
+      dryRun: true,
+      ...base,
+      proof,
+      write: r.write,
+      next: "nothing was written: run the same command with --yes to record it",
+    });
+    return;
+  }
+  print({
+    ...base,
+    proof,
+    wrote: r.write,
+    ...(r.write.status === "settling"
+      ? {
+          next: `the transaction reverted: run pilot:settle --case ${caseId} to decide again from the chain`,
+        }
+      : {}),
+  });
+}
+
+/** `pilot:settle --dropped`: what proved the drop and the write it leads to; written with `--yes`. */
+async function dropped(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  caseId: string,
+  o: { script: FakeScript | undefined; yes: boolean },
+): Promise<void> {
+  checkScriptMode(ctx, o.script);
+  const r = await clearDroppedSettleTx(settleDepsOf(ctx, deps, o.script), caseId, {
+    write: o.yes,
+  });
+  const after = ctx.cases.find(caseId);
+  const base = { caseId, mode: after?.mode, status: after?.status };
+  if (!o.yes) {
+    print({
+      dryRun: true,
+      ...base,
+      read: r.read,
+      write: r.write,
+      next: "nothing was written: run the same command with --yes to clear the hash",
+    });
+    return;
+  }
+  print({
+    ...base,
+    read: r.read,
+    wrote: r.write,
+    next: `run pilot:settle --case ${caseId} to decide again from the chain`,
+  });
 }
 
 export function registerPilotSettlementCommands(
@@ -358,13 +448,23 @@ export function registerPilotSettlementCommands(
       "--script <name>",
       "rehearsal mode only: the script the case was filed with, needed when the case holds no ruling read yet",
     )
-    .option("--yes", "confirm: send the transaction")
+    .option(
+      "--tx <hash>",
+      "adopt a settle transaction the case lost, once it is proven to be the referee's settle of the case's job; sends nothing",
+    )
+    .option(
+      "--dropped",
+      "clear a settling case's transaction hash once the network is proven to have dropped it, so the next run decides again; sends nothing",
+    )
+    .option("--yes", "confirm: send the transaction, or with --tx or --dropped write the row")
     .action(
       async (opts: {
         case: string;
         claimRefund?: boolean;
         acceptRound?: string;
         script?: string;
+        tx?: string;
+        dropped?: boolean;
         yes?: boolean;
       }) => {
         // Options are parsed before the context opens, so a bad one never opens the database.
@@ -372,15 +472,28 @@ export function registerPilotSettlementCommands(
         const acceptRound = parseAcceptRound(opts.acceptRound);
         if (acceptRound !== undefined && opts.claimRefund)
           refuse("--accept-round and --claim-refund cannot both be given");
+        if (opts.tx !== undefined && opts.dropped)
+          refuse("--tx and --dropped cannot both be given");
+        // The two recovery options send nothing, so the options that shape a send mean nothing.
+        const recovery = opts.tx !== undefined ? "--tx" : opts.dropped ? "--dropped" : undefined;
+        if (recovery !== undefined && opts.claimRefund)
+          refuse(`${recovery} and --claim-refund cannot both be given`);
+        if (recovery !== undefined && acceptRound !== undefined)
+          refuse(`${recovery} and --accept-round cannot both be given`);
+        const tx = opts.tx === undefined ? undefined : parseTxHash("--tx", opts.tx);
         const script = parseScript(opts.script);
+        const yes = !!opts.yes;
         const ctx = deps.open();
         try {
-          await settle(ctx, deps, caseId, {
-            acceptRound,
-            claimRefundOnly: !!opts.claimRefund,
-            script,
-            yes: !!opts.yes,
-          });
+          if (tx !== undefined) await adopt(ctx, deps, caseId, tx, { script, yes });
+          else if (opts.dropped) await dropped(ctx, deps, caseId, { script, yes });
+          else
+            await settle(ctx, deps, caseId, {
+              acceptRound,
+              claimRefundOnly: !!opts.claimRefund,
+              script,
+              yes,
+            });
         } catch (e) {
           throw new Error(withoutEmDash(publicErrorMessage(e)));
         } finally {

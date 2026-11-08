@@ -5,8 +5,14 @@
  */
 import Database from "better-sqlite3";
 import { Command } from "commander";
-import type { Hex } from "viem";
+import {
+  type Hex,
+  TransactionNotFoundError,
+  TransactionReceiptNotFoundError,
+  encodeFunctionData,
+} from "viem";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { iErc8183JobAbi } from "../../src/abis/generated";
 import { klerosCaseUrl } from "../../src/adapters/kleros/deployments";
 import { FakeDisputeService } from "../../src/adapters/kleros/fakeDisputeService";
 import { registerPilotCommands } from "../../src/cli/pilot";
@@ -16,8 +22,9 @@ import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
 import type { KlerosStage, PilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
-import { reasonFor } from "../../src/pilot/settlement";
+import { DROP_GRACE_SECONDS, reasonFor } from "../../src/pilot/settlement";
 import type { PilotCaseRecord, PilotMode, PilotStatus } from "../../src/pilot/types";
+import { sqliteUtcTimestamp } from "../../src/util/sqliteTime";
 
 /** Spelled by code point: the repository keeps the character itself out of its sources. */
 const EM_DASH = String.fromCodePoint(0x2014);
@@ -63,9 +70,28 @@ function makeFake(o: { chainStatus?: number; mode?: PilotMode } = {}) {
       return TX;
     },
   };
+  /** What the node holds under a hash: none by default, as a node that never saw it. */
+  const node = {
+    txs: new Map<string, { from: string; to: string; input: Hex; blockNumber: bigint | null }>(),
+    receipts: new Map<string, { status: "success" | "reverted"; blockNumber: bigint }>(),
+  };
   const chain = {
     job,
-    publicClient: { getChainId: async () => 5042002, getBalance: async () => 10n ** 18n },
+    publicClient: {
+      getChainId: async () => 5042002,
+      getBalance: async () => 10n ** 18n,
+      getTransaction: async ({ hash }: { hash: Hex }) => {
+        const tx = node.txs.get(hash);
+        if (!tx) throw new TransactionNotFoundError({ hash });
+        return tx;
+      },
+      getTransactionReceipt: async ({ hash }: { hash: Hex }) => {
+        const receipt = node.receipts.get(hash);
+        if (!receipt) throw new TransactionReceiptNotFoundError({ hash });
+        return receipt;
+      },
+      getBlock: async () => ({ timestamp: BigInt(NOW - 60) }),
+    },
     jobContract: "0x0000000000000000000000000000000000000b0b",
     chainId: 5042002,
     wallets: { referee: { name: "referee" } },
@@ -112,7 +138,17 @@ function makeFake(o: { chainStatus?: number; mode?: PilotMode } = {}) {
     for (const l of logs) expect(l).not.toContain(EM_DASH);
     return logs.map((l) => JSON.parse(l) as Record<string, unknown>);
   };
-  return { cases, fake, sent, escrow, run, opened: () => opens, closed: () => closes };
+  return {
+    db,
+    cases,
+    fake,
+    sent,
+    escrow,
+    node,
+    run,
+    opened: () => opens,
+    closed: () => closes,
+  };
 }
 
 type Fake = ReturnType<typeof makeFake>;
@@ -287,6 +323,292 @@ describe("pilot:settle", () => {
     expect(f.sent).toEqual([]);
     expect(f.closed()).toBe(1);
   });
+});
+
+/** The referee's complete of job 7 with the case's reason, as the node holds it once mined. */
+function minedComplete(f: Fake, receipt: "success" | "reverted" = "success"): void {
+  f.node.txs.set(TX, {
+    from: "0x0000000000000000000000000000000000000003",
+    to: "0x0000000000000000000000000000000000000b0b",
+    input: encodeFunctionData({
+      abi: iErc8183JobAbi,
+      functionName: "complete",
+      args: [7n, reasonFor("287"), "0x"],
+    }),
+    blockNumber: 1n,
+  });
+  f.node.receipts.set(TX, { status: receipt, blockNumber: 1n });
+}
+
+/** A settle/sending event on the case, stamped `secondsAgo` before the command's clock. */
+function sendingEvent(f: Fake, caseId: string, secondsAgo: number): void {
+  f.cases.recordEvent(caseId, "settle", "sending", null, `complete ${reasonFor("287")}`);
+  f.db
+    .prepare(
+      "UPDATE pilot_case_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM pilot_case_events WHERE case_id = ?)",
+    )
+    .run(sqliteUtcTimestamp((NOW - secondsAgo) * 1000), caseId);
+}
+
+const SETTLING_COMPLETE: Partial<PilotCaseRecord> = {
+  settleAction: "complete",
+  settleReason: reasonFor("287"),
+};
+
+describe("pilot:settle --tx", () => {
+  test("without --yes it prints the proof and what it would write, and writes nothing", async () => {
+    const f = makeFake();
+    const caseId = seed(f, { status: "settling", patch: SETTLING_COMPLETE });
+    minedComplete(f);
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--tx", TX]);
+    expect(out).toEqual({
+      dryRun: true,
+      caseId,
+      mode: "rehearsal",
+      status: "settling",
+      proof: {
+        hash: TX,
+        sender: "0x0000000000000000000000000000000000000003",
+        target: "0x0000000000000000000000000000000000000b0b",
+        action: "complete",
+        jobId: "7",
+        reason: reasonFor("287"),
+        receipt: "success",
+        blockTime: new Date((NOW - 60) * 1000).toISOString(),
+      },
+      write: {
+        status: "settled",
+        settleTxHash: TX,
+        settleAction: "complete",
+        settledAt: NOW - 60,
+        escrowOutcome: "released",
+        event: { step: "settle", status: "adopted", ref: TX, detail: "complete" },
+      },
+      next: "nothing was written: run the same command with --yes to record it",
+    });
+    expect(f.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: null });
+    expect(f.cases.events(caseId)).toEqual([]);
+    expect(f.sent).toEqual([]);
+    expect(f.closed()).toBe(1);
+  });
+
+  test("with --yes it adopts the hash and sends nothing", async () => {
+    const f = makeFake();
+    const caseId = seed(f, { status: "settling", patch: SETTLING_COMPLETE });
+    minedComplete(f);
+    const outs = await f.run([
+      "pilot:settle",
+      "--case",
+      caseId,
+      "--tx",
+      TX.toUpperCase().replace("0X", "0x"),
+      "--yes",
+    ]);
+    const out = outs.find((o) => o.opslog === undefined);
+    expect(out).toMatchObject({
+      caseId,
+      status: "settled",
+      proof: { hash: TX, receipt: "success" },
+      wrote: { status: "settled", settleTxHash: TX },
+    });
+    expect(out!.dryRun).toBeUndefined();
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleTxHash: TX,
+      settledAt: NOW - 60,
+      escrowOutcome: "released",
+    });
+    expect(f.sent).toEqual([]);
+  });
+
+  test("with --yes on a reverted hash it says the next run decides again", async () => {
+    const f = makeFake();
+    const caseId = seed(f, { status: "settling", patch: SETTLING_COMPLETE });
+    minedComplete(f, "reverted");
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--tx", TX, "--yes"]);
+    expect(out).toMatchObject({
+      status: "settling",
+      wrote: { status: "settling", settleTxHash: TX },
+      next: `the transaction reverted: run pilot:settle --case ${caseId} to decide again from the chain`,
+    });
+    expect(f.sent).toEqual([]);
+  });
+
+  test("naming the hash the row holds says so and changes nothing", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "settled",
+      patch: { ...SETTLING_COMPLETE, settleTxHash: TX },
+    });
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--tx", TX, "--yes"]);
+    expect(out).toEqual({
+      caseId,
+      mode: "rehearsal",
+      status: "settled",
+      txHash: TX,
+      next: "nothing to change: the case already holds this hash",
+    });
+    expect(f.cases.events(caseId)).toEqual([]);
+  });
+
+  test("a hash the proof refuses is refused in its words, and nothing is written", async () => {
+    const f = makeFake();
+    const caseId = seed(f, { status: "settling", patch: SETTLING_COMPLETE });
+    await expect(f.run(["pilot:settle", "--case", caseId, "--tx", TX, "--yes"])).rejects.toThrow(
+      new RegExp(`case ${caseId}'s settle transaction ${TX} could not be read from the node yet`),
+    );
+    expect(f.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: null });
+    expect(f.closed()).toBe(1);
+  });
+});
+
+describe("pilot:settle --dropped", () => {
+  test("without --yes it prints what it read and what it would write, and writes nothing", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "settling",
+      patch: { ...SETTLING_COMPLETE, settleTxHash: TX },
+    });
+    sendingEvent(f, caseId, DROP_GRACE_SECONDS + 5);
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--dropped"]);
+    expect(out).toEqual({
+      dryRun: true,
+      caseId,
+      mode: "rehearsal",
+      status: "settling",
+      read: {
+        hash: TX,
+        action: "complete",
+        receipt: null,
+        transaction: null,
+        sendAgeSeconds: DROP_GRACE_SECONDS + 5,
+        escrowStatus: "Submitted",
+      },
+      write: {
+        status: "settling",
+        settleTxHash: null,
+        settleAction: "complete",
+        settleReason: reasonFor("287"),
+        event: {
+          step: "settle",
+          status: "dropped",
+          ref: TX,
+          detail: `complete not mined and not pending ${DROP_GRACE_SECONDS + 5} s after its send; the escrow is Submitted`,
+        },
+      },
+      next: "nothing was written: run the same command with --yes to clear the hash",
+    });
+    expect(f.cases.find(caseId)!.settleTxHash).toBe(TX);
+    expect(f.sent).toEqual([]);
+  });
+
+  test("with --yes it clears the hash, keeps the action, and sends nothing", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "settling",
+      patch: { ...SETTLING_COMPLETE, settleTxHash: TX },
+    });
+    sendingEvent(f, caseId, DROP_GRACE_SECONDS);
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--dropped", "--yes"]);
+    expect(out).toMatchObject({
+      caseId,
+      status: "settling",
+      wrote: { settleTxHash: null, settleAction: "complete" },
+      next: `run pilot:settle --case ${caseId} to decide again from the chain`,
+    });
+    expect(out!.dryRun).toBeUndefined();
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleTxHash: null,
+      settleAction: "complete",
+    });
+    expect(f.cases.events(caseId).at(-1)).toMatchObject({
+      step: "settle",
+      status: "dropped",
+      ref: TX,
+    });
+    expect(f.sent).toEqual([]);
+  });
+
+  test("a hash the node has a receipt for is refused, and the context is closed", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "settling",
+      patch: { ...SETTLING_COMPLETE, settleTxHash: TX },
+    });
+    sendingEvent(f, caseId, 3600);
+    minedComplete(f);
+    await expect(f.run(["pilot:settle", "--case", caseId, "--dropped", "--yes"])).rejects.toThrow(
+      /has a receipt \(success\): it was mined, not dropped/,
+    );
+    expect(f.cases.find(caseId)!.settleTxHash).toBe(TX);
+    expect(f.closed()).toBe(1);
+  });
+});
+
+describe("pilot:settle --tx and --dropped: the options", () => {
+  test.each([
+    [["--tx", TX, "--dropped"], /--tx and --dropped cannot both be given/],
+    [["--tx", TX, "--claim-refund"], /--tx and --claim-refund cannot both be given/],
+    [["--tx", TX, "--accept-round", "2"], /--tx and --accept-round cannot both be given/],
+    [["--dropped", "--claim-refund"], /--dropped and --claim-refund cannot both be given/],
+    [["--dropped", "--accept-round", "2"], /--dropped and --accept-round cannot both be given/],
+    [["--tx", "0x1234"], /--tx must be a transaction hash \(0x and 64 hex digits\)/],
+    [["--tx", `0x${"g".repeat(64)}`], /--tx must be a transaction hash/],
+    [["--tx", `${"ab".repeat(32)}`], /--tx must be a transaction hash/],
+    [["--tx", `0x${"ab".repeat(33)}`], /--tx must be a transaction hash/],
+  ])("%j is refused before the context opens", async (flags, message) => {
+    const f = makeFake();
+    await expect(
+      f.run(["pilot:settle", "--case", "pc_000000000000", ...flags, "--yes"]),
+    ).rejects.toThrow(message);
+    expect(f.opened()).toBe(0);
+    expect(f.sent).toEqual([]);
+  });
+
+  test("each says what it does in one line of help", () => {
+    const program = new Command();
+    registerPilotSettlementCommands(program, {});
+    const settle = program.commands.find((c) => c.name() === "pilot:settle")!;
+    const help = (flag: string) => settle.options.find((o) => o.long === flag)?.description;
+    expect(help("--tx")).toBe(
+      "adopt a settle transaction the case lost, once it is proven to be the referee's settle of the case's job; sends nothing",
+    );
+    expect(help("--dropped")).toBe(
+      "clear a settling case's transaction hash once the network is proven to have dropped it, so the next run decides again; sends nothing",
+    );
+  });
+
+  test.each([[["--tx", TX]], [["--dropped"]]])(
+    "%j on a case of another mode is refused, and the context is closed",
+    async (flags) => {
+      const f = makeFake();
+      const caseId = seed(f, {
+        mode: "testnet",
+        status: "settling",
+        patch: { ...SETTLING_COMPLETE, settleTxHash: TX },
+      });
+      await expect(f.run(["pilot:settle", "--case", caseId, ...flags, "--yes"])).rejects.toThrow(
+        /testnet case and this stage is rehearsal/,
+      );
+      expect(f.closed()).toBe(1);
+    },
+  );
+
+  test.each([[["--tx", TX]], [["--dropped"]]])(
+    "%j with --script outside the rehearsal is refused as the plain settle refuses it",
+    async (flags) => {
+      const f = makeFake({ mode: "testnet" });
+      const caseId = seed(f, {
+        mode: "testnet",
+        status: "settling",
+        patch: { ...SETTLING_COMPLETE, settleTxHash: TX },
+      });
+      await expect(
+        f.run(["pilot:settle", "--case", caseId, ...flags, "--script", "pay", "--yes"]),
+      ).rejects.toThrow(/--script is accepted in rehearsal mode only/);
+    },
+  );
 });
 
 describe("pilot:poll prints the settlement it would take", () => {
