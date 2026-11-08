@@ -12,7 +12,13 @@ import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage, PilotChain } from "./composition";
 import { withoutEmDash } from "./job";
 import { klerosTextOf } from "./klerosCheck";
-import { type RulingOutcome, pollOnce, readRuling, rulingOfStoredRead } from "./ruling";
+import {
+  type RulingOutcome,
+  pollOnce,
+  readRuling,
+  rulingOfStoredRead,
+  stageChainProblem,
+} from "./ruling";
 import type { PilotCaseRecord, PilotStatus } from "./types";
 
 /**
@@ -158,6 +164,18 @@ export function decideSettlement(
     : { action: "reject", reason, outcome: "refunded" };
 }
 
+/**
+ * Whether `decideSettlement` acts on the ruling for this escrow at this time: only for a Submitted
+ * job outside the expiry's last ten minutes, which is also before the expiry path opens. Anywhere
+ * else the chain and the clock decide alone, so a ruling read there would change nothing.
+ */
+export function decisionTurnsOnRuling(escrow: EscrowState, nowSeconds: number): boolean {
+  return (
+    escrow.status === JobStatusOnChain.submitted &&
+    BigInt(nowSeconds) <= escrow.expiredAt - BigInt(EXPIRY_MARGIN_SECONDS)
+  );
+}
+
 export interface SettleDeps {
   chain: PilotChain;
   cases: PilotCaseRepository;
@@ -181,23 +199,37 @@ function refuse(message: string): never {
   throw new Error(`refusing: ${message}; nothing was sent`);
 }
 
+/** The settle events that are a send or the outcome of one, as opposed to a read or the chain's. */
+const SEND_TRAIL: ReadonlySet<string> = new Set([
+  "sending",
+  "sent",
+  "reverted",
+  "unconfirmed",
+  "failed",
+  "ok",
+]);
+
 /**
  * Refuses while the case's latest `settle/sending` event is younger than
- * {SEND_IN_FLIGHT_SECONDS} on the settle's clock, whatever the row's status. The database stamps
- * the event; a stamp that cannot be read refuses too, since an unknown age never lets a second
- * send through. Run it before any read and again inside the transaction that records the next
- * `settle/sending` event, so two runs cannot both pass it.
+ * {SEND_IN_FLIGHT_SECONDS} on the settle's clock, whatever the row's status. With
+ * `outcomeEndsSend`, a sending event that its outcome (sent, reverted, unconfirmed, failed or ok)
+ * already follows holds nothing: for a row whose hash reverted, where this run's own revert ended
+ * its send but another run's newer one has not ended yet. The database stamps the event; a stamp
+ * that cannot be read refuses too, since an unknown age never lets a second send through. Run it
+ * before any read and again inside the transaction that records the next `settle/sending` event,
+ * so two runs cannot both pass it.
  */
 export function refuseWhileSendMayRun(
   cases: PilotCaseRepository,
   caseId: string,
   nowSec: number,
+  o: { outcomeEndsSend?: boolean } = {},
 ): void {
-  const last = cases
-    .events(caseId)
-    .filter((e) => e.step === "settle" && e.status === "sending")
-    .at(-1);
-  if (last === undefined) return;
+  const trail = cases.events(caseId).filter((e) => e.step === "settle" && SEND_TRAIL.has(e.status));
+  const last = o.outcomeEndsSend
+    ? trail.at(-1)
+    : trail.filter((e) => e.status === "sending").at(-1);
+  if (last === undefined || last.status !== "sending") return;
   const startedMs = parseSqliteUtc(last.createdAt);
   // The parser reads a stamp it cannot read as 0.
   if (startedMs === 0)
@@ -221,11 +253,12 @@ function rulingOfAction(action: PilotCaseRecord["settleAction"]): RulingOutcome 
 }
 
 /**
- * Whether a settling row about to be sent on again (no hash, or one whose receipt reverted) reads
- * Kleros first: on a real deployment, when its stored read is missing or older than
- * RULING_FRESH_SECONDS, since the ruling may have moved on appeal after the action was chosen. A
- * claimRefund, stored or asked for, reads nothing: the expiry path does not depend on the ruling.
- * A rehearsal's fake cannot read the case again.
+ * Whether a settling row about to be sent on again (no hash, or one whose receipt reverted) may
+ * read Kleros again: on a real deployment, when its stored read is missing or older than
+ * RULING_FRESH_SECONDS, since the ruling may have moved on appeal after the action was chosen.
+ * It reads only after the escrow, and only when the decision turns on the ruling
+ * (`decisionTurnsOnRuling`). A claimRefund, stored or asked for, reads nothing: the expiry path
+ * does not depend on the ruling. A rehearsal's fake cannot read the case again.
  */
 function readsBeforeResend(
   row: PilotCaseRecord,
@@ -239,9 +272,10 @@ function readsBeforeResend(
 
 /**
  * The ruling read live before a re-send: one read of the row's dispute on the row's Kleros chain,
- * from the stage's Dispute Service, decided by `readRuling` with the stage's expected options.
- * Nothing is written to the row's status or ruling columns; a `settle/reread` event names the
- * outcome. A read that fails refuses, in the service's redacted words.
+ * from the stage's Dispute Service once the stage is shown to read that chain, decided by
+ * `readRuling` with the stage's expected options. Nothing is written to the row's status or
+ * ruling columns; a `settle/reread` event names the outcome. A read that fails refuses, in the
+ * service's redacted words.
  */
 async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<RulingOutcome> {
   const { caseId, klerosChain, coreDisputeId } = row;
@@ -249,6 +283,8 @@ async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<Ruling
     refuse(
       `case ${caseId} has no Kleros chain or dispute id to read its ruling again before a new send`,
     );
+  const problem = stageChainProblem(d.stage, row);
+  if (problem !== null) refuse(problem);
   let read: DisputeRead;
   try {
     read = await d.stage.service.getDispute({ chain: klerosChain, coreDisputeId });
@@ -310,7 +346,9 @@ function settledLine(
  * receipt first: none yet is refused, a success is recorded settled with that hash, and a revert
  * lets the row be decided again against the chain. A settling row decided again acts on the
  * action it chose, or, on a real deployment whose stored read is stale, on the ruling read again
- * (`readsBeforeResend`). An escrow settled elsewhere is recorded settled with no action of ours.
+ * after the escrow when the decision turns on it (`readsBeforeResend`). The move to settling
+ * refuses when the row's hash is no longer the one this run read. An escrow settled elsewhere is
+ * recorded settled with no action of ours, or with the row's when the chain agrees with it.
  * A rehearsal row that holds a read is decided from it, whatever its age. With `send` false only
  * the ruling read writes, with its event.
  */
@@ -337,10 +375,14 @@ export async function settleCase(
 
   // Our earlier send is resolved before anything else: a second transaction while the first may
   // still land is the one thing the adapter says not to do. A row with no hash may be another
-  // run's send, still before its broadcast or its hash's write: it waits out the window, checked
-  // here before any read and again inside the move to settling, so two runs cannot both pass.
-  if (row.status === "settling" && row.settleTxHash === null)
-    refuseWhileSendMayRun(d.cases, caseId, nowSec());
+  // run's send, still before its broadcast or its hash's write; a row whose hash reverted may
+  // have another run's newer send under way, its hash not yet written. Either waits out the
+  // window, checked here before any read and again inside the move to settling, so two runs
+  // cannot both pass.
+  if (row.status === "settling")
+    refuseWhileSendMayRun(d.cases, caseId, nowSec(), {
+      outcomeEndsSend: row.settleTxHash !== null,
+    });
   let landed: Hex | null = null;
   if (row.status === "settling" && row.settleTxHash !== null) {
     const hash = row.settleTxHash as Hex;
@@ -353,12 +395,11 @@ export async function settleCase(
   }
 
   let ruling: RulingOutcome;
-  // Set when the ruling of a settling row was read live before a re-send.
-  let reread: RulingOutcome | null = null;
-  if (row.status === "settling" && landed === null && readsBeforeResend(row, opts, nowSec())) {
-    reread = await rereadRuling(d, row);
-    ruling = reread;
-  } else if (row.status === "settling" || row.status === "settled")
+  // A re-send that may read the ruling again does so after the escrow read, and only when the
+  // decision turns on the ruling: a settled escrow or the expiry path never waits on Kleros.
+  const mayReread =
+    row.status === "settling" && landed === null && readsBeforeResend(row, opts, nowSec());
+  if (row.status === "settling" || row.status === "settled")
     ruling = rulingOfAction(row.settleAction);
   // The expiry path does not depend on the ruling, so a Kleros outage does not hold it up.
   else if (opts.claimRefundOnly) ruling = { kind: "pending" };
@@ -384,6 +425,12 @@ export async function settleCase(
   await checkConnectedChain(d, row);
   const escrow = await d.chain.job.escrowState(jobId);
   checkEscrowIsOwn(row, jobId, escrow);
+  // Set when the ruling of a settling row was read live before a re-send.
+  let reread: RulingOutcome | null = null;
+  if (mayReread && decisionTurnsOnRuling(escrow, nowSec())) {
+    reread = await rereadRuling(d, row);
+    ruling = reread;
+  }
   const settlement = decideSettlement(ruling, escrow, nowSec(), {
     acceptRound: opts.acceptRound,
     claimRefundOnly: opts.claimRefundOnly,
@@ -530,21 +577,43 @@ function recordElsewhere(
 type SendAction = Extract<Settlement, { action: "complete" | "reject" | "claimRefund" }>["action"];
 
 /**
+ * The row as the run that sends left it: the status its send was recorded at (`settling` for a
+ * settle) and the hash it held then (none, or a reverted one).
+ */
+export interface SendStart {
+  status: PilotStatus;
+  settleTxHash: string | null;
+}
+
+/** Writes `hash` on the row while it is still as `start` says, inside the caller's transaction.
+ *  A row another command moved, or whose hash another run wrote, is left as it is. */
+function writeHashIfUnmoved(
+  cases: PilotCaseRepository,
+  caseId: string,
+  start: SendStart,
+  hash: Hex,
+): void {
+  const current = cases.find(caseId);
+  if (current?.status !== start.status || current.settleTxHash !== start.settleTxHash) return;
+  cases.advance(caseId, start.status, start.status, { settleTxHash: hash });
+}
+
+/**
  * The hash of a settle's transaction, written the moment the node accepted it and before its
- * receipt is waited for: on the row while it is still at `status` (the status the send was
- * recorded at; `settling` for a settle), and as a `settle/sent` event with the action, whatever
- * the row's status, so a row another command moved keeps the hash on its trail. One transaction;
- * it throws only when the database write fails.
+ * receipt is waited for: on the row while it is still as `start` says, and as a `settle/sent`
+ * event with the action, whatever became of the row, so a row another command moved, or whose
+ * hash another run wrote, keeps this hash on its trail and the other one on the row. One
+ * transaction; it throws only when the database write fails.
  */
 export function recordBroadcast(
   cases: PilotCaseRepository,
   caseId: string,
-  status: PilotStatus,
+  start: SendStart,
   action: SendAction,
   hash: Hex,
 ): void {
   cases.transaction(() => {
-    cases.advance(caseId, status, status, { settleTxHash: hash });
+    writeHashIfUnmoved(cases, caseId, start, hash);
     cases.recordEvent(caseId, "settle", "sent", hash, action);
   });
 }
@@ -563,11 +632,18 @@ async function send(
   d.cases.transaction(() => {
     // Measured on the row as this run read it: another run's send that started since leaves its
     // sending event, and its hash may already be on the row.
-    if (row.status === "settling" && row.settleTxHash === null)
-      refuseWhileSendMayRun(d.cases, caseId, nowSec());
+    if (row.status === "settling")
+      refuseWhileSendMayRun(d.cases, caseId, nowSec(), {
+        outcomeEndsSend: row.settleTxHash !== null,
+      });
+    const current = d.cases.find(caseId);
+    // A hash written since this run read the row is another run's broadcast.
+    if (current !== undefined && current.settleTxHash !== row.settleTxHash)
+      refuse(
+        `pilot case ${caseId} moved while this command ran: its transaction hash is not the one this run read`,
+      );
     // The decision was made from the ruling this row held. A read that came in since (an appeal,
     // or a verdict read again) may have changed it, and the status alone would not show that.
-    const current = d.cases.find(caseId);
     if (
       current !== undefined &&
       (current.rulingReadAt !== row.rulingReadAt ||
@@ -590,10 +666,11 @@ async function send(
   // The hash is written as soon as it exists: a transport error or a stop during the receipt
   // wait then leaves it on the row, and the next run reads its receipt before anything else.
   let broadcast: Hex | null = null;
+  const start: SendStart = { status: "settling", settleTxHash: row.settleTxHash };
   const hook = {
     onBroadcast: (hash: Hex) => {
       broadcast = hash;
-      recordBroadcast(d.cases, caseId, "settling", action, hash);
+      recordBroadcast(d.cases, caseId, start, action, hash);
     },
   };
   let txHash: Hex;
@@ -610,8 +687,9 @@ async function send(
         ? e.txHash
         : broadcast;
     d.cases.transaction(() => {
-      // Only while the row is still ours to write: a concurrent run may have settled it.
-      if (sent !== null) d.cases.advance(caseId, "settling", "settling", { settleTxHash: sent });
+      // Only while the row is still ours to write: a concurrent run may have settled it, or
+      // written its own hash. A hash our hook already wrote is left as it is.
+      if (sent !== null) writeHashIfUnmoved(d.cases, caseId, start, sent);
       d.cases.recordEvent(
         caseId,
         "settle",

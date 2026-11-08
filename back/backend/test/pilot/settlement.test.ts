@@ -5,7 +5,7 @@
  * are read off what the node accepted.
  */
 import Database from "better-sqlite3";
-import { type Address, decodeFunctionData, toHex } from "viem";
+import { type Address, type Hex, decodeFunctionData, toHex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { iErc8183JobAbi } from "../../src/abis/generated";
@@ -31,6 +31,7 @@ import {
   SEND_IN_FLIGHT_SECONDS,
   type SettleDeps,
   decideSettlement,
+  decisionTurnsOnRuling,
   reasonFor,
   settleCase,
 } from "../../src/pilot/settlement";
@@ -258,6 +259,25 @@ describe("decideSettlement: the rulings the table does not act on, and the opera
       why: "released_elsewhere",
     });
   });
+});
+
+test("decisionTurnsOnRuling holds exactly where a pay and a pending ruling decide differently", () => {
+  const times = [
+    NOW,
+    EXPIRES - EXPIRY_MARGIN_SECONDS,
+    EXPIRES - EXPIRY_MARGIN_SECONDS + 1,
+    EXPIRES,
+    EXPIRES + Number(REFUND_CLOCK_MARGIN_SECONDS) + 1,
+  ];
+  for (const status of [0, 1, 2, 3, 4, 5, 6])
+    for (const at of times) {
+      const e = escrow(status);
+      const differ =
+        decideSettlement(PAY, e, at, withId).action !==
+        decideSettlement({ kind: "pending" }, e, at, withId).action;
+      expect(decisionTurnsOnRuling(e, at)).toBe(differ);
+    }
+  expect(decisionTurnsOnRuling(escrow(2), NOW)).toBe(true);
 });
 
 test("reasonFor writes the dispute id as a 32-byte number", () => {
@@ -791,6 +811,11 @@ const settleTrail = (s: Setup, caseId: string) =>
     .map((e) => [e.status, e.ref, e.detail]);
 
 describe("settleCase: the hash is written the moment it exists", () => {
+  // The settled line goes to stdout; these tests read the row and the trail instead.
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
   test("the row holds the hash, with a sent event, before the receipt is waited for", async () => {
     const s = setup({ script: "pay" });
     const caseId = seed(s, { status: "ruled", patch: STORED_PAY });
@@ -934,6 +959,11 @@ function sendingEvent(s: Setup, caseId: string, secondsAgo: number, stamp?: stri
 }
 
 describe("settleCase: a send that may still be running is never sent again", () => {
+  // The settled line goes to stdout; these tests read the row and the trail instead.
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
   test("the window is the receipt wait and two minutes more", () => {
     expect(SEND_IN_FLIGHT_SECONDS).toBe(RECEIPT_TIMEOUT_MS / 1000 + 120);
     expect(SEND_IN_FLIGHT_SECONDS).toBe(180);
@@ -1056,6 +1086,157 @@ describe("settleCase: a send that may still be running is never sent again", () 
   });
 });
 
+/** A refund case whose first reject reverted: at settling, holding the reverted hash. */
+async function revertedRow(s: Setup): Promise<{ caseId: string; reverted: Hex }> {
+  const caseId = seed(s);
+  const err = await settleCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
+  expect(err).toBeInstanceOf(ChainTxRevertedError);
+  const reverted = (err as ChainTxRevertedError).txHash as Hex;
+  expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: reverted });
+  return { caseId, reverted };
+}
+
+/** A hash another run's broadcast wrote on the row. */
+const OTHER_RUNS_HASH = `0x${"cd".repeat(32)}` as Hex;
+
+describe("settleCase: a settling row whose hash reverted is sent on once", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
+  test("two settles at once on it send one new transaction, and the row holds the sending run's hash", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    // On the database's clock, as for the race on a row with no hash: the run that moves second
+    // measures the first one's sending event against this clock.
+    s.clock.sec = Math.floor(Date.now() / 1000);
+    const { caseId } = await revertedRow(s);
+    const results = await Promise.allSettled([
+      settleCase(s.deps, caseId, { send: true }),
+      settleCase(s.deps, caseId, { send: true }),
+    ]);
+    expect(s.node.hashesOf("reject")).toHaveLength(2);
+    const sent = results.filter((r) => r.status === "fulfilled") as PromiseFulfilledResult<
+      Awaited<ReturnType<typeof settleCase>>
+    >[];
+    expect(sent).toHaveLength(1);
+    const refused = results.find((r) => r.status === "rejected") as PromiseRejectedResult;
+    expect(String(refused.reason)).toMatch(
+      new RegExp(
+        `(a settle may still be running on case ${caseId}|pilot case ${caseId} moved while this command ran).*; nothing was sent$`,
+      ),
+    );
+    expect(s.node.hashesOf("reject")[1]).toBe(sent[0]!.value.txHash);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleTxHash: sent[0]!.value.txHash,
+    });
+  });
+
+  test("a hash written on the row between this run's read and its move refuses: the row moved", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    const { caseId, reverted } = await revertedRow(s);
+    const job = s.deps.chain.job;
+    const real = job.escrowState.bind(job);
+    job.escrowState = async (...a: Parameters<typeof job.escrowState>) => {
+      const state = await real(...a);
+      s.cases.patch(caseId, { settleTxHash: OTHER_RUNS_HASH });
+      return state;
+    };
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: pilot case ${caseId} moved while this command ran: its transaction hash is not the one this run read; nothing was sent$`,
+      ),
+    );
+    expect(s.node.hashesOf("reject")).toEqual([reverted]);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleTxHash: OTHER_RUNS_HASH,
+    });
+  });
+
+  test("another run's send with no outcome yet holds a re-send before any read, until the window passes", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    const { caseId } = await revertedRow(s);
+    sendingEvent(s, caseId, 30);
+    const reads = [
+      vi.spyOn(s.deps.chain.publicClient, "getTransactionReceipt"),
+      vi.spyOn(s.deps.chain.job, "escrowState"),
+    ];
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: a settle may still be running on case ${caseId}: its send started 30 s ago, .*; nothing was sent$`,
+      ),
+    );
+    for (const spy of reads) expect(spy).not.toHaveBeenCalled();
+    expect(s.node.hashesOf("reject")).toHaveLength(1);
+    s.clock.sec += SEND_IN_FLIGHT_SECONDS;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement.action).toBe("reject");
+    expect(s.node.hashesOf("reject")).toHaveLength(2);
+  });
+
+  test("another run's send recorded while this one read is caught inside the move", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    const { caseId, reverted } = await revertedRow(s);
+    const job = s.deps.chain.job;
+    const real = job.escrowState.bind(job);
+    job.escrowState = async (...a: Parameters<typeof job.escrowState>) => {
+      const state = await real(...a);
+      sendingEvent(s, caseId, 0);
+      return state;
+    };
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: a settle may still be running on case ${caseId}: its send started 0 s ago`,
+      ),
+    );
+    expect(s.node.hashesOf("reject")).toEqual([reverted]);
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: reverted });
+  });
+
+  test("the hook does not write over a hash another run wrote, and keeps its own on the trail", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    const { caseId } = await revertedRow(s);
+    const job = s.deps.chain.job;
+    const real = job.reject.bind(job);
+    job.reject = async (...a: Parameters<typeof job.reject>) => {
+      s.cases.patch(caseId, { settleTxHash: OTHER_RUNS_HASH });
+      return real(...a);
+    };
+    const atWait: (string | null | undefined)[] = [];
+    const wait = s.node.publicClient.waitForTransactionReceipt;
+    vi.spyOn(s.node.publicClient, "waitForTransactionReceipt").mockImplementation(async (args) => {
+      atWait.push(s.cases.find(caseId)?.settleTxHash);
+      return wait(args);
+    });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(atWait).toEqual([OTHER_RUNS_HASH]);
+    expect(settleTrail(s, caseId)).toContainEqual(["sent", r.txHash, "reject"]);
+  });
+
+  test("the failure's own record does not write over a hash another run wrote", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    const { caseId } = await revertedRow(s);
+    const job = s.deps.chain.job;
+    const real = job.reject.bind(job);
+    job.reject = async (...a: Parameters<typeof job.reject>) => {
+      s.cases.patch(caseId, { settleTxHash: OTHER_RUNS_HASH });
+      return real(...a);
+    };
+    vi.spyOn(s.node.publicClient, "waitForTransactionReceipt").mockRejectedValueOnce(
+      new Error("socket hang up"),
+    );
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow("socket hang up");
+    const mine = s.node.hashesOf("reject")[1]!;
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleTxHash: OTHER_RUNS_HASH,
+    });
+    expect(settleTrail(s, caseId)).toContainEqual(["sent", mine, "reject"]);
+    expect(settleTrail(s, caseId)).toContainEqual(["failed", mine, "socket hang up"]);
+  });
+});
+
 /** A testnet stage whose Dispute Service answers every read with `answer`, and the reads. */
 function testnetStage(
   answer: () => DisputeRead,
@@ -1091,6 +1272,11 @@ const rulingColumns = (row: PilotCaseRecord) => ({
 });
 
 describe("settleCase: a re-send on a real deployment reads Kleros again", () => {
+  // The settled line goes to stdout; these tests read the row and the trail instead.
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
   test("a settling row with no hash and a stale read is read on its own chain, and a refund read sends reject in place of the stored complete", async () => {
     const { s, reads } = testnetStage(() => appealRead("2"));
     const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
@@ -1210,7 +1396,7 @@ describe("settleCase: a re-send on a real deployment reads Kleros again", () => 
   test("a failed read refuses in the service's redacted words, and nothing is sent", async () => {
     const { s } = testnetStage(() => {
       throw new KlerosTransportError(
-        "dispute_get failed at https://kleros.example.com/v1/mcp?apiKey=abcdefghijklmnop12345 after 3 tries",
+        "dispute_get failed at https://kleros.example.com/v1/mcp?apiKey=SENTINELKEY after 3 tries",
       );
     });
     const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
@@ -1287,6 +1473,61 @@ describe("settleCase: a re-send on a real deployment reads Kleros again", () => 
     expect(r.settlement).toMatchObject({ why: "released_elsewhere" });
   });
 
+  test("a Kleros outage on a settling row whose escrow the chain settled still records the chain's outcome", async () => {
+    const { s, reads } = testnetStage(
+      () => {
+        throw new KlerosTransportError("dispute_get failed after 3 tries");
+      },
+      { chainStatus: 3 },
+    );
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement).toMatchObject({ why: "released_elsewhere" });
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "complete",
+      settleTxHash: null,
+    });
+  });
+
+  test("past the expiry a stale settling row takes the expiry path with no Kleros read", async () => {
+    const { s, reads } = testnetStage(() => {
+      throw new KlerosTransportError("dispute_get failed after 3 tries");
+    });
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    s.clock.sec = EXPIRES + Number(REFUND_CLOCK_MARGIN_SECONDS) + 1;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement.action).toBe("claimRefund");
+    expect(s.node.hashesOf("claimRefund")).toEqual([r.txHash]);
+  });
+
+  test("inside the expiry's last ten minutes nothing is read and nothing is sent", async () => {
+    const { s, reads } = testnetStage(() => appealRead("2"));
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    s.clock.sec = EXPIRES - EXPIRY_MARGIN_SECONDS + 1;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement).toEqual({ action: "none", why: "too_close_to_expiry" });
+    expect(s.node.sends).toEqual([]);
+  });
+
+  test("a row whose dispute is on another Kleros chain than the stage reads is refused before the read, though the service would answer", async () => {
+    const { s, reads } = testnetStage(() => appealRead("2"));
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { ...TESTNET_STALE, klerosChain: "arbitrum-one" },
+    });
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: case ${caseId}'s dispute is on arbitrum-one and this stage reads arbitrum-sepolia-testnet; nothing was sent$`,
+      ),
+    );
+    expect(reads).toEqual([]);
+    expect(s.node.sends).toEqual([]);
+  });
+
   test.each<[string, Partial<PilotCaseRecord>]>([
     ["Kleros chain", { klerosChain: null }],
     ["dispute id", { coreDisputeId: null }],
@@ -1307,6 +1548,11 @@ describe("settleCase: a re-send on a real deployment reads Kleros again", () => 
 });
 
 describe("settleCase: an escrow the chain settled keeps the action the chain agrees with", () => {
+  // The settled line goes to stdout; these tests read the row and the trail instead.
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
   const ELSEWHERE_NOTE = (name: string) =>
     `the chain shows the job ${name}, moved by a transaction whose hash this row does not hold; the hash of our own send may be unknown`;
 

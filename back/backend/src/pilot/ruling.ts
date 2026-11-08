@@ -177,10 +177,22 @@ function readableRow(
     refuse(
       `case ${caseId} is ruled (${rulingOfStoredRead(row).kind}); a rehearsal ruling is final once read, and a fresh fake can only replay its script: settle it with pilot:settle`,
     );
-  const stageChain = d.stage.deployment === null ? "fake" : d.stage.deployment.chain;
-  if (row.klerosChain !== stageChain)
-    refuse(`case ${caseId}'s dispute is on ${row.klerosChain} and this stage reads ${stageChain}`);
+  const problem = stageChainProblem(d.stage, row);
+  if (problem !== null) refuse(problem);
   return row as ReturnType<typeof readableRow>;
+}
+
+/**
+ * Why the stage cannot read the row's dispute, or null when it can: the stage's service reads one
+ * Kleros chain, its deployment's or the fake's for a rehearsal, and the same dispute id on another
+ * chain is somebody else's case. Checked before any request; the poll and the settle's re-read
+ * both run it, each refusing in its own words.
+ */
+export function stageChainProblem(stage: KlerosStage, row: PilotCaseRecord): string | null {
+  const stageChain = stage.deployment === null ? "fake" : stage.deployment.chain;
+  return row.klerosChain === stageChain
+    ? null
+    : `case ${row.caseId}'s dispute is on ${row.klerosChain} and this stage reads ${stageChain}`;
 }
 
 /**
