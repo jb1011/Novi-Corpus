@@ -1080,7 +1080,9 @@ export async function clearDroppedSettleTx(
     refuse(`case ${caseId} is ${row.status}; a hash is cleared as dropped on a settling case only`);
   if (row.settleTxHash === null) refuse(`case ${caseId} holds no settle transaction hash to clear`);
   const hash = row.settleTxHash as Hex;
-  const what = `case ${caseId}'s ${row.settleAction} ${hash}`;
+  // The send as the refusals and the event name it: its action, or words for a row with none.
+  const sent = row.settleAction ?? "settle (no action recorded)";
+  const what = `case ${caseId}'s ${sent} ${hash}`;
   const sending = d.cases
     .events(caseId)
     .filter((e) => e.step === "settle" && e.status === "sending")
@@ -1132,7 +1134,7 @@ export async function clearDroppedSettleTx(
       step: "settle",
       status: "dropped",
       ref: hash,
-      detail: `${row.settleAction} not mined and not pending ${age} s after its send; the escrow is ${escrowStatus}`,
+      detail: `${sent} not mined and not pending ${age} s after its send; the escrow is ${escrowStatus}`,
     },
   };
   if (!opts.write) return { read, write, written: false };

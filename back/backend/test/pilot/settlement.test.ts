@@ -2413,6 +2413,71 @@ describe("adoptSettleTx: a settling row with no hash", () => {
     });
     expect(settleTrail(s, caseId)).toEqual([]);
   });
+
+  test("an action written on the row while this run read is caught inside the write", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s);
+    const getBlock = s.node.publicClient.getBlock.bind(s.node.publicClient);
+    // No sending event, no hash and no status change: only the action tells the row moved.
+    vi.spyOn(s.node.publicClient, "getBlock").mockImplementation(async (args) => {
+      s.cases.patch(caseId, { settleAction: "reject" });
+      return getBlock(args);
+    });
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(`^refusing: pilot case ${caseId} moved while this command ran; nothing was sent$`),
+    );
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleAction: "reject",
+      settleTxHash: null,
+    });
+    expect(settleTrail(s, caseId)).toEqual([]);
+  });
+
+  test.each<["reject" | "claimRefund"]>([["reject"], ["claimRefund"]])(
+    "adopts the referee's %s that succeeded: settled with its hash, its block's time and the refund",
+    async (action) => {
+      const s = setup({ script: "refund" });
+      const caseId = seedSettlingNoHash(s, {
+        patch: {
+          settleAction: action,
+          settleReason: action === "reject" ? reasonFor(DISPUTE) : null,
+        },
+      });
+      // A claimRefund is mined only past the expiry; the block's time is the node's clock.
+      if (action === "claimRefund") s.clock.sec = EXPIRES + Number(REFUND_CLOCK_MARGIN_SECONDS) + 1;
+      const blockTime = s.clock.sec;
+      const hash =
+        action === "reject"
+          ? await refereeReject(s)
+          : await s.deps.chain.job.claimRefund(7n, s.deps.chain.wallets.referee);
+      // The box's clock is an hour past the block's: the row takes the block's.
+      s.deps.now = () => (blockTime + 3600) * 1000;
+      const r = await adoptSettleTx(s.deps, caseId, hash, { write: true });
+      expect(r).toMatchObject({
+        written: true,
+        proof: { action, receipt: "success", blockTime },
+        write: {
+          status: "settled",
+          settleTxHash: hash,
+          settleAction: action,
+          settledAt: blockTime,
+          escrowOutcome: "refunded",
+          event: { step: "settle", status: "adopted", ref: hash, detail: action },
+        },
+      });
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "settled",
+        settleAction: action,
+        settleTxHash: hash,
+        settledAt: blockTime,
+        escrowOutcome: "refunded",
+      });
+      expect(settleTrail(s, caseId)).toEqual([["adopted", hash, action]]);
+      expect(s.node.sends).toHaveLength(1);
+    },
+  );
 });
 
 describe("adoptSettleTx: a settled row with no hash", () => {
@@ -2932,6 +2997,31 @@ describe("clearDroppedSettleTx: a settle hash the network dropped", () => {
       expect(s.node.sends).toHaveLength(1);
     },
   );
+
+  test("a settling row with no action recorded is named in words, never as null", async () => {
+    const dropped = setup({ script: "pay" });
+    const caseId = seedSettlingWithHash(dropped);
+    dropped.cases.patch(caseId, { settleAction: null });
+    const r = await clearDroppedSettleTx(dropped.deps, caseId, { write: true });
+    expect(r.write.event.detail).toBe(
+      `settle (no action recorded) not mined and not pending ${DROP_GRACE_SECONDS} s after its send; the escrow is Submitted`,
+    );
+    expect(settleTrail(dropped, caseId).at(-1)).toEqual([
+      "dropped",
+      DROPPED_HASH,
+      r.write.event.detail,
+    ]);
+
+    const mined = setup({ script: "pay" });
+    const hash = await refereeComplete(mined);
+    const minedId = seedSettlingWithHash(mined, hash);
+    mined.cases.patch(minedId, { settleAction: null });
+    await expect(clearDroppedSettleTx(mined.deps, minedId, { write: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: case ${minedId}'s settle \\(no action recorded\\) ${hash} has a receipt \\(success\\): it was mined, not dropped; run pilot:settle to read it; nothing was sent$`,
+      ),
+    );
+  });
 
   test("a hash the node still holds as pending is never cleared", async () => {
     const s = setup({ script: "pay", withholdReceipt: "complete" });
