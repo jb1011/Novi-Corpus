@@ -393,16 +393,49 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
     });
   });
 
-  test("an escrow the chain already refunded is recorded and nothing is sent", async () => {
+  test("an escrow the chain already refunded: the dry run says what --yes would record, and --yes records it", async () => {
     const f = makeFake({ chainStatus: 5, nowSec: REFUND_TIME });
     const caseId = seedUnfiled(f, "submitted");
+    const write = {
+      status: "failed",
+      settleAction: "none",
+      settleTxHash: null,
+      settledAt: REFUND_TIME,
+      escrowOutcome: "refunded",
+      error: "expired; escrow refunded elsewhere",
+      event: {
+        step: "settle",
+        status: "chain",
+        ref: null,
+        detail: "the chain shows the job Expired, moved by a transaction this case never sent",
+      },
+    };
+    const [dry] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund"]);
+    expect(dry).toEqual({
+      dryRun: true,
+      caseId,
+      mode: "rehearsal",
+      status: "submitted",
+      settlement: { action: "none", why: "refunded_elsewhere", outcome: "refunded" },
+      escrow: expect.objectContaining({ status: "Expired" }),
+      write,
+      next: "nothing to send: the escrow is already refunded to the client; nothing was written: run the same command with --yes to record the refund and fail the case",
+    });
+    expect(f.cases.find(caseId)).toMatchObject({ status: "submitted", escrowOutcome: null });
+    expect(f.cases.events(caseId)).toEqual([]);
     const [line, out] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
-    expect(line).toMatchObject({ opslog: "pilot_case_settled", caseId, action: "none" });
+    expect(line).toMatchObject({
+      opslog: "pilot_case_settled",
+      caseId,
+      action: "none",
+      endsAt: "failed",
+    });
     expect(out).toMatchObject({
       caseId,
       status: "failed",
       settlement: { action: "none", why: "refunded_elsewhere" },
       escrow: { status: "Expired" },
+      wrote: write,
       next: "nothing to send: the escrow is already refunded to the client",
     });
     expect(f.sent).toEqual([]);
@@ -411,6 +444,25 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
       escrowOutcome: "refunded",
       error: "expired; escrow refunded elsewhere",
     });
+    // Once recorded, a run says there is nothing left to send or to record.
+    const [again] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
+    expect(again).toMatchObject({
+      status: "failed",
+      next: "nothing to send or to record: the escrow is already refunded to the client, and the case records it",
+    });
+  });
+
+  test("a failed case's dry run says --yes records the refund on it", async () => {
+    const f = makeFake({ chainStatus: 4, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "failed", { error: "stuck" });
+    const [dry] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund"]);
+    expect(dry).toMatchObject({
+      dryRun: true,
+      status: "failed",
+      write: { status: "failed", escrowOutcome: "refunded" },
+      next: "nothing to send: the escrow is already refunded to the client; nothing was written: run the same command with --yes to record the refund on the case",
+    });
+    expect((dry!.write as Record<string, unknown>).error).toBeUndefined();
   });
 
   test("before the expiry and its margin it is refused with the expiry time, and nothing is sent", async () => {
@@ -423,18 +475,33 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
     expect(f.closed()).toBe(1);
   });
 
-  test("a case whose filing started is refused: its ruling settles it", async () => {
+  test("a contested case whose filing started and went back is refunded and ends failed", async () => {
     const f = makeFake({ chainStatus: 2, nowSec: REFUND_TIME });
-    const caseId = seedUnfiled(f, "contested", { filingStartedAt: NOW - 100 });
-    await expect(
-      f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]),
-    ).rejects.toThrow(
-      new RegExp(
-        `^refusing: case ${caseId} is contested and its filing started; settle it through its ruling; nothing was sent$`,
-      ),
-    );
-    expect(f.sent).toEqual([]);
+    const caseId = seedUnfiled(f, "contested", { filingStartedAt: NOW - 100, klerosChain: "fake" });
+    const [, out] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
+    expect(out).toMatchObject({ caseId, status: "failed", txHash: TX });
+    expect(f.sent.map((s) => s.call)).toEqual(["claimRefund"]);
+    expect(f.cases.find(caseId)).toMatchObject({ status: "failed", escrowOutcome: "refunded" });
   });
+
+  test.each<[PilotStatus, RegExp]>([
+    ["filing", /is filing: a filing of it may still be running.*pilot:case set-ids.*pilot:dispute/],
+    [
+      "filing_unknown",
+      /is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids.*pilot:case fail/,
+    ],
+  ])(
+    "a case at %s is refused, naming the command that resolves it, and nothing is sent",
+    async (status, words) => {
+      const f = makeFake({ chainStatus: 2, nowSec: REFUND_TIME });
+      const caseId = seedUnfiled(f, status, { filingStartedAt: NOW - 100, klerosChain: "fake" });
+      await expect(
+        f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]),
+      ).rejects.toThrow(words);
+      expect(f.sent).toEqual([]);
+      expect(f.closed()).toBe(1);
+    },
+  );
 
   test("without --claim-refund a case never filed is refused, as before", async () => {
     const f = makeFake({ chainStatus: 1, nowSec: REFUND_TIME });
@@ -445,13 +512,33 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
     expect(f.sent).toEqual([]);
   });
 
-  test("the option says it also takes back the escrow of a case never filed", () => {
+  test("the option says it also takes back the escrow of a case no ruling settles", () => {
     const program = new Command();
     registerPilotSettlementCommands(program, {});
     const settle = program.commands.find((c) => c.name() === "pilot:settle")!;
     expect(settle.options.find((o) => o.long === "--claim-refund")?.description).toBe(
-      "take the expiry path: claimRefund, refused before the expiry; on a case funded but never filed it takes the escrow back and the case ends failed",
+      "take the expiry path: claimRefund, refused before the expiry; on a funded, submitted, contested or failed case it takes the escrow back and the case ends failed",
     );
+  });
+
+  test("--dropped on a case's claimRefund hash clears it and says to claim the refund again", async () => {
+    const f = makeFake({ chainStatus: 1, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "funded", { settleAction: "claimRefund", settleTxHash: TX });
+    f.cases.recordEvent(caseId, "settle", "sending", null, "claimRefund");
+    f.db
+      .prepare(
+        "UPDATE pilot_case_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM pilot_case_events WHERE case_id = ?)",
+      )
+      .run(sqliteUtcTimestamp((REFUND_TIME - DROP_GRACE_SECONDS) * 1000), caseId);
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--dropped", "--yes"]);
+    expect(out).toMatchObject({
+      caseId,
+      status: "funded",
+      wrote: { status: "funded", settleTxHash: null, settleAction: "claimRefund" },
+      next: `run pilot:settle --case ${caseId} --claim-refund to refund it again from the chain`,
+    });
+    expect(f.sent).toEqual([]);
+    expect(f.cases.find(caseId)).toMatchObject({ status: "funded", settleTxHash: null });
   });
 });
 
@@ -705,7 +792,7 @@ describe("pilot:settle --tx and --dropped: the options", () => {
       "adopt a settle transaction the case lost, once it is proven to be the referee's settle of the case's job; sends nothing",
     );
     expect(help("--dropped")).toBe(
-      "clear a settling case's transaction hash once the network is proven to have dropped it, so the next run decides again; sends nothing",
+      "clear the transaction hash of a settling case, or the claimRefund hash of a funded, submitted, contested or failed case, once the network is proven to have dropped it, so the next run decides again; sends nothing",
     );
   });
 

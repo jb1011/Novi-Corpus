@@ -23,9 +23,9 @@ import {
   pollUntilRuled,
 } from "../pilot/ruling";
 import {
+  CLAIM_REFUND_UNFILED_ROUTE,
   type SettleDeps,
   type Settlement,
-  UNFILED_REFUND_STATUSES,
   type UnfiledEscrowRead,
   adoptSettleTx,
   checkEscrowIsOwn,
@@ -45,8 +45,9 @@ import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
  * Like the other pilot commands, each one parses its options before it opens its own narrow
  * context, prints JSON objects and throws on a refusal. `pilot:poll` only reads Kleros and the
  * escrow and writes the row: it sends no transaction. `pilot:settle` prints its decision and
- * sends it only with `--yes`; with `--claim-refund` on a case funded but never filed it takes the
- * escrow back after the expiry, and the case ends failed. Its two recovery options send nothing:
+ * sends it only with `--yes`; with `--claim-refund` on a case no ruling settles (funded,
+ * submitted, contested or failed) it takes the escrow back after the expiry, and the case ends
+ * failed. Its two recovery options send nothing:
  * `--tx` adopts a settle hash the case lost once the chain proves it, and `--dropped` clears one
  * the network dropped; each prints what it read and writes only with `--yes`.
  */
@@ -288,8 +289,9 @@ async function settle(
 ): Promise<void> {
   checkScriptMode(ctx, o.script);
   const row = ctx.cases.find(caseId);
-  // A case never filed has no ruling: only the expiry gives its escrow back.
-  if (o.claimRefundOnly && row !== undefined && UNFILED_REFUND_STATUSES.has(row.status))
+  // A case no ruling settles: only the expiry gives its escrow back. A filing in doubt is
+  // refused there, naming the command that resolves it.
+  if (o.claimRefundOnly && row !== undefined && CLAIM_REFUND_UNFILED_ROUTE.has(row.status))
     return refundUnfiled(ctx, deps, caseId, o);
   // A rehearsal case that holds a read is settled from it. One with none yet is read once, from
   // a fresh fake that answers its script's verdict at once, so the script must be the filing's.
@@ -343,8 +345,9 @@ const escrowView = (e: UnfiledEscrowRead) => ({
   refundMarginSeconds: e.refundMarginSeconds,
 });
 
-/** `pilot:settle --claim-refund` on a case funded but never filed: the escrow read and the
- *  claimRefund it leads to; sent with `--yes`. */
+/** `pilot:settle --claim-refund` on a case no ruling settles: the escrow read and the claimRefund
+ *  it leads to, sent with `--yes`; or, for an escrow the chain already refunded, what the case
+ *  records of it, written with `--yes`. */
 async function refundUnfiled(
   ctx: PilotContext,
   deps: PilotSettlementDeps,
@@ -361,7 +364,25 @@ async function refundUnfiled(
     escrow: escrowView(r.escrow),
   };
   if (r.settlement.action === "none") {
-    print({ ...base, next: `nothing to send: ${NOTHING_TO_SEND[r.settlement.why]}` });
+    const why = NOTHING_TO_SEND[r.settlement.why];
+    if (!r.record) {
+      print({ ...base, next: `nothing to send or to record: ${why}, and the case records it` });
+      return;
+    }
+    if (!o.yes) {
+      const writes =
+        after?.status === "failed"
+          ? "record the refund on the case"
+          : "record the refund and fail the case";
+      print({
+        dryRun: true,
+        ...base,
+        write: r.record,
+        next: `nothing to send: ${why}; nothing was written: run the same command with --yes to ${writes}`,
+      });
+      return;
+    }
+    print({ ...base, wrote: r.record, next: `nothing to send: ${why}` });
     return;
   }
   if (!o.yes) {
@@ -441,12 +462,12 @@ async function dropped(
     });
     return;
   }
-  print({
-    ...base,
-    read: r.read,
-    wrote: r.write,
-    next: `run pilot:settle --case ${caseId} to decide again from the chain`,
-  });
+  // A settling case is decided again; a case of the expiry refund claims its refund again.
+  const again =
+    r.write.status === "settling"
+      ? `run pilot:settle --case ${caseId} to decide again from the chain`
+      : `run pilot:settle --case ${caseId} --claim-refund to refund it again from the chain`;
+  print({ ...base, read: r.read, wrote: r.write, next: again });
 }
 
 export function registerPilotSettlementCommands(
@@ -494,7 +515,7 @@ export function registerPilotSettlementCommands(
     .requiredOption("--case <caseId>", "the pilot case")
     .option(
       "--claim-refund",
-      "take the expiry path: claimRefund, refused before the expiry; on a case funded but never filed it takes the escrow back and the case ends failed",
+      "take the expiry path: claimRefund, refused before the expiry; on a funded, submitted, contested or failed case it takes the escrow back and the case ends failed",
     )
     .option("--accept-round <n>", "act on an appealed case's ruling when round <n> is the one read")
     .option(
@@ -507,7 +528,7 @@ export function registerPilotSettlementCommands(
     )
     .option(
       "--dropped",
-      "clear a settling case's transaction hash once the network is proven to have dropped it, so the next run decides again; sends nothing",
+      "clear the transaction hash of a settling case, or the claimRefund hash of a funded, submitted, contested or failed case, once the network is proven to have dropped it, so the next run decides again; sends nothing",
     )
     .option("--yes", "confirm: send the transaction, or with --tx or --dropped write the row")
     .action(

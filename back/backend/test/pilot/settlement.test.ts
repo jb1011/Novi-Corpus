@@ -3116,26 +3116,28 @@ describe("clearDroppedSettleTx: a settle hash the network dropped", () => {
     expect(settleTrail(s, caseId).map(([status]) => status)).not.toContain("dropped");
   });
 
-  test.each<[PilotStatus]>([["settled"], ["ruled"], ["filed"], ["failed"]])(
-    "a row at %s is refused before any read, holding a hash or not",
-    async (status) => {
-      const s = setup({ script: "pay" });
-      const caseId = seed(s, {
-        status,
-        patch: { ...STORED_PAY, settleAction: "complete", settleTxHash: DROPPED_HASH },
-      });
-      sendingEvent(s, caseId, 3600);
-      const getChainId = vi.spyOn(s.node.publicClient, "getChainId");
-      const before = snapshot(s, caseId);
-      await expect(clearDroppedSettleTx(s.deps, caseId, { write: true })).rejects.toThrow(
-        new RegExp(
-          `^refusing: case ${caseId} is ${status}; a hash is cleared as dropped on a settling case only; nothing was sent$`,
-        ),
-      );
-      expect(getChainId).not.toHaveBeenCalled();
-      expect(snapshot(s, caseId)).toEqual(before);
-    },
-  );
+  test.each<[PilotStatus, string]>([
+    ["settled", ""],
+    ["ruled", ""],
+    ["filed", ""],
+    ["failed", " and its action is complete, not claimRefund"],
+  ])("a row at %s is refused before any read, holding a hash or not", async (status, action) => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s, {
+      status,
+      patch: { ...STORED_PAY, settleAction: "complete", settleTxHash: DROPPED_HASH },
+    });
+    sendingEvent(s, caseId, 3600);
+    const getChainId = vi.spyOn(s.node.publicClient, "getChainId");
+    const before = snapshot(s, caseId);
+    await expect(clearDroppedSettleTx(s.deps, caseId, { write: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: case ${caseId} is ${status}${action}; a hash is cleared as dropped on a settling case, or on a funded, submitted, contested or failed case whose claimRefund it is; nothing was sent$`,
+      ),
+    );
+    expect(getChainId).not.toHaveBeenCalled();
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
 
   test("a settling row with no hash is refused before any read", async () => {
     const s = setup({ script: "pay" });
@@ -3297,7 +3299,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
     expect(atWait).toEqual([expect.objectContaining({ status: "funded", settleTxHash: r.txHash })]);
   });
 
-  test("the settled line names the case, its mode, the claimRefund and its hash", async () => {
+  test("the settled line names the case, its mode, the claimRefund, its hash and the failed status the case ends at", async () => {
     const s = setup({ chainStatus: 1 });
     const caseId = seedUnfiled(s, "funded");
     s.clock.sec = REFUND_TIME;
@@ -3305,7 +3307,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
     expect(console.log).toHaveBeenCalledWith(
       expect.stringMatching(
         new RegExp(
-          `"opslog":"pilot_case_settled".*"caseId":"${caseId}","mode":"rehearsal","klerosChain":null,"action":"claimRefund","txHash":"${r.txHash}","coreDisputeId":null`,
+          `"opslog":"pilot_case_settled".*"caseId":"${caseId}","mode":"rehearsal","klerosChain":null,"action":"claimRefund","txHash":"${r.txHash}","coreDisputeId":null,"endsAt":"failed"`,
         ),
       ),
     );
@@ -3357,34 +3359,12 @@ describe("refundUnfiledCase: the rows it acts on", () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
 
-  test.each(UNFILED)(
-    "a case at %s whose filing started is refused before any read: it is settled through its ruling",
-    async (status, chainStatus) => {
-      const s = setup({ chainStatus });
-      const caseId = seedUnfiled(s, status, { patch: { filingStartedAt: NOW - 100 } });
-      s.clock.sec = REFUND_TIME;
-      const reads = chainReads(s);
-      const before = snapshot(s, caseId);
-      for (const send of [true, false])
-        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
-          new RegExp(
-            `^refusing: case ${caseId} is ${status} and its filing started; settle it through its ruling; nothing was sent$`,
-          ),
-        );
-      for (const spy of reads) expect(spy).not.toHaveBeenCalled();
-      expect(s.node.sends).toEqual([]);
-      expect(snapshot(s, caseId)).toEqual(before);
-    },
-  );
-
   test.each<[PilotStatus]>([
     ["created"],
-    ["filing"],
     ["filed"],
     ["ruled"],
     ["settling"],
     ["settled"],
-    ["filing_unknown"],
     ["evidence_unknown"],
   ])(
     "a case at %s is refused before any read, and a settled row is never touched",
@@ -3396,7 +3376,7 @@ describe("refundUnfiledCase: the rows it acts on", () => {
       const before = snapshot(s, caseId);
       await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
         new RegExp(
-          `^refusing: case ${caseId} is ${status}; a case never filed has its escrow refunded at funded, submitted, contested or failed; nothing was sent$`,
+          `^refusing: case ${caseId} is ${status}; its escrow is not refunded this way, which acts at funded, submitted, contested or failed; nothing was sent$`,
         ),
       );
       for (const spy of reads) expect(spy).not.toHaveBeenCalled();
@@ -3553,6 +3533,21 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
       const caseId = seedUnfiled(s, status);
       s.clock.sec = REFUND_TIME;
       const before = snapshot(s, caseId);
+      // A case that never sent says so: no hash of ours can be the one that moved the job.
+      const record = {
+        status: "failed",
+        settleAction: "none",
+        settleTxHash: null,
+        settledAt: REFUND_TIME,
+        escrowOutcome: "refunded",
+        error: "expired; escrow refunded elsewhere",
+        event: {
+          step: "settle",
+          status: "chain",
+          ref: null,
+          detail: `the chain shows the job ${name}, moved by a transaction this case never sent`,
+        },
+      };
       const dry = await refundUnfiledCase(s.deps, caseId, { send: false });
       expect(dry).toEqual({
         settlement: { action: "none", why: "refunded_elsewhere", outcome: "refunded" },
@@ -3562,10 +3557,12 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
           expiredAt: EXPIRES,
           refundMarginSeconds: 60,
         },
+        record,
+        written: false,
       });
       expect(snapshot(s, caseId)).toEqual(before);
       const r = await refundUnfiledCase(s.deps, caseId, { send: true });
-      expect(r.settlement).toEqual(dry.settlement);
+      expect(r).toEqual({ ...dry, written: true });
       expect(s.node.sends).toEqual([]);
       expect(s.cases.find(caseId)).toMatchObject({
         status: "failed",
@@ -3575,13 +3572,10 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
         escrowOutcome: "refunded",
         error: "expired; escrow refunded elsewhere",
       });
-      expect(settleTrail(s, caseId)).toEqual([
-        [
-          "chain",
-          null,
-          `the chain shows the job ${name}, moved by a transaction whose hash this row does not hold; the hash of our own send may be unknown`,
-        ],
-      ]);
+      expect(settleTrail(s, caseId)).toEqual([["chain", null, record.event.detail]]);
+      expect(console.log).toHaveBeenCalledWith(
+        expect.stringMatching(/"opslog":"pilot_case_settled".*"endsAt":"failed"/),
+      );
     },
   );
 
@@ -3612,6 +3606,8 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
       escrowOutcome: "refunded",
       error: "expired; escrow refunded elsewhere",
     });
+    // A row that sent may hold no hash of the send that landed.
+    expect(settleTrail(s, caseId).at(-1)?.[2]).toMatch(/the hash of our own send may be unknown$/);
   });
 
   test.each<[string, Partial<PilotCaseRecord>, Partial<PilotCaseRecord>]>([
@@ -3671,14 +3667,19 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
       why: "refunded_elsewhere",
       outcome: "refunded",
     });
+    expect(r).toMatchObject({ record: null, written: false });
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(snapshot(s, caseId)).toEqual(before);
   });
 
   test.each<[number, string, string]>([
-    [3, "Completed", "its escrow released to the provider"],
-    [0, "Open", "it holds no escrow to refund"],
-  ])("a job at %i is refused: read the chain before acting", async (chainStatus, name, words) => {
+    [
+      3,
+      "Completed",
+      "Completed, its escrow released to the provider, so there is nothing to refund",
+    ],
+    [0, "Open", "Open, which holds no escrow to refund"],
+  ])("a job at %i is refused: read the chain before acting", async (chainStatus, _, words) => {
     const s = setup({ chainStatus });
     const caseId = seedUnfiled(s, "funded");
     s.clock.sec = REFUND_TIME;
@@ -3686,7 +3687,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
     for (const send of [true, false])
       await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
         new RegExp(
-          `^refusing: the chain shows job 7 ${name}, ${words}, on a case that was never filed; read the chain before acting; nothing was sent$`,
+          `^refusing: the chain shows job 7 ${words}; read the chain before acting; nothing was sent$`,
         ),
       );
     expect(s.node.sends).toEqual([]);
@@ -3702,6 +3703,24 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
     );
     expect(snapshot(s, caseId)).toEqual(before);
   });
+
+  test.each<[number, string]>([
+    [5, "Expired"],
+    [4, "Rejected"],
+  ])(
+    "an escrow the chain shows at %i inside the margin after the expiry is not recorded yet",
+    async (chainStatus) => {
+      const s = setup({ chainStatus });
+      const caseId = seedUnfiled(s, "funded");
+      s.clock.sec = EXPIRES + 30;
+      const before = snapshot(s, caseId);
+      for (const send of [true, false])
+        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+          /^refusing: the job expires at 2027-.*; no claimRefund until 60 seconds after that, a margin for the difference between this box's clock and chain time, and nothing was sent$/,
+        );
+      expect(snapshot(s, caseId)).toEqual(before);
+    },
+  );
 });
 
 describe("refundUnfiledCase: a send that may still be running, and two runs at once", () => {
@@ -3960,7 +3979,7 @@ describe("refundUnfiledCase: a hash the row holds", () => {
     for (const send of [true, false])
       await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
         new RegExp(
-          `^refusing: case ${caseId}'s settle transaction ${hash} has no receipt yet; wait until it is mined, then run again; nothing was sent$`,
+          `^refusing: case ${caseId}'s claimRefund ${hash} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again; nothing was sent$`,
         ),
       );
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
@@ -4059,5 +4078,257 @@ describe("refundUnfiledCase: the cap", () => {
     // The same row with a filing time is one the cap counts: the rule itself is as it was.
     s.cases.patch(caseId, { filingStartedAt: NOW });
     expect(s.cases.countFiled("testnet")).toBe(1);
+  });
+});
+
+describe("refundUnfiledCase: a case whose filing started", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
+  test.each(UNFILED)(
+    "a case at %s whose filing started is refunded past the expiry and the margin, as one whose filing never did",
+    async (status, chainStatus) => {
+      const s = setup({ chainStatus });
+      const caseId = seedUnfiled(s, status, {
+        patch: { filingStartedAt: NOW - 100, klerosChain: "fake" },
+      });
+      s.clock.sec = REFUND_TIME;
+      const before = s.node.balanceOf(BUYER);
+      const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+      expect(r.settlement.action).toBe("claimRefund");
+      expect(s.node.sendsFrom(REFEREE)).toHaveLength(1);
+      expect(s.node.balanceOf(BUYER)).toBe(before + BUDGET);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "failed",
+        settleTxHash: r.txHash,
+        escrowOutcome: "refunded",
+        error: status === "failed" ? OPERATORS_REASON : "expired; escrow refunded by claimRefund",
+        filingStartedAt: NOW - 100,
+      });
+    },
+  );
+
+  test("a contested case whose filing started and went back with nothing filed ends failed, and the cap counts it as a fail of it would", async () => {
+    const s = setup({ chainStatus: 2, stageMode: "testnet", deployment: deploymentFor("testnet") });
+    const caseId = seedUnfiled(s, "contested", {
+      mode: "testnet",
+      patch: { filingStartedAt: NOW - 100, klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    s.cases.recordEvent(caseId, "filing", "started", "arbitrum-sepolia-testnet", null);
+    s.clock.sec = REFUND_TIME;
+    expect(s.cases.countFiled("testnet")).toBe(0);
+    await refundUnfiledCase(s.deps, caseId, { send: true });
+    expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      escrowOutcome: "refunded",
+      error: "expired; escrow refunded by claimRefund",
+    });
+    expect(s.cases.countFiled("testnet")).toBe(1);
+  });
+
+  test("a failed case whose filing started is refunded and stays failed, keeping its reason and its slot in the cap", async () => {
+    const s = setup({ chainStatus: 2, stageMode: "testnet", deployment: deploymentFor("testnet") });
+    const caseId = seedUnfiled(s, "failed", {
+      mode: "testnet",
+      patch: {
+        filingStartedAt: NOW - 100,
+        klerosChain: "arbitrum-sepolia-testnet",
+        coreDisputeId: DISPUTE,
+      },
+    });
+    s.clock.sec = REFUND_TIME;
+    expect(s.cases.countFiled("testnet")).toBe(1);
+    await refundUnfiledCase(s.deps, caseId, { send: true });
+    expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      error: OPERATORS_REASON,
+      settleAction: "claimRefund",
+      escrowOutcome: "refunded",
+    });
+    expect(s.cases.countFiled("testnet")).toBe(1);
+  });
+
+  test.each<[PilotStatus, RegExp]>([
+    [
+      "filing",
+      /is filing: a filing of it may still be running, and its dispute may exist; wait until 30 minutes after its filing started, then record its dispute ids with pilot:case set-ids and settle it, or run pilot:dispute on it with --yes, which freezes a filing that stopped at filing_unknown; nothing was sent$/,
+    ],
+    [
+      "filing_unknown",
+      /is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids, then pilot:settle --case pc_[0-9a-f]{12} --claim-refund takes its expiry path, or mark it failed with pilot:case fail once Kleros confirms none exists, then run this command again; nothing was sent$/,
+    ],
+  ])(
+    "a case at %s is refused before any read, naming the command that resolves it",
+    async (status, words) => {
+      const s = setup({ chainStatus: 2 });
+      const caseId = seedUnfiled(s, status, {
+        patch: { filingStartedAt: NOW - 100, klerosChain: "fake" },
+      });
+      s.clock.sec = REFUND_TIME;
+      const reads = chainReads(s);
+      const before = snapshot(s, caseId);
+      for (const send of [true, false])
+        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+          new RegExp(`^refusing: case ${caseId} ${words.source}`),
+        );
+      for (const spy of reads) expect(spy).not.toHaveBeenCalled();
+      expect(s.node.sends).toEqual([]);
+      expect(snapshot(s, caseId)).toEqual(before);
+    },
+  );
+
+  test("a failed case holding the reject that landed before it was failed is recorded refunded, sending nothing", async () => {
+    const s = setup({ script: "refund", chainStatus: 2 });
+    const hash = await refereeReject(s);
+    const caseId = seedUnfiled(s, "failed", {
+      patch: {
+        filingStartedAt: NOW - 100,
+        klerosChain: "fake",
+        settleAction: "reject",
+        settleReason: reasonFor(DISPUTE),
+        settleTxHash: hash,
+      },
+    });
+    s.clock.sec = REFUND_TIME;
+    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    expect(r.settlement).toEqual({
+      action: "none",
+      why: "refunded_elsewhere",
+      outcome: "refunded",
+    });
+    expect(s.node.sends).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      error: OPERATORS_REASON,
+      settleAction: "reject",
+      settleTxHash: hash,
+      escrowOutcome: "refunded",
+    });
+    expect(settleTrail(s, caseId)).toEqual([["chain", hash, "the chain shows the job Rejected"]]);
+  });
+
+  test("a failed case holding a complete with no receipt yet waits for it, naming the complete", async () => {
+    const s = setup({ script: "pay", chainStatus: 2, withholdReceipt: "complete" });
+    const hash = await failedSendHash(refereeComplete(s));
+    const caseId = seedUnfiled(s, "failed", {
+      patch: {
+        filingStartedAt: NOW - 100,
+        klerosChain: "fake",
+        settleAction: "complete",
+        settleReason: reasonFor(DISPUTE),
+        settleTxHash: hash,
+      },
+    });
+    s.clock.sec = REFUND_TIME;
+    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: case ${caseId}'s complete ${hash} has no receipt yet; wait until it is mined, then run again; nothing was sent$`,
+      ),
+    );
+    expect(s.node.sends).toHaveLength(1);
+  });
+});
+
+describe("refundUnfiledCase: a claimRefund hash the network dropped", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
+  test.each<[PilotStatus, number | null]>([
+    ["funded", null],
+    ["failed", NOW - 100],
+  ])(
+    "a case at %s (filing started at %s) is cleared by --dropped at its own status, and the next refund sends once",
+    async (status, filingStartedAt) => {
+      const s = setup({ chainStatus: 1 });
+      const caseId = seedUnfiled(s, status, {
+        patch: { settleAction: "claimRefund", settleTxHash: DROPPED_HASH, filingStartedAt },
+      });
+      s.clock.sec = REFUND_TIME;
+      s.cases.recordEvent(caseId, "settle", "sending", null, "claimRefund");
+      s.db
+        .prepare(
+          "UPDATE pilot_case_events SET created_at = ? WHERE id = (SELECT MAX(id) FROM pilot_case_events WHERE case_id = ?)",
+        )
+        .run(sqliteUtcTimestamp((s.clock.sec - DROP_GRACE_SECONDS) * 1000), caseId);
+      s.cases.recordEvent(caseId, "settle", "sent", DROPPED_HASH, "claimRefund");
+      // The refund waits on the hash while it may be mined, and names the way out.
+      await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+        new RegExp(`pilot:settle --case ${caseId} --dropped clears it`),
+      );
+      const r = await clearDroppedSettleTx(s.deps, caseId, { write: true });
+      expect(r.write).toMatchObject({
+        status,
+        settleTxHash: null,
+        settleAction: "claimRefund",
+        event: {
+          status: "dropped",
+          ref: DROPPED_HASH,
+          detail: `claimRefund not mined and not pending ${DROP_GRACE_SECONDS} s after its send; the escrow is Funded`,
+        },
+      });
+      expect(s.cases.find(caseId)).toMatchObject({
+        status,
+        settleTxHash: null,
+        settleAction: "claimRefund",
+      });
+      const refund = await refundUnfiledCase(s.deps, caseId, { send: true });
+      expect(s.node.hashesOf("claimRefund")).toEqual([refund.txHash]);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "failed",
+        settleTxHash: refund.txHash,
+        escrowOutcome: "refunded",
+      });
+    },
+  );
+
+  test.each<[PilotStatus, PilotCaseRecord["settleAction"], string]>([
+    ["funded", null, "not recorded"],
+    ["contested", "none", "none"],
+    ["failed", "reject", "reject"],
+  ])(
+    "a case at %s whose action is %s is refused before any read: only its claimRefund is cleared",
+    async (status, settleAction, named) => {
+      const s = setup({ chainStatus: 1 });
+      const caseId = seedUnfiled(s, status, {
+        patch: { settleAction, settleTxHash: DROPPED_HASH },
+      });
+      sendingEvent(s, caseId, 3600);
+      const getChainId = vi.spyOn(s.node.publicClient, "getChainId");
+      const before = snapshot(s, caseId);
+      await expect(clearDroppedSettleTx(s.deps, caseId, { write: true })).rejects.toThrow(
+        new RegExp(
+          `^refusing: case ${caseId} is ${status} and its action is ${named}, not claimRefund; a hash is cleared as dropped on a settling case, or on a funded, submitted, contested or failed case whose claimRefund it is; nothing was sent$`,
+        ),
+      );
+      expect(getChainId).not.toHaveBeenCalled();
+      expect(snapshot(s, caseId)).toEqual(before);
+    },
+  );
+});
+
+describe("refundUnfiledCase: a send that failed before its broadcast", () => {
+  test("another run's send that failed before its broadcast while this one reads still holds the move", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    // On the database's clock: the other run's events are stamped by the database.
+    const wall = Math.floor(Date.now() / 1000);
+    const s = setup({ chainStatus: 1, expiredAt: wall - 3600 });
+    s.clock.sec = wall;
+    const caseId = seedUnfiled(s, "funded", { patch: { settleAction: "claimRefund" } });
+    sendingEvent(s, caseId, 3600);
+    const job = s.deps.chain.job;
+    const real = job.escrowState.bind(job);
+    job.escrowState = async (...a: Parameters<typeof job.escrowState>) => {
+      s.cases.recordEvent(caseId, "settle", "sending", null, "claimRefund");
+      s.cases.recordEvent(caseId, "settle", "failed", null, "the node refused the request");
+      return real(...a);
+    };
+    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(`a settle may still be running on case ${caseId}: its send started -?\\d+ s ago`),
+    );
+    expect(s.node.sends).toEqual([]);
   });
 });
