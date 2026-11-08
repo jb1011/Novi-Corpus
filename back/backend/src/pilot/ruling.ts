@@ -335,10 +335,10 @@ const AUTH_REFUSED: ReadonlySet<number> = new Set([401, 403]);
  * injected clock, then stops with the last outcome. A transport or HTTP error is written as the
  * ops line `pilot_poll_read_failed` and a `read_failed` event on the case's trail, and the watch
  * goes on, up to `MAX_FAILED_READS_IN_A_ROW` in a row; any other error, a refusal included,
- * escapes. An HTTP 401 or 403 stops the watch at
- * once with the reason `auth_refused`. A stop at the cap, on failing reads or on a refused key
- * writes the ops line `pilot_poll_capped` with its reason. `reads` counts every request, failed
- * ones included. `onRead` sees every read that answered, as it is taken.
+ * escapes. An HTTP 401 or 403 stops the watch at once with the reason `auth_refused`. A stop at
+ * the cap, on failing reads or on a refused key writes the ops line `pilot_poll_capped` with its
+ * reason. `reads` counts every request, failed ones included. `onRead` sees every read that
+ * answered, as it is taken.
  */
 export async function pollUntilRuled(
   d: PollDeps,

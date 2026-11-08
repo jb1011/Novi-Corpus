@@ -28,6 +28,7 @@ import {
 } from "../pilot/ruling";
 import {
   CLAIM_REFUND_UNFILED_ROUTE,
+  REFUND_CLOCK_MARGIN_SECONDS,
   type SettleDeps,
   type Settlement,
   type UnfiledEscrowRead,
@@ -50,8 +51,8 @@ import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
  * context, prints JSON objects and throws on a refusal. `pilot:poll` only reads Kleros and the
  * escrow and writes the row: it sends no transaction. `pilot:settle` prints its decision and
  * sends it only with `--yes`; with `--claim-refund` on a case no ruling settles (funded,
- * submitted, contested or failed) it takes the escrow back after the expiry, and the case ends
- * failed. Its two recovery options send nothing:
+ * submitted, contested or failed) it takes the escrow back after the expiry and its clock margin,
+ * and the case ends failed. Its two recovery options send nothing:
  * `--tx` adopts a settle hash the case lost once the chain proves it, and `--dropped` clears one
  * the network dropped; each prints what it read and writes only with `--yes`.
  */
@@ -293,8 +294,7 @@ const NOTHING_TO_SEND: Record<Extract<Settlement, { action: "none" }>["why"], st
   tied: "the round is tied: poll again, a tie may resolve inside the appeal period",
   refused: "the court refused to arbitrate: the escrow waits for the expiry, then --claim-refund",
   appealed: "the case was appealed: read the round, then act on it with --accept-round <n> --yes",
-  too_close_to_expiry:
-    "the job expires within ten minutes: run again after the expiry with --claim-refund",
+  too_close_to_expiry: `the job expires within ten minutes, or expired at most ${REFUND_CLOCK_MARGIN_SECONDS} seconds ago: run again with --claim-refund more than ${REFUND_CLOCK_MARGIN_SECONDS} seconds after its expiry`,
   unknown_status: "the job is at a status the settlement does not act on: read the chain",
   options_mismatch: "the dispute's ruling options are not the expected ones: a person reads them",
   unexpected_ruling: "the ruling is not a value the settlement knows: a person reads it",
@@ -539,7 +539,7 @@ export function registerPilotSettlementCommands(
     .requiredOption("--case <caseId>", "the pilot case")
     .option(
       "--claim-refund",
-      "take the expiry path: claimRefund, refused before the expiry; on a funded, submitted, contested or failed case it takes the escrow back and the case ends failed",
+      `take the expiry path: claimRefund, refused until ${REFUND_CLOCK_MARGIN_SECONDS} seconds after the expiry; on a funded, submitted, contested or failed case it takes the escrow back and the case ends failed`,
     )
     .option("--accept-round <n>", "act on an appealed case's ruling when round <n> is the one read")
     .option(

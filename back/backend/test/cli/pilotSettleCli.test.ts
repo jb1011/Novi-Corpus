@@ -319,6 +319,26 @@ describe("pilot:settle", () => {
     expect(String(b!.next)).toMatch(/poll again/);
   });
 
+  test.each([
+    ["a minute before the expiry", EXPIRES - 60],
+    ["at the end of the margin after it", EXPIRES + 60],
+  ])(
+    "a verdict %s sends nothing and says when --claim-refund takes the escrow back",
+    async (_name, nowSec) => {
+      const f = makeFake({ nowSec });
+      const caseId = seed(f, {
+        status: "ruled",
+        patch: { rulingValue: "1", rulingTied: 0, rulingRoundCount: 1, rulingReadAt: NOW },
+      });
+      const [out] = await f.run(["pilot:settle", "--case", caseId, "--yes"]);
+      expect(out).toMatchObject({
+        settlement: { action: "none", why: "too_close_to_expiry" },
+        next: "nothing to send: the job expires within ten minutes, or expired at most 60 seconds ago: run again with --claim-refund more than 60 seconds after its expiry",
+      });
+      expect(f.sent).toEqual([]);
+    },
+  );
+
   test("a case of another mode is refused, and the context is closed", async () => {
     const f = makeFake();
     const caseId = seed(f, { mode: "testnet" });
@@ -575,7 +595,7 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
     registerPilotSettlementCommands(program, {});
     const settle = program.commands.find((c) => c.name() === "pilot:settle")!;
     expect(settle.options.find((o) => o.long === "--claim-refund")?.description).toBe(
-      "take the expiry path: claimRefund, refused before the expiry; on a funded, submitted, contested or failed case it takes the escrow back and the case ends failed",
+      "take the expiry path: claimRefund, refused until 60 seconds after the expiry; on a funded, submitted, contested or failed case it takes the escrow back and the case ends failed",
     );
   });
 

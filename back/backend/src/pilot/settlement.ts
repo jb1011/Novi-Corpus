@@ -39,8 +39,8 @@ import type { PilotCaseRecord, PilotStatus } from "./types";
  * before the transaction and to `settled` after it. Acting once is a property of the chain:
  * `complete` and `reject` revert on a job that is no longer Submitted, and the decision never
  * sends on a job the chain says is settled, so a repeated run reads the chain and stops.
- * `refundUnfiledCase` takes back, once its job has expired, the escrow of a case no ruling's
- * settle reaches: one funded, submitted or contested, or failed.
+ * `refundUnfiledCase` takes back, once its job's expiry and the clock margin have passed, the
+ * escrow of a case no ruling's settle reaches: one funded, submitted or contested, or failed.
  */
 export type EscrowState = Awaited<ReturnType<JobAdapter["escrowState"]>>;
 
@@ -142,13 +142,14 @@ const WAIT_FOR: Record<Exclude<RulingOutcome["kind"], "pay" | "refund">, NoActio
 
 /**
  * The decision, by the chain's status first: a settled escrow is reported and never sent on;
- * past the expiry the job can only be refunded, whatever the ruling; before it, only a Submitted
- * job with a pay or refund ruling is acted on, and not in the last ten minutes.
+ * past the expiry and its clock margin the job can only be refunded, whatever the ruling; before
+ * that, only a Submitted job with a pay or refund ruling is acted on, and not in the last ten
+ * minutes before the expiry.
  *
  * `nowSeconds` and the escrow's `expiredAt` are unix seconds; the contract's `claimRefund` needs
  * the clock strictly past `expiredAt`, and the decision waits a further
  * `REFUND_CLOCK_MARGIN_SECONDS`. `coreDisputeId` gives the reason of a `complete` or a
- * `reject`. `claimRefundOnly` takes the expiry path and throws before the expiry.
+ * `reject`. `claimRefundOnly` takes the expiry path and throws before the expiry and its margin.
  */
 export function decideSettlement(
   ruling: RulingOutcome,
@@ -409,21 +410,30 @@ function settledLine(
 }
 
 /**
- * Re-reads the ruling (when the stored read is older than 10 minutes; with the ROW's
- * kleros_chain, in the row's mode only) and the escrow, decides, and with `send` advances to
- * settling (action, reason) before the transaction, then to settled with the hash.
+ * Reads the ruling and the escrow, decides, and with `send` advances to settling (action, reason)
+ * before the transaction, then to settled with the hash.
  *
- * A row of another mode than the stage's, or at a status no settlement starts from, is refused
- * before any read. A row at `settling` with no hash is refused while its latest send is younger
- * than {SEND_IN_FLIGHT_SECONDS}. A row at `settling` with a stored hash reads that transaction's
- * receipt first: none yet is refused, a success is recorded settled with that hash, and a revert
- * lets the row be decided again against the chain. A settling row decided again acts on the
- * action it chose, or, on a real deployment whose stored read is stale, on the ruling read again
- * after the escrow when the decision turns on it (`readsBeforeResend`). The move to settling
- * refuses when the row's hash is no longer the one this run read. An escrow settled elsewhere is
- * recorded settled with no action of ours, or with the row's when the chain agrees with it.
- * A rehearsal row that holds a read is decided from it, whatever its age. With `send` false only
- * the ruling read writes, with its event.
+ * Before any read: the mode, the status (one no settlement starts from is refused), the job id,
+ * and the configured job contract and chain id (`checkOwnConfig`). A row at `settling` is then
+ * held while its latest send may still be running ({SEND_IN_FLIGHT_SECONDS}), and one with a
+ * stored hash reads that transaction's receipt first: none yet is refused, a success is recorded
+ * settled with that hash, and a revert lets the row be decided again against the chain.
+ *
+ * The ruling: a settling or settled row acts on the action it chose, and `claimRefundOnly` reads
+ * none. A rehearsal row that holds a read is decided from it, whatever its age. A ruled row whose
+ * stored read is younger than ten minutes is decided from it, unless an appealed round is
+ * accepted, which is always read live. Any other row reads Kleros live, with the ROW's
+ * kleros_chain, in the row's mode only; a read that fails refuses and leaves a
+ * `ruling/read_failed` event. Then the connected chain, and the escrow read as the case's own job
+ * (`checkEscrowIsOwn`). A settling row about to be sent on again, on a real deployment whose
+ * stored read is stale, reads the ruling again after the escrow, when the decision turns on it
+ * (`readsBeforeResend`). Then the decision.
+ *
+ * An escrow settled elsewhere is recorded settled with no action of ours, or with the row's when
+ * the chain agrees with it. Before a send: the referee as the job's evaluator, and its gas floor
+ * ({MIN_GAS_WEI}); the move to settling refuses while a send may still be running, and when the
+ * row's hash, its ruling's time of read or its round count is no longer the one this run read.
+ * With `send` false only the ruling reads write, with their events.
  */
 export async function settleCase(
   d: SettleDeps,
