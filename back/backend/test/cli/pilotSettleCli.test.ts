@@ -176,7 +176,13 @@ describe("pilot:settle", () => {
       txHash: TX,
       status: "settled",
     });
-    expect(f.sent).toEqual([{ call: "complete", args: [7n, reasonFor("287")] }]);
+    // The settle hands the adapter a hook that writes the hash the moment it exists.
+    expect(f.sent).toEqual([
+      {
+        call: "complete",
+        args: [7n, reasonFor("287"), { onBroadcast: expect.any(Function) }],
+      },
+    ]);
   });
 
   test("--claim-refund before the expiry is refused with the expiry time, and nothing is sent", async () => {
