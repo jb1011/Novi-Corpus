@@ -5,8 +5,8 @@
  * are read off what the node accepted.
  */
 import Database from "better-sqlite3";
-import { type Address, type Hex, decodeFunctionData, toHex } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { type Address, type Hex, decodeFunctionData, encodeFunctionData, toHex } from "viem";
+import { type PrivateKeyAccount, privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { iErc8183JobAbi } from "../../src/abis/generated";
 import { JobAdapter } from "../../src/adapters/arc/jobAdapter";
@@ -30,9 +30,11 @@ import {
   REFUND_CLOCK_MARGIN_SECONDS,
   SEND_IN_FLIGHT_SECONDS,
   type SettleDeps,
+  adoptSettleTx,
   decideSettlement,
   decisionTurnsOnRuling,
   reasonFor,
+  refuseWhileSendMayRun,
   settleCase,
 } from "../../src/pilot/settlement";
 import type { PilotCaseRecord, PilotMode, PilotStatus } from "../../src/pilot/types";
@@ -2154,5 +2156,608 @@ describe("settleCase: refusals and the ruling read", () => {
       settleTxHash: null,
       escrowOutcome: "released",
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A settle transaction the row lost, adopted only through proof
+// ---------------------------------------------------------------------------
+
+/** A transaction `account` signs to `to` with `data`, as the node accepts it: a call the adapter
+ *  would never send, for the proof to refuse. */
+function rawSend(
+  s: Setup,
+  account: PrivateKeyAccount,
+  data: Hex,
+  to: Address = JOB_CONTRACT,
+): Promise<Hex> {
+  return s.node.walletFor(account).sendTransaction({ to, data });
+}
+
+/** The calldata of a complete or a reject of `jobId` with `reason`. */
+const settleCall = (fn: "complete" | "reject", jobId = 7n, reason: Hex = reasonFor(DISPUTE)) =>
+  encodeFunctionData({ abi: iErc8183JobAbi, functionName: fn, args: [jobId, reason, "0x"] });
+
+/** A 32-byte reason that is not the case's. */
+const OTHER_REASON = reasonFor("288");
+
+/** The referee's complete of job 7, as a settle sends it: the send whose hash a row lost. */
+const refereeComplete = (s: Setup, reason: Hex = reasonFor(DISPUTE)) =>
+  s.deps.chain.job.complete(7n, reason);
+
+/** The referee's reject of job 7, as a settle sends it. */
+const refereeReject = (s: Setup) =>
+  s.deps.chain.job.reject(7n, reasonFor(DISPUTE), s.deps.chain.wallets.referee);
+
+/** The hash of a send the adapter reported as reverted or unconfirmed. */
+async function failedSendHash(send: Promise<Hex>): Promise<Hex> {
+  const err = await send.catch((e: unknown) => e);
+  expect(err instanceof ChainTxRevertedError || err instanceof ChainTxUnconfirmedError).toBe(true);
+  return (err as ChainTxRevertedError).txHash as Hex;
+}
+
+/** The row and its trail, to show a refusal wrote nothing. */
+const snapshot = (s: Setup, caseId: string) => ({
+  row: s.cases.find(caseId),
+  events: s.cases.events(caseId),
+});
+
+/** A hash the row already holds. */
+const HELD_HASH = `0x${"ab".repeat(32)}` as Hex;
+
+/** A row the chain settled before its hash was known: `action`, no hash, an outcome and a time. */
+function seedSettledNoHash(
+  s: Setup,
+  action: PilotCaseRecord["settleAction"],
+  patch: Partial<PilotCaseRecord> = {},
+): string {
+  return seed(s, {
+    status: "settled",
+    patch: {
+      ...STORED_PAY,
+      settleAction: action,
+      settleReason: null,
+      settledAt: NOW - 100,
+      escrowOutcome: "released",
+      ...patch,
+    },
+  });
+}
+
+describe("adoptSettleTx: a settling row with no hash", () => {
+  // The settled line goes to stdout; these tests read the row and the trail instead.
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
+  test("adopts the referee's complete that succeeded: settled with its hash, its block's time and the release, sending nothing", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s);
+    // The box's clock is an hour past the block's: the row takes the block's.
+    s.deps.now = () => (NOW + 3600) * 1000;
+    const getBlock = vi.spyOn(s.node.publicClient, "getBlock");
+    const sends = s.node.sends.length;
+    const r = await adoptSettleTx(s.deps, caseId, hash, { write: true });
+    expect(s.node.sends).toHaveLength(sends);
+    expect(getBlock).toHaveBeenCalledWith({ blockNumber: 1n });
+    expect(r).toEqual({
+      unchanged: false,
+      written: true,
+      proof: {
+        hash,
+        sender: expect.stringMatching(new RegExp(`^${REFEREE}$`, "i")),
+        target: expect.stringMatching(new RegExp(`^${JOB_CONTRACT}$`, "i")),
+        action: "complete",
+        jobId: "7",
+        reason: reasonFor(DISPUTE),
+        receipt: "success",
+        blockTime: NOW,
+      },
+      write: {
+        status: "settled",
+        settleTxHash: hash,
+        settleAction: "complete",
+        settledAt: NOW,
+        escrowOutcome: "released",
+        event: { step: "settle", status: "adopted", ref: hash, detail: "complete" },
+      },
+    });
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "complete",
+      settleReason: reasonFor(DISPUTE),
+      settleTxHash: hash,
+      settledAt: NOW,
+      escrowOutcome: "released",
+    });
+    expect(settleTrail(s, caseId)).toEqual([["adopted", hash, "complete"]]);
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringMatching(new RegExp(`"opslog":"pilot_case_settled".*"txHash":"${hash}"`)),
+    );
+  });
+
+  test("adopts the referee's reject that reverted: the hash is written, the row stays settling, and the next run reads it and decides again", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    const caseId = seedSettlingNoHash(s, { patch: { settleAction: "reject" } });
+    const hash = await failedSendHash(refereeReject(s));
+    const r = await adoptSettleTx(s.deps, caseId, hash, { write: true });
+    expect(s.node.sends).toHaveLength(1);
+    expect(r).toEqual({
+      unchanged: false,
+      written: true,
+      proof: expect.objectContaining({ action: "reject", receipt: "reverted", jobId: "7" }),
+      write: {
+        status: "settling",
+        settleTxHash: hash,
+        settleAction: "reject",
+        event: { step: "settle", status: "adopted", ref: hash, detail: "reject reverted" },
+      },
+    });
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleAction: "reject",
+      settleReason: reasonFor(DISPUTE),
+      settleTxHash: hash,
+      settledAt: null,
+      escrowOutcome: null,
+    });
+    expect(settleTrail(s, caseId)).toEqual([["adopted", hash, "reject reverted"]]);
+    const next = await settleCase(s.deps, caseId, { send: true });
+    expect(next.settlement.action).toBe("reject");
+    expect(s.node.hashesOf("reject")).toHaveLength(2);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleTxHash: next.txHash,
+      escrowOutcome: "refunded",
+    });
+  });
+
+  test("refuses a transaction with no receipt yet as still pending, and writes nothing", async () => {
+    const s = setup({ script: "pay", withholdReceipt: "complete" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await failedSendHash(refereeComplete(s));
+    const before = snapshot(s, caseId);
+    for (const write of [true, false])
+      await expect(adoptSettleTx(s.deps, caseId, hash, { write })).rejects.toThrow(
+        new RegExp(
+          `^refusing: case ${caseId}'s complete ${hash} has no receipt yet: it is still pending: wait, then run again; nothing was sent$`,
+        ),
+      );
+    expect(snapshot(s, caseId)).toEqual(before);
+    expect(s.node.sends).toHaveLength(1);
+  });
+
+  test("refuses a proven settle of another action than the one the row chose", async () => {
+    const s = setup({ script: "refund" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeReject(s);
+    const before = snapshot(s, caseId);
+    for (const write of [true, false])
+      await expect(adoptSettleTx(s.deps, caseId, hash, { write })).rejects.toThrow(
+        new RegExp(`case ${caseId} chose complete and ${hash} is a reject; nothing was sent$`),
+      );
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
+
+  test("a dry run prints the proof and what it would write, and writes nothing", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s);
+    const before = snapshot(s, caseId);
+    const r = await adoptSettleTx(s.deps, caseId, hash, { write: false });
+    expect(r).toMatchObject({
+      unchanged: false,
+      written: false,
+      proof: { hash, action: "complete", jobId: "7", receipt: "success", blockTime: NOW },
+      write: { status: "settled", settleTxHash: hash, settledAt: NOW, escrowOutcome: "released" },
+    });
+    expect(snapshot(s, caseId)).toEqual(before);
+    expect(s.node.sends).toHaveLength(1);
+  });
+
+  test("refuses while the row's last send may still be running, before any read, and adopts once the window passed", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s);
+    sendingEvent(s, caseId, 30);
+    const getTx = vi.spyOn(s.node.publicClient, "getTransaction");
+    const getChainId = vi.spyOn(s.node.publicClient, "getChainId");
+    for (const write of [true, false])
+      await expect(adoptSettleTx(s.deps, caseId, hash, { write })).rejects.toThrow(
+        new RegExp(`a settle may still be running on case ${caseId}: its send started 30 s ago`),
+      );
+    expect(getTx).not.toHaveBeenCalled();
+    expect(getChainId).not.toHaveBeenCalled();
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: null });
+    s.clock.sec += SEND_IN_FLIGHT_SECONDS - 30;
+    await adoptSettleTx(s.deps, caseId, hash, { write: true });
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settled", settleTxHash: hash });
+  });
+
+  test("a send another run records while this one reads is caught inside the write", async () => {
+    const s = setup({ script: "pay" });
+    // On the database's clock: the other run's sending event is stamped by the database.
+    s.clock.sec = Math.floor(Date.now() / 1000);
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s);
+    const getBlock = s.node.publicClient.getBlock.bind(s.node.publicClient);
+    vi.spyOn(s.node.publicClient, "getBlock").mockImplementation(async (args) => {
+      s.cases.recordEvent(caseId, "settle", "sending", null, `complete ${reasonFor(DISPUTE)}`);
+      return getBlock(args);
+    });
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(`a settle may still be running on case ${caseId}`),
+    );
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: null });
+    expect(settleTrail(s, caseId).map(([status]) => status)).toEqual(["sending"]);
+  });
+
+  test("a hash written on the row while this run read is caught inside the write", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s);
+    const getBlock = s.node.publicClient.getBlock.bind(s.node.publicClient);
+    vi.spyOn(s.node.publicClient, "getBlock").mockImplementation(async (args) => {
+      s.cases.advance(caseId, "settling", "settling", { settleTxHash: OTHER_RUNS_HASH });
+      return getBlock(args);
+    });
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(`pilot case ${caseId} moved while this command ran; nothing was sent$`),
+    );
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleTxHash: OTHER_RUNS_HASH,
+    });
+    expect(settleTrail(s, caseId)).toEqual([]);
+  });
+});
+
+describe("adoptSettleTx: a settled row with no hash", () => {
+  beforeEach(() => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+  });
+
+  test("with the action none, a successful complete the chain shows Completed is attached with its action, keeping the outcome and the time", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettledNoHash(s, "none");
+    const hash = await refereeComplete(s);
+    const r = await adoptSettleTx(s.deps, caseId, hash, { write: true });
+    expect(s.node.sends).toHaveLength(1);
+    expect(r).toEqual({
+      unchanged: false,
+      written: true,
+      proof: expect.objectContaining({
+        action: "complete",
+        receipt: "success",
+        reason: reasonFor(DISPUTE),
+      }),
+      write: {
+        status: "settled",
+        settleTxHash: hash,
+        settleAction: "complete",
+        event: {
+          step: "settle",
+          status: "adopted",
+          ref: hash,
+          detail: "complete, attached to the settled row",
+        },
+      },
+    });
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "complete",
+      settleTxHash: hash,
+      settleReason: null,
+      settledAt: NOW - 100,
+      escrowOutcome: "released",
+    });
+    expect(settleTrail(s, caseId)).toEqual([
+      ["adopted", hash, "complete, attached to the settled row"],
+    ]);
+  });
+
+  test("with the proven action already chosen, a successful reject the chain shows Rejected is attached", async () => {
+    const s = setup({ script: "refund" });
+    const caseId = seedSettledNoHash(s, "reject", {
+      settleReason: reasonFor(DISPUTE),
+      escrowOutcome: "refunded",
+    });
+    const hash = await refereeReject(s);
+    await adoptSettleTx(s.deps, caseId, hash, { write: true });
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "reject",
+      settleTxHash: hash,
+      settledAt: NOW - 100,
+      escrowOutcome: "refunded",
+    });
+  });
+
+  test("a successful claimRefund the chain shows Expired is attached, with no reason to compare", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettledNoHash(s, "none", { escrowOutcome: "refunded" });
+    s.clock.sec = EXPIRES + Number(REFUND_CLOCK_MARGIN_SECONDS) + 1;
+    const hash = await s.deps.chain.job.claimRefund(7n, s.deps.chain.wallets.referee);
+    const r = await adoptSettleTx(s.deps, caseId, hash, { write: true });
+    expect(r).toMatchObject({ proof: { action: "claimRefund", reason: null, receipt: "success" } });
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "claimRefund",
+      settleTxHash: hash,
+      escrowOutcome: "refunded",
+    });
+  });
+
+  test("refuses when the chain's status is not the one the proven action leaves", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettledNoHash(s, "none");
+    const hash = await refereeComplete(s);
+    s.node.chainJob(7n)!.status = 4;
+    const before = snapshot(s, caseId);
+    for (const write of [true, false])
+      await expect(adoptSettleTx(s.deps, caseId, hash, { write })).rejects.toThrow(
+        new RegExp(
+          `the chain shows job 7 Rejected and ${hash} is a complete, which leaves it Completed; nothing was sent$`,
+        ),
+      );
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
+
+  test("refuses a reverted transaction: it moved nothing", async () => {
+    const s = setup({ script: "refund", revertReject: true });
+    const caseId = seedSettledNoHash(s, "none");
+    const hash = await failedSendHash(refereeReject(s));
+    const before = snapshot(s, caseId);
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(
+        `case ${caseId}'s reject ${hash} reverted on chain, and a reverted transaction is never attached to a settled row; nothing was sent$`,
+      ),
+    );
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
+
+  test("refuses a transaction with no receipt yet as still pending", async () => {
+    const s = setup({ script: "pay", withholdReceipt: "complete" });
+    const caseId = seedSettledNoHash(s, "none");
+    const hash = await failedSendHash(refereeComplete(s));
+    const before = snapshot(s, caseId);
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      /has no receipt yet: it is still pending: wait, then run again/,
+    );
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
+
+  test("refuses when the row chose another action than the proven one", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettledNoHash(s, "reject", { settleReason: reasonFor(DISPUTE) });
+    const hash = await refereeComplete(s);
+    const before = snapshot(s, caseId);
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(`case ${caseId} is settled with the action reject and ${hash} is a complete`),
+    );
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
+
+  test("refuses an escrow that is not the case's own before trusting its status", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettledNoHash(s, "none");
+    s.cases.patch(caseId, { buyerAddress: SELLER });
+    const hash = await refereeComplete(s);
+    const before = snapshot(s, caseId);
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(`job 7's client is ${BUYER} and the case's buyer is ${SELLER}`, "i"),
+    );
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
+});
+
+describe("adoptSettleTx: a row that holds a hash, or is at another status", () => {
+  test.each<[PilotStatus]>([["settling"], ["settled"]])(
+    "a %s row that holds a hash refuses another one, and changes nothing for its own",
+    async (status) => {
+      const s = setup({ script: "pay" });
+      const caseId = seed(s, {
+        status,
+        patch: { ...STORED_PAY, settleAction: "complete", settleTxHash: HELD_HASH },
+      });
+      const other = await refereeComplete(s);
+      const getTx = vi.spyOn(s.node.publicClient, "getTransaction");
+      const before = snapshot(s, caseId);
+      for (const write of [true, false])
+        await expect(adoptSettleTx(s.deps, caseId, other, { write })).rejects.toThrow(
+          new RegExp(
+            `case ${caseId} is ${status} with settle transaction ${HELD_HASH}, not ${other}; a hash the row holds is never replaced; nothing was sent$`,
+          ),
+        );
+      expect(await adoptSettleTx(s.deps, caseId, HELD_HASH, { write: true })).toEqual({
+        unchanged: true,
+        hash: HELD_HASH,
+        status,
+      });
+      expect(snapshot(s, caseId)).toEqual(before);
+      expect(getTx).not.toHaveBeenCalled();
+      expect(s.node.sends).toHaveLength(1);
+    },
+  );
+
+  test.each<[PilotStatus]>([["filed"], ["ruled"], ["submitted"], ["failed"]])(
+    "a case at %s is refused before any read",
+    async (status) => {
+      const s = setup({ script: "pay" });
+      const caseId = seed(s, { status });
+      const hash = await refereeComplete(s);
+      const getTx = vi.spyOn(s.node.publicClient, "getTransaction");
+      const before = snapshot(s, caseId);
+      await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+        new RegExp(
+          `^refusing: case ${caseId} is ${status}; a settle transaction is adopted on a settling or settled case only; nothing was sent$`,
+        ),
+      );
+      expect(getTx).not.toHaveBeenCalled();
+      expect(snapshot(s, caseId)).toEqual(before);
+    },
+  );
+
+  test("a case of another mode is refused before any read", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s, { mode: "testnet" });
+    const hash = await refereeComplete(s);
+    const getTx = vi.spyOn(s.node.publicClient, "getTransaction");
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(`case ${caseId} is a testnet case and this stage is rehearsal`),
+    );
+    expect(getTx).not.toHaveBeenCalled();
+  });
+
+  test("a case made for another job contract is refused before any read", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s, {
+      insert: { jobContract: "0x0000000000000000000000000000000000000b0b" },
+    });
+    const hash = await refereeComplete(s);
+    const getChainId = vi.spyOn(s.node.publicClient, "getChainId");
+    const getTx = vi.spyOn(s.node.publicClient, "getTransaction");
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      /job contract is 0x0000000000000000000000000000000000000b0b and the configured job contract/,
+    );
+    expect(getChainId).not.toHaveBeenCalled();
+    expect(getTx).not.toHaveBeenCalled();
+  });
+
+  test("a node on another chain is refused before the transaction is read", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s);
+    vi.spyOn(s.node.publicClient, "getChainId").mockResolvedValue(1);
+    const getTx = vi.spyOn(s.node.publicClient, "getTransaction");
+    await expect(adoptSettleTx(s.deps, caseId, hash, { write: true })).rejects.toThrow(
+      new RegExp(`case ${caseId} is on chain id 31337 and the connected chain is 1`),
+    );
+    expect(getTx).not.toHaveBeenCalled();
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: null });
+  });
+});
+
+describe("adoptSettleTx: the proof refuses each field that differs, naming both values", () => {
+  /** Refused with `message` in a dry run and with write, the row and its trail unchanged, and
+   *  nothing sent beyond the test's own transactions. */
+  async function refused(s: Setup, caseId: string, hash: Hex, message: string): Promise<void> {
+    const before = snapshot(s, caseId);
+    const sends = s.node.sends.length;
+    for (const write of [true, false])
+      await expect(adoptSettleTx(s.deps, caseId, hash, { write })).rejects.toThrow(
+        new RegExp(
+          `^refusing: case ${caseId}'s settle transaction ${hash} ${message}; nothing was sent$`,
+          "i",
+        ),
+      );
+    expect(snapshot(s, caseId)).toEqual(before);
+    expect(s.node.sends).toHaveLength(sends);
+  }
+
+  test("a hash the node does not know", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    await refused(
+      s,
+      caseId,
+      OTHER_RUNS_HASH,
+      "could not be read from the node yet; check the hash, or run again once the node has it",
+    );
+  });
+
+  test("a transaction to another contract than the job contract", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await rawSend(s, evaluatorAccount, settleCall("complete"), USDC);
+    await refused(s, caseId, hash, `has recipient ${USDC}, not the job contract ${JOB_CONTRACT}`);
+  });
+
+  test("a transaction from another sender than the case's referee", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await rawSend(s, sellerAccount, settleCall("complete"));
+    await refused(s, caseId, hash, `has sender ${SELLER}, not the referee ${REFEREE}`);
+  });
+
+  test("calldata that is not a call of the job contract", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await rawSend(s, evaluatorAccount, "0xdeadbeef");
+    await refused(
+      s,
+      caseId,
+      hash,
+      "is not a call of the job contract's complete, reject or claimRefund",
+    );
+  });
+
+  test("a call of another function of the job contract", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const data = encodeFunctionData({
+      abi: iErc8183JobAbi,
+      functionName: "setBudget",
+      args: [7n, BUDGET, "0x"],
+    });
+    const hash = await rawSend(s, evaluatorAccount, data);
+    await refused(s, caseId, hash, "calls setBudget, not complete, reject or claimRefund");
+  });
+
+  test("a settle of another job", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await rawSend(s, evaluatorAccount, settleCall("complete", 8n));
+    await refused(s, caseId, hash, "settles job 8, not job 7");
+  });
+
+  test("a reason other than the one the row holds", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s);
+    const hash = await refereeComplete(s, OTHER_REASON);
+    await refused(
+      s,
+      caseId,
+      hash,
+      `has reason ${OTHER_REASON}, not the case's ${reasonFor(DISPUTE)}`,
+    );
+  });
+
+  test("a reason other than the case's dispute id, for a row that holds no reason", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettledNoHash(s, "none");
+    const hash = await refereeComplete(s, OTHER_REASON);
+    await refused(
+      s,
+      caseId,
+      hash,
+      `has reason ${OTHER_REASON}, not the case's ${reasonFor(DISPUTE)}`,
+    );
+  });
+
+  test("a row with neither a reason nor a dispute id to compare the reason with", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettledNoHash(s, "none", { coreDisputeId: null });
+    const hash = await refereeComplete(s);
+    await refused(
+      s,
+      caseId,
+      hash,
+      "is a complete, and the case holds no reason or dispute id to compare its reason with",
+    );
+  });
+});
+
+describe("the in-flight hold: an adopted hash ends a send", () => {
+  test("an adopted event after a send that started inside the window holds nothing for a row with a hash", () => {
+    const s = setup({ script: "pay" });
+    const caseId = seedSettlingNoHash(s, { patch: { settleTxHash: HELD_HASH } });
+    sendingEvent(s, caseId, 30);
+    const hold = () =>
+      refuseWhileSendMayRun(s.cases, caseId, s.clock.sec, { outcomeEndsSend: true });
+    expect(hold).toThrow(/a settle may still be running/);
+    s.cases.recordEvent(caseId, "settle", "adopted", HELD_HASH, "complete reverted");
+    expect(hold).not.toThrow();
   });
 });

@@ -10,7 +10,7 @@ import { parseSqliteUtc } from "../util/sqliteTime";
 import { publicErrorMessage } from "../workflow/publicError";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage, PilotChain } from "./composition";
-import { withoutEmDash } from "./job";
+import { jobCallOf, withoutEmDash } from "./job";
 import { klerosTextOf } from "./klerosCheck";
 import {
   type RulingOutcome,
@@ -199,7 +199,8 @@ function refuse(message: string): never {
   throw new Error(`refusing: ${message}; nothing was sent`);
 }
 
-/** The settle events that are a send or the outcome of one, as opposed to a read or the chain's. */
+/** The settle events that are a send or the outcome of one, as opposed to a read or the chain's.
+ *  A hash adopted through its proof is a send's outcome too. */
 const SEND_TRAIL: ReadonlySet<string> = new Set([
   "sending",
   "sent",
@@ -207,13 +208,14 @@ const SEND_TRAIL: ReadonlySet<string> = new Set([
   "unconfirmed",
   "failed",
   "ok",
+  "adopted",
 ]);
 
 /**
  * Refuses while the case's latest `settle/sending` event is younger than
  * {SEND_IN_FLIGHT_SECONDS} on the settle's clock, whatever the row's status. With
- * `outcomeEndsSend`, a sending event that its outcome (sent, reverted, unconfirmed, failed or ok)
- * already follows holds nothing: for a row whose hash reverted, where this run's own revert ended
+ * `outcomeEndsSend`, a sending event that its outcome (sent, reverted, unconfirmed, failed, ok or
+ * adopted) already follows holds nothing: for a row whose hash reverted, where this run's own revert ended
  * its send but another run's newer one has not ended yet. The database stamps the event; a stamp
  * that cannot be read refuses too, since an unknown age never lets a second send through. Run it
  * before any read and again inside the transaction that records the next `settle/sending` event,
@@ -230,17 +232,22 @@ export function refuseWhileSendMayRun(
     ? trail.at(-1)
     : trail.filter((e) => e.status === "sending").at(-1);
   if (last === undefined || last.status !== "sending") return;
-  const startedMs = parseSqliteUtc(last.createdAt);
-  // The parser reads a stamp it cannot read as 0.
-  if (startedMs === 0)
+  const age = ageOf(last, nowSec);
+  if (age === null)
     refuse(
       `a settle may still be running on case ${caseId}: the time its send started cannot be read; read the chain and the case's trail before it is sent on again`,
     );
-  const age = nowSec - Math.floor(startedMs / 1000);
   if (age < SEND_IN_FLIGHT_SECONDS)
     refuse(
       `a settle may still be running on case ${caseId}: its send started ${age} s ago, and a send is treated as running for ${SEND_IN_FLIGHT_SECONDS} s; wait, then run again`,
     );
+}
+
+/** Seconds since the database stamped the event, on the settle's clock; null when the stamp cannot
+ *  be read (the parser reads such a stamp as 0). */
+function ageOf(e: { createdAt: string }, nowSec: number): number | null {
+  const ms = parseSqliteUtc(e.createdAt);
+  return ms === 0 ? null : nowSec - Math.floor(ms / 1000);
 }
 
 /** The ruling a row at `settling` was acting on, from the action it chose: the decision is taken
@@ -303,22 +310,35 @@ const WAITS_ON_RULING: ReadonlySet<NoAction["why"]> = new Set(Object.values(WAIT
 const outcomeName = (r: RulingOutcome) =>
   r.kind === "appealed" ? `appealed (round ${r.roundCount})` : r.kind;
 
-/** The receipt's status, or null while the node has none: the transaction is pending, or was
- *  dropped. Any other failure of the read escapes. */
-async function receiptStatus(d: SettleDeps, hash: Hex): Promise<"success" | "reverted" | null> {
+type Receipt = Awaited<ReturnType<PilotChain["publicClient"]["getTransactionReceipt"]>>;
+
+/** The receipt, or null while the node has none: the transaction is pending, or was dropped.
+ *  Any other failure of the read escapes. */
+async function receiptOf(d: SettleDeps, hash: Hex): Promise<Receipt | null> {
   try {
-    return (await d.chain.publicClient.getTransactionReceipt({ hash })).status;
+    return await d.chain.publicClient.getTransactionReceipt({ hash });
   } catch (e) {
     if (e instanceof TransactionReceiptNotFoundError) return null;
     throw e;
   }
 }
 
+/** The receipt's status, or null while the node has none, as {receiptOf} reads it. */
+async function receiptStatus(d: SettleDeps, hash: Hex): Promise<"success" | "reverted" | null> {
+  return (await receiptOf(d, hash))?.status ?? null;
+}
+
 const STATUS_NAME: Record<number, string> = {
+  [JobStatusOnChain.open]: "Open",
+  [JobStatusOnChain.funded]: "Funded",
+  [JobStatusOnChain.submitted]: "Submitted",
   [JobStatusOnChain.completed]: "Completed",
   [JobStatusOnChain.rejected]: "Rejected",
   [JobStatusOnChain.expired]: "Expired",
 };
+
+/** The chain's status as a refusal names it: its name, or its number when it has none. */
+const statusName = (status: number) => STATUS_NAME[status] ?? String(status);
 
 function settledLine(
   row: PilotCaseRecord,
@@ -566,7 +586,7 @@ function recordElsewhere(
       "settle",
       "chain",
       hash,
-      `the chain shows the job ${STATUS_NAME[escrow.status] ?? escrow.status}${hash === null ? ", moved by a transaction whose hash this row does not hold; the hash of our own send may be unknown" : ""}`,
+      `the chain shows the job ${statusName(escrow.status)}${hash === null ? ", moved by a transaction whose hash this row does not hold; the hash of our own send may be unknown" : ""}`,
     );
   });
   settledLine(row, action, hash);
@@ -728,4 +748,251 @@ async function send(
   }
   settledLine(settled, action, txHash);
   return { settlement, txHash };
+}
+
+// ---------------------------------------------------------------------------
+// Recovery: a settle hash the row lost, and one the network dropped. Neither sends anything.
+// ---------------------------------------------------------------------------
+
+/** The three settle calls, in the order a refusal names them. */
+const SEND_ACTIONS: readonly SendAction[] = ["complete", "reject", "claimRefund"];
+
+/** What `pilot:settle --tx` proved about the transaction it was given, as it prints it. */
+export interface SettleTxProof {
+  hash: Hex;
+  /** The transaction's sender and target, as the node returns them. */
+  sender: string;
+  target: string;
+  action: SendAction;
+  jobId: string;
+  /** The reason of a complete or a reject; null for a claimRefund, which carries none. */
+  reason: Hex | null;
+  receipt: "success" | "reverted";
+  /** The unix seconds of the block that holds it. */
+  blockTime: number;
+}
+
+/** What an adoption writes on the row, or would write in a dry run, and the event it records. */
+export interface AdoptWrite {
+  status: "settling" | "settled";
+  settleTxHash: Hex;
+  settleAction: SendAction;
+  settledAt?: number;
+  escrowOutcome?: "released" | "refunded";
+  event: { step: "settle"; status: "adopted"; ref: Hex; detail: string };
+}
+
+export type AdoptResult =
+  | { unchanged: true; hash: Hex; status: PilotStatus }
+  | { unchanged: false; proof: SettleTxProof; write: AdoptWrite; written: boolean };
+
+const sameHash = (a: string, b: string) => a.toLowerCase() === b.toLowerCase();
+
+/** A network read that refuses when it fails, in the redacted words of the failure. */
+async function readOrRefuse<T>(what: string, read: () => Promise<T>): Promise<T> {
+  try {
+    return await read();
+  } catch (e) {
+    refuse(`${what} could not be read: ${withoutEmDash(publicErrorMessage(e))}`);
+  }
+}
+
+/**
+ * The call `hash` makes, proven to be one of this case's settles: sent by the case's referee to
+ * the job contract, a complete, reject or claimRefund of the case's job, and for a complete or a
+ * reject the case's reason (the row's, else the one its dispute id gives). A transaction the node
+ * does not know, calldata that does not decode, or any field that differs refuses, naming the
+ * field and both values.
+ */
+async function provenSettleCall(
+  d: SettleDeps,
+  row: PilotCaseRecord,
+  jobId: bigint,
+  hash: Hex,
+): Promise<Pick<SettleTxProof, "sender" | "target" | "action" | "reason">> {
+  const what = `case ${row.caseId}'s settle transaction ${hash}`;
+  const call = await jobCallOf(d.chain, hash, {
+    fn: SEND_ACTIONS,
+    verb: "settles",
+    jobId,
+    sender: row.refereeAddress,
+    role: "referee",
+    retry: "check the hash, or run again once the node has it",
+  });
+  if (typeof call === "string") refuse(`${what} ${call}`);
+  const action = call.functionName as SendAction;
+  let reason: Hex | null = null;
+  if (action !== "claimRefund") {
+    const expected =
+      row.settleReason ?? (row.coreDisputeId === null ? null : reasonFor(row.coreDisputeId));
+    if (expected === null)
+      refuse(
+        `${what} is a ${action}, and the case holds no reason or dispute id to compare its reason with`,
+      );
+    reason = call.args[1] as Hex;
+    if (!sameHash(reason, expected))
+      refuse(`${what} has reason ${reason}, not the case's ${expected}`);
+  }
+  return { sender: call.tx.from, target: call.tx.to as string, action, reason };
+}
+
+/** The action a proven settle must be on this row: the one a settling row chose, and for a
+ *  settled row the one it chose or none. */
+function checkActionFits(row: PilotCaseRecord, action: SendAction, hash: Hex): void {
+  if (row.status === "settling" && action !== row.settleAction)
+    refuse(`case ${row.caseId} chose ${row.settleAction} and ${hash} is a ${action}`);
+  if (row.status === "settled" && row.settleAction !== "none" && action !== row.settleAction)
+    refuse(
+      `case ${row.caseId} is settled with the action ${row.settleAction ?? "none recorded"} and ${hash} is a ${action}`,
+    );
+}
+
+/** The receipt's status and its block's time; no receipt yet refuses, as still pending. */
+async function minedOf(
+  d: SettleDeps,
+  row: PilotCaseRecord,
+  action: SendAction,
+  hash: Hex,
+): Promise<Pick<SettleTxProof, "receipt" | "blockTime">> {
+  const receipt = await readOrRefuse(`the receipt of ${hash}`, () => receiptOf(d, hash));
+  if (receipt === null)
+    refuse(
+      `case ${row.caseId}'s ${action} ${hash} has no receipt yet: it is still pending: wait, then run again`,
+    );
+  // The block's time, never this box's: the row records when the chain settled the job.
+  const block = await readOrRefuse(`the block of ${hash}`, () =>
+    d.chain.publicClient.getBlock({ blockNumber: receipt.blockNumber }),
+  );
+  return { receipt: receipt.status, blockTime: Number(block.timestamp) };
+}
+
+const adoptedEvent = (hash: Hex, detail: string): AdoptWrite["event"] => ({
+  step: "settle",
+  status: "adopted",
+  ref: hash,
+  detail,
+});
+
+/** A settling row's adoption: settled with the hash on a success, the hash alone on a revert. */
+function settlingWrite(proof: SettleTxProof): AdoptWrite {
+  const { hash, action } = proof;
+  if (proof.receipt === "reverted")
+    return {
+      status: "settling",
+      settleTxHash: hash,
+      settleAction: action,
+      event: adoptedEvent(hash, `${action} reverted`),
+    };
+  return {
+    status: "settled",
+    settleTxHash: hash,
+    settleAction: action,
+    settledAt: proof.blockTime,
+    escrowOutcome: action === "complete" ? "released" : "refunded",
+    event: adoptedEvent(hash, action),
+  };
+}
+
+/** A settled row's adoption: the hash and the action, once the receipt succeeded and the chain,
+ *  read as the case's own job, shows the status the action leaves. */
+async function settledWrite(
+  d: SettleDeps,
+  row: PilotCaseRecord,
+  jobId: bigint,
+  proof: SettleTxProof,
+): Promise<AdoptWrite> {
+  const { hash, action } = proof;
+  if (proof.receipt !== "success")
+    refuse(
+      `case ${row.caseId}'s ${action} ${hash} reverted on chain, and a reverted transaction is never attached to a settled row`,
+    );
+  const escrow = await readOrRefuse(`job ${jobId}'s escrow`, () => d.chain.job.escrowState(jobId));
+  checkEscrowIsOwn(row, jobId, escrow);
+  if (escrow.status !== STATUS_AFTER[action])
+    refuse(
+      `the chain shows job ${jobId} ${statusName(escrow.status)} and ${hash} is a ${action}, which leaves it ${statusName(STATUS_AFTER[action])}`,
+    );
+  return {
+    status: "settled",
+    settleTxHash: hash,
+    settleAction: action,
+    event: adoptedEvent(hash, `${action}, attached to the settled row`),
+  };
+}
+
+/**
+ * `pilot:settle --tx`: a settle transaction the row lost, adopted only through its proof. It
+ * sends nothing. By the row's status:
+ * - settling with no hash: the proven action must be the one the row chose. A success moves the
+ *   row to settled with the hash, its block's time and the outcome the action gives; a revert
+ *   writes the hash and leaves the row at settling, for the next run to read. Held, like a send,
+ *   while the row's last send may still be running, before any read and again at the write.
+ * - settled with no hash, and the action none or the proven one: the hash and the action are
+ *   attached once the receipt succeeded and the chain shows the status that action leaves; the
+ *   outcome and the time stay as they are.
+ * - holding a hash: refused unless it is the same one, which changes nothing.
+ * - any other status: refused.
+ * A transaction with no receipt yet is refused as still pending. The configured deployment is
+ * checked before any read, the connected chain before the transaction is read, and the write
+ * compares the row with the one this run read, in one transaction. With `write` false nothing is
+ * written: the result is what was read and what would be written.
+ */
+export async function adoptSettleTx(
+  d: SettleDeps,
+  caseId: string,
+  hash: Hex,
+  opts: { write: boolean },
+): Promise<AdoptResult> {
+  const nowSec = () => Math.floor((d.now ?? Date.now)() / 1000);
+  const row = d.cases.find(caseId);
+  if (!row) refuse(`no pilot case ${caseId}`);
+  if (row.mode !== d.stage.mode)
+    refuse(`case ${caseId} is a ${row.mode} case and this stage is ${d.stage.mode}`);
+  if (row.jobId === null) refuse(`case ${caseId} has no job id`);
+  const jobId = BigInt(row.jobId);
+  checkOwnConfig(d.chain, row);
+  const { status } = row;
+  if (status !== "settling" && status !== "settled")
+    refuse(
+      `case ${caseId} is ${status}; a settle transaction is adopted on a settling or settled case only`,
+    );
+  if (row.settleTxHash !== null) {
+    if (!sameHash(row.settleTxHash, hash))
+      refuse(
+        `case ${caseId} is ${status} with settle transaction ${row.settleTxHash}, not ${hash}; a hash the row holds is never replaced`,
+      );
+    return { unchanged: true, hash: row.settleTxHash as Hex, status };
+  }
+  // A settling row with no hash may be another run's send, its hash not yet written: an adoption
+  // then could leave the row free for a new send while that one still lands.
+  if (status === "settling") refuseWhileSendMayRun(d.cases, caseId, nowSec());
+  await checkConnectedChain(d, row);
+  const call = await provenSettleCall(d, row, jobId, hash);
+  checkActionFits(row, call.action, hash);
+  const proof: SettleTxProof = {
+    hash,
+    ...call,
+    jobId: jobId.toString(),
+    ...(await minedOf(d, row, call.action, hash)),
+  };
+  const write =
+    status === "settling" ? settlingWrite(proof) : await settledWrite(d, row, jobId, proof);
+  if (!opts.write) return { unchanged: false, proof, write, written: false };
+  d.cases.transaction(() => {
+    if (status === "settling") refuseWhileSendMayRun(d.cases, caseId, nowSec());
+    const current = d.cases.find(caseId);
+    if (
+      current?.status !== status ||
+      current.settleTxHash !== null ||
+      current.settleAction !== row.settleAction
+    )
+      refuse(`pilot case ${caseId} moved while this command ran`);
+    const { event, status: to, ...patch } = write;
+    if (!d.cases.advance(caseId, status, to, patch))
+      refuse(`pilot case ${caseId} moved while this command ran`);
+    d.cases.recordEvent(caseId, event.step, event.status, event.ref, event.detail);
+  });
+  if (status === "settling" && write.status === "settled")
+    settledLine(row, write.settleAction, hash);
+  return { unchanged: false, proof, write, written: true };
 }
