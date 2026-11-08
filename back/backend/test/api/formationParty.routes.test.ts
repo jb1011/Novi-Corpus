@@ -526,12 +526,15 @@ test("POST /companies mints a company through the ONE domain function, and lists
     "businessPurpose",
     "companyId",
     "createdAt",
+    "daoSupplement",
     "environment",
     "filedAt",
     "filingNumber",
     "industryLabel",
     "legalNameFiled",
     "nameOptions",
+    "provider",
+    "purpose",
     "state",
   ]);
   // …and NOT the four the list has no reader for. `state` is the row's status, its live payment

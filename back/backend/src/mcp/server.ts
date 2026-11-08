@@ -119,6 +119,9 @@ export interface McpToolDeps extends EntityViewDeps {
    *  the SAME objects ApiDeps carries, so MCP and REST cannot describe a company differently. */
   companies?: import("../api/app").ApiDeps["companies"];
   formationSteps?: import("../api/app").ApiDeps["formationSteps"];
+  /** The FULL document index, as ApiDeps declares it and the SAME object: the company views read
+   *  the latest DAO supplement off it, beside the two reads the entity views make. */
+  documents?: import("../api/app").ApiDeps["documents"];
   /** A customer company's declaration and checks, for `list_companies` and `get_company`: the
    *  SAME object ApiDeps carries, so a customer's company reads the same on both surfaces. */
   customerFacts?: import("../api/app").ApiDeps["customerFacts"];

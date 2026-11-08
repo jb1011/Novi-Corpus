@@ -464,12 +464,15 @@ const COMPANY_VIEW_KEYS = [
   "businessPurpose",
   "companyId",
   "createdAt",
+  "daoSupplement",
   "environment",
   "filedAt",
   "filingNumber",
   "industryLabel",
   "legalNameFiled",
   "nameOptions",
+  "provider",
+  "purpose",
   "state",
 ];
 

@@ -96,6 +96,14 @@ function toRecord(r: Row): DocumentIndexRecord {
 }
 
 const SOURCES: readonly DocumentIndexRecord["source"][] = ["provider", "customer"];
+
+/**
+ * The doc type of the DAO supplement: doola's amended articles, which add the DAO supplement to a
+ * formed company's articles by hand. An operator records them (design §6.5); the company view
+ * reads the latest such row as `daoSupplement`.
+ */
+export const DAO_SUPPLEMENT_DOC_TYPE = "dao_supplement";
+
 /** The largest time in unix seconds accepted. A time in milliseconds is past it for centuries. */
 const MAX_UNIX_SECONDS = 99_999_999_999;
 
@@ -177,6 +185,13 @@ export interface DocumentIndexRepository {
    * The caller already knows each row's company; asking by that is both cheaper and total.
    */
   listByCompanies(companyIds: string[]): Map<string, DocumentIndexRecord[]>;
+  /**
+   * The latest row of one doc type for each of the companies named, in ONE statement: the newest
+   * by `created_at`, and of two in the same second the one indexed last. A company with no such
+   * row is absent from the map. A later row replaces an earlier one in the answer only: the index
+   * keeps both.
+   */
+  latestOfType(docType: string, companyIds: string[]): Map<string, DocumentIndexRecord>;
   /** Ownership is enforced by the caller against `companies`; the company id is re-asserted here
    *  so a document id from one company can never be read through another company's route. */
   findOwned(companyId: string, id: string): DocumentIndexRecord | undefined;
@@ -324,6 +339,25 @@ export class SqliteDocumentIndexRepository implements DocumentIndexRepository {
         if (list) list.push(toRecord(r));
         else out.set(key, [toRecord(r)]);
       }
+    }
+    return out;
+  }
+
+  latestOfType(docType: string, companyIds: string[]): Map<string, DocumentIndexRecord> {
+    const out = new Map<string, DocumentIndexRecord>();
+    if (companyIds.length === 0) return out;
+    // Chunked at 400, as `listByCompanies`. Oldest first, so the row a company is left holding is
+    // its latest: the rowid orders two rows of the same second as they were indexed.
+    for (let i = 0; i < companyIds.length; i += 400) {
+      const chunk = companyIds.slice(i, i + 400);
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM documents
+            WHERE doc_type = ? AND company_id IN (${chunk.map(() => "?").join(",")})
+            ORDER BY created_at, rowid`,
+        )
+        .all(docType, ...chunk) as Row[];
+      for (const r of rows) if (r.company_id) out.set(r.company_id, toRecord(r));
     }
     return out;
   }

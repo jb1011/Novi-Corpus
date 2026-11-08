@@ -208,6 +208,9 @@ describe("/config.legalBodies", () => {
       gasSeedOffered: false,
       paymentRequired: false,
       identityRequired: false,
+      // No doola on this deployment: no formed door, and the waiting screen's default.
+      formedDoor: "hidden",
+      filingWorkingDays: 5,
       linkTtl: { min: 600, max: 85_800, default: 3_600 },
     });
   });
@@ -262,7 +265,7 @@ describe("/config.legalBodies", () => {
     );
   });
 
-  test("the offered answer has exactly the eleven keys of its type, and the link window exactly three", async () => {
+  test("the offered answer has exactly the thirteen keys of its type, and the link window exactly three", async () => {
     const orders = orderDeps();
     const { body } = await configOf({
       legalBodyOrders: orders,
@@ -283,10 +286,12 @@ describe("/config.legalBodies", () => {
         gasSeedOffered: true,
         paymentRequired: true,
         identityRequired: true,
+        formedDoor: true,
+        filingWorkingDays: true,
         linkTtl: true,
       }),
     );
-    expect(keys).toHaveLength(11);
+    expect(keys).toHaveLength(13);
     expect(Object.keys(body.legalBodies.linkTtl).sort()).toEqual(
       keysOf<OfferedConfig["linkTtl"]>({ min: true, max: true, default: true }),
     );

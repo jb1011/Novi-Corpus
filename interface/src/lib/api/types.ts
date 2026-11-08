@@ -1213,6 +1213,13 @@ export type LegalBodyConfig =
       /** The guardian must pass the identity check first (production). Absent from a backend
        *  before PR 1, read as false. */
       identityRequired?: boolean;
+      /** Whether to show the door that forms a company through doola: `cap_reached` when every
+       *  gate holds but the deployment has taken all the formed companies it takes. Absent from a
+       *  backend before F-A-1, read as "hidden". */
+      formedDoor?: "offered" | "cap_reached" | "hidden";
+      /** How many working days the formed door's waiting screen says a filing usually takes.
+       *  Absent from a backend before F-A-1. */
+      filingWorkingDays?: number;
       /** The link window a client may ask for, in seconds, counted from the chain's clock. */
       linkTtl: { min: number; max: number; default: number };
     };
@@ -1228,6 +1235,8 @@ export const LEGAL_BODY_CONFIG_KEYS = [
   "gasSeedOffered",
   "paymentRequired",
   "identityRequired",
+  "formedDoor",
+  "filingWorkingDays",
   "linkTtl",
 ] as const satisfies readonly (keyof Extract<LegalBodyConfig, { available: true }>)[];
 

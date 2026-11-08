@@ -1185,6 +1185,8 @@ async function main() {
             // The submitter. Present only where the box CHARGES, so a deployment that has
             // stopped can still read its payments while having no settle path wired at all.
             paymentExecutor: formationPayment.required ? formationExecutor : undefined,
+            // What the formed door's waiting screen says a filing usually takes.
+            filingWorkingDays: formationCfg.filingWorkingDays,
           }
         : undefined,
     // The view dependencies, as ONE object shared with the MCP surface below (C8).
