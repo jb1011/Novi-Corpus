@@ -102,6 +102,8 @@ function toRecord(r: Row): CompanyRecord {
     ein: r.ein,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    // Undefined on a database this build has not migrated (no column), which
+    // `companyAcceptsAgents` reads as not a company for agents.
     purposeKind: r.purpose_kind,
   };
 }

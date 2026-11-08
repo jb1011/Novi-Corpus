@@ -27,6 +27,7 @@ import {
   truncateTenant,
   warnIfNearLimit,
 } from "../formation";
+import { refusal } from "../legalBody/sentences";
 import { opsLog } from "../observability/opsLog";
 import type { TransferAuthorizationDomain } from "../payments/transferAuthorization";
 import type { CompanyRepository, CompanyStatus } from "../persistence/companyRepository";
@@ -197,6 +198,16 @@ export function createCompany(
   intake: CompanyIntakeInput,
 ): CreateCompanyResult {
   const now = deps.now ?? Date.now;
+
+  // 0. A company for a legal body is not offered on PRODUCTION yet: the formed door's gates
+  //    (strict World, the identity record, the approved texts, the invite, the total cap) are not
+  //    wired, and without them this door would file real companies for anyone World lets through.
+  //    The deployment's pin decides: a mainnet box always pins doola production (a boot
+  //    invariant), so this covers `legalBodyEnvironment(cfg) === "production"`, and it refuses on
+  //    any box that would file a real company. Before anything else, so nothing is written.
+  //    ⚠ F-A-2 REPLACES this check with those gates.
+  if (intake.for === "legal_body" && deps.pin.environment === "production")
+    throw refusal("formed_door_not_offered", 403);
 
   // 1. PERSONHOOD, first, and on this door specifically (§6.7): `POST /companies` is where the
   //    money is spent, and an anonymous caller with a wallet must not be able to buy real

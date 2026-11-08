@@ -19,6 +19,7 @@ import { ApiError } from "../../src/api/errors";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
 import { createCompany } from "../../src/formation/company";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -87,12 +88,17 @@ beforeEach(() => {
 afterEach(() => db.close());
 
 function makeApp(
-  formation?: { required?: boolean; syntheticPii?: boolean; maxPerTenant?: number },
+  formation?: {
+    required?: boolean;
+    syntheticPii?: boolean;
+    maxPerTenant?: number;
+    environment?: "sandbox" | "production";
+  },
   custody: { circle?: boolean } = {},
 ) {
   const companies = new SqliteCompanyRepository(db);
   const requests = new SqliteFormationRepository(db);
-  const pin = { provider: "doola" as const, environment: "sandbox" as const };
+  const pin = { provider: "doola" as const, environment: formation?.environment ?? "sandbox" };
   // ONE dependency set for all three doors, exactly as the composition root builds it — only the
   // transaction differs per call site.
   const companyDeps = {
@@ -125,7 +131,7 @@ function makeApp(
     turnkeyCustodyAvailable: true,
     formation: formation
       ? {
-          environment: "sandbox" as const,
+          environment: pin.environment,
           required: formation.required ?? true,
           sandboxSyntheticPii: formation.syntheticPii ?? false,
           maxPerTenant: formation.maxPerTenant ?? 3,
@@ -584,6 +590,31 @@ test("POST /companies with `for: legal_body` mints a legal-body company; without
     expect((await res.json()).error.message).toMatch(/^for: /);
   }
   expect(companies.listByTenant(account.address)).toHaveLength(2);
+});
+
+test("PRODUCTION: POST /companies with `for: legal_body` is refused, 403 formed_door_not_offered, and nothing is written", async () => {
+  const app = makeApp({ required: true, environment: "production" });
+  const token = await login(app);
+  const companies = new SqliteCompanyRepository(db);
+  const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();
+
+  const res = await post(app, "/companies", token, {
+    partyId,
+    ...COMPANY_INTAKE,
+    for: "legal_body",
+  });
+  expect(res.status).toBe(403);
+  expect((await res.json()).error).toMatchObject({
+    code: "formed_door_not_offered",
+    message: LEGAL_BODY_SENTENCES.formed_door_not_offered,
+  });
+  expect(companies.listByTenant(account.address)).toHaveLength(0);
+  expect(parties.findOwned(account.address, partyId)!.companyId).toBeNull();
+
+  // Without `for`, the same production deployment creates a company for agents as before.
+  const agent = await post(app, "/companies", token, { partyId, ...COMPANY_INTAKE });
+  expect(agent.status).toBe(201);
+  expect(companies.find((await agent.json()).companyId)!.purposeKind).toBe("agent");
 });
 
 test("POST /companies requires a session and the FULL intake, naming what is missing", async () => {

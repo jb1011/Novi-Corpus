@@ -33,6 +33,7 @@ const ANSWERING_MODULES = [
   "legalBody/binding.ts",
   "legalBody/checkLink.ts",
   "legalBody/gasSeed.ts",
+  "formation/company.ts",
   "api/routes/legalBodyOrders.ts",
   "mcp/server.ts",
 ];

@@ -1,18 +1,19 @@
 /**
  * `create_company` over MCP always creates a company for agents (`purpose_kind = agent`).
  *
- * A legal-body company is asked for on `POST /companies` alone (`for: "legal_body"`), where the
- * legal-body gates run. The MCP tool has no `for` in its schema, and its schema is strict: a
- * caller that passes one gets a schema error and nothing is created, rather than a company for
- * agents it did not ask for.
+ * A company for a legal body is asked for on `POST /companies` alone (`for: "legal_body"`). The
+ * tool declares `for` only in order to refuse it by name, the way it declares `ssn`: an argument
+ * the tool does not declare is stripped and the call goes on, as it always has, so a caller that
+ * passed `for` undeclared would get back a company for agents it did not ask for.
  *
  * Every tenant, name and id here is an invention.
  */
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { buildApiApp } from "../../src/api/app";
+import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -43,10 +44,11 @@ beforeEach(() => {
 });
 afterEach(() => db.close());
 
-/** The API with formation on a sandbox deployment that takes real (test) parties. */
+/** The API with formation on a sandbox deployment that takes real (test) parties: only the
+ *  dependencies the MCP door reads, each of its declared type. */
 function buildTestApp() {
   const requests = new SqliteFormationRepository(db);
-  const pin = { provider: "doola" as const, environment: "sandbox" as const };
+  const pin = { provider: "doola", environment: "sandbox" } as const;
   const companyDeps = {
     companies,
     parties,
@@ -56,7 +58,7 @@ function buildTestApp() {
     maxPerTenant: 3,
     dailyCeiling: 10,
   };
-  return buildApiApp({
+  const deps: Partial<ApiDeps> = {
     webOrigin: "*",
     nonceStore: new SqliteNonceStore(db),
     siweDomain: "wizard.local",
@@ -73,7 +75,7 @@ function buildTestApp() {
     circleCustodyAvailable: true,
     turnkeyCustodyAvailable: true,
     formation: {
-      environment: "sandbox" as const,
+      environment: "sandbox",
       required: true,
       sandboxSyntheticPii: false,
       maxPerTenant: 3,
@@ -84,9 +86,11 @@ function buildTestApp() {
       companies,
       pin,
       companyDeps,
+      feeUsdc: 399,
     },
     companies,
-  } as never);
+  };
+  return buildApiApp(deps as ApiDeps);
 }
 
 /** A responsible party of the tenant's, as `create_formation_party` would have registered it. */
@@ -122,38 +126,45 @@ async function withClient<T>(
   }
 }
 
-test("the tool declares no `for`, and refuses unknown arguments", async () => {
-  const tool = await withClient(
-    async (c) => (await c.listTools()).tools.find((t) => t.name === "create_company")!,
-  );
-  expect(Object.keys(tool.inputSchema.properties ?? {})).not.toContain("for");
-  expect(tool.inputSchema.additionalProperties).toBe(false);
-});
-
-test("create_company with `for` answers a schema error, and nothing is created", async () => {
+test("create_company refuses `for` by name, whatever its value, and creates nothing", async () => {
   const partyId = newParty();
-  const res = await withClient((c) =>
-    c.callTool({
-      name: "create_company",
-      arguments: { partyId, ...MCP_INTAKE, for: "legal_body" },
-    }),
-  );
-  expect(isError(res)).toBe(true);
-  expect(textOf(res)).toMatch(/Input validation error/);
-  // The strict schema names the one key it does not know.
-  expect(textOf(res)).toMatch(/"code": "unrecognized_keys"/);
-  expect(textOf(res)).toMatch(/"keys": \[\s*"for"\s*\]/);
+  await withClient(async (c) => {
+    for (const value of ["legal_body", "agent"]) {
+      const res = await c.callTool({
+        name: "create_company",
+        arguments: { partyId, ...MCP_INTAKE, for: value },
+      });
+      expect(isError(res), value).toBe(true);
+      // The refusal is the whole answer: the table's sentence, which says what this tool makes.
+      expect(textOf(res), value).toBe(LEGAL_BODY_SENTENCES.create_company_agents_only);
+    }
+  });
   expect(companies.listByTenant(TENANT)).toHaveLength(0);
   // The party is not spent: the same person can still be filed under a company.
   expect(parties.findOwned(TENANT, partyId)!.companyId).toBeNull();
 });
 
-test("create_company without `for` creates a company for agents", async () => {
-  const partyId = newParty();
-  const res = await withClient((c) =>
-    c.callTool({ name: "create_company", arguments: { partyId, ...MCP_INTAKE } }),
+test("create_company without `for` creates a company for agents, and an unknown argument is still let through", async () => {
+  const plain = await withClient((c) =>
+    c.callTool({ name: "create_company", arguments: { partyId: newParty(), ...MCP_INTAKE } }),
   );
-  expect(isError(res)).toBe(false);
-  const { companyId } = JSON.parse(textOf(res)) as { companyId: string };
+  expect(isError(plain)).toBe(false);
+  const { companyId } = JSON.parse(textOf(plain)) as { companyId: string };
   expect(companies.find(companyId)!.purposeKind).toBe("agent");
+
+  // An argument the tool does not declare is dropped, as before this tool knew about purposes.
+  const extra = await withClient((c) =>
+    c.callTool({
+      name: "create_company",
+      arguments: {
+        partyId: newParty(),
+        ...MCP_INTAKE,
+        names: ["Beta Works", "Beta Systems", "Beta Foundry"],
+        nickname: "an argument the tool does not declare",
+      },
+    }),
+  );
+  expect(isError(extra)).toBe(false);
+  const { companyId: extraId } = JSON.parse(textOf(extra)) as { companyId: string };
+  expect(companies.find(extraId)!.purposeKind).toBe("agent");
 });

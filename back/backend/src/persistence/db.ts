@@ -2034,20 +2034,24 @@ export function migrate(db: Database.Database): void {
     db.exec(
       "ALTER TABLE companies ADD COLUMN purpose_kind TEXT NOT NULL DEFAULT 'agent' CHECK (purpose_kind IN ('agent', 'legal_body'))",
     );
-  // One-shot data migration: DEFAULT 'agent' is the truth for every row written before the column
-  // existed but one kind. A customer's own declared company (provider 'customer',
-  // CUSTOMER_PROVIDER) stands behind a legal body, never behind an agent. Guarded by a `meta`
-  // marker so it runs once: from this build on, every writer names the purpose itself.
-  // `updated_at` is left alone, since nothing about the company changed.
-  const PURPOSE_KIND_BACKFILL_KEY = "purpose_kind_backfill_v1";
-  if (!db.prepare("SELECT value FROM meta WHERE key = ?").get(PURPOSE_KIND_BACKFILL_KEY)) {
-    db.transaction(() => {
-      db.exec("UPDATE companies SET purpose_kind = 'legal_body' WHERE provider = 'customer'");
-      db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, '1')").run(
-        PURPOSE_KIND_BACKFILL_KEY,
-      );
-    })();
-  }
+  // The backfill, on EVERY boot: DEFAULT 'agent' is the truth for every row written before the
+  // column existed but one kind. A customer's own declared company (provider 'customer',
+  // CUSTOMER_PROVIDER) stands behind a legal body, never behind an agent. Not once under a `meta`
+  // marker: after a rollback to the build before this one and a roll forward again, the customer
+  // companies that build wrote read 'agent' and this has to correct them. Idempotent, and it
+  // touches no other row. `updated_at` is left alone, since nothing about the company changed.
+  // ASKED FIRST, with a read: an UPDATE takes the write lock even when it matches no row, and a
+  // start that finds everything in sync must not wait for another process's writer
+  // (legalBodySchemaVersion.test.ts).
+  const customerRowsToCorrect = db
+    .prepare(
+      "SELECT EXISTS (SELECT 1 FROM companies WHERE provider = 'customer' AND purpose_kind <> 'legal_body') AS found",
+    )
+    .get() as { found: number };
+  if (customerRowsToCorrect.found === 1)
+    db.exec(
+      "UPDATE companies SET purpose_kind = 'legal_body' WHERE provider = 'customer' AND purpose_kind <> 'legal_body'",
+    );
 
   // formation_parties: PR 1's shape was keyed by entity_key with no tenant column, which cannot
   // express a party that exists BEFORE its entity does (the intake handle, design §5). Rebuild

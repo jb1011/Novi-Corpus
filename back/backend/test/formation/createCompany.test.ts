@@ -40,6 +40,7 @@ import { type CreateCompanyDeps, createCompany } from "../../src/formation/compa
 import { DEFAULT_INDUSTRY, NAME_MAX_LENGTH, PURPOSE_MAX_LENGTH } from "../../src/formation/intake";
 import { decryptSsn, parsePiiKey } from "../../src/formation/pii";
 import { hasLivePayment } from "../../src/formation/status";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
@@ -182,6 +183,35 @@ test("`for: legal_body` mints a legal-body company; without `for`, a company for
 
   const agent = createCompany(deps(), TENANT, intake(newParty(), { names: SECOND_NAMES }));
   expect(companies.find((agent as { companyId: string }).companyId)!.purposeKind).toBe("agent");
+});
+
+test("PRODUCTION refuses `for: legal_body` until the formed door's gates exist, and writes nothing", () => {
+  const partyId = newParty();
+  let refused: unknown;
+  try {
+    createCompany(prodDeps(), TENANT, intake(partyId, { for: "legal_body" }));
+  } catch (err) {
+    refused = err;
+  }
+  expect(refused).toBeInstanceOf(ApiError);
+  expect(refused).toMatchObject({
+    code: "formed_door_not_offered",
+    status: 403,
+    message: LEGAL_BODY_SENTENCES.formed_door_not_offered,
+  });
+  expect(companies.listByTenant(TENANT)).toHaveLength(0);
+  expect(parties.findOwned(TENANT, partyId)!.companyId).toBeNull();
+
+  // The same deployment still creates a company for agents, and a sandbox one a legal-body one.
+  const agent = createCompany(prodDeps(), TENANT, intake(partyId));
+  expect(companies.find((agent as { companyId: string }).companyId)!.purposeKind).toBe("agent");
+  const sandbox = createCompany(deps(), TENANT, {
+    ...intake(newParty(), { for: "legal_body" }),
+    names: SECOND_NAMES,
+  });
+  expect(companies.find((sandbox as { companyId: string }).companyId)!.purposeKind).toBe(
+    "legal_body",
+  );
 });
 
 test("the door names the POSITION — three candidates, three places to be wrong", () => {
