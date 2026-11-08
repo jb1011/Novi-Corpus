@@ -86,14 +86,20 @@ export function companyAgentCapMessage(max: number): string {
  * derived `failed` is refused because the agent would be attaching to a filing that will not
  * happen, and a live payment is refused because the company is not paid for yet.
  *
- * A customer's own company is refused before any of that, whatever its state: it stands behind a
- * legal body, never behind an agent of the full product.
+ * A company that stands behind a legal body, never behind an agent of the full product, is refused
+ * before any of that, whatever its state: one whose purpose is `legal_body` (a formed company asked
+ * for with `for: "legal_body"`, F9), and a customer's own company.
  */
 export function companyAcceptsAgents(
-  company: { status: "draft" | "ready" | "abandoned"; provider: string },
+  company: {
+    status: "draft" | "ready" | "abandoned";
+    provider: string;
+    purposeKind: import("./persistence/companyRepository").CompanyPurposeKind;
+  },
   derivedStatus: import("./formation/status").FormationStatus,
   hasLivePayment: boolean,
 ): boolean {
+  if (company.purposeKind !== "agent") return false;
   if (company.provider === CUSTOMER_PROVIDER) return false;
   if (company.status !== "ready") return false;
   if (hasLivePayment) return false;

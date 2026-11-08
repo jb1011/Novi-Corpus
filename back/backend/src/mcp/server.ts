@@ -1096,6 +1096,12 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
    * ⚠ It takes NO `ssn`, deliberately and permanently (§4.1). An SSN in an MCP tool argument
    * would sit in an LLM client's context window and in its logs; the web form is the only place
    * one is ever collected.
+   *
+   * It always creates a company for agents (`purpose_kind = agent`). A company for a legal body is
+   * asked for on `POST /companies` alone (`for: "legal_body"`), so this schema has no `for`, and it
+   * is STRICT: the SDK strips an undeclared argument silently, and a caller that passed `for` would
+   * get back a company for agents it did not ask for. Strict, it gets a schema error and nothing
+   * is created.
    */
   if (deps.formation) {
     server.registerTool(
@@ -1103,32 +1109,35 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       {
         title: "Create company",
         description: createCompanyDescription(deps),
-        inputSchema: {
-          partyId: z.string(),
-          /** THREE ranked candidates (§5). */
-          names: z.array(z.string()).length(3),
-          /** The COMPANY's own purpose — the agent's description is no longer doola-visible. */
-          businessPurpose: z.string(),
-          /** One of the shipped NAICS labels. */
-          industryLabel: z.string(),
-          /** The sandbox deployment's marker, checked against this box's own setting. */
-          synthetic: z.boolean().optional(),
-          /**
-           * ⚠ DECLARED IN ORDER TO BE REFUSED (§4.1), and for no other reason.
-           *
-           * This door never takes an SSN. But an UNDECLARED field is not rejected by the SDK — it
-           * is SILENTLY STRIPPED before the handler ever sees it, because the tool's zod schema
-           * parses the arguments and discards what it does not know. So a model that reads "US
-           * persons should supply an SSN" on the web form and helpfully passes one here would
-           * have got back a companyId, filed under the slow EIN route, with no indication that
-           * the field had been thrown away — and with the number still sitting in the client's
-           * context window and its logs, which is the entire harm §4.1 exists to prevent.
-           *
-           * Declaring it is what turns a silent strip into a loud refusal that says where the
-           * field DOES belong.
-           */
-          ssn: z.string().optional(),
-        },
+        inputSchema: z
+          .object({
+            partyId: z.string(),
+            /** THREE ranked candidates (§5). */
+            names: z.array(z.string()).length(3),
+            /** The COMPANY's own purpose — the agent's description is no longer doola-visible. */
+            businessPurpose: z.string(),
+            /** One of the shipped NAICS labels. */
+            industryLabel: z.string(),
+            /** The sandbox deployment's marker, checked against this box's own setting. */
+            synthetic: z.boolean().optional(),
+            /**
+             * ⚠ DECLARED IN ORDER TO BE REFUSED (§4.1), and for no other reason.
+             *
+             * This door never takes an SSN. But an UNDECLARED field is not rejected by the SDK — it
+             * is SILENTLY STRIPPED before the handler ever sees it, because the tool's zod schema
+             * parses the arguments and discards what it does not know. So a model that reads "US
+             * persons should supply an SSN" on the web form and helpfully passes one here would
+             * have got back a companyId, filed under the slow EIN route, with no indication that
+             * the field had been thrown away — and with the number still sitting in the client's
+             * context window and its logs, which is the entire harm §4.1 exists to prevent.
+             *
+             * Declaring it is what turns a silent strip into a loud refusal that says where the
+             * field DOES belong. (The schema is strict now, so an undeclared `ssn` would be refused
+             * too, but by a schema error that says nothing about where it belongs.)
+             */
+            ssn: z.string().optional(),
+          })
+          .strict(),
       },
       async ({ partyId, names, businessPurpose, industryLabel, synthetic, ssn }) => {
         // The rung, then the ssn — the latter BEFORE anything is created and before any other

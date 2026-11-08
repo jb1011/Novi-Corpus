@@ -160,6 +160,12 @@ export interface CompanyIntakeInput {
   proceedWithoutSsn?: boolean;
   /** The caller's CLAIM about the deployment, checked against it — never the stored value. */
   synthetic?: boolean;
+  /**
+   * What the company is FOR. `"legal_body"`: it will stand behind a legal body and never takes an
+   * agent (`companyAcceptsAgents`). Absent: a company for agents of the full product. REST only:
+   * MCP `create_company` declares no such field, so it always creates a company for agents.
+   */
+  for?: "legal_body";
 }
 
 /**
@@ -289,7 +295,7 @@ export function createCompany(
         businessPurpose: built.businessPurpose,
         industryLabel: built.industryLabel,
         intakeSynthesized: built.synthesized,
-        purposeKind: "agent",
+        purposeKind: intake.for === "legal_body" ? "legal_body" : "agent",
       });
       // THROWN, not returned. better-sqlite3 rolls a transaction back on an EXCEPTION and on
       // nothing else: a callback that returns `false` COMMITS, and the company row it just

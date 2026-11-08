@@ -174,6 +174,16 @@ test("A3: an intake a HUMAN typed is never marked synthesized", () => {
   );
 });
 
+// ── what the company is for ────────────────────────────────────────────────────────────────
+
+test("`for: legal_body` mints a legal-body company; without `for`, a company for agents", () => {
+  const lb = createCompany(deps(), TENANT, intake(newParty(), { for: "legal_body" }));
+  expect(companies.find((lb as { companyId: string }).companyId)!.purposeKind).toBe("legal_body");
+
+  const agent = createCompany(deps(), TENANT, intake(newParty(), { names: SECOND_NAMES }));
+  expect(companies.find((agent as { companyId: string }).companyId)!.purposeKind).toBe("agent");
+});
+
 test("the door names the POSITION — three candidates, three places to be wrong", () => {
   // "names[1]" is exactly what a caller filling in three fields needs to hear. (The shim had its
   // own softer sentences for a caller who had never seen a `names` array; those went with it.)

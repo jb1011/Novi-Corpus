@@ -555,6 +555,37 @@ test("POST /companies mints a company through the ONE domain function, and lists
     expect(printed).not.toContain(forbidden);
 });
 
+test("POST /companies with `for: legal_body` mints a legal-body company; without it, one for agents", async () => {
+  const app = makeApp({ required: true });
+  const token = await login(app);
+  const companies = new SqliteCompanyRepository(db);
+  const create = async (extra: Record<string, unknown>) => {
+    const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();
+    return post(app, "/companies", token, { partyId, ...COMPANY_INTAKE, ...extra });
+  };
+
+  const lb = await create({ for: "legal_body" });
+  expect(lb.status).toBe(201);
+  const { companyId: lbId } = await lb.json();
+  expect(companies.find(lbId)!.purposeKind).toBe("legal_body");
+
+  const agent = await create({ names: ["Beta Works", "Beta Systems", "Beta Foundry"] });
+  expect(agent.status).toBe(201);
+  const { companyId: agentId } = await agent.json();
+  expect(companies.find(agentId)!.purposeKind).toBe("agent");
+
+  // `legal_body` is the one value: "agent" is said by leaving the field out.
+  for (const value of ["agent", "LEGAL_BODY", true]) {
+    const res = await create({
+      names: ["Gamma Works", "Gamma Systems", "Gamma Foundry"],
+      for: value,
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toMatch(/^for: /);
+  }
+  expect(companies.listByTenant(account.address)).toHaveLength(2);
+});
+
 test("POST /companies requires a session and the FULL intake, naming what is missing", async () => {
   const app = makeApp({ required: true });
   const token = await login(app);
