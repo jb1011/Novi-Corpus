@@ -1,9 +1,10 @@
 import { readFileSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
+import { hasEntityEnding } from "../formation/intake";
 import { companyFiled, stepStateOf } from "../formation/status";
 import { COMPANY_NAME } from "../legalBody/companyFields";
-import { sha256Of } from "../legalBody/evidence";
+import { sha256Of, startsAsPdf } from "../legalBody/evidence";
 import { type FieldProblem, applyTextRule } from "../legalBody/textRules";
 import { opsLog } from "../observability/opsLog";
 import { type CompanyRecord, SqliteCompanyRepository } from "../persistence/companyRepository";
@@ -38,8 +39,9 @@ import { OPERATOR_NAME, osUser, parseOperator, print, refuse, withDatabase } fro
  * writing commands keep the rules of `company:check` (`cli/companyChecks.ts`):
  *  - without `--yes` they print what they would write and write nothing;
  *  - the rules and the write run in ONE immediate transaction, so nothing lands between them;
- *  - each write has one ops line, which carries ids, booleans and the operator: never a path, a
- *    file's bytes or a company's name.
+ *  - each write has one ops line, which carries ids, booleans, the operator and the OS user that
+ *    ran the command: never a path, a file's bytes or a company's name;
+ *  - every legal body of the company gets a note event under `operator:<name>`, with ids only.
  *
  * The supplement is RECORDED, never claimed: what the company view shows is when it was recorded
  * and the hash of its bytes, and no sentence calls the company a DAO from that alone.
@@ -54,8 +56,6 @@ const NEXT = "nothing was written: run the same command with --yes to record thi
 
 /** The largest document the operator records, in bytes: 10 MiB. */
 export const DAO_SUPPLEMENT_MAX_BYTES = 10 * 1024 * 1024;
-/** The five bytes every PDF starts with. */
-const PDF_SIGNATURE = Buffer.from("%PDF-", "latin1");
 
 interface Stores {
   db: Database.Database;
@@ -130,19 +130,23 @@ function readSupplement(path: string): Buffer {
   const bytes = readable(() => readFileSync(path));
   if (bytes.length === 0) refuse("--document is empty");
   if (bytes.length > DAO_SUPPLEMENT_MAX_BYTES) over();
-  if (!PDF_SIGNATURE.equals(bytes.subarray(0, PDF_SIGNATURE.length)))
-    refuse("--document is not a PDF: its bytes do not start with %PDF-");
+  if (!startsAsPdf(bytes)) refuse("--document is not a PDF: its bytes do not start with %PDF-");
   return bytes;
 }
 
 /**
- * Records doola's amended articles on a formed legal-body company: the bytes in the document
- * store, then their row in the index (`docType = dao_supplement`, `source = operator`, the hash in
- * the customer-upload spelling, `created_at` the database's own clock, which the view's
- * `latestOfType` orders by), then a note on every legal body of the company. A second recording
- * is refused unless `--replace`: the index keeps both rows and the view shows the latest. The same
+ * Records doola's amended articles on a formed legal-body company: their row in the index
+ * (`docType = dao_supplement`, `source = operator`, the hash in the customer-upload spelling,
+ * `created_at` the database's own clock, which the view's `latestOfType` orders by), a note on
+ * every legal body of the company, then the bytes in the document store. A second recording is
+ * refused unless `--replace`: the index keeps both rows and the view shows the latest. The same
  * file twice is refused either way: its row id is derived from its hash, and a row is never
  * rewritten.
+ *
+ * The bytes are written LAST, inside the transaction: a statement that fails rolls the row and the
+ * notes back before any file exists, and a failed file write rolls them back too. Other
+ * connections see the row only once the transaction commits, after the file is in place, so a row
+ * never points at a file that is not there.
  */
 function recordDaoSupplement(companyId: string, opts: SupplementOptions): void {
   const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
@@ -174,9 +178,7 @@ function recordDaoSupplement(companyId: string, opts: SupplementOptions): void {
             `company ${companyId} already has amended articles recorded (document ${latest.id}, ${latest.createdAt} UTC): pass --replace to record this file as the latest; the index keeps both`,
           );
         const bodies = s.bodies.listByCompany(companyId).map((b) => b.legalBodyId);
-        if (opts.yes !== true) return { latest, bodies, recordedAt: undefined };
-        // The bytes first, so the row never points at a file that is not there.
-        docStore.putBytes(path, bytes);
+        if (opts.yes !== true) return { written: false as const, latest, bodies };
         const inserted = s.documents.insert({
           id: docId,
           companyId,
@@ -195,11 +197,16 @@ function recordDaoSupplement(companyId: string, opts: SupplementOptions): void {
             act: "dao_supplement_recorded",
             docId,
           });
-        return { latest, bodies, recordedAt: s.documents.findOwned(companyId, docId)?.createdAt };
+        const row = s.documents.findOwned(companyId, docId);
+        // Unreachable: the row was inserted above, in this transaction.
+        if (row === undefined) throw new Error(`document index: ${docId} vanished`);
+        // Last: see above.
+        docStore.putBytes(path, bytes);
+        return { written: true as const, latest, bodies, recordedAt: row.createdAt };
       })
       .immediate();
 
-    if (found.recordedAt === undefined) {
+    if (!found.written) {
       print({
         recorded: false,
         companyId,
@@ -210,7 +217,7 @@ function recordDaoSupplement(companyId: string, opts: SupplementOptions): void {
       });
       return;
     }
-    opsLog("dao_supplement_recorded", { companyId, docId, operator });
+    opsLog("dao_supplement_recorded", { companyId, docId, operator, operatorOsUser });
     print({
       recorded: true,
       companyId,
@@ -224,6 +231,12 @@ function recordDaoSupplement(companyId: string, opts: SupplementOptions): void {
 }
 
 // ── company:filed-name ───────────────────────────────────────────────────────────────────────
+
+/** The advice `company:filed-name` gives; neither refuses: the State's record is the truth. */
+const NO_STORED_OPTION =
+  "matches no stored option: the State's record is the truth, so it is written as typed; check it against the record once more";
+const NO_ENTITY_ENDING =
+  "no entity ending (LLC, L.L.C., Limited Liability Company): the State's record of an LLC carries its ending; check the name";
 
 interface FiledNameOptions {
   name: string;
@@ -257,9 +270,13 @@ function parseFiledName(value: string): string {
  * and may still stand behind it: `open`, an order on its way (a draft within its 24 hours, a
  * reserved or a deployed row); `linked`, a body that is linked, or was and can be again
  * (`markLinked` takes a broken or a superseded body back to linked). An expired draft, a lapsed
- * reservation and an abandoned order hold nothing.
+ * reservation and an abandoned order hold nothing. A state this build does not know is `unknown`,
+ * which refuses a replacement like the other two: the rule fails closed.
  */
-function holdsName(body: LegalBodyRecord, nowMs: number): "open" | "linked" | undefined {
+export function holdsFiledName(
+  body: Pick<LegalBodyRecord, "bindingState" | "createdAt">,
+  nowMs: number,
+): "open" | "linked" | "unknown" | undefined {
   switch (body.bindingState) {
     case "draft":
       return isDraftExpired(body, nowMs) ? undefined : "open";
@@ -273,6 +290,12 @@ function holdsName(body: LegalBodyRecord, nowMs: number): "open" | "linked" | un
     case "lapsed":
     case "abandoned":
       return undefined;
+    default: {
+      // A state added to `BindingState` and not placed above fails to compile here.
+      const unplaced: never = body.bindingState;
+      void unplaced;
+      return "unknown";
+    }
   }
 }
 
@@ -283,9 +306,14 @@ function holdsName(body: LegalBodyRecord, nowMs: number): "open" | "linked" | un
  * matter for counsel, not for this command).
  */
 function assertNoAgreementPrintsIt(bodies: LegalBodyRecord[], nowMs: number): void {
-  if (bodies.some((b) => holdsName(b, nowMs) === "linked"))
+  const unknown = bodies.find((b) => holdsFiledName(b, nowMs) === "unknown");
+  if (unknown !== undefined)
+    refuse(
+      `this company has a legal body in a state this command does not know (${unknown.bindingState}); its agreement may print the current name`,
+    );
+  if (bodies.some((b) => holdsFiledName(b, nowMs) === "linked"))
     refuse("this company has a linked legal body; its agreement prints the current name");
-  const open = bodies.find((b) => holdsName(b, nowMs) === "open");
+  const open = bodies.find((b) => holdsFiledName(b, nowMs) === "open");
   if (open === undefined) return;
   refuse(
     `this company has an open legal-body order; its agreement prints the current name${
@@ -299,8 +327,9 @@ function assertNoAgreementPrintsIt(bodies: LegalBodyRecord[], nowMs: number): vo
 /**
  * Sets a formed legal-body company's filed name from the State's record: the operator's exact
  * string, which the State's record is, so it is written even when it matches none of the stored
- * options (the output then carries a warning, in the dry run and the write alike). A name already
- * set is replaced only with `--replace`, and only while no agreement prints it.
+ * options or carries no entity ending (the output then carries `warnings`, in the dry run and the
+ * write alike). A name already set is replaced only with `--replace`, and only while no agreement
+ * prints it. Every legal body the company has (only closed ones can remain by then) gets a note.
  *
  * Written through `recordFilingFacts`, the writer of every filing fact: its COALESCE keeps a value
  * against a NULL only, so a different name replaces the one held, and nothing else on the row
@@ -335,20 +364,26 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
           assertNoAgreementPrintsIt(bodies, nowMs);
         }
         const matched = matchFiledNameAgainst(company.nameOptions, name) !== null;
-        if (opts.yes !== true) return { previous, matched, written: false };
+        const legalBodies = bodies.map((b) => b.legalBodyId);
+        if (opts.yes !== true) return { previous, matched, legalBodies, written: false };
         // Unreachable when false: the name differs from the one held, in this transaction.
         if (!s.companies.recordFilingFacts(companyId, { legalNameFiled: name }))
           throw new Error(`company ${companyId}: the filed name did not change`);
-        return { previous, matched, written: true };
+        for (const id of legalBodies)
+          s.bodies.recordEvent(id, "note", `operator:${operator}`, null, {
+            act: "filed_name_recorded",
+            companyId,
+          });
+        return { previous, matched, legalBodies, written: true };
       })
       .immediate();
 
-    const warning = found.matched
-      ? {}
-      : {
-          warning:
-            "matches no stored option: the State's record is the truth, so it is written as typed; check it against the record once more",
-        };
+    const advice = [
+      ...(found.matched ? [] : [NO_STORED_OPTION]),
+      // Every company these commands take is a legal-body company (`formedLegalBodyCompany`).
+      ...(hasEntityEnding(name) ? [] : [NO_ENTITY_ENDING]),
+    ];
+    const warnings = advice.length === 0 ? {} : { warnings: advice };
     if (!found.written) {
       print({
         recorded: false,
@@ -356,7 +391,8 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
         current: found.previous,
         wouldRecord: { legalNameFiled: name },
         matched: found.matched,
-        ...warning,
+        ...warnings,
+        legalBodies: found.legalBodies,
         next: NEXT,
       });
       return;
@@ -367,6 +403,7 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
       matched: found.matched,
       replaced: found.previous !== null,
       operator,
+      operatorOsUser,
     });
     print({
       recorded: true,
@@ -374,7 +411,8 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
       legalNameFiled: name,
       replaced: found.previous,
       matched: found.matched,
-      ...warning,
+      ...warnings,
+      legalBodies: found.legalBodies,
       operator,
       operatorOsUser,
     });

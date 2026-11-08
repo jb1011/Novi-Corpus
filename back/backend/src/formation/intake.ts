@@ -94,6 +94,19 @@ export function normalizeCompanyName(raw: string): string {
     .toLowerCase();
 }
 
+/** A trailing limited-liability ending, after a space or a comma: LLC or L.L.C. (dots optional),
+ *  or the words, with "Limited" or "Ltd." and "Company" or "Co.", in any case. */
+const LLC_ENDING = /[\s,](l\.?l\.?c\.?|(limited|ltd\.?)\s+liability\s+(company|co\.?))$/i;
+
+/**
+ * Whether a full legal name ends in a limited-liability ending, as the State's record of an LLC
+ * does. Advice only (`company:filed-name` warns on a name without one): it never decides a match,
+ * which is `normalizeCompanyName`'s, so it may admit the abbreviated spellings that one keeps.
+ */
+export function hasEntityEnding(name: string): boolean {
+  return LLC_ENDING.test(name.normalize("NFC").trim());
+}
+
 // ── canonicalization + limits (design §5, A2) ───────────────────────────────────────────────
 
 /**
