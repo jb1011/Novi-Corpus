@@ -1,6 +1,7 @@
 import { type Hex, TransactionReceiptNotFoundError, formatUnits, toHex } from "viem";
 import type { JobAdapter } from "../adapters/arc/jobAdapter";
 import { RECEIPT_TIMEOUT_MS } from "../adapters/arc/receipts";
+import type { DisputeRead } from "../adapters/kleros/disputeService";
 import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { ChainTxRevertedError, ChainTxUnconfirmedError } from "../errors";
 import { JobStatusOnChain } from "../jobs/refund";
@@ -10,7 +11,8 @@ import { publicErrorMessage } from "../workflow/publicError";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage, PilotChain } from "./composition";
 import { withoutEmDash } from "./job";
-import { type RulingOutcome, pollOnce, rulingOfStoredRead } from "./ruling";
+import { klerosTextOf } from "./klerosCheck";
+import { type RulingOutcome, pollOnce, readRuling, rulingOfStoredRead } from "./ruling";
 import type { PilotCaseRecord, PilotStatus } from "./types";
 
 /**
@@ -204,12 +206,60 @@ function refuseWhileSendMayRun(cases: PilotCaseRepository, caseId: string, nowSe
 }
 
 /** The ruling a row at `settling` was acting on, from the action it chose: the decision is taken
- *  again against the chain and the clock, never against a new read. */
+ *  again against the chain and the clock. A re-send on a real deployment from a stale read reads
+ *  the ruling again instead (`readsBeforeResend`). */
 function rulingOfAction(action: PilotCaseRecord["settleAction"]): RulingOutcome {
   if (action === "complete") return { kind: "pay" };
   if (action === "reject") return { kind: "refund" };
   return { kind: "pending" };
 }
+
+/**
+ * Whether a settling row about to be sent on again (no hash, or one whose receipt reverted) reads
+ * Kleros first: on a real deployment, when its stored read is missing or older than
+ * RULING_FRESH_SECONDS, since the ruling may have moved on appeal after the action was chosen. A
+ * claimRefund, stored or asked for, reads nothing: the expiry path does not depend on the ruling.
+ * A rehearsal's fake cannot read the case again.
+ */
+function readsBeforeResend(
+  row: PilotCaseRecord,
+  opts: { claimRefundOnly?: boolean },
+  nowSec: number,
+): boolean {
+  if (row.klerosChain === "fake") return false;
+  if (row.settleAction === "claimRefund" || opts.claimRefundOnly) return false;
+  return row.rulingReadAt === null || nowSec - row.rulingReadAt >= RULING_FRESH_SECONDS;
+}
+
+/**
+ * The ruling read live before a re-send: one read of the row's dispute on the row's Kleros chain,
+ * from the stage's Dispute Service, decided by `readRuling` with the stage's expected options.
+ * Nothing is written to the row's status or ruling columns; a `settle/reread` event names the
+ * outcome. A read that fails refuses, in the service's redacted words.
+ */
+async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<RulingOutcome> {
+  const { caseId, klerosChain, coreDisputeId } = row;
+  if (klerosChain === null || coreDisputeId === null)
+    refuse(
+      `case ${caseId} has no Kleros chain or dispute id to read its ruling again before a new send`,
+    );
+  let read: DisputeRead;
+  try {
+    read = await d.stage.service.getDispute({ chain: klerosChain, coreDisputeId });
+  } catch (e) {
+    refuse(`case ${caseId}'s ruling could not be read again before a new send: ${klerosTextOf(e)}`);
+  }
+  const outcome = readRuling(read, d.expected);
+  d.cases.recordEvent(caseId, "settle", "reread", coreDisputeId, outcome.kind);
+  return outcome;
+}
+
+/** The decisions that wait on the ruling, as opposed to the chain or the clock. */
+const WAITS_ON_RULING: ReadonlySet<NoAction["why"]> = new Set(Object.values(WAIT_FOR));
+
+/** An outcome as a refusal names it: its kind, and the round of an appeal. */
+const outcomeName = (r: RulingOutcome) =>
+  r.kind === "appealed" ? `appealed (round ${r.roundCount})` : r.kind;
 
 /** The receipt's status, or null while the node has none: the transaction is pending, or was
  *  dropped. Any other failure of the read escapes. */
@@ -249,11 +299,14 @@ function settledLine(
  * settling (action, reason) before the transaction, then to settled with the hash.
  *
  * A row of another mode than the stage's, or at a status no settlement starts from, is refused
- * before any read. A row at `settling` with a stored hash reads that transaction's receipt first:
- * none yet is refused, a success is recorded settled with that hash, and a revert lets the row be
- * decided again from the action it chose, against the chain. An escrow settled elsewhere is
- * recorded settled with no action of ours. A rehearsal row that holds a read is decided from it,
- * whatever its age. With `send` false only the ruling read writes.
+ * before any read. A row at `settling` with no hash is refused while its latest send is younger
+ * than {SEND_IN_FLIGHT_SECONDS}. A row at `settling` with a stored hash reads that transaction's
+ * receipt first: none yet is refused, a success is recorded settled with that hash, and a revert
+ * lets the row be decided again against the chain. A settling row decided again acts on the
+ * action it chose, or, on a real deployment whose stored read is stale, on the ruling read again
+ * (`readsBeforeResend`). An escrow settled elsewhere is recorded settled with no action of ours.
+ * A rehearsal row that holds a read is decided from it, whatever its age. With `send` false only
+ * the ruling read writes, with its event.
  */
 export async function settleCase(
   d: SettleDeps,
@@ -294,7 +347,12 @@ export async function settleCase(
   }
 
   let ruling: RulingOutcome;
-  if (row.status === "settling" || row.status === "settled")
+  // Set when the ruling of a settling row was read live before a re-send.
+  let reread: RulingOutcome | null = null;
+  if (row.status === "settling" && landed === null && readsBeforeResend(row, opts, nowSec())) {
+    reread = await rereadRuling(d, row);
+    ruling = reread;
+  } else if (row.status === "settling" || row.status === "settled")
     ruling = rulingOfAction(row.settleAction);
   // The expiry path does not depend on the ruling, so a Kleros outage does not hold it up.
   else if (opts.claimRefundOnly) ruling = { kind: "pending" };
@@ -337,6 +395,12 @@ export async function settleCase(
       );
     return { settlement };
   }
+  // A re-send acts on a final pay or refund read now, which may differ from the stored action:
+  // the move to settling then writes the new one. Any other ruling is named, and nothing is sent.
+  if (reread !== null && settlement.action === "none" && WAITS_ON_RULING.has(settlement.why))
+    refuse(
+      `case ${caseId}'s ruling, read again before a new send, is ${outcomeName(reread)}, not a pay or a refund to act on`,
+    );
   if (!opts.send) return { settlement };
 
   if (settlement.action === "none") {

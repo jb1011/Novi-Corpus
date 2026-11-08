@@ -14,6 +14,7 @@ import { RECEIPT_TIMEOUT_MS } from "../../src/adapters/arc/receipts";
 import { resetSenderNonces } from "../../src/adapters/arc/senderLock";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
+import { KlerosTransportError } from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import type { Config } from "../../src/config/env";
 import { ChainTxRevertedError, ChainTxUnconfirmedError } from "../../src/errors";
@@ -1052,6 +1053,256 @@ describe("settleCase: a send that may still be running is never sent again", () 
     expect(r.settlement.action).toBe("reject");
     expect(s.node.hashesOf("reject")).toHaveLength(2);
     expect(s.cases.find(caseId)).toMatchObject({ status: "settled", settleTxHash: r.txHash });
+  });
+});
+
+/** A testnet stage whose Dispute Service answers every read with `answer`, and the reads. */
+function testnetStage(
+  answer: () => DisputeRead,
+  o: Parameters<typeof setup>[0] = {},
+): { s: Setup; reads: { chain: string; coreDisputeId: string }[] } {
+  const reads: { chain: string; coreDisputeId: string }[] = [];
+  const service = {
+    deployment: "testnet",
+    getDispute: async (p: { chain: string; coreDisputeId: string }): Promise<DisputeRead> => {
+      reads.push(p);
+      return answer();
+    },
+  } as unknown as KlerosDisputeService;
+  const s = setup({ ...o, service, stageMode: "testnet", deployment: deploymentFor("testnet") });
+  return { s, reads };
+}
+
+/** A testnet case's dispute, its stored read an hour old. */
+const TESTNET_STALE: Partial<PilotCaseRecord> = {
+  klerosChain: "arbitrum-sepolia-testnet",
+  rulingReadAt: NOW - 3600,
+};
+
+/** The ruling columns, which a read taken before a re-send never writes. */
+const rulingColumns = (row: PilotCaseRecord) => ({
+  rulingStatus: row.rulingStatus,
+  rulingValue: row.rulingValue,
+  rulingTied: row.rulingTied,
+  rulingRoundCount: row.rulingRoundCount,
+  rulingLabel: row.rulingLabel,
+  rulingReadAt: row.rulingReadAt,
+  rulingDeadline: row.rulingDeadline,
+});
+
+describe("settleCase: a re-send on a real deployment reads Kleros again", () => {
+  test("a settling row with no hash and a stale read is read on its own chain, and a refund read sends reject in place of the stored complete", async () => {
+    const { s, reads } = testnetStage(() => appealRead("2"));
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    const before = s.cases.find(caseId)!;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([{ chain: "arbitrum-sepolia-testnet", coreDisputeId: DISPUTE }]);
+    expect(r.settlement).toEqual({
+      action: "reject",
+      reason: reasonFor(DISPUTE),
+      outcome: "refunded",
+    });
+    expect(await decodedSends(s)).toEqual([
+      expect.objectContaining({ from: REFEREE.toLowerCase(), functionName: "reject" }),
+    ]);
+    const row = s.cases.find(caseId)!;
+    expect(row).toMatchObject({
+      status: "settled",
+      settleAction: "reject",
+      settleReason: reasonFor(DISPUTE),
+      escrowOutcome: "refunded",
+    });
+    expect(rulingColumns(row)).toEqual(rulingColumns(before));
+    expect(settleTrail(s, caseId)).toEqual([
+      ["reread", DISPUTE, "refund"],
+      ["sending", null, `reject ${reasonFor(DISPUTE)}`],
+      ["sent", r.txHash, "reject"],
+      ["ok", r.txHash, "reject"],
+    ]);
+  });
+
+  test("a settling row whose hash reverted is read again before the re-send", async () => {
+    const { s, reads } = testnetStage(() => appealRead("1"), { revertReject: true });
+    const reverted = (await s.deps.chain.job
+      .reject(7n, reasonFor(DISPUTE), s.deps.chain.wallets.referee)
+      .catch((e: unknown) => e)) as ChainTxRevertedError;
+    expect(reverted).toBeInstanceOf(ChainTxRevertedError);
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { ...TESTNET_STALE, settleAction: "reject", settleTxHash: reverted.txHash },
+    });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toHaveLength(1);
+    expect(r.settlement.action).toBe("complete");
+    expect(s.node.hashesOf("complete")).toEqual([r.txHash]);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "complete",
+      settleTxHash: r.txHash,
+    });
+  });
+
+  test.each<[string, number | null]>([
+    ["never taken", null],
+    ["taken ten minutes ago", NOW - 600],
+  ])("a settling row whose stored read was %s is read again", async (_name, readAt) => {
+    const { s, reads } = testnetStage(() => appealRead("1"));
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { ...TESTNET_STALE, rulingReadAt: readAt },
+    });
+    await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toHaveLength(1);
+  });
+
+  test("a settling row read under ten minutes ago is decided from its action, with no read", async () => {
+    const { s, reads } = testnetStage(() => appealRead("2"));
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { ...TESTNET_STALE, rulingReadAt: NOW - 599 },
+    });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement.action).toBe("complete");
+  });
+
+  const swapped = [
+    { value: "0x01", title: "Refund the client" },
+    { value: "0x02", title: "Pay the provider" },
+  ];
+  test.each<[string, DisputeRead, string]>([
+    ["pending", { ...appealRead("0"), status: "Vote", tied: true }, "pending"],
+    ["tied", { ...appealRead("0"), tied: true }, "tied"],
+    ["refused", appealRead("0"), "refused"],
+    ["appealed", { ...appealRead("2"), roundCount: 2 }, "appealed \\(round 2\\)"],
+    ["options_mismatch", { ...appealRead("1"), rulingOptions: swapped }, "options_mismatch"],
+    ["unexpected", appealRead("7"), "unexpected"],
+  ])("a read that is %s refuses, naming it, and nothing is sent", async (kind, read, named) => {
+    const { s, reads } = testnetStage(() => read);
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    for (const send of [true, false])
+      await expect(settleCase(s.deps, caseId, { send })).rejects.toThrow(
+        new RegExp(
+          `^refusing: case ${caseId}'s ruling, read again before a new send, is ${named}, not a pay or a refund to act on; nothing was sent$`,
+        ),
+      );
+    expect(reads).toHaveLength(2);
+    expect(s.node.sends).toEqual([]);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settling",
+      settleAction: "complete",
+      settleTxHash: null,
+    });
+    expect(settleTrail(s, caseId)).toEqual([
+      ["reread", DISPUTE, kind],
+      ["reread", DISPUTE, kind],
+    ]);
+  });
+
+  test("an appealed round read again is acted on when the run accepts that round", async () => {
+    const { s } = testnetStage(() => ({ ...appealRead("2"), roundCount: 2 }));
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    const r = await settleCase(s.deps, caseId, { send: true, acceptRound: 2 });
+    expect(r.settlement.action).toBe("reject");
+    expect(s.node.hashesOf("reject")).toEqual([r.txHash]);
+  });
+
+  test("a failed read refuses in the service's redacted words, and nothing is sent", async () => {
+    const { s } = testnetStage(() => {
+      throw new KlerosTransportError(
+        "dispute_get failed at https://kleros.example.com/v1/mcp?apiKey=abcdefghijklmnop12345 after 3 tries",
+      );
+    });
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    const err = await settleCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
+    expect(String(err)).toBe(
+      `Error: refusing: case ${caseId}'s ruling could not be read again before a new send: dispute_get failed at https://kleros.example.com after 3 tries; nothing was sent`,
+    );
+    expect(s.node.sends).toEqual([]);
+    expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: null });
+    expect(settleTrail(s, caseId)).toEqual([]);
+  });
+
+  test("a stored claimRefund needs no read: the expiry path does not depend on the ruling", async () => {
+    const { s, reads } = testnetStage(() => appealRead("1"));
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { ...TESTNET_STALE, settleAction: "claimRefund", settleReason: null },
+    });
+    s.clock.sec = EXPIRES + Number(REFUND_CLOCK_MARGIN_SECONDS) + 1;
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement.action).toBe("claimRefund");
+    expect(s.node.hashesOf("claimRefund")).toEqual([r.txHash]);
+  });
+
+  test("--claim-refund on a settling row reads nothing either", async () => {
+    const { s, reads } = testnetStage(() => appealRead("2"));
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    s.clock.sec = EXPIRES + Number(REFUND_CLOCK_MARGIN_SECONDS) + 1;
+    const r = await settleCase(s.deps, caseId, { send: true, claimRefundOnly: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement.action).toBe("claimRefund");
+  });
+
+  test("a rehearsal settling row keeps the action it chose, however old its read", async () => {
+    const s = setup({ script: "refund" });
+    const caseId = seedSettlingNoHash(s, { patch: { rulingReadAt: NOW - 3600 } });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(s.fake.calls).toEqual([]);
+    expect(r.settlement.action).toBe("complete");
+  });
+
+  test("a settling row whose hash landed reads nothing and is recorded settled", async () => {
+    const { s, reads } = testnetStage(() => appealRead("2"));
+    const landed = await s.deps.chain.job.complete(7n, reasonFor(DISPUTE));
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { ...TESTNET_STALE, settleTxHash: landed },
+    });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement).toMatchObject({ why: "released_elsewhere" });
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "complete",
+      settleTxHash: landed,
+    });
+  });
+
+  test("a settled row reads nothing", async () => {
+    const { s, reads } = testnetStage(() => appealRead("2"), { chainStatus: 3 });
+    const caseId = seed(s, {
+      mode: "testnet",
+      status: "settled",
+      patch: {
+        ...STORED_PAY,
+        ...TESTNET_STALE,
+        settleAction: "complete",
+        settleReason: reasonFor(DISPUTE),
+      },
+    });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(reads).toEqual([]);
+    expect(r.settlement).toMatchObject({ why: "released_elsewhere" });
+  });
+
+  test.each<[string, Partial<PilotCaseRecord>]>([
+    ["Kleros chain", { klerosChain: null }],
+    ["dispute id", { coreDisputeId: null }],
+  ])("a settling row with no %s is refused before a re-send", async (_name, missing) => {
+    const { s, reads } = testnetStage(() => appealRead("1"));
+    const caseId = seedSettlingNoHash(s, {
+      mode: "testnet",
+      patch: { ...TESTNET_STALE, ...missing },
+    });
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: case ${caseId} has no Kleros chain or dispute id to read its ruling again before a new send; nothing was sent$`,
+      ),
+    );
+    expect(reads).toEqual([]);
+    expect(s.node.sends).toEqual([]);
   });
 });
 
