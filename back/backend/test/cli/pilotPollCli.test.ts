@@ -16,7 +16,7 @@ import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
 import type { KlerosStage, PilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
-import { reasonFor } from "../../src/pilot/settlement";
+import { type EscrowState, reasonFor } from "../../src/pilot/settlement";
 import type { KlerosChainOnRow, PilotCaseRecord, PilotMode } from "../../src/pilot/types";
 
 /** Spelled by code point: the repository keeps the character itself out of its sources. */
@@ -46,6 +46,10 @@ async function makeFake(
     realStage?: boolean;
     /** The job contract the configuration names; default the one the seeded rows were made on. */
     jobContract?: string;
+    /** The chain id the configuration names; default the seeded rows'. */
+    chainId?: number;
+    /** Fields of the escrow the chain answers that differ from the seeded rows' job. */
+    escrow?: Partial<EscrowState>;
   } = {},
 ): Promise<Fake & { caseId: string }> {
   const clock = { now: T0 };
@@ -96,7 +100,7 @@ async function makeFake(
         buildChain: () =>
           ({
             jobContract: o.jobContract ?? JOB_CONTRACT,
-            chainId: 5042002,
+            chainId: o.chainId ?? 5042002,
             job: {
               escrowState: async () => ({
                 status: 2,
@@ -104,6 +108,7 @@ async function makeFake(
                 expiredAt: BigInt(Math.floor(T0 / 1000) + 7 * 86_400),
                 client: "0x0000000000000000000000000000000000000001",
                 evaluator: "0x0000000000000000000000000000000000000003",
+                ...o.escrow,
               }),
             },
           }) as unknown as PilotChain,
@@ -211,6 +216,45 @@ describe("pilot:poll: the settlement line checks the job is the case's own", () 
     expect(settlement.unavailable).toMatch(/job contract/);
     expect(f.cases.find(f.caseId)!.settleTxHash).toBeNull();
   });
+
+  const OTHER = "0x00000000000000000000000000000000000000f1";
+  const EXPIRY = Math.floor(T0 / 1000) + 7 * 86_400;
+  test.each<[string, Parameters<typeof makeFake>[0], string]>([
+    [
+      "configured chain id",
+      { chainId: 1 },
+      "is on chain id 5042002 and the configured chain id is 1",
+    ],
+    [
+      "client",
+      { escrow: { client: OTHER } },
+      `client is ${OTHER} and the case's buyer is 0x0000000000000000000000000000000000000001`,
+    ],
+    [
+      "evaluator",
+      { escrow: { evaluator: OTHER } },
+      `evaluator is ${OTHER} and the case's referee is 0x0000000000000000000000000000000000000003`,
+    ],
+    [
+      "expiry",
+      { escrow: { expiredAt: BigInt(EXPIRY + 1) } },
+      `expiredAt is ${EXPIRY + 1} and the case's expiredAt is ${EXPIRY}`,
+    ],
+    [
+      "budget",
+      { escrow: { budget: 2_000_001n } },
+      "budget is 2000001 and the case's budget is 2000000",
+    ],
+  ])(
+    "a job whose %s is not the case's prints unavailable, naming both values",
+    async (_name, o, words) => {
+      const f = await makeFake(o);
+      const [out] = await f.run(["pilot:poll", "--case", f.caseId, "--script", "pay"]);
+      const settlement = (out as { settlement: { unavailable?: string } }).settlement;
+      expect(Object.keys(settlement)).toEqual(["unavailable"]);
+      expect(settlement.unavailable).toContain(words);
+    },
+  );
 });
 
 describe("pilot:poll --watch", () => {

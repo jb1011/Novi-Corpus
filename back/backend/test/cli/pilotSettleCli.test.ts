@@ -1002,6 +1002,29 @@ describe("pilot:case set-ids", () => {
     });
   });
 
+  test("the dry run prints the local id the row holds when --local is omitted", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "filing",
+      patch: { coreDisputeId: null, localDisputeId: "44", filedAt: NOW - 3600 },
+    });
+    const [out] = await f.run([
+      "pilot:case",
+      "set-ids",
+      caseId,
+      "--core",
+      "312",
+      "--by",
+      "an operator",
+    ]);
+    expect(out).toMatchObject({ dryRun: true, coreDisputeId: "312", localDisputeId: "44" });
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "filing",
+      coreDisputeId: null,
+      localDisputeId: "44",
+    });
+  });
+
   test("a local id that differs from the one the row holds is refused", async () => {
     const f = makeFake();
     const caseId = seed(f, {

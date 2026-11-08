@@ -2180,6 +2180,71 @@ describe("settleCase: refusals and the ruling read", () => {
     expect(s.cases.find(caseId)).toMatchObject({ status: "ruled", rulingRoundCount: 2 });
   });
 
+  test("the same verdict read again by a poll while the settle ran is not acted on by that run; the next run sends once", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const { s } = testnetStage(() => appealRead("1"));
+    const caseId = seed(s, {
+      mode: "testnet",
+      status: "ruled",
+      patch: { ...STORED_PAY, klerosChain: "arbitrum-sepolia-testnet" },
+    });
+    const poll = {
+      stage: s.stage,
+      cases: s.cases,
+      expected: EXPECTED,
+      now: () => s.clock.sec * 1000,
+    };
+    const job = s.deps.chain.job;
+    const real = job.escrowState.bind(job);
+    let polled = false;
+    job.escrowState = async (...a: Parameters<typeof job.escrowState>) => {
+      const state = await real(...a);
+      // A poll reads the same round again, 30 s later, while this settle is between its read
+      // and its send: only the time of the read moves.
+      if (!polled) {
+        polled = true;
+        s.clock.sec += 30;
+        await pollOnce(poll, caseId);
+      }
+      return state;
+    };
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(`case ${caseId}'s ruling was read again while this command ran; run it again`),
+    );
+    expect(s.node.sends).toEqual([]);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "ruled",
+      rulingValue: "1",
+      rulingRoundCount: 1,
+      rulingReadAt: NOW + 30,
+    });
+    const r = await settleCase(s.deps, caseId, { send: true });
+    expect(r.settlement.action).toBe("complete");
+    expect(s.node.sends).toHaveLength(1);
+  });
+
+  test("a ruling whose round moved while the settle ran, with the same time of read, is not acted on", async () => {
+    const s = setup({ script: "pay" });
+    const caseId = seed(s, { status: "ruled", patch: STORED_PAY });
+    const job = s.deps.chain.job;
+    const real = job.escrowState.bind(job);
+    job.escrowState = async (...a: Parameters<typeof job.escrowState>) => {
+      const state = await real(...a);
+      // Only the round count moves: a read of the next round within the same second.
+      s.cases.advance(caseId, "ruled", "ruled", { rulingRoundCount: 2 });
+      return state;
+    };
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(`case ${caseId}'s ruling was read again while this command ran; run it again`),
+    );
+    expect(s.node.sends).toEqual([]);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "ruled",
+      rulingRoundCount: 2,
+      rulingReadAt: NOW,
+    });
+  });
+
   test("a settled write that misses after the send keeps the hash on the trail", async () => {
     const s = setup({ script: "pay" });
     const caseId = seed(s);
