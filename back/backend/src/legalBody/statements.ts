@@ -20,7 +20,7 @@ import { type IdentityDeps, agreesWithWorld, currentRecord } from "../identity/s
 import { opsLog } from "../observability/opsLog";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
-import type { CompanyRepository } from "../persistence/companyRepository";
+import type { CompanyRecord, CompanyRepository } from "../persistence/companyRepository";
 import type { FormationRequestRecord } from "../persistence/formationRepository";
 import {
   type Deployment,
@@ -457,7 +457,8 @@ interface RecordedFacts {
  *  - the filing facts on the Wyoming date of the issue: a customer's from the formation date and
  *    the last annual report of the latest check when it is a pass; a formed company's from the
  *    date the State filed it (`filed_at`, the day doola reported, stored at its UTC midnight) once
- *    the filing is confirmed, with no report recorded;
+ *    the filing is confirmed, with no report recorded (`formedOn`: a filed company whose `filed_at`
+ *    is missing or not such a date reads `unverified`, and writes an ops line);
  *  - whether the guardian is a verified human. A failed read of it throws: it says nothing about
  *    the guardian;
  *  - on production, whether the guardian's identity record is verified at the issue
@@ -500,8 +501,8 @@ function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFa
   const filing = filingFacts({
     formationDate: customer
       ? (passed?.formationDate ?? null)
-      : filed && company.filedAt !== null
-        ? calendarDateOfUtcMidnight(company.filedAt)
+      : filed
+        ? formedOn(row, company)
         : null,
     lastReport,
     today: wyomingDate(issuedAt),
@@ -536,6 +537,28 @@ function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFa
       identityVerified: guardianIdentityVerified,
     },
   };
+}
+
+/**
+ * The date the State filed a formed company whose filing is confirmed: the calendar date its
+ * `filed_at` stores (the day doola reported, kept at its UTC midnight), or null when `filed_at` is
+ * missing (doola reported no date with the filing) or is not such a date. A null makes the filing
+ * facts `unverified`, so the standing reads `unknown`, and writes one ops line naming the body, the
+ * company and the reason's code, never the stored value, so an operator knows why. Like this
+ * module's other lines it is written by every statement and listing that reads it: the module
+ * de-duplicates no line, the statement routes spend the shared read budget, and `/transparency`
+ * computes its listing at most once per its ten-second cache.
+ */
+function formedOn(row: PublicRow, company: CompanyRecord): string | null {
+  const date = company.filedAt === null ? null : calendarDateOfUtcMidnight(company.filedAt);
+  if (date === null)
+    opsLog("legal_body_statement_filing_date_unusable", {
+      level: "warn",
+      legalBodyId: row.legalBodyId,
+      companyId: row.companyId,
+      problem: company.filedAt === null ? "filed_at_missing" : "filed_at_not_a_stored_date",
+    });
+  return date;
 }
 
 /** The statement, unsigned, from one block's chain facts and the row's recorded facts. The chain

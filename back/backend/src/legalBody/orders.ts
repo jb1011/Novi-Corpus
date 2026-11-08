@@ -265,7 +265,9 @@ export function toOrderView(row: LegalBodyRecord, facts: OrderViewFacts): LegalB
  *    company waits for a new passed check;
  *  - a company filed through formation, by the state's confirmed filing, and only once its row
  *    carries the filed name and the filing number its agreement prints. A filed name that matched
- *    none of the company's options was never written, and an operator writes it.
+ *    none of the company's options was never written, and an operator writes it. Never while its
+ *    latest check is a revocation (`company:revoke` takes a company of any provider): it needs no
+ *    check to stand, and a reinstatement falls back to its filing, as the attestation reads it.
  * Whose company it is, each door asks before.
  */
 export function companyEligible(
@@ -277,7 +279,11 @@ export function companyEligible(
   if (company.status === "abandoned" || company.purposeKind !== "legal_body") return false;
   if (company.provider === CUSTOMER_PROVIDER)
     return deps.checks.latest(companyId)?.result === "passed";
-  return companyFiled(deps.formationSteps(companyId)) && filedCompanyNames(company) !== null;
+  return (
+    deps.checks.latest(companyId)?.result !== "revoked" &&
+    companyFiled(deps.formationSteps(companyId)) &&
+    filedCompanyNames(company) !== null
+  );
 }
 
 /**

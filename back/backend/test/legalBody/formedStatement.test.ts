@@ -101,6 +101,9 @@ function opsLines(event: string): OpsLine[] {
   });
 }
 
+/** The event of the line a filed formed company's unusable `filed_at` writes. */
+const FILING_DATE_LINE = "legal_body_statement_filing_date_unusable";
+
 type Signed = Extract<StatementOutcome, { kind: "statement" }>;
 
 function expectStatement(out: StatementOutcome): Signed {
@@ -124,12 +127,15 @@ let formed = 0;
  * not charge), its formation steps opened and `create_provider` confirmed, as the saga leaves
  * them. `filing`: `confirmed` writes the filing facts the processor writes when the State confirms
  * the filing; `submitted` leaves the step waiting on the State with the facts already written, so
- * only the step tells the two apart. `ein` confirms the documents and the EIN after the filing.
+ * only the step tells the two apart. `filedAt` is the `filed_at` written with the facts (FILED_AT
+ * unless told otherwise; null when doola has reported no date yet). `ein` confirms the documents
+ * and the EIN after the filing.
  */
 function formedCompany(
   o: {
     purposeKind?: "agent" | "legal_body";
     filing?: "confirmed" | "submitted";
+    filedAt?: number | null;
     ein?: boolean;
   } = {},
 ): string {
@@ -151,7 +157,7 @@ function formedCompany(
     true,
   );
   s.companies.recordFilingFacts(companyId, {
-    filedAt: FILED_AT,
+    filedAt: o.filedAt === undefined ? FILED_AT : o.filedAt,
     filingNumber: FILING_NUMBER,
     legalNameFiled: FILED_NAME,
   });
@@ -352,6 +358,8 @@ describe("a company Novi formed, filed, paid and linked", () => {
           '{"checkId":null,"revocationEventId":null,"companyStatus":"ready","humanVerified":true,"identityVerified":false}',
       },
     ]);
+    // A usable filing date writes no line.
+    expect(opsLines(FILING_DATE_LINE)).toEqual([]);
   });
 
   test("the formation date is the day doola reported, never the evening before on Wyoming's clock", async () => {
@@ -362,9 +370,9 @@ describe("a company Novi formed, filed, paid and linked", () => {
     expect(message.nextDue).toBe("2027-10-01");
   });
 
-  test("a filed_at that is not a stored date (a UTC midnight) is no formation date: unverified, never a guessed day", async () => {
+  test("a filed_at that is not a stored date (a UTC midnight) is no formation date: unverified, never a guessed day, and one line naming the body and the reason", async () => {
     const companyId = formedCompany();
-    linkedBody(companyId, FORMED_BODY);
+    const row = linkedBody(companyId, FORMED_BODY);
     const find = s.companies.find.bind(s.companies);
     vi.spyOn(s.companies, "find").mockImplementation((id: string) => {
       const company = find(id);
@@ -378,6 +386,49 @@ describe("a company Novi formed, filed, paid and linked", () => {
       nextDue: "",
       legalName: FILED_NAME,
     });
+    expect(opsLines(FILING_DATE_LINE)).toEqual([
+      {
+        level: "warn",
+        legalBodyId: row.legalBodyId,
+        companyId,
+        problem: "filed_at_not_a_stored_date",
+      },
+    ]);
+    // Ids and the reason's code only: never the stored value, nor any date read from it (the
+    // line's own `at` stamp, which `opsLines` leaves out, is the only time it carries).
+    const fields = JSON.stringify(opsLines(FILING_DATE_LINE));
+    expect(fields).not.toContain(String(FILED_AT + 3_600));
+    expect(fields).not.toMatch(/[0-9]{4}-[0-9]{2}-[0-9]{2}/);
+  });
+
+  test("a confirmed filing whose filed_at doola has not reported yet: unverified, so unknown, and one line per read naming the body and the reason", async () => {
+    // The processor confirms `await_filing` and writes the facts doola reported; with no filing
+    // date, `filingDateToUnix` gives null and `filed_at` stays NULL.
+    const companyId = formedCompany({ filedAt: null });
+    expect(s.companies.find(companyId)?.filedAt).toBeNull();
+    const row = linkedBody(companyId, FORMED_BODY);
+
+    const { message } = expectStatement(await agent42()).statement;
+    expect(message).toMatchObject({
+      standing: "unknown",
+      attestationState: "active",
+      source: "novi",
+      legalName: FILED_NAME,
+      filingNumber: FILING_NUMBER,
+      filedAt: "",
+      filingStatus: "unverified",
+      nextDue: "",
+      lastFiledPeriod: "0",
+    });
+    // Not active, so not listed; the listing read it too, and wrote its own line.
+    await expect(listing()).resolves.toEqual([]);
+    const expected = {
+      level: "warn",
+      legalBodyId: row.legalBodyId,
+      companyId,
+      problem: "filed_at_missing",
+    };
+    expect(opsLines(FILING_DATE_LINE)).toEqual([expected, expected]);
   });
 
   test("einIssued turns true once await_ein is confirmed, and nothing else moves", async () => {
@@ -432,6 +483,8 @@ describe("a formed company the gates do not let stand", () => {
       controlVerified: false,
     });
     await expect(listing()).resolves.toEqual([]);
+    // Not filed: no filing date is expected yet, so none is missing.
+    expect(opsLines(FILING_DATE_LINE)).toEqual([]);
   });
 
   test("abandoned: no longer active, and it names nothing", async () => {

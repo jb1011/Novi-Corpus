@@ -14,6 +14,7 @@ import type { LegalBodyChainPort } from "../../src/adapters/arc/legalBodyChain";
 import { ApiError } from "../../src/errors";
 import { companyNameOptions } from "../../src/formation/intake";
 import { agreementDocNames, buildAgreement } from "../../src/legalBody/agreement";
+import { linkMessage, submitLink } from "../../src/legalBody/linkDoor";
 import {
   type LegalBodyOrderDeps,
   companyEligible,
@@ -36,6 +37,7 @@ import { seedCompany } from "../helpers/formationFakes";
 import {
   type LegalBodyStores,
   REGISTRY,
+  appendCheck,
   customerCompany,
   legalBodyOrderDeps,
   openLegalBodyStores,
@@ -121,6 +123,17 @@ function declaredCompany(opts: { checks?: CompanyCheckResult[]; filingNumber?: s
 function refusalOf(run: () => unknown): ApiError {
   try {
     run();
+  } catch (err) {
+    if (err instanceof ApiError) return err;
+    throw err;
+  }
+  throw new Error("no refusal");
+}
+
+/** `refusalOf` for a door that answers a promise. */
+async function asyncRefusalOf(run: () => Promise<unknown>): Promise<ApiError> {
+  try {
+    await run();
   } catch (err) {
     if (err instanceof ApiError) return err;
     throw err;
@@ -252,6 +265,69 @@ describe("a company formed for a legal body", () => {
     expect(refusalOf(() => createOrder(deps, tenant, { companyId })).code).toBe(
       "company_not_eligible",
     );
+  });
+});
+
+describe("a formed company the operator revoked", () => {
+  // `company:revoke` takes a company of any provider and appends a `revoked` check; the check is
+  // written here through the repository, as the command writes it.
+
+  test("revoked after its filing: not eligible, and the order door answers company_not_eligible, writing nothing", () => {
+    const deps = orderDeps();
+    const companyId = formedCompany();
+    expect(companyEligible(deps, companyId)).toBe(true);
+    appendCheck(s.checks, companyId, "revoked");
+    expect(companyEligible(deps, companyId)).toBe(false);
+    const err = refusalOf(() => createOrder(deps, tenant, { companyId }));
+    expect(err.code).toBe("company_not_eligible");
+    expect(err.status).toBe(409);
+    expect(err.message).toBe(LEGAL_BODY_SENTENCES.company_not_eligible);
+    expect(rowCount()).toBe(0);
+  });
+
+  test("a draft ordered before the revocation: both link functions refuse it company_not_eligible at their re-check", async () => {
+    const deps = orderDeps();
+    const companyId = formedCompany();
+    const order = createOrder(deps, tenant, { companyId });
+    const never = {
+      create: async () => {
+        throw new Error("the create is never reached");
+      },
+    };
+    const link = () => linkMessage(deps, tenant, order.id, { agentId: "42" });
+    const submit = () =>
+      submitLink(deps, tenant, order.id, { message: null, signature: "0x" }, never);
+
+    // Before: both pass rule 1, the eligibility re-check included, and stop at their next step:
+    // the chain this test has none of, and the malformed link.
+    expect((await asyncRefusalOf(link)).code).toBe("chain_unavailable");
+    expect((await asyncRefusalOf(submit)).code).toBe("malformed_link");
+
+    appendCheck(s.checks, companyId, "revoked");
+    for (const [name, run] of [
+      ["linkMessage", link],
+      ["submitLink", submit],
+    ] as const) {
+      const err = await asyncRefusalOf(run);
+      expect(err.code, name).toBe("company_not_eligible");
+      expect(err.status, name).toBe(409);
+    }
+    expect(s.repo.findById(order.id)?.bindingState).toBe("draft");
+  });
+
+  test("no check at all, or a reinstatement after the revocation: eligible on its filing", () => {
+    const deps = orderDeps();
+    const unchecked = formedCompany();
+    expect(s.checks.latest(unchecked)).toBeUndefined();
+    expect(companyEligible(deps, unchecked)).toBe(true);
+
+    const reinstated = formedCompany();
+    appendCheck(s.checks, reinstated, "revoked");
+    appendCheck(s.checks, reinstated, "reinstated");
+    // A formed company is established by its filing, which a reinstatement falls back to, as the
+    // attestation reads it.
+    expect(companyEligible(deps, reinstated)).toBe(true);
+    expect(createOrder(deps, tenant, { companyId: reinstated }).state).toBe("draft");
   });
 });
 
