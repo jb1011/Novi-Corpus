@@ -1,4 +1,10 @@
-import { type Hex, TransactionReceiptNotFoundError, formatUnits, toHex } from "viem";
+import {
+  type Hex,
+  TransactionNotFoundError,
+  TransactionReceiptNotFoundError,
+  formatUnits,
+  toHex,
+} from "viem";
 import type { JobAdapter } from "../adapters/arc/jobAdapter";
 import { RECEIPT_TIMEOUT_MS } from "../adapters/arc/receipts";
 import type { DisputeRead } from "../adapters/kleros/disputeService";
@@ -200,7 +206,7 @@ function refuse(message: string): never {
 }
 
 /** The settle events that are a send or the outcome of one, as opposed to a read or the chain's.
- *  A hash adopted through its proof is a send's outcome too. */
+ *  A hash adopted through its proof, or cleared as dropped, is a send's outcome too. */
 const SEND_TRAIL: ReadonlySet<string> = new Set([
   "sending",
   "sent",
@@ -209,13 +215,14 @@ const SEND_TRAIL: ReadonlySet<string> = new Set([
   "failed",
   "ok",
   "adopted",
+  "dropped",
 ]);
 
 /**
  * Refuses while the case's latest `settle/sending` event is younger than
  * {SEND_IN_FLIGHT_SECONDS} on the settle's clock, whatever the row's status. With
- * `outcomeEndsSend`, a sending event that its outcome (sent, reverted, unconfirmed, failed, ok or
- * adopted) already follows holds nothing: for a row whose hash reverted, where this run's own revert ended
+ * `outcomeEndsSend`, a sending event that its outcome (sent, reverted, unconfirmed, failed, ok,
+ * adopted or dropped) already follows holds nothing: for a row whose hash reverted, where this run's own revert ended
  * its send but another run's newer one has not ended yet. The database stamps the event; a stamp
  * that cannot be read refuses too, since an unknown age never lets a second send through. Run it
  * before any read and again inside the transaction that records the next `settle/sending` event,
@@ -995,4 +1002,145 @@ export async function adoptSettleTx(
   if (status === "settling" && write.status === "settled")
     settledLine(row, write.settleAction, hash);
   return { unchanged: false, proof, write, written: true };
+}
+
+/**
+ * How long after a settle's send its hash may be cleared as dropped, in seconds: well past the
+ * time a send is treated as running ({SEND_IN_FLIGHT_SECONDS}), so a hash still on its way to the
+ * node, or still in another node's pool, is not cleared on the first silence.
+ */
+export const DROP_GRACE_SECONDS = 600;
+
+/** What `pilot:settle --dropped` read to prove the drop, as it prints it. */
+export interface DropRead {
+  hash: Hex;
+  action: PilotCaseRecord["settleAction"];
+  /** What the node answered for the hash: no receipt, and no transaction mined or pending. */
+  receipt: null;
+  transaction: null;
+  /** Seconds since the case's latest settle/sending event, on the settle's clock. */
+  sendAgeSeconds: number;
+  escrowStatus: "Funded" | "Submitted";
+}
+
+/** The row as a cleared drop leaves it, the action and the reason kept, and the event recorded. */
+export interface DropWrite {
+  status: "settling";
+  settleTxHash: null;
+  settleAction: PilotCaseRecord["settleAction"];
+  settleReason: string | null;
+  event: { step: "settle"; status: "dropped"; ref: Hex; detail: string };
+}
+
+export interface DropResult {
+  read: DropRead;
+  write: DropWrite;
+  written: boolean;
+}
+
+/** Whether the node knows the transaction, mined or pending; any failure but "not found" escapes. */
+async function transactionKnown(d: SettleDeps, hash: Hex): Promise<boolean> {
+  try {
+    await d.chain.publicClient.getTransaction({ hash });
+    return true;
+  } catch (e) {
+    if (e instanceof TransactionNotFoundError) return false;
+    throw e;
+  }
+}
+
+/**
+ * `pilot:settle --dropped`: the hash of a settling row's send, cleared once the network is proven
+ * to have dropped it, so the next run decides again. It sends nothing. Only a settling row that
+ * holds a hash; the proof, in order: at least {DROP_GRACE_SECONDS} since the case's latest
+ * settle/sending event (before any read), the connected chain is the row's, the node has no
+ * receipt for the hash and no transaction under it, mined or pending, and the escrow, read as
+ * the case's own job, is still Funded or Submitted. Any of them failing refuses, naming it. The
+ * write, in one transaction, compares the row's status and hash with the ones this run read,
+ * clears the hash, keeps the action and the reason, and records settle/dropped with the old hash;
+ * the row stays at settling. With `write` false nothing is written.
+ */
+export async function clearDroppedSettleTx(
+  d: SettleDeps,
+  caseId: string,
+  opts: { write: boolean },
+): Promise<DropResult> {
+  const nowSec = () => Math.floor((d.now ?? Date.now)() / 1000);
+  const row = d.cases.find(caseId);
+  if (!row) refuse(`no pilot case ${caseId}`);
+  if (row.mode !== d.stage.mode)
+    refuse(`case ${caseId} is a ${row.mode} case and this stage is ${d.stage.mode}`);
+  if (row.jobId === null) refuse(`case ${caseId} has no job id`);
+  const jobId = BigInt(row.jobId);
+  checkOwnConfig(d.chain, row);
+  if (row.status !== "settling")
+    refuse(`case ${caseId} is ${row.status}; a hash is cleared as dropped on a settling case only`);
+  if (row.settleTxHash === null) refuse(`case ${caseId} holds no settle transaction hash to clear`);
+  const hash = row.settleTxHash as Hex;
+  const what = `case ${caseId}'s ${row.settleAction} ${hash}`;
+  const sending = d.cases
+    .events(caseId)
+    .filter((e) => e.step === "settle" && e.status === "sending")
+    .at(-1);
+  if (sending === undefined)
+    refuse(`case ${caseId} has no settle/sending event, so the drop of ${hash} cannot be timed`);
+  const age = ageOf(sending, nowSec());
+  if (age === null)
+    refuse(
+      `the time case ${caseId}'s last send started cannot be read, so the drop of ${hash} cannot be timed`,
+    );
+  if (age < DROP_GRACE_SECONDS)
+    refuse(
+      `case ${caseId}'s last send started ${age} s ago, and a hash is cleared as dropped only ${DROP_GRACE_SECONDS} s after its send; wait, then run again`,
+    );
+  // A node on another chain knows nothing of the hash: it would read as dropped.
+  await checkConnectedChain(d, row);
+  // The receipt first: a transaction mined between the two reads is then found by the second.
+  const receipt = await readOrRefuse(`the receipt of ${hash}`, () => receiptOf(d, hash));
+  if (receipt !== null)
+    refuse(
+      `${what} has a receipt (${receipt.status}): it was mined, not dropped; run pilot:settle to read it`,
+    );
+  if (await readOrRefuse(`the transaction ${hash}`, () => transactionKnown(d, hash)))
+    refuse(
+      `${what} has no receipt but the node still knows it: it is pending, not dropped; wait, then run again`,
+    );
+  const escrow = await readOrRefuse(`job ${jobId}'s escrow`, () => d.chain.job.escrowState(jobId));
+  checkEscrowIsOwn(row, jobId, escrow);
+  if (escrow.status !== JobStatusOnChain.funded && escrow.status !== JobStatusOnChain.submitted)
+    refuse(
+      `job ${jobId} is ${statusName(escrow.status)}, not Funded or Submitted, so ${hash} is not cleared; run pilot:settle to read the chain`,
+    );
+  const escrowStatus = statusName(escrow.status) as DropRead["escrowStatus"];
+  const read: DropRead = {
+    hash,
+    action: row.settleAction,
+    receipt: null,
+    transaction: null,
+    sendAgeSeconds: age,
+    escrowStatus,
+  };
+  const write: DropWrite = {
+    status: "settling",
+    settleTxHash: null,
+    settleAction: row.settleAction,
+    settleReason: row.settleReason,
+    event: {
+      step: "settle",
+      status: "dropped",
+      ref: hash,
+      detail: `${row.settleAction} not mined and not pending ${age} s after its send; the escrow is ${escrowStatus}`,
+    },
+  };
+  if (!opts.write) return { read, write, written: false };
+  d.cases.transaction(() => {
+    const current = d.cases.find(caseId);
+    if (current?.status !== "settling" || current.settleTxHash !== row.settleTxHash)
+      refuse(`pilot case ${caseId} moved while this command ran`);
+    if (!d.cases.advance(caseId, "settling", "settling", { settleTxHash: null }))
+      refuse(`pilot case ${caseId} moved while this command ran`);
+    const { event } = write;
+    d.cases.recordEvent(caseId, event.step, event.status, event.ref, event.detail);
+  });
+  return { read, write, written: true };
 }
