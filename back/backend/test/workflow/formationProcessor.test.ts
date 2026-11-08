@@ -9,7 +9,7 @@
  */
 import { createHmac } from "node:crypto";
 import type Database from "better-sqlite3";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { DOOLA_SIGNATURE_HEADER, type DoolaWakeUp } from "../../src/api/routes/doolaWebhook";
 import { companyNameOptions } from "../../src/formation/intake";
@@ -36,6 +36,7 @@ import {
   isFormationFailed,
   isFormationFiled,
   isKnownDoolaEvent,
+  matchFiledNameAgainst,
   processDoolaEvent,
 } from "../../src/workflow/formationProcessor";
 import {
@@ -810,4 +811,52 @@ test("a reported name that matches no candidate writes no name, whatever the com
   await advanceFormation(deps(), COMPANY_KEY);
   expect(stateOf("await_filing")).toBe("confirmed");
   expect(company()?.legalNameFiled).toBeNull();
+});
+
+// ── matchFiledNameAgainst: the one rule a reported name is held to, wherever it is reported ─────
+
+describe("matchFiledNameAgainst", () => {
+  const options = companyNameOptions("Lantern Works LLC", "Lantern Works Two");
+
+  test("names the stored option a reported name is, under normalizeCompanyName: any case, spacing at the ends or entity ending", () => {
+    for (const reported of [
+      "Lantern Works",
+      "  lantern works ",
+      "LANTERN WORKS LLC",
+      "Lantern Works, L.L.C.",
+      "Lantern Works Limited Liability Company",
+    ])
+      expect(matchFiledNameAgainst(options, reported), reported).toBe("Lantern Works");
+    expect(matchFiledNameAgainst(options, "Lantern Works Two LLC")).toBe("Lantern Works Two");
+  });
+
+  test("answers the bare candidate as the intake stored it: the entity ending is the caller's to add", () => {
+    // The processor adds it for a legal-body company; the matcher never does.
+    expect(matchFiledNameAgainst(options, "Lantern Works LLC")).toBe(options[0]?.name);
+    expect(options[0]?.name).toBe("Lantern Works");
+  });
+
+  test("null for a name that is none of the options, for a blank or absent name, and with no options", () => {
+    for (const reported of [
+      "Lantern Works Ltd. Liability Co.",
+      "Lantern Workshop",
+      "Lantern",
+      "",
+      "   ",
+      null,
+      undefined,
+    ])
+      expect(matchFiledNameAgainst(options, reported), String(reported)).toBeNull();
+    expect(matchFiledNameAgainst([], "Lantern Works")).toBeNull();
+  });
+
+  test("pure: it reads no database and writes no ops line", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      expect(matchFiledNameAgainst(options, "No Such Name")).toBeNull();
+      expect(log).not.toHaveBeenCalled();
+    } finally {
+      log.mockRestore();
+    }
+  });
 });

@@ -5,7 +5,11 @@ import type {
   DoolaEnvironment,
   DoolaRequiredAction,
 } from "../adapters/doola/types";
-import { normalizeCompanyName, withEntityEnding } from "../formation/intake";
+import {
+  type CompanyNameOption,
+  normalizeCompanyName,
+  withEntityEnding,
+} from "../formation/intake";
 import { POLL_BASE_MS, POLL_CAP_MS, type StepBackoff, nextInterval } from "../formation/schedule";
 import { providerRefOf } from "../formation/status";
 import { opsLog } from "../observability/opsLog";
@@ -497,6 +501,27 @@ function advanceFiling(
 }
 
 /**
+ * Which stored name option a reported name is: the option's own `name` (the bare candidate, as the
+ * intake stored it, without its entity ending), or null when it is none of them or the reported
+ * name is blank or absent. Both sides are compared under `normalizeCompanyName` (NFC, trimmed, a
+ * trailing entity ending dropped, any case), so "Lantern Works LLC" is the option "Lantern Works".
+ *
+ * PURE: it reads nothing and logs nothing, so every place a reported name arrives holds it to the
+ * one rule (the processor's `matchFiledName`, `company:filed-name`, and the operator's record of a
+ * filing). Which form a caller then stores is the caller's: the processor adds the entity ending
+ * for a legal-body company (`withEntityEnding`), and keeps the bare candidate for an agent company.
+ */
+export function matchFiledNameAgainst(
+  options: readonly CompanyNameOption[],
+  reported: string | null | undefined,
+): string | null {
+  const trimmed = reported?.trim();
+  if (!trimmed) return null;
+  const wanted = normalizeCompanyName(trimmed);
+  return options.find((o) => normalizeCompanyName(o.name) === wanted)?.name ?? null;
+}
+
+/**
  * Which of OUR name candidates the state actually accepted (design §5).
  *
  * doola reports the accepted name as free text, and free text is exactly what must never reach
@@ -517,11 +542,10 @@ function matchFiledName(
 ): string | null {
   const reported = company.name?.trim();
   if (!reported) return null;
-  const wanted = normalizeCompanyName(reported);
   const row = d.companies.find(companyId);
   const stored = row?.nameOptions ?? [];
-  const hit = stored.find((o) => normalizeCompanyName(o.name) === wanted);
-  if (hit) return row?.purposeKind === "legal_body" ? withEntityEnding(hit.name) : hit.name;
+  const hit = matchFiledNameAgainst(stored, reported);
+  if (hit !== null) return row?.purposeKind === "legal_body" ? withEntityEnding(hit) : hit;
   opsLog("formation_filed_name_unmatched", {
     level: "warn",
     companyId,

@@ -1,7 +1,8 @@
 /**
  * The operator's commands over a company Novi formed for a legal body: `company:dao-supplement`,
  * which records doola's amended articles (the DAO supplement doola files by hand) as an operator
- * document of the company.
+ * document of the company, and `company:filed-name`, which sets the company's filed name from the
+ * State's record when doola's reported name matched none of the stored options, or corrects it.
  *
  * Each command opens the database and the document store itself, through the configuration, so
  * every test here works in a temporary data directory: the database file and the document bytes
@@ -18,9 +19,14 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import type { Address, Hex } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { LegalBodyChainPort } from "../../src/adapters/arc/legalBodyChain";
 import { listCompanyViews } from "../../src/api/views";
 import { buildCli } from "../../src/cli/index";
+import { ApiError } from "../../src/errors";
 import { companyNameOptions } from "../../src/formation/intake";
+import { agreementDocNames } from "../../src/legalBody/agreement";
+import { type LegalBodyOrderDeps, abandonOrder, createOrder } from "../../src/legalBody/orders";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
@@ -30,10 +36,27 @@ import {
   documentStoreName,
 } from "../../src/persistence/documentIndexRepository";
 import { FileDocumentStore } from "../../src/persistence/documentStore";
+import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
-import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
-import { ANVIL_ACCOUNT_2, CHAIN_ID, FACTORY } from "../helpers/customerCompanyFixtures";
-import { seedCompany } from "../helpers/formationFakes";
+import {
+  type BindingState,
+  SqliteLegalBodyRepository,
+} from "../../src/persistence/legalBodyRepository";
+import { advanceFormation } from "../../src/workflow/formationProcessor";
+import {
+  ACTION,
+  ANVIL_ACCOUNT_2,
+  CHAIN_ID,
+  FACTORY,
+  recordHuman,
+} from "../helpers/customerCompanyFixtures";
+import { MemoryDocumentStore, fakeDoola, seedCompany } from "../helpers/formationFakes";
+import {
+  type LegalBodyStores,
+  legalBodyOrderDeps,
+  openLegalBodyStores,
+} from "../helpers/legalBodyFixtures";
+import { bodyIn } from "../helpers/legalBodyStatementFixtures";
 
 /** anvil's published account #2: a test key, never a real wallet. */
 const tenant: Address = ANVIL_ACCOUNT_2.address;
@@ -449,5 +472,341 @@ describe("company:dao-supplement", () => {
     expect(await refusal(args("Ops Example"))).toMatch(/^refusing: --operator must match/);
     expect(await refusal(args("system"))).toMatch(/^refusing: --operator system is reserved/);
     expect(supplementRows(companyId)).toEqual([]);
+  });
+});
+
+// ── company:filed-name ────────────────────────────────────────────────────────────────────────
+
+/** A name a Wyoming LLC may carry that `normalizeCompanyName` does not strip an ending from, so it
+ *  matches none of the stored options "Lantern Works" and "Lantern Works Two". */
+const UNMATCHED_NAME = "Lantern Works Ltd. Liability Co.";
+
+/** The order stores over the test's own connection: the order door and the commands share the
+ *  database file. */
+function orderStores(): { s: LegalBodyStores; deps: LegalBodyOrderDeps } {
+  const s = openLegalBodyStores(db, new MemoryDocumentStore());
+  if (s.store.findByTenant(tenant, ACTION) === undefined)
+    recordHuman(s.store, tenant, "3101", Date.now());
+  const deps = legalBodyOrderDeps(s, {
+    chain: {} as LegalBodyChainPort,
+    maxOpenPerTenant: 50,
+    maxOrdersPerTenantPerDay: 50,
+  });
+  return { s, deps };
+}
+
+function orderRefusal(run: () => unknown): ApiError {
+  try {
+    run();
+  } catch (err) {
+    if (err instanceof ApiError) return err;
+    throw err;
+  }
+  throw new Error("no refusal");
+}
+
+const filedNameArgs = (companyId: string, name: string, ...more: string[]) => [
+  "company:filed-name",
+  companyId,
+  "--name",
+  name,
+  "--operator",
+  OPERATOR,
+  ...more,
+];
+
+const filedNameOf = (companyId: string) => companies.find(companyId)?.legalNameFiled;
+
+/** A row of the company brought to `state` through the repository's own moves. */
+let agents = 100;
+function bodyOf(companyId: string, state: BindingState): string {
+  const { s } = orderStores();
+  agents += 1;
+  if (state === "deployed" || state === "linked" || state === "broken" || state === "superseded")
+    return bodyIn(state, s, companyId, { agentId: String(agents), tenant }).legalBodyId;
+  const id = draftBody(companyId);
+  if (state === "draft") return id;
+  expect(s.repo.freezeAgreement(id, { hash: `0x${"ab".repeat(32)}`, version: 1 })).toBe(true);
+  if (state === "abandoned") {
+    expect(s.repo.abandon(id, "test")).toBe(true);
+    return id;
+  }
+  expect(state).toBe("reserved");
+  expect(
+    s.repo.reserve(id, {
+      agentId: String(agents),
+      identityOwner: tenant,
+      linkDigest: `0x${agents.toString(16).padStart(64, "0")}`,
+      linkDeadline: 1_900_000_000,
+      linkSignature: "0x01",
+      bodyAddress: `0x${agents.toString(16).padStart(40, "0")}`,
+      observedAtBlock: 1,
+      firstCheckAt: Date.now(),
+    }),
+  ).toBe("reserved");
+  return id;
+}
+
+interface FiledNameRecorded {
+  recorded: true;
+  companyId: string;
+  legalNameFiled: string;
+  replaced: string | null;
+  matched: boolean;
+  warning?: string;
+  operator: string;
+}
+
+describe("company:filed-name", () => {
+  test("doola reports a name that matches no option: no filed name and no order; the operator sets it from the State's record, and the order then prints it", async () => {
+    const companyId = formedCompany({ filing: "none" });
+    // The processor confirms the filing, with doola's name matching none of the stored options.
+    const doola = fakeDoola({
+      company: {
+        doolaCompanyId: `doola-${companyId}`,
+        name: UNMATCHED_NAME,
+        formationFilingDate: "2026-11-02",
+        formationFilingNumber: FILING_NUMBER,
+      },
+    });
+    await advanceFormation(
+      {
+        repo: new SqliteEntityRepository(db),
+        companies,
+        requests,
+        documents,
+        docStore: new MemoryDocumentStore(),
+        doola: doola.api,
+        environment: "sandbox",
+        fetchImpl: doola.fetchImpl,
+        lookupImpl: doola.lookupImpl,
+        now: () => Date.now(),
+      },
+      companyId,
+    );
+    expect(requests.stepsOf(companyId).find((r) => r.step === "await_filing")?.state).toBe(
+      "confirmed",
+    );
+    expect(companies.find(companyId)).toMatchObject({
+      legalNameFiled: null,
+      filingNumber: FILING_NUMBER,
+    });
+    const { deps } = orderStores();
+    const refused = orderRefusal(() => createOrder(deps, tenant, { companyId }));
+    expect(refused.code).toBe("company_not_eligible");
+    expect(refused.message).toBe(LEGAL_BODY_SENTENCES.company_not_eligible);
+
+    const { output, ops, lines } = await run<FiledNameRecorded>(
+      filedNameArgs(companyId, UNMATCHED_NAME, "--yes"),
+    );
+    expect(output).toMatchObject({
+      recorded: true,
+      companyId,
+      legalNameFiled: UNMATCHED_NAME,
+      replaced: null,
+      matched: false,
+      operator: OPERATOR,
+    });
+    // Advice, in the one JSON object: the State's record is the truth, so it is written all the same.
+    expect(output.warning).toMatch(/^matches no stored option/);
+    // As typed: the State's record, never a stored option.
+    expect(filedNameOf(companyId)).toBe(UNMATCHED_NAME);
+    expect(ops).toEqual([
+      {
+        opslog: "filed_name_recorded",
+        at: expect.any(String),
+        companyId,
+        matched: false,
+        replaced: false,
+        operator: OPERATOR,
+      },
+    ]);
+    const opsText = lines.filter((line) => isOpsLine(line)).join("\n");
+    for (const leak of ["Lantern", "Ltd", "Liability"]) expect(opsText).not.toContain(leak);
+
+    const view = createOrder(deps, tenant, { companyId });
+    expect(view.state).toBe("draft");
+    const terms = deps.docStore.get(agreementDocNames(view.id).terms);
+    expect(terms).toContain(`# Operating Agreement of "${UNMATCHED_NAME}"`);
+  });
+
+  test("a name that is a stored option under normalizeCompanyName is matched, with no warning", async () => {
+    const companyId = formedCompany({ legalNameFiled: null });
+    const { output } = await run<FiledNameRecorded>(
+      filedNameArgs(companyId, "Lantern Works LLC", "--yes"),
+    );
+    expect(output).toMatchObject({ recorded: true, matched: true, replaced: null });
+    expect(output.warning).toBeUndefined();
+    expect(filedNameOf(companyId)).toBe("Lantern Works LLC");
+  });
+
+  test("without --yes it says what it would set, with the same warning, and writes nothing", async () => {
+    const companyId = formedCompany({ legalNameFiled: null });
+    const { output, ops } = await run(filedNameArgs(companyId, UNMATCHED_NAME));
+    expect(output).toMatchObject({
+      recorded: false,
+      companyId,
+      current: null,
+      wouldRecord: { legalNameFiled: UNMATCHED_NAME },
+      matched: false,
+    });
+    expect(output.warning).toMatch(/^matches no stored option/);
+    expect(output.next).toMatch(/--yes/);
+    expect(ops).toEqual([]);
+    expect(filedNameOf(companyId)).toBeNull();
+  });
+
+  test("a set name is refused without --replace, and corrected with it", async () => {
+    const companyId = formedCompany();
+    expect(await refusal(filedNameArgs(companyId, "Lantern Works, LLC", "--yes"))).toBe(
+      `refusing: company ${companyId} already holds a filed name: pass --replace to correct it`,
+    );
+    expect(filedNameOf(companyId)).toBe(FILED_NAME);
+
+    const { output, ops } = await run<FiledNameRecorded>(
+      filedNameArgs(companyId, "Lantern Works, LLC", "--replace", "--yes"),
+    );
+    expect(output).toMatchObject({
+      recorded: true,
+      legalNameFiled: "Lantern Works, LLC",
+      replaced: FILED_NAME,
+      matched: true,
+    });
+    expect(ops).toEqual([expect.objectContaining({ replaced: true, matched: true })]);
+    expect(filedNameOf(companyId)).toBe("Lantern Works, LLC");
+
+    // The same name again replaces nothing.
+    expect(
+      await refusal(filedNameArgs(companyId, "Lantern Works, LLC", "--replace", "--yes")),
+    ).toBe(`refusing: company ${companyId} already holds this filed name: nothing to replace`);
+  });
+
+  test("--replace is refused while an open order's agreement prints the current name; once the draft is abandoned, the name is corrected", async () => {
+    const companyId = formedCompany();
+    const { deps } = orderStores();
+    const order = createOrder(deps, tenant, { companyId });
+
+    expect(
+      await refusal(filedNameArgs(companyId, "Lantern Works, LLC", "--replace", "--yes")),
+    ).toBe(
+      `refusing: this company has an open legal-body order; its agreement prints the current name: the order ${order.id} must be abandoned first (its guardian abandons the draft, or it expires 24 hours after it was ordered)`,
+    );
+    expect(filedNameOf(companyId)).toBe(FILED_NAME);
+
+    await abandonOrder(deps, tenant, order.id);
+    const { output } = await run<FiledNameRecorded>(
+      filedNameArgs(companyId, "Lantern Works, LLC", "--replace", "--yes"),
+    );
+    expect(output).toMatchObject({ recorded: true, replaced: FILED_NAME });
+  });
+
+  test("a draft past its 24 hours no longer holds the name", async () => {
+    const companyId = formedCompany();
+    bodyOf(companyId, "draft");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 25 * 60 * 60 * 1000);
+      const { output } = await run<FiledNameRecorded>(
+        filedNameArgs(companyId, "Lantern Works, LLC", "--replace", "--yes"),
+      );
+      expect(output).toMatchObject({ recorded: true, replaced: FILED_NAME });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("--replace is refused for an order on its way, and for a body that is or was linked; a closed one does not hold the name", async () => {
+    const cases: [BindingState, string][] = [
+      ["reserved", "an open legal-body order"],
+      ["deployed", "an open legal-body order"],
+      ["linked", "a linked legal body"],
+      ["broken", "a linked legal body"],
+      ["superseded", "a linked legal body"],
+    ];
+    for (const [state, kind] of cases) {
+      const companyId = formedCompany();
+      bodyOf(companyId, state);
+      expect(
+        await refusal(filedNameArgs(companyId, "Lantern Works, LLC", "--replace", "--yes")),
+        state,
+      ).toBe(`refusing: this company has ${kind}; its agreement prints the current name`);
+      expect(filedNameOf(companyId), state).toBe(FILED_NAME);
+    }
+
+    const closed = formedCompany();
+    bodyOf(closed, "abandoned");
+    const { output } = await run<FiledNameRecorded>(
+      filedNameArgs(closed, "Lantern Works, LLC", "--replace", "--yes"),
+    );
+    expect(output).toMatchObject({ recorded: true, replaced: FILED_NAME });
+  });
+
+  test("a first-time set is refused if the company has any legal-body order at all", async () => {
+    // Not reachable through the doors: an order cannot exist without a filed name.
+    const companyId = formedCompany({ legalNameFiled: null });
+    bodyOf(companyId, "abandoned");
+    expect(await refusal(filedNameArgs(companyId, UNMATCHED_NAME, "--yes"))).toMatch(
+      new RegExp(`^refusing: company ${companyId} holds no filed name but has a legal-body order`),
+    );
+    expect(filedNameOf(companyId)).toBeNull();
+  });
+
+  test("a name the agreement's field rule refuses is refused with the rule's reason, and one the rule would change is refused as typed", async () => {
+    const companyId = formedCompany({ legalNameFiled: null });
+    const cases: [string, string][] = [
+      ['Lantern "Works" LLC', "refusing: --name holds a double quote"],
+      ["Lantern​Works LLC", "refusing: --name holds a control or invisible character"],
+      ["Lantern Works LLC", "refusing: --name holds a space other than a plain space"],
+      ["L", "refusing: --name must be 2 to 200 characters long"],
+      [
+        "Lantern {guardian} LLC",
+        "refusing: --name may hold only the characters a Wyoming entity name takes: A-Z, a-z, 0-9, spaces and & ' - , . ( ) +",
+      ],
+    ];
+    for (const [name, expected] of cases)
+      expect(await refusal(filedNameArgs(companyId, name, "--yes")), name).toBe(expected);
+    for (const name of [" Lantern Works LLC", "Lantern Works LLC ", "Lantern  Works LLC"])
+      expect(await refusal(filedNameArgs(companyId, name, "--yes")), name).toMatch(
+        /^refusing: --name would be changed by the agreement's field rule/,
+      );
+    expect(filedNameOf(companyId)).toBeNull();
+  });
+
+  test("refuses a company the State has not filed, one not formed through doola for a legal body, and an unknown one", async () => {
+    for (const filing of ["none", "submitted"] as const) {
+      const companyId = formedCompany({ filing, legalNameFiled: null });
+      expect(await refusal(filedNameArgs(companyId, UNMATCHED_NAME, "--yes"))).toMatch(
+        /^refusing: the State's filing of company formed-\d+ is not confirmed yet/,
+      );
+    }
+    const forAgents = formedCompany({ purposeKind: "agent", legalNameFiled: null });
+    expect(await refusal(filedNameArgs(forAgents, UNMATCHED_NAME, "--yes"))).toMatch(
+      /^refusing: company formed-\d+ was formed for agents, not for a legal body/,
+    );
+    const declared = formedCompany({ provider: "customer", legalNameFiled: null });
+    expect(await refusal(filedNameArgs(declared, UNMATCHED_NAME, "--yes"))).toMatch(
+      /^refusing: company formed-\d+ was not formed through doola \(provider customer\)/,
+    );
+    expect(await refusal(filedNameArgs("no-such-company", UNMATCHED_NAME, "--yes"))).toBe(
+      "refusing: no company no-such-company",
+    );
+    expect(filedNameOf(forAgents)).toBeNull();
+    expect(filedNameOf(declared)).toBeNull();
+  });
+
+  test("refuses the reserved operator name system", async () => {
+    const companyId = formedCompany({ legalNameFiled: null });
+    expect(
+      await refusal([
+        "company:filed-name",
+        companyId,
+        "--name",
+        UNMATCHED_NAME,
+        "--operator",
+        "system",
+        "--yes",
+      ]),
+    ).toMatch(/^refusing: --operator system is reserved/);
+    expect(filedNameOf(companyId)).toBeNull();
   });
 });

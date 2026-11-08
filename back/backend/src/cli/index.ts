@@ -787,7 +787,7 @@ export function buildCli(
   // DB-only, like the formation commands: each opens the configured database itself.
   registerCompanyCheckCommands(program);
 
-  // ── company:dao-supplement — what doola does by hand for a company Novi formed ────────────────
+  // ── company:dao-supplement, company:filed-name — what doola settles by hand for a formed company
   // DB-only, like the company commands: each opens the configured database itself.
   registerFormedCompanyCommands(program);
 
