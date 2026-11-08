@@ -906,9 +906,9 @@ function failCase(
       reason,
       next: "nothing was changed: run the same command with --yes to mark the case failed",
     };
-  // A funded job keeps its budget whatever the row says: no pilot command reclaims it.
+  // A funded job keeps its budget whatever the row says, until the expiry refund takes it back.
   const escrow = ESCROWED.has(row.status)
-    ? `${row.jobId === null ? "the job" : `job ${row.jobId}`} still holds the budget in escrow on chain until a claimRefund after its expiry at ${isoOf(row.expiredAt)}`
+    ? `${row.jobId === null ? "the job" : `job ${row.jobId}`} still holds the budget in escrow on chain until pilot:settle --case ${caseId} --claim-refund takes it back after its expiry at ${isoOf(row.expiredAt)}`
     : null;
   // A forced fail leaves a trace: the event says the guard was overridden and what it cost.
   const stated = escrow === null ? reason : `${reason}; ${escrow}`;
