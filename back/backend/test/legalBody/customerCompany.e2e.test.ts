@@ -6,7 +6,8 @@
  *
  * Two deployments, one per test:
  *  - a production deployment that charges, serving an approved wording under a production World ID
- *    configuration. Its declarant types a name and a title, so this is where the run shows where
+ *    configuration and the guardian identity record. Its declarant's name is written from that
+ *    record (where it is kept encrypted) and its title typed, so this is where the run shows where
  *    they go: into the declaration's table, the typed data the declarant asked to sign and the
  *    operator's `company:show`, and into no other answer, table, ops line or output. A customer's
  *    company is quoted only once one of its legal bodies is linked: here one is linked through the
@@ -50,6 +51,7 @@ import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../../src/persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
@@ -57,11 +59,15 @@ import type { Hex } from "../../src/types";
 import { OnboardingRunner } from "../../src/workflow/runner";
 import {
   ANVIL_ACCOUNT_2,
+  DECLARANT_OF_RECORD,
   FACTORY,
   FORMATION_PROVIDER,
+  NAMES_OF_RECORD,
   SANDBOX_TYPED,
   customerCompanyDeps,
+  identityOver,
   recordHuman,
+  recordIdentity,
   sandboxCustomerCompanyDeps,
 } from "../helpers/customerCompanyFixtures";
 import { CHAIN_ID, fakeChain, paymentCfg } from "../helpers/formationPayment";
@@ -74,13 +80,14 @@ const JWT_SECRET = "test-jwt-secret-that-is-long-enough-to-be-plausible";
 /** An invented fee for a customer's company, in atomic USDC (6 decimals). */
 const CUSTOMER_FEE = 7_000_000n;
 
-/** The declarant's own words: typed on the production deployment, and nowhere else in this file. */
-const DECLARANT_NAME = "Ada Example";
+/** The declarant on the production deployment, and nowhere else in this file: the name written
+ *  from the guardian's identity record (its names of record are NAMES_OF_RECORD), and the title
+ *  typed. */
+const DECLARANT_NAME = DECLARANT_OF_RECORD;
 const DECLARANT_TITLE = "Example Managing Member";
 const COMPANY_NAME = "Example Holdings LLC";
 const FILING_NUMBER = "TEST-0001";
 const TYPED = {
-  declarantName: DECLARANT_NAME,
   declarantTitle: DECLARANT_TITLE,
   companyName: COMPANY_NAME,
   filingNumber: FILING_NUMBER,
@@ -174,12 +181,17 @@ function deploy(charging: boolean) {
   const repo = new SqliteEntityRepository(db);
   const store = new SqliteWorldStore(db);
   const legalBodies = new SqliteLegalBodyRepository(db);
+  const identityRepo = new SqliteIdentityRepository(db);
   const chain = fakeChain();
   const stores = { db, companies, declarations, checks, store };
-  // Production: the approved wording and a production World ID configuration (the fixture's
-  // defaults). Sandbox: the draft wording and a staging one. One chain id for the whole deployment.
+  // Production: the approved wording, a production World ID configuration (the fixture's
+  // defaults) and the identity record over this database. Sandbox: the draft wording and a staging
+  // World ID configuration, and no identity record. One chain id for the whole deployment.
   const doors: CustomerCompanyDeps = charging
-    ? customerCompanyDeps(stores, Date.now, { chainId: CHAIN_ID })
+    ? customerCompanyDeps(stores, Date.now, {
+        chainId: CHAIN_ID,
+        identity: identityOver(identityRepo, Date.now),
+      })
     : sandboxCustomerCompanyDeps(stores, Date.now, { chainId: CHAIN_ID, paymentRequired: false });
   const payment = charging
     ? paymentCfg(payments, { byoFeeAtomic: CUSTOMER_FEE })
@@ -251,6 +263,7 @@ function deploy(charging: boolean) {
     repo,
     store,
     legalBodies,
+    identityRepo,
     chain,
     sagas,
   };
@@ -526,11 +539,19 @@ test("production, charging: a declared company is uploaded, checked, paid, revok
   const d = deploy(true);
   // The guardian is a verified human: its World ID verification, as the verify route records it.
   recordHuman(d.store, guardian.address, "1001", Date.now());
+  // And its identity is verified: a passed record, as the operator's command writes one.
+  recordIdentity(d.identityRepo, guardian.address, {
+    at: Date.now() - DAY_SECONDS * 1000,
+    expiresAt: Date.now() + 3 * 365 * DAY_SECONDS * 1000,
+    names: NAMES_OF_RECORD,
+    nullifier: "1001",
+  });
   const token = await sessionOf();
 
-  // It asks for the statement, signs it and creates the company.
+  // It asks for the statement, signs it and creates the company. The declarant's name in the
+  // typed data is the record's, written by the door.
   const signed = await signedStatement(d, token, TYPED);
-  expect(signed.typedData.message).toMatchObject(TYPED);
+  expect(signed.typedData.message).toMatchObject({ ...TYPED, declarantName: DECLARANT_NAME });
   const created = await call(d, "POST", CREATE, token, { json: signed.body });
   expect(created.status).toBe(201);
   const { companyId } = created.body;

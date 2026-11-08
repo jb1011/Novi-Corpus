@@ -543,19 +543,29 @@ describe("who may use the tools", () => {
     expect(snapshot(w)).toEqual(before);
   });
 
-  test("the real-human check's codes are a closed list, the very codes that check throws, each with its message written as one string literal and answered with the message the door answers", async () => {
+  test("the real-human and identity checks' codes are a closed list, the very codes those checks throw, each with its message written as one string literal and answered with the message the door answers", async () => {
     expect([...REAL_HUMAN_CHECK_CODES].sort()).toEqual([
+      "guardian_identity_not_verified",
       "guardian_not_verified",
+      "identity_unavailable",
       "unavailable",
       "waiver_not_accepted",
     ]);
-    const source = readFileSync(
-      join(import.meta.dirname, "..", "..", "src", "api", "routes", "worldId.ts"),
-      "utf8",
-    );
-    const start = source.indexOf("export function assertRealHuman(");
-    expect(start).toBeGreaterThan(-1);
-    const check = source.slice(start, source.indexOf("\n}\n", start));
+    // The checks whose refusals the tools pass on: the World check and the identity gate.
+    const src = join(import.meta.dirname, "..", "..", "src");
+    const check = (
+      [
+        [["api", "routes", "worldId.ts"], "export function assertRealHuman("],
+        [["identity", "state.ts"], "export function assertIdentityVerified("],
+      ] as const
+    )
+      .map(([path, head]) => {
+        const source = readFileSync(join(src, ...path), "utf8");
+        const start = source.indexOf(head);
+        expect(start, head).toBeGreaterThan(-1);
+        return source.slice(start, source.indexOf("\n}\n", start));
+      })
+      .join("\n");
     const thrown = new Set(
       [...check.matchAll(/new ApiError\(\s*"([a-z_]+)"/g)].map((m) => m[1] as string),
     );

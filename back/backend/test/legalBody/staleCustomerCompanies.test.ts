@@ -45,6 +45,7 @@ import {
   ANVIL_ACCOUNT_2,
   APPROVED,
   CHAIN_ID,
+  DECLARANT_OF_RECORD,
   FACTORY,
   FORMATION_PROVIDER,
   customerCompanyDeps,
@@ -57,9 +58,8 @@ const owner = ANVIL_ACCOUNT_2;
 const OWNER_NULLIFIER = "2001";
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** A declaration as a production caller types it. */
+/** A declaration as a production caller types it: the declarant's name is the identity record's. */
 const TYPED: CustomerStatementInput = {
-  declarantName: "Ada Example",
   declarantTitle: "Manager",
   companyName: "Example Holdings LLC",
   filingNumber: "TEST-0001",
@@ -139,7 +139,7 @@ async function declare(
   const typed = { ...TYPED, filingNumber: opts.filingNumber ?? TYPED.filingNumber };
   const issuedAt = BigInt(Math.floor(startMs / 1000));
   const fields = {
-    declarantName: TYPED.declarantName as string,
+    declarantName: DECLARANT_OF_RECORD,
     declarantTitle: TYPED.declarantTitle as string,
     companyName: typed.companyName,
     jurisdiction: "WY" as const,
@@ -284,7 +284,7 @@ function expectErased(companyId: string, atSeconds: number): void {
 function expectDeclarationKept(companyId: string): void {
   const declaration = declarations.find(companyId);
   expect(declaration).toMatchObject({
-    declarantName: "Ada Example",
+    declarantName: DECLARANT_OF_RECORD,
     declarantTitle: "Manager",
     piiErasedAt: null,
   });

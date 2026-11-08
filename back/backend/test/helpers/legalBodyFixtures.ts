@@ -98,8 +98,9 @@ export const noChain = new Proxy({} as LegalBodyChainPort, {
 });
 
 /** The order deps of a sandbox deployment (the agreement's wording is a draft, which only a
- *  sandbox serves), with room in every throttle and a sleep that returns at once, so a door's
- *  wait for a receipt takes no real time. The chain is whatever `over` gives. */
+ *  sandbox serves), with no identity record, as on the testnet box, which holds no PII key; with
+ *  room in every throttle and a sleep that returns at once, so a door's wait for a receipt takes
+ *  no real time. The chain is whatever `over` gives. */
 export function legalBodyOrderDeps(
   s: LegalBodyStores,
   over: Partial<LegalBodyOrderDeps> = {},
@@ -110,6 +111,7 @@ export function legalBodyOrderDeps(
     declarations: s.declarations,
     checks: s.checks,
     world: worldFor(s.store),
+    identity: undefined,
     chain: noChain,
     docStore: s.docStore,
     deployment: { chainId: CHAIN_ID, factory: FACTORY },

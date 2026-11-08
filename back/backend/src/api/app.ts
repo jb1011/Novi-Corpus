@@ -4,6 +4,7 @@ import type { DoolaEnvironment } from "../adapters/doola/types";
 import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
+import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
 import type { EvidenceDeps } from "../legalBody/evidence";
 import type { GasSeedDeps } from "../legalBody/gasSeed";
@@ -274,6 +275,13 @@ export interface ApiDeps extends EntityViewDeps {
   /** Optional World ID guardian gate (proof-of-personhood). Present only when the WORLD_*
    *  portal credentials are set; absent -> routes not mounted and onboarding is ungated. */
   worldId?: import("./routes/worldId").WorldIdDeps;
+  /**
+   * The guardian identity record (who the guardian is; World ID proves one real person). Present
+   * wherever the PII key is set, since the names of record are encrypted under it; absent on a box
+   * without the key (the testnet box), where `/world-id/me` answers the block with state `none`
+   * and `assertIdentityVerified` refuses a production door with `identity_unavailable`.
+   */
+  identity?: IdentityDeps;
   /** AgentBook (design 2026-08-25 v3). Present wherever the World Chain READ config is, which is
    *  everywhere — reading "is this agent human-backed?" needs nothing but an RPC URL. Its
    *  `registrar` is the optional WRITE half, present iff `canRegisterAgentBook(cfg)`; that
@@ -355,6 +363,8 @@ export type LegalBodyConfig =
       gasSeedOffered: boolean;
       /** A new customer company lands `draft` and owes a payment. */
       paymentRequired: boolean;
+      /** The guardian must pass the identity check before a door files: on production only. */
+      identityRequired: boolean;
       /** The link window a client may ask for, in seconds, counted from the chain's clock. */
       linkTtl: { min: number; max: number; default: number };
     };
@@ -378,6 +388,7 @@ export function legalBodyConfigOf(
     factory: orders.deployment.factory,
     gasSeedOffered: (deps.legalBodyGasSeed?.amountWei ?? 0n) > 0n,
     paymentRequired: deps.customerCompanies?.paymentRequired ?? false,
+    identityRequired: orders.environment === "production",
     linkTtl: {
       min: Number(MIN_SERVED_LINK_TTL_SECONDS),
       max: Number(MAX_SERVED_LINK_TTL_SECONDS),

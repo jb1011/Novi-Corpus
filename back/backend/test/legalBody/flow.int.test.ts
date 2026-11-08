@@ -326,6 +326,8 @@ function deploy(opts: { charging?: boolean; gasSeedUsdc?: string } = {}): Deploy
     declarations,
     checks,
     world,
+    // A sandbox: the guardian identity record is never read, and the testnet box holds none.
+    identity: undefined,
     chain: lb,
     docStore,
     deployment,

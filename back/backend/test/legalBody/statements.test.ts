@@ -655,6 +655,7 @@ describe("the log", () => {
         revocationEventId: null,
         companyStatus: "ready",
         humanVerified: true,
+        identityVerified: false,
       },
     });
 
@@ -687,6 +688,7 @@ describe("the log", () => {
       revocationEventId: null,
       companyStatus: "draft",
       humanVerified: false,
+      identityVerified: false,
     });
   });
 

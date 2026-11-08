@@ -37,6 +37,9 @@ import {
  * A chain read that failed answers `unknown`, unsigned, `no-store` and never memoised: it is the
  * absence of an answer. Only a failed DATABASE read answers 503. No error text reaches an answer
  * or an ops line.
+ *
+ * On production a body answer also carries `guardianIdentityVerified`, beside the statement and
+ * outside it: the signed statement is untouched (statement v3 signs the fact).
  */
 
 /** The three answers. The agent id is the canonical decimal the caller supplied. */
@@ -60,6 +63,10 @@ export type ByAgentAnswer =
       network: "testnet" | "mainnet";
       links: { transparency: string; statement: string };
       checkedAt: string;
+      /** Production only, and NOT SIGNED: whether the guardian's identity record is verified at
+       *  the statement's issue. Absent on a sandbox. Statement v3 signs the fact and removes this
+       *  key; until then this is the fact. */
+      guardianIdentityVerified?: boolean;
       statement: SignedStatementJson;
     };
 
@@ -154,6 +161,10 @@ export function mountLegalBodyStatementRoutes(
               statement: `${st.links.statementBase}${agentId}`,
             },
             checkedAt,
+            // Production only, unsigned, outside the statement: a sandbox answer has no such key.
+            ...(st.environment === "production"
+              ? { guardianIdentityVerified: outcome.guardianIdentityVerified }
+              : {}),
             statement: outcome.statement,
           };
     memo.set(agentId, answer);

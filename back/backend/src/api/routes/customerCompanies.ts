@@ -181,8 +181,10 @@ export function mountCustomerCompanyRoutes(
 
   /**
    * The statement to sign, as EIP-712 typed data in its JSON-safe form, with the version and the
-   * status of its wording. The human, the wording, the synthetic rule and the field rules are all
-   * checked BEFORE anything is rendered, so a caller any of them refuses is never shown a sentence.
+   * status of its wording. The human, on production the identity record, the wording, the synthetic
+   * rule and the field rules are all checked BEFORE anything is rendered, so a caller any of them
+   * refuses is never shown a sentence. On production the declarant's name in it is the one written
+   * from the identity record.
    * It writes nothing: the statement only becomes a declaration once it comes back signed.
    */
   app.post("/companies/customer/statement-message", limit, async (c) => {

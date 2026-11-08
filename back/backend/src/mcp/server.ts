@@ -378,16 +378,19 @@ function onceOnNetwork(insert: () => number): number | null {
 }
 
 /**
- * THE REAL-HUMAN CHECK'S CODES, a closed list: the codes `assertRealHuman` throws, each with a
- * fixed message written beside it there, which the doors answer as it is. The legal-body tools
- * answer those messages too, for these three codes and for no other code outside the flow's table.
- * A code the check gains later is answered `internal_error` by the tools until it is listed here;
- * a test holds this list to the codes the check throws.
+ * THE REAL-HUMAN AND IDENTITY CHECKS' CODES, a closed list: the codes `assertRealHuman` and
+ * `assertIdentityVerified` throw, each with a fixed message written beside it there, which the
+ * doors answer as it is. The legal-body tools answer those messages too, for these codes and for
+ * no other code outside the flow's table. A code a check gains later is answered `internal_error`
+ * by the tools until it is listed here; a test holds this list to the codes the checks throw.
  */
 export const REAL_HUMAN_CHECK_CODES: ReadonlySet<string> = new Set([
   "unavailable",
   "guardian_not_verified",
   "waiver_not_accepted",
+  // The identity gate's: they pass through with their own message, like the three World codes.
+  "guardian_identity_not_verified",
+  "identity_unavailable",
 ]);
 
 /** A legal-body tool's refusal: its code and its fixed sentence, as one JSON object. */
@@ -400,7 +403,8 @@ const codeRefusal = (code: string, message: string): ToolRefusal =>
  * can carry the node's URL. So:
  *  - a code of the flow's table answers the table's sentence, built from the code, never read off
  *    the error;
- *  - a code of the real-human check answers that check's own fixed message, as the doors do;
+ *  - a code of the real-human or identity check answers that check's own fixed message, as the
+ *    doors do;
  *  - anything else answers `internal_error`, after one line that names the tool and the error's
  *    NAME, never its message.
  */
