@@ -611,6 +611,19 @@ describe("pilot:settle --tx and --dropped: the options", () => {
   );
 });
 
+describe("pilot:case show", () => {
+  test("prints a settle/sent event with its hash, the trail that names a send's transaction", async () => {
+    const f = makeFake();
+    const caseId = seed(f, { status: "settling", patch: SETTLING_COMPLETE });
+    f.cases.recordEvent(caseId, "settle", "sending", null, `complete ${reasonFor("287")}`);
+    f.cases.recordEvent(caseId, "settle", "sent", TX, "complete");
+    const [out] = await f.run(["pilot:case", "show", caseId]);
+    expect(out!.events).toContainEqual(
+      expect.objectContaining({ step: "settle", status: "sent", ref: TX, detail: "complete" }),
+    );
+  });
+});
+
 describe("pilot:poll prints the settlement it would take", () => {
   test("a pay ruling on a submitted job reads as complete", async () => {
     const f = makeFake();
