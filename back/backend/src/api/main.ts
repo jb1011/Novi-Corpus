@@ -628,6 +628,9 @@ async function main() {
           companies,
           declarations: companyDeclarations,
           checks: companyChecks,
+          // The steps the attestation reads too: a formed company is eligible once its filing is
+          // confirmed.
+          formationSteps: (companyId: string) => formationRequests.stepsOf(companyId),
           world: worldId,
           // The guardian identity record built above: on production an order requires a verified
           // one, as the declared door does; a sandbox never reads it.

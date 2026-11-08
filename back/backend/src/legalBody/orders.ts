@@ -2,6 +2,7 @@ import type { Address, Hex } from "viem";
 import type { LegalBodyChainPort } from "../adapters/arc/legalBodyChain";
 import { type WorldIdDeps, assertRealHuman } from "../api/routes/worldId";
 import { ApiError } from "../errors";
+import { companyFiled } from "../formation/status";
 import { type IdentityDeps, assertIdentityVerified } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
@@ -9,6 +10,7 @@ import type { CompanyCheckRepository } from "../persistence/companyCheckReposito
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
 import type { CompanyRepository } from "../persistence/companyRepository";
 import type { DocumentStore } from "../persistence/documentStore";
+import type { FormationRequestRecord } from "../persistence/formationRepository";
 import type {
   BindingState,
   BrokenReason,
@@ -19,7 +21,8 @@ import type {
   LegalBodyRepository,
 } from "../persistence/legalBodyRepository";
 import { buildAgreement, storeAgreement } from "./agreement";
-import { publicCompanyNames } from "./attestation";
+import { filedCompanyNames, publicCompanyNames } from "./attestation";
+import { filedNamesPrintable } from "./companyFields";
 import { CUSTOMER_PROVIDER } from "./provider";
 import { refusal } from "./sentences";
 import { LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
@@ -35,7 +38,8 @@ import { LEGAL_BODY_OPERATING_AGREEMENT } from "./texts/operatingAgreement";
  *  - the deps of every door (`LegalBodyOrderDeps`);
  *  - the one boundary between a door and the chain (`chainCall`);
  *  - the doors' throttles (`takeDoorTokens`);
- *  - the one rule of which company may stand behind a body (`companyEligible`);
+ *  - the one rule of which company may stand behind a body (`companyEligible`), and of the names
+ *    its agreement prints (`companyNamesForOrder`);
  *  - the order's view, which serialises as it is (no bigint), and the facts it carries beside the
  *    row (`orderViewFacts`).
  *
@@ -48,6 +52,10 @@ export interface LegalBodyOrderDeps {
   companies: CompanyRepository;
   declarations: CompanyDeclarationRepository;
   checks: CompanyCheckRepository;
+  /** A company's formation steps, as the attestation reads them: whether the state has filed a
+   *  formed company is `companyFiled` of these. A customer's company has none, and they are never
+   *  read for one. */
+  formationSteps: (companyId: string) => FormationRequestRecord[];
   world: WorldIdDeps | undefined;
   /** The guardian identity record. Production requires a verified one before an order is written
    *  (absent there, the order door answers 503 `identity_unavailable`); a sandbox never reads it. */
@@ -233,15 +241,44 @@ export function toOrderView(row: LegalBodyRecord, facts: OrderViewFacts): LegalB
 }
 
 /**
- * The one rule of which company may stand behind a legal body: a customer's own company, not
- * abandoned, whose latest check passed. A failed, revoked or reinstated company waits for a new
- * passed check; a company filed through formation is never eligible here.
+ * The one rule of which company may stand behind a legal body: a company for a legal body (never
+ * one for agents), not abandoned, and established:
+ *  - a customer's own company, by its latest check, which passed. A failed, revoked or reinstated
+ *    company waits for a new passed check;
+ *  - a company filed through formation, by the state's confirmed filing, and only once its row
+ *    carries the filed name and the filing number its agreement prints. A filed name that matched
+ *    none of the company's options was never written, and an operator writes it.
+ * Whose company it is, each door asks before.
  */
-export function companyEligible(deps: LegalBodyOrderDeps, companyId: string): boolean {
+export function companyEligible(
+  deps: Pick<LegalBodyOrderDeps, "companies" | "checks" | "formationSteps">,
+  companyId: string,
+): boolean {
   const company = deps.companies.find(companyId);
   if (company === undefined) return false;
-  if (company.provider !== CUSTOMER_PROVIDER || company.status === "abandoned") return false;
-  return deps.checks.latest(companyId)?.result === "passed";
+  if (company.status === "abandoned" || company.purposeKind !== "legal_body") return false;
+  if (company.provider === CUSTOMER_PROVIDER)
+    return deps.checks.latest(companyId)?.result === "passed";
+  return companyFiled(deps.formationSteps(companyId)) && filedCompanyNames(company) !== null;
+}
+
+/**
+ * The name and the filing number an order's agreement prints for a company, or null when there is
+ * none to print:
+ *  - a customer's company: the declared ones, once its latest check passed and only while its
+ *    declaration stands (`publicCompanyNames`);
+ *  - a company filed through formation: the filed ones, as its row holds them, once it holds both
+ *    (`filedCompanyNames`).
+ */
+export function companyNamesForOrder(
+  deps: Pick<LegalBodyOrderDeps, "companies" | "declarations" | "checks">,
+  companyId: string,
+): { legalName: string; filingNumber: string } | null {
+  const company = deps.companies.find(companyId);
+  if (company === undefined) return null;
+  if (company.provider === CUSTOMER_PROVIDER)
+    return publicCompanyNames(deps.declarations.find(companyId), deps.checks.latest(companyId));
+  return filedCompanyNames(company);
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -254,8 +291,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *     check says who. A sandbox reads nothing here;
  *  2. the agreement's wording can be served (a production deployment refuses a draft);
  *  3. the company is the tenant's (one 404 for unknown and not-yours) and eligible;
- *  4. the agreement is built, before anything is written. It names the company by the declared
- *     name and filing number its passed check stands behind, and nothing else;
+ *  4. the agreement is built, before anything is written. It names the company by the names
+ *     `companyNamesForOrder` reads, and nothing else: a customer's company by the declared name
+ *     and filing number its passed check stands behind; a formed company by the filed name and
+ *     filing number its row holds, printed as they stand, so a filed fact the agreement cannot
+ *     print (`filedNamesPrintable`) is refused, never cleaned;
  *  5. one transaction: the two caps are counted, the draft is created, the agreement is stored
  *     and frozen, and the tenant's `ordered` note is written.
  * A throw anywhere in step 5 rolls the row back. The files are written inside it, so a failure
@@ -284,16 +324,17 @@ export function createOrder(
 
   // 3.
   const companyId = typeof input?.companyId === "string" ? input.companyId : undefined;
-  if (companyId === undefined || deps.companies.findOwned(tenantId, companyId) === undefined)
-    throw refusal("not_found", 404);
+  const owned = companyId === undefined ? undefined : deps.companies.findOwned(tenantId, companyId);
+  if (companyId === undefined || owned === undefined) throw refusal("not_found", 404);
   if (!companyEligible(deps, companyId)) throw refusal("company_not_eligible", 409);
 
-  // 4. A declaration erased, or paired with another company's check, names nothing.
-  const names = publicCompanyNames(
-    deps.declarations.find(companyId),
-    deps.checks.latest(companyId),
-  );
+  // 4. A declaration erased, or paired with another company's check, names nothing. A filed
+  //    name or number the agreement cannot print is for an operator to set; a declared company's
+  //    names were held to the same field rules when they were declared.
+  const names = companyNamesForOrder(deps, companyId);
   if (names === null) throw refusal("company_not_eligible", 409);
+  if (owned.provider !== CUSTOMER_PROVIDER && !filedNamesPrintable(names))
+    throw refusal("company_name_unusable", 409);
   const built = buildAgreement(
     {
       companyName: names.legalName,

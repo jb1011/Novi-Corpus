@@ -1,7 +1,6 @@
 import type { Address, Hex } from "viem";
 import { type WorldIdDeps, assertRealHuman } from "../api/routes/worldId";
 import { ApiError } from "../errors";
-import { NAME_CHARSET_SOURCE } from "../formation/intake";
 import { composeDeclarantName } from "../identity/names";
 import { type IdentityDeps, assertIdentityVerified, namesOfRecordAtDoor } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
@@ -14,6 +13,7 @@ import type { CompanyRepository } from "../persistence/companyRepository";
 import type { GuardianIdentityCheck } from "../persistence/identityRepository";
 import type { GuardianVerification } from "../persistence/worldStore";
 import { sqliteUtcTimestamp } from "../util/sqliteTime";
+import { COMPANY_NAME, FILING_NUMBER } from "./companyFields";
 import { CUSTOMER_PROVIDER } from "./provider";
 import { automaticSandboxCheck, isAutomaticSandboxCheck, processOsUser } from "./sandboxCheck";
 import {
@@ -139,25 +139,12 @@ const DECLARANT_TITLE: TextRule = {
   charsProblem:
     "may hold only letters, digits, spaces, apostrophes, hyphens, full stops, &, / and commas",
 };
-/** The characters the formation intake accepts in a Wyoming entity name. */
-const COMPANY_NAME: TextRule = {
-  min: 2,
-  max: 200,
-  chars: new RegExp(`^[${NAME_CHARSET_SOURCE}]+$`),
-  charsProblem:
-    "may hold only the characters a Wyoming entity name takes: A-Z, a-z, 0-9, spaces and & ' - , . ( ) +",
-};
-/** On a sandbox, a name that says it is a test, so a sandbox record cannot pass for a real
- *  company's. */
+/** The company name and the filing number are held to the legal texts' own rules
+ *  (`companyFields.ts`), the ones a formed company's filed facts are held to too. On a sandbox, a
+ *  name that also says it is a test, so a sandbox record cannot pass for a real company's. */
 const SANDBOX_COMPANY_NAME: TextRule = {
   ...COMPANY_NAME,
   also: { pattern: /\btest\b/i, problem: "must say it is a test on this deployment" },
-};
-const FILING_NUMBER: TextRule = {
-  min: 4,
-  max: 32,
-  chars: /^[0-9A-Za-z-]+$/,
-  charsProblem: "may hold only A-Z, a-z, 0-9 and hyphens",
 };
 /** On a sandbox, a test number, so a sandbox declaration can never name a real Wyoming filing. */
 const SANDBOX_FILING_NUMBER: TextRule = {

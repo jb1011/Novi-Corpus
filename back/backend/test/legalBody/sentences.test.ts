@@ -63,6 +63,7 @@ const NAMED_CODES = [
   "busy",
   "rate_limited",
   "company_not_eligible",
+  "company_name_unusable",
   "order_expired",
   "order_revoked",
   "order_closed",

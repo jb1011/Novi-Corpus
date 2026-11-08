@@ -1,7 +1,7 @@
 import { companyFiled } from "../formation/status";
 import type { CompanyCheck, CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclaration } from "../persistence/companyDeclarationRepository";
-import type { CompanyRepository } from "../persistence/companyRepository";
+import type { CompanyRecord, CompanyRepository } from "../persistence/companyRepository";
 import type { FormationRequestRecord } from "../persistence/formationRepository";
 import { CUSTOMER_PROVIDER } from "./provider";
 
@@ -111,7 +111,8 @@ export function attestationFactsFor(
 }
 
 /**
- * The names a public surface may show: null unless the latest check passed.
+ * The names a public surface may show of a customer's company: null unless the latest check
+ * passed.
  *
  * Until the operator has checked a declaration, the LLC name and the filing number are only the
  * declarant's word, and they stay inside the tenant's own view. An erased declaration (its company
@@ -124,4 +125,17 @@ export function publicCompanyNames(
   if (d === undefined || d.piiErasedAt !== null) return null;
   if (latest?.result !== "passed" || latest.companyId !== d.companyId) return null;
   return { legalName: d.companyName, filingNumber: d.filingNumber };
+}
+
+/**
+ * The names of a company filed through formation: the filed name and the filing number its row
+ * carries, null unless it carries both. The processor writes them when the state confirms the
+ * filing (the filed name only when doola's reported name matches one of the company's options),
+ * and they are public registry facts, so nothing waits on an operator's check here.
+ */
+export function filedCompanyNames(
+  company: Pick<CompanyRecord, "legalNameFiled" | "filingNumber">,
+): { legalName: string; filingNumber: string } | null {
+  if (company.legalNameFiled === null || company.filingNumber === null) return null;
+  return { legalName: company.legalNameFiled, filingNumber: company.filingNumber };
 }

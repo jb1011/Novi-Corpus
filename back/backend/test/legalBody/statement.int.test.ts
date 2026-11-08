@@ -296,6 +296,7 @@ function deploy(opts: DeployOptions = {}): Deployment {
     companies,
     declarations,
     checks,
+    formationSteps: (companyId) => requests.stepsOf(companyId),
     world,
     // A sandbox: the guardian identity record is never read, and the testnet box holds none.
     identity: undefined,

@@ -21,6 +21,10 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
     "This deployment does not take legal-body orders yet: the wording of the operating agreement is not approved for use with a real company.",
   company_not_eligible:
     "This company cannot stand behind a legal body: it must be a company you declared, not abandoned, whose latest check by the operator passed.",
+  // A formed company whose filed name or filing number the agreement cannot print as the row holds
+  // it: refused, never cleaned.
+  company_name_unusable:
+    "The filed company name cannot be printed in the agreement as it stands: an operator must set it.",
   legal_body_cap:
     "You already hold as many open legal-body orders as you may at once: finish or abandon one before you order another.",
   legal_body_orders:

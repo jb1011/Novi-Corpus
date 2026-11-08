@@ -32,6 +32,7 @@ import {
   type CompanyRepository,
   SqliteCompanyRepository,
 } from "../../src/persistence/companyRepository";
+import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import {
   type LegalBodyRecord,
   SqliteLegalBodyRepository,
@@ -100,16 +101,19 @@ export const noChain = new Proxy({} as LegalBodyChainPort, {
 /** The order deps of a sandbox deployment (the agreement's wording is a draft, which only a
  *  sandbox serves), with no identity record, as on the testnet box, which holds no PII key; with
  *  room in every throttle and a sleep that returns at once, so a door's wait for a receipt takes
- *  no real time. The chain is whatever `over` gives. */
+ *  no real time. A formed company's formation steps are read from the same database. The chain is
+ *  whatever `over` gives. */
 export function legalBodyOrderDeps(
   s: LegalBodyStores,
   over: Partial<LegalBodyOrderDeps> = {},
 ): LegalBodyOrderDeps {
+  const requests = new SqliteFormationRepository(s.db);
   return {
     repo: s.repo,
     companies: s.companies,
     declarations: s.declarations,
     checks: s.checks,
+    formationSteps: (companyId) => requests.stepsOf(companyId),
     world: worldFor(s.store),
     identity: undefined,
     chain: noChain,
