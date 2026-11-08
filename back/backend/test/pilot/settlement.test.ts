@@ -41,7 +41,12 @@ import {
   refuseWhileSendMayRun,
   settleCase,
 } from "../../src/pilot/settlement";
-import type { PilotCaseRecord, PilotMode, PilotStatus } from "../../src/pilot/types";
+import type {
+  KlerosChainOnRow,
+  PilotCaseRecord,
+  PilotMode,
+  PilotStatus,
+} from "../../src/pilot/types";
 import { sqliteUtcTimestamp } from "../../src/util/sqliteTime";
 import {
   JOB_CONTRACT,
@@ -4332,29 +4337,39 @@ describe("refundUnfiledCase: a case whose filing started", () => {
     expect(s.cases.countFiled("testnet")).toBe(1);
   });
 
-  test.each<[PilotStatus, RegExp]>([
-    [
-      "filing",
-      /is filing: a filing of it may still be running, and its dispute may exist; wait until 30 minutes after its filing started, then record its dispute ids with pilot:case set-ids and settle it, or run pilot:dispute on it with --yes, which freezes a filing that stopped at filing_unknown; nothing was sent$/,
-    ],
-    [
-      "filing_unknown",
-      /is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids, then pilot:settle --case pc_[0-9a-f]{12} --claim-refund takes its expiry path, or mark it failed with pilot:case fail once Kleros confirms none exists, then run this command again; nothing was sent$/,
-    ],
+  /** The words of a filing in doubt, naming each command with the flags the case's mode needs. */
+  const inDoubt = (status: PilotStatus, caseId: string, mode: PilotMode) => {
+    const confirm = mode === "rehearsal" ? "" : ` --${mode}`;
+    const force = mode === "rehearsal" ? "" : " --force";
+    return status === "filing"
+      ? `case ${caseId} is filing: a filing of it may still be running, and its dispute may exist; wait until 30 minutes after its filing started, then record its dispute ids with pilot:case set-ids, which moves it to filed, or run pilot:dispute --case ${caseId}${confirm} --yes, which freezes a filing that stopped, at evidence_unknown when it holds a dispute id and at filing_unknown when it holds none; at filed or evidence_unknown, pilot:settle --case ${caseId} --claim-refund settles it`
+      : `case ${caseId} is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids, then pilot:settle --case ${caseId} --claim-refund takes its expiry path, or, once Kleros confirms none exists, mark it failed with pilot:case fail ${caseId} --reason <why>${force} --yes, then run this command again`;
+  };
+
+  test.each<[PilotStatus, PilotMode, KlerosChainOnRow]>([
+    ["filing", "rehearsal", "fake"],
+    ["filing", "testnet", "arbitrum-sepolia-testnet"],
+    ["filing", "live", "arbitrum-one"],
+    ["filing_unknown", "rehearsal", "fake"],
+    ["filing_unknown", "testnet", "arbitrum-sepolia-testnet"],
+    ["filing_unknown", "live", "arbitrum-one"],
   ])(
-    "a case at %s is refused before any read, naming the command that resolves it",
-    async (status, words) => {
-      const s = setup({ chainStatus: 2 });
+    "a case at %s in %s mode is refused before any read, naming each command that resolves it with the flags the mode needs",
+    async (status, mode, klerosChain) => {
+      const s = setup({ chainStatus: 2, stageMode: mode });
       const caseId = seedUnfiled(s, status, {
-        patch: { filingStartedAt: NOW - 100, klerosChain: "fake" },
+        mode,
+        patch: { filingStartedAt: NOW - 100, klerosChain },
       });
       s.clock.sec = REFUND_TIME;
       const reads = chainReads(s);
       const before = snapshot(s, caseId);
-      for (const send of [true, false])
-        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
-          new RegExp(`^refusing: case ${caseId} ${words.source}`),
+      for (const send of [true, false]) {
+        const err = await refundUnfiledCase(s.deps, caseId, { send }).catch((e: unknown) => e);
+        expect((err as Error).message).toBe(
+          `refusing: ${inDoubt(status, caseId, mode)}; nothing was sent`,
         );
+      }
       for (const spy of reads) expect(spy).not.toHaveBeenCalled();
       expect(s.node.sends).toEqual([]);
       expect(snapshot(s, caseId)).toEqual(before);

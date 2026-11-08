@@ -1377,12 +1377,18 @@ export interface UnfiledRefund {
   written?: boolean;
 }
 
-/** Why a filing in doubt is not refunded yet, naming the command that resolves it first. */
+/**
+ * Why a filing in doubt is not refunded yet, naming each command that resolves it first with the
+ * flags the case's mode needs: in testnet and live, pilot:dispute files only with the mode's own
+ * flag, and pilot:case fail fails a case the cap counts only with --force.
+ */
 function filingInDoubt(row: PilotCaseRecord): string {
   const { caseId } = row;
+  const confirm = row.mode === "rehearsal" ? "" : ` --${row.mode}`;
+  const force = row.mode === "rehearsal" ? "" : " --force";
   if (row.status === "filing")
-    return `case ${caseId} is filing: a filing of it may still be running, and its dispute may exist; wait until ${FILING_IN_PROGRESS_SECONDS / 60} minutes after its filing started, then record its dispute ids with pilot:case set-ids and settle it, or run pilot:dispute on it with --yes, which freezes a filing that stopped at filing_unknown`;
-  return `case ${caseId} is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids, then pilot:settle --case ${caseId} --claim-refund takes its expiry path, or mark it failed with pilot:case fail once Kleros confirms none exists, then run this command again`;
+    return `case ${caseId} is filing: a filing of it may still be running, and its dispute may exist; wait until ${FILING_IN_PROGRESS_SECONDS / 60} minutes after its filing started, then record its dispute ids with pilot:case set-ids, which moves it to filed, or run pilot:dispute --case ${caseId}${confirm} --yes, which freezes a filing that stopped, at evidence_unknown when it holds a dispute id and at filing_unknown when it holds none; at filed or evidence_unknown, pilot:settle --case ${caseId} --claim-refund settles it`;
+  return `case ${caseId} is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids, then pilot:settle --case ${caseId} --claim-refund takes its expiry path, or, once Kleros confirms none exists, mark it failed with pilot:case fail ${caseId} --reason <why>${force} --yes, then run this command again`;
 }
 
 /**
