@@ -321,8 +321,11 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *     filing number its row holds, printed as they stand, so a filed fact the agreement cannot
  *     print (`filedNamesPrintable`) is refused, never cleaned. Its manifest states the company's
  *     source: `customer` or `novi` (`companySourceOf`);
- *  5. one transaction: the two caps are counted, the draft is created, the agreement is stored
- *     and frozen, and the tenant's `ordered` note is written.
+ *  5. one transaction: the names are read again and must be the ones the agreement prints (an
+ *     operator's `company:filed-name --replace` committed after step 4 is answered
+ *     `company_not_eligible`, never a draft printing the superseded name), the two caps are
+ *     counted, the draft is created, the agreement is stored and frozen, and the tenant's
+ *     `ordered` note is written.
  * A throw anywhere in step 5 rolls the row back. The files are written inside it, so a failure
  * after they were written leaves at most two orphan files, named by an id no row holds.
  */
@@ -375,9 +378,18 @@ export function createOrder(
     { source: companySourceOf(owned.provider) },
   );
 
-  // 5. The caps are counted inside the transaction that writes, which holds the write lock from
-  //    its first statement: another writer cannot add an order between the count and the insert.
+  // 5. The names and the caps are read inside the transaction that writes, which holds the write
+  //    lock from its first statement: another writer cannot change the names, or add an order,
+  //    between these reads and the insert. A writer that committed before it (the operator's
+  //    command, on its own connection) is seen here, and its names are not the agreement's.
   const row = deps.transaction((): LegalBodyRecord => {
+    const current = companyNamesForOrder(deps, companyId);
+    if (
+      current === null ||
+      current.legalName !== names.legalName ||
+      current.filingNumber !== names.filingNumber
+    )
+      throw refusal("company_not_eligible", 409);
     if (deps.repo.countOpenByTenant(tenantId, nowMs) >= deps.maxOpenPerTenant)
       throw refusal("legal_body_cap", 409);
     if (

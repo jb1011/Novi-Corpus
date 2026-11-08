@@ -266,6 +266,44 @@ describe("a company formed for a legal body", () => {
       "company_not_eligible",
     );
   });
+
+  test("a filed name corrected between the door's read and its write: company_not_eligible, and no draft prints the superseded name", () => {
+    const companyId = formedCompany();
+    // The operator's `company:filed-name --replace` commits after the door read the names and
+    // built the agreement, just before the door's write transaction takes the lock.
+    const deps = orderDeps({
+      transaction: (fn) => {
+        s.companies.recordFilingFacts(companyId, { legalNameFiled: "Lantern Works, LLC" });
+        return s.repo.transaction(fn);
+      },
+    });
+    const err = refusalOf(() => createOrder(deps, tenant, { companyId }));
+    expect(err.code).toBe("company_not_eligible");
+    expect(err.status).toBe(409);
+    expect(err.message).toBe(LEGAL_BODY_SENTENCES.company_not_eligible);
+    expect(rowCount()).toBe(0);
+    expect(s.docStore.files.size).toBe(0);
+
+    // The next order prints the corrected name.
+    const view = createOrder(orderDeps(), tenant, { companyId });
+    expect(s.docStore.get(agreementDocNames(view.id).terms)).toContain(
+      '# Operating Agreement of "Lantern Works, LLC"',
+    );
+  });
+
+  test("a filing number changed between the door's read and its write is refused the same way", () => {
+    const companyId = formedCompany();
+    const deps = orderDeps({
+      transaction: (fn) => {
+        s.companies.recordFilingFacts(companyId, { filingNumber: "2026-000451208" });
+        return s.repo.transaction(fn);
+      },
+    });
+    expect(refusalOf(() => createOrder(deps, tenant, { companyId })).code).toBe(
+      "company_not_eligible",
+    );
+    expect(rowCount()).toBe(0);
+  });
 });
 
 describe("a formed company the operator revoked", () => {

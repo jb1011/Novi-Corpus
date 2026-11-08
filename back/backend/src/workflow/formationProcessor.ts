@@ -534,6 +534,13 @@ export function matchFiledNameAgainst(
  * the State's record prints it: the candidate and our own entity ending (`withEntityEnding`). An
  * agent company keeps the bare candidate, exactly as before: the published manifests of the full
  * product commit to that string, and a changed form would re-hash every one of them.
+ *
+ * A LEGAL-BODY COMPANY'S NAME, ONCE HELD, IS NEVER REWRITTEN HERE. Its filed name may be the
+ * operator's, typed from the State's record (`company:filed-name`), and the record is the truth:
+ * a later poll that matches a candidate must not put the candidate's form back. So for such a
+ * company that already holds a name this returns null, which both writers (the confirmation and
+ * `healFilingFacts`) store as "no new name" (`recordFilingFacts` keeps a value against a null). An
+ * agent company is matched on every poll, exactly as before.
  */
 function matchFiledName(
   d: FormationAdvanceDeps,
@@ -543,6 +550,7 @@ function matchFiledName(
   const reported = company.name?.trim();
   if (!reported) return null;
   const row = d.companies.find(companyId);
+  if (row?.purposeKind === "legal_body" && row.legalNameFiled !== null) return null;
   const stored = row?.nameOptions ?? [];
   const hit = matchFiledNameAgainst(stored, reported);
   if (hit !== null) return row?.purposeKind === "legal_body" ? withEntityEnding(hit) : hit;

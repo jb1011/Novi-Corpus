@@ -813,6 +813,55 @@ test("a reported name that matches no candidate writes no name, whatever the com
   expect(company()?.legalNameFiled).toBeNull();
 });
 
+test("a legal-body company's held name is never rewritten by a later poll: an operator's correction from the State's record stands", async () => {
+  seedCompanyFiling("legal_body");
+  filedAs("Formation Agent");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBe("Formation Agent LLC");
+
+  // The operator's correction, as `company:filed-name --replace` writes it.
+  expect(companies.recordFilingFacts(COMPANY_KEY, { legalNameFiled: "Formation Agent, LLC" })).toBe(
+    true,
+  );
+  // A later poll matches a stored option again, and learns a new filing number: the number heals,
+  // the name stays the operator's.
+  doola.state.company = {
+    doolaCompanyId: COMPANY_ID,
+    name: "Formation Agent",
+    formationFilingDate: "2026-08-19",
+    formationFilingNumber: "2026-007654321",
+  };
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.filingNumber).toBe("2026-007654321");
+  expect(company()?.legalNameFiled).toBe("Formation Agent, LLC");
+  // Nor does a poll that reports the other option.
+  filedAs("Formation Agent Two");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBe("Formation Agent, LLC");
+});
+
+test("a legal-body company holding a name when its filing is confirmed keeps it", async () => {
+  seedCompanyFiling("legal_body");
+  // Set before the confirmation, as an operator's record of the filing may.
+  companies.recordFilingFacts(COMPANY_KEY, { legalNameFiled: "Formation Agent Two, LLC" });
+  filedAs("Formation Agent");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.filingNumber).toBe("2026-001234567");
+  expect(company()?.legalNameFiled).toBe("Formation Agent Two, LLC");
+});
+
+test("an agent company's held name is matched on every poll, exactly as before", async () => {
+  seedCompanyFiling("agent");
+  filedAs("Formation Agent");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBe("Formation Agent");
+  companies.recordFilingFacts(COMPANY_KEY, { legalNameFiled: "Something Else" });
+  filedAs("Formation Agent Two");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBe("Formation Agent Two");
+});
+
 // ── matchFiledNameAgainst: the one rule a reported name is held to, wherever it is reported ─────
 
 describe("matchFiledNameAgainst", () => {
