@@ -1306,6 +1306,89 @@ describe("settleCase: a re-send on a real deployment reads Kleros again", () => 
   });
 });
 
+describe("settleCase: an escrow the chain settled keeps the action the chain agrees with", () => {
+  const ELSEWHERE_NOTE = (name: string) =>
+    `the chain shows the job ${name}, moved by a transaction whose hash this row does not hold; the hash of our own send may be unknown`;
+
+  test.each<["complete" | "reject" | "claimRefund", number, string]>([
+    ["complete", 3, "Completed"],
+    ["reject", 4, "Rejected"],
+    ["claimRefund", 5, "Expired"],
+  ])(
+    "a settling row that chose %s, holding no hash, on a job at status %i keeps its action",
+    async (action, status, name) => {
+      const s = setup({ script: "pay", chainStatus: status });
+      const caseId = seedSettlingNoHash(s, {
+        patch: {
+          settleAction: action,
+          settleReason: action === "claimRefund" ? null : reasonFor(DISPUTE),
+        },
+      });
+      const lines: string[] = [];
+      vi.spyOn(console, "log").mockImplementation((m) => lines.push(String(m)));
+      const r = await settleCase(s.deps, caseId, { send: true });
+      expect(r.settlement.action).toBe("none");
+      expect(s.node.sends).toEqual([]);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "settled",
+        settleAction: action,
+        settleTxHash: null,
+      });
+      expect(s.cases.events(caseId).at(-1)).toMatchObject({
+        step: "settle",
+        status: "chain",
+        ref: null,
+        detail: ELSEWHERE_NOTE(name),
+      });
+      const settled = lines
+        .map((l) => JSON.parse(l) as Record<string, unknown>)
+        .find((l) => l.opslog === "pilot_case_settled");
+      expect(settled).toMatchObject({ caseId, action, txHash: null });
+    },
+  );
+
+  test.each<["complete" | "reject" | "claimRefund", number]>([
+    ["complete", 4],
+    ["complete", 5],
+    ["reject", 3],
+    ["reject", 5],
+    ["claimRefund", 3],
+    ["claimRefund", 4],
+  ])(
+    "a settling row that chose %s, on a job at status %i, is recorded with no action of ours",
+    async (action, status) => {
+      const s = setup({ script: "pay", chainStatus: status });
+      const caseId = seedSettlingNoHash(s, {
+        patch: {
+          settleAction: action,
+          settleReason: action === "claimRefund" ? null : reasonFor(DISPUTE),
+        },
+      });
+      await settleCase(s.deps, caseId, { send: true });
+      expect(s.node.sends).toEqual([]);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "settled",
+        settleAction: "none",
+        settleTxHash: null,
+      });
+      expect(s.cases.events(caseId).at(-1)!.detail).toMatch(/hash of our own send may be unknown/);
+    },
+  );
+
+  test("a row that chose no action is recorded with none, as before", async () => {
+    const s = setup({ script: "pay", chainStatus: 3 });
+    const caseId = seed(s, { status: "ruled", patch: STORED_PAY });
+    await settleCase(s.deps, caseId, { send: true });
+    expect(s.node.sends).toEqual([]);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "settled",
+      settleAction: "none",
+      settleTxHash: null,
+      escrowOutcome: "released",
+    });
+  });
+});
+
 describe("settleCase: refusals and the ruling read", () => {
   test("a row of another mode is refused with zero reads and zero sends", async () => {
     const s = setup({ stageMode: "testnet" });

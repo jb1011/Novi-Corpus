@@ -476,8 +476,19 @@ export function checkEscrowIsOwn(row: PilotCaseRecord, jobId: bigint, escrow: Es
     );
 }
 
-/** The escrow is settled on chain: the row follows it, with our hash only when its receipt
- *  says our transaction succeeded. */
+/** The status each of the three transactions leaves the job at. */
+const STATUS_AFTER: Record<SendAction, number> = {
+  complete: JobStatusOnChain.completed,
+  reject: JobStatusOnChain.rejected,
+  claimRefund: JobStatusOnChain.expired,
+};
+
+/**
+ * The escrow is settled on chain: the row follows it, with our hash only when its receipt says
+ * our transaction succeeded. Without that hash, the action the row chose is kept when the chain
+ * shows the status that action leaves, since our own send may be the one that landed with its
+ * hash unknown; `none` is written when they differ or the row chose no action.
+ */
 function recordElsewhere(
   d: SettleDeps,
   row: PilotCaseRecord,
@@ -486,7 +497,9 @@ function recordElsewhere(
   at: number,
   hash: Hex | null,
 ): { settlement: Settlement } {
-  const action = hash === null ? "none" : row.settleAction;
+  const chose = row.settleAction;
+  const agrees = chose !== null && chose !== "none" && STATUS_AFTER[chose] === escrow.status;
+  const action = hash !== null || agrees ? chose : "none";
   d.cases.transaction(() => {
     const moved = d.cases.advance(row.caseId, row.status, "settled", {
       settleAction: action,
