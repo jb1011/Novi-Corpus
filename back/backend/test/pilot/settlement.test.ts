@@ -1887,20 +1887,67 @@ describe("settleCase: refusals and the ruling read", () => {
           rulingReadAt: readAt,
         },
       });
+      // A read that fails the options check clears the time of the stored read, so no settle
+      // trusts the stored verdict until a read passes again.
       const first = await settleCase(s.deps, caseId, { send: true });
       expect(first.settlement).toEqual({ action: "none", why: "options_mismatch" });
       expect(s.node.sends).toEqual([]);
-      expect(s.cases.find(caseId)).toMatchObject({ status: "ruled", rulingReadAt: readAt });
+      expect(s.cases.find(caseId)).toMatchObject({ status: "ruled", rulingReadAt: null });
       s.clock.sec += 60;
       const second = await settleCase(s.deps, caseId, { send: true });
       expect(second.settlement).toEqual({ action: "none", why: "options_mismatch" });
       expect(s.node.sends).toEqual([]);
-      expect(s.cases.find(caseId)).toMatchObject({ status: "ruled", rulingReadAt: readAt });
+      expect(s.cases.find(caseId)).toMatchObject({ status: "ruled", rulingReadAt: null });
       // Once the options read right again, the next settle acts on the verdict it reads.
       next = appealRead("1");
       const third = await settleCase(s.deps, caseId, { send: true });
       expect(third.settlement.action).toBe("complete");
       expect(s.node.sends).toHaveLength(1);
+    },
+  );
+
+  test.each(
+    (["Appeal", "Executed"] as const).flatMap((status) =>
+      FAILING_OPTIONS.map(
+        ([name, failing]): [DisputeRead["status"], string, Partial<DisputeRead>] => [
+          status,
+          name,
+          failing,
+        ],
+      ),
+    ),
+  )(
+    "a verdict read a minute before a round-1 re-read at %s with options %s is read again live by the next settle, and never sent on",
+    async (status, _name, failing) => {
+      let next = appealRead("1");
+      const { s, reads } = testnetStage(() => next);
+      const caseId = seed(s, {
+        mode: "testnet",
+        patch: { klerosChain: "arbitrum-sepolia-testnet" },
+      });
+      const poll = {
+        stage: s.stage,
+        cases: s.cases,
+        expected: EXPECTED,
+        now: () => s.clock.sec * 1000,
+      };
+      expect((await pollOnce(poll, caseId)).outcome.kind).toBe("pay");
+      expect(s.cases.find(caseId)).toMatchObject({ status: "ruled", rulingReadAt: NOW });
+      next = { ...appealRead("1"), status, ruled: status === "Executed", ...failing };
+      s.clock.sec += 60;
+      expect((await pollOnce(poll, caseId)).outcome.kind).toBe("options_mismatch");
+      // Two minutes after the verdict's read, well inside the ten minutes a stored read is
+      // trusted for: the failed check sends the settle to Kleros all the same.
+      s.clock.sec += 60;
+      const r = await settleCase(s.deps, caseId, { send: true });
+      expect(r.settlement).toEqual({ action: "none", why: "options_mismatch" });
+      expect(reads).toHaveLength(3);
+      expect(s.node.sends).toEqual([]);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "ruled",
+        rulingValue: "1",
+        rulingReadAt: null,
+      });
     },
   );
 

@@ -463,16 +463,34 @@ describe("pollOnce", () => {
     expect(s.cases.find(s.row.caseId)).toEqual(ruled);
   });
 
-  test.each<[string, Partial<DisputeRead>, string]>([
+  // The time of the read: a read that kept the stored ruling must not renew the trust a settle
+  // puts in it, so a pending or tied read leaves the time the ruling was taken at, and a read that
+  // failed the options check clears it, so the next settle reads Kleros live.
+  test.each<[string, Partial<DisputeRead>, string, "kept" | "cleared"]>([
     [
       "an options mismatch",
       { rulingOptions: [{ value: "1", title: "Something else" }] },
       "options_mismatch",
+      "cleared",
     ],
-    ["a tie at Appeal", { ruling: "0", tied: true }, "tied"],
+    [
+      "an options mismatch at Executed",
+      {
+        status: "Executed",
+        ruled: true,
+        rulingOptions: [
+          { value: "1", title: "Refund the client" },
+          { value: "2", title: "Pay the provider" },
+        ],
+      },
+      "options_mismatch",
+      "cleared",
+    ],
+    ["a tie at Appeal", { ruling: "0", tied: true }, "tied", "kept"],
+    ["a read at Vote", { status: "Vote", ruling: "0", tied: true }, "pending", "kept"],
   ])(
     "a re-read of a ruled row that is %s keeps the stored ruling and records the outcome",
-    async (_name, o, kind) => {
+    async (_name, o, kind, readTime) => {
       let next = read({ ruling: "2" });
       const service = stubService(() => next);
       const t = setup({ stage: testnetStage(service) });
@@ -495,11 +513,10 @@ describe("pollOnce", () => {
         rulingTied: ruled.rulingTied,
         rulingLabel: ruled.rulingLabel,
         rulingRoundCount: 1,
-        // The time of the read is the one the stored ruling was taken at: a read that kept it
-        // must not renew the trust a settle puts in it.
-        rulingReadAt: ruled.rulingReadAt,
+        rulingReadAt: readTime === "kept" ? ruled.rulingReadAt : null,
         rulingDeadline: "2026-11-01T00:00:00.000Z",
       });
+      expect(ruled.rulingReadAt).not.toBeNull();
       expect(after.rulingReadAt).not.toBe(Math.floor(t.clock.now / 1000));
       expect(t.cases.events(row.caseId).at(-1)).toMatchObject({
         step: "ruling",

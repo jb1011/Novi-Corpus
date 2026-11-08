@@ -200,11 +200,12 @@ export function stageChainProblem(stage: KlerosStage, row: PilotCaseRecord): str
  * columns with the time of the read. Advances `filed` or `evidence_unknown` to `ruled` when the
  * outcome is final (pay, refund, refused, or a tie at Executed). On a row already ruled, a read
  * that is neither final nor an appeal keeps the stored ruling: only the period and the deadline
- * are written, with an event naming the outcome. The time of the read is not written, because a
- * settle trusts a stored ruling for ten minutes after that time and a read that failed the
- * options check must not renew the trust. An appeal is written in full. A rehearsal row at ruled
- * is refused. Refuses, before any request, a row of another mode than the stage's, a row without
- * a chain or a dispute id, a row at another status, and a row whose chain is not the one the
+ * are written, with an event naming the outcome. A settle trusts a stored ruling for ten minutes
+ * after the time of its read, so such a read never renews that time: a pending, tied or
+ * unexpected read leaves it as it is, and a read that failed the options check clears it, so the
+ * next settle reads Kleros live. An appeal is written in full. A rehearsal row at ruled is
+ * refused. Refuses, before any request, a row of another mode than the stage's, a row without a
+ * chain or a dispute id, a row at another status, and a row whose chain is not the one the
  * stage's service reads.
  */
 export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult> {
@@ -236,10 +237,14 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   // settle sees the new round instead of acting on the first one.
   const appeal = read.roundCount > 1;
   const keepRuling = from === "ruled" && !final && !appeal;
+  // A read that failed the options check revokes the trust in the stored verdict: with no time
+  // of read, the next settle reads Kleros live instead of acting on it from the row.
+  const mismatch = outcome.kind === "options_mismatch";
   const written: Partial<PilotCaseRecord> = keepRuling
     ? {
         rulingStatus: patch.rulingStatus,
         rulingDeadline: patch.rulingDeadline,
+        ...(mismatch ? { rulingReadAt: null } : {}),
       }
     : patch;
   d.cases.transaction(() => {
@@ -264,7 +269,9 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
         "ruling",
         outcome.kind,
         row.coreDisputeId,
-        "a read of the ruled case was not final; the stored ruling is kept",
+        mismatch
+          ? "a read of the ruled case failed the options check; the stored ruling is kept, and the next settle reads Kleros again before acting on it"
+          : "a read of the ruled case was not final; the stored ruling is kept",
       );
   });
   if (read.deadline === null) return { read, outcome };
