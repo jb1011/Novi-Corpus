@@ -307,14 +307,6 @@ export function recordReadFailed(
   return text;
 }
 
-/**
- * A refusal because the ruling could not be read. Its words hold the service's, already
- * redacted by `klerosTextOf`, so a command prints them as they are: through
- * `publicErrorMessage`, a fee wallet's "insufficient funds" in Kleros's answer would read as the
- * platform's own wallet. The name stays `Error`, as every other refusal's.
- */
-export class RulingReadRefusal extends Error {}
-
 const DEFAULT_INTERVAL_MS = 30_000;
 const DEFAULT_MAX_MINUTES = 180;
 /** A watch rides out this many failed reads in a row (an outage of the service or the network,

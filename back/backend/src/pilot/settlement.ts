@@ -21,7 +21,6 @@ import { jobCallOf, withoutEmDash } from "./job";
 import { klerosTextOf } from "./klerosCheck";
 import {
   type RulingOutcome,
-  RulingReadRefusal,
   isKlerosReadFailure,
   pollOnce,
   readRuling,
@@ -115,7 +114,7 @@ function refundTimeReached(expiredAt: bigint, nowSeconds: number): boolean {
 }
 
 function notYetExpired(expiredAt: bigint): Error {
-  return new Error(
+  return new SettleRefusal(
     `refusing: the job expires at ${isoOf(expiredAt)}; no claimRefund until ${REFUND_CLOCK_MARGIN_SECONDS} seconds after that, a margin for the difference between this box's clock and chain time, and nothing was sent`,
   );
 }
@@ -236,14 +235,19 @@ export const CLAIM_REFUND_UNFILED_ROUTE: ReadonlySet<PilotStatus> = new Set([
   "filing_unknown",
 ]);
 
-function refuse(message: string): never {
-  throw new Error(`refusing: ${message}; nothing was sent`);
-}
+/**
+ * A refusal of the settlement, of the recovery or of the expiry refund: nothing was sent. Its
+ * words are this module's own, and every outside text in them is already redacted
+ * (`publicErrorMessage` for a chain read, `klerosTextOf` for a Kleros one), so a command prints
+ * them whole: a refusal names what to run next and ends saying nothing was sent, and a cut at a
+ * line's length would lose both. Never through `publicErrorMessage` again, whose fixed sentences
+ * would also read a fee wallet's "insufficient funds" in Kleros's answer as the platform's own
+ * wallet. The name stays `Error`, as every other refusal's.
+ */
+export class SettleRefusal extends Error {}
 
-/** A refusal because the ruling could not be read, its words already in the service's redacted
- *  ones: the command prints it as it is. */
-function refuseUnread(message: string): never {
-  throw new RulingReadRefusal(`refusing: ${message}; nothing was sent`);
+function refuse(message: string): never {
+  throw new SettleRefusal(`refusing: ${message}; nothing was sent`);
 }
 
 /** The settle events that are a send or the outcome of one, as opposed to a read or the chain's.
@@ -345,7 +349,7 @@ async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<Ruling
     read = await d.stage.service.getDispute({ chain: klerosChain, coreDisputeId });
   } catch (e) {
     const text = isKlerosReadFailure(e) ? recordReadFailed(d.cases, caseId, e) : klerosTextOf(e);
-    refuseUnread(`case ${caseId}'s ruling could not be read again before a new send: ${text}`);
+    refuse(`case ${caseId}'s ruling could not be read again before a new send: ${text}`);
   }
   const outcome = readRuling(read, d.expected);
   d.cases.recordEvent(caseId, "settle", "reread", coreDisputeId, outcome.kind);
@@ -506,9 +510,7 @@ export async function settleCase(
     } catch (e) {
       if (!isKlerosReadFailure(e)) throw e;
       // As the poll's watch does: the failed read leaves its line on the case's trail.
-      refuseUnread(
-        `case ${caseId}'s ruling could not be read: ${recordReadFailed(d.cases, caseId, e)}`,
-      );
+      refuse(`case ${caseId}'s ruling could not be read: ${recordReadFailed(d.cases, caseId, e)}`);
     }
     row = d.cases.find(caseId) as PilotCaseRecord;
   }

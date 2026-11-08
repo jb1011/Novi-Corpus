@@ -22,7 +22,7 @@ import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
 import { type KlerosStage, type PilotChain, buildPilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
-import { type RulingOutcome, RulingReadRefusal, pollOnce } from "../../src/pilot/ruling";
+import { type RulingOutcome, pollOnce } from "../../src/pilot/ruling";
 import {
   DROP_GRACE_SECONDS,
   EXPIRY_MARGIN_SECONDS,
@@ -31,6 +31,7 @@ import {
   REFUND_CLOCK_MARGIN_SECONDS,
   SEND_IN_FLIGHT_SECONDS,
   type SettleDeps,
+  SettleRefusal,
   adoptSettleTx,
   clearDroppedSettleTx,
   decideSettlement,
@@ -1423,7 +1424,7 @@ describe("settleCase: a re-send on a real deployment reads Kleros again", () => 
     const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
     const err = await settleCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
     const text = "Kleros dispute_get: insufficient funds for gas at client.js";
-    expect(err).toBeInstanceOf(RulingReadRefusal);
+    expect(err).toBeInstanceOf(SettleRefusal);
     expect((err as Error).message).toBe(
       `refusing: case ${caseId}'s ruling could not be read again before a new send: ${text}; nothing was sent`,
     );
@@ -2017,7 +2018,7 @@ describe("settleCase: refusals and the ruling read", () => {
       });
       for (const send of [true, false]) {
         const err = await settleCase(s.deps, caseId, { send }).catch((e: unknown) => e);
-        expect(err).toBeInstanceOf(RulingReadRefusal);
+        expect(err).toBeInstanceOf(SettleRefusal);
         expect((err as Error).message).toBe(
           `refusing: case ${caseId}'s ruling could not be read: ${text}; nothing was sent`,
         );

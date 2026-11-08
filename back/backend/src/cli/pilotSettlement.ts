@@ -20,7 +20,6 @@ import {
   type PollDeps,
   type PollResult,
   type RulingOutcome,
-  RulingReadRefusal,
   isKlerosReadFailure,
   pollOnce,
   pollUntilRuled,
@@ -30,6 +29,7 @@ import {
   CLAIM_REFUND_UNFILED_ROUTE,
   REFUND_CLOCK_MARGIN_SECONDS,
   type SettleDeps,
+  SettleRefusal,
   type Settlement,
   type UnfiledEscrowRead,
   adoptSettleTx,
@@ -112,14 +112,15 @@ function print(output: Record<string, unknown>): void {
 }
 
 /**
- * The words a command fails with. A failed Kleros read, or a refusal built on one, is in the
- * service's own words, redacted (`klerosTextOf`): `publicErrorMessage`'s fixed sentences would
- * read a fee wallet's "insufficient funds" in Kleros's answer as the platform's own wallet. Any
- * other failure, a chain or an escrow read's included, goes through `publicErrorMessage`, with
- * every absolute file path cut to its file name.
+ * The words a command fails with, never with an absolute file path. A settle's refusal is printed
+ * whole: its words are already redacted, and it ends saying nothing was sent. A failed Kleros read
+ * is in the service's own words, redacted (`klerosTextOf`): `publicErrorMessage`'s fixed
+ * sentences would read a fee wallet's "insufficient funds" in Kleros's answer as the platform's
+ * own wallet. Any other failure, a chain or an escrow read's included, goes through
+ * `publicErrorMessage`.
  */
 function failureText(e: unknown): string {
-  if (e instanceof RulingReadRefusal) return withoutEmDash(e.message);
+  if (e instanceof SettleRefusal) return withoutEmDash(withoutPaths(e.message));
   if (isKlerosReadFailure(e)) return klerosTextOf(e);
   return withoutEmDash(withoutPaths(publicErrorMessage(e)));
 }

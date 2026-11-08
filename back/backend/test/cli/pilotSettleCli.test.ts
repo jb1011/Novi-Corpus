@@ -581,6 +581,21 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
     },
   );
 
+  test.each<[PilotStatus]>([["filing"], ["filing_unknown"]])(
+    "the refusal of a case at %s is printed whole, however long, down to its last words",
+    async (status) => {
+      const f = makeFake({ chainStatus: 2, nowSec: REFUND_TIME });
+      const caseId = seedUnfiled(f, status, { filingStartedAt: NOW - 100, klerosChain: "fake" });
+      const err = await f
+        .run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"])
+        .catch((e: Error) => e);
+      const message = (err as Error).message;
+      expect(message).toMatch(new RegExp(`^refusing: case ${caseId} is ${status}`));
+      expect(message.length).toBeGreaterThan(300);
+      expect(message.endsWith("; nothing was sent")).toBe(true);
+    },
+  );
+
   test("without --claim-refund a case never filed is refused, as before", async () => {
     const f = makeFake({ chainStatus: 1, nowSec: REFUND_TIME });
     const caseId = seedUnfiled(f, "funded");
@@ -838,6 +853,25 @@ describe("pilot:settle --dropped", () => {
     );
     expect(f.cases.find(caseId)!.settleTxHash).toBe(TX);
     expect(f.closed()).toBe(1);
+  });
+
+  test("a receipt read that fails is refused with no file path in the words", async () => {
+    const f = makeFake();
+    const caseId = seed(f, {
+      status: "settling",
+      patch: { ...SETTLING_COMPLETE, settleTxHash: TX },
+    });
+    sendingEvent(f, caseId, 3600);
+    vi.spyOn(f.node.receipts, "get").mockImplementation(() => {
+      throw new Error("ENOENT: no such file or directory, open /var/lib/arc/node/receipts.db");
+    });
+    const err = await f
+      .run(["pilot:settle", "--case", caseId, "--dropped", "--yes"])
+      .catch((e: Error) => e);
+    expect((err as Error).message).toBe(
+      `refusing: the receipt of ${TX} could not be read: ENOENT: no such file or directory, open receipts.db; nothing was sent`,
+    );
+    expect(f.cases.find(caseId)!.settleTxHash).toBe(TX);
   });
 });
 
