@@ -2,8 +2,8 @@
  * The settle's recovery on anvil, through `pilot:settle`'s own wiring: MockUSDC and
  * MockERC8183Job, the buyer as the job's client, the seller as its provider, the referee as its
  * evaluator, and the real `buildPilotChain` over anvil's clients. Each case is seeded in its own
- * database on a real submitted job, as the earlier commands would have left it; the box is in
- * rehearsal mode, the Kleros side is the scripted fake, and no Kleros read is taken.
+ * database on a real job, as the earlier commands would have left it; the box is in rehearsal
+ * mode, the Kleros side is the scripted fake, and no Kleros read is taken.
  */
 import { Command } from "commander";
 import { http, type Hex, createPublicClient, encodeFunctionData } from "viem";
@@ -16,7 +16,7 @@ import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
 import { type PilotChain, buildPilotChain } from "../../src/pilot/composition";
 import type { PilotContext } from "../../src/pilot/context";
-import { reasonFor } from "../../src/pilot/settlement";
+import { REFUND_CLOCK_MARGIN_SECONDS, reasonFor } from "../../src/pilot/settlement";
 import type { PilotCaseRecord, PilotStatus } from "../../src/pilot/types";
 import { type MockJobEnv, deployMockJob } from "../helpers/anvilJob";
 
@@ -51,8 +51,22 @@ afterAll(() => env?.stop());
 
 const blockSeconds = async () => Number((await env.publicClient.getBlock()).timestamp);
 
-/** Create, budget, fund and submit, each by the account the contract requires. */
-async function submittedJob(): Promise<{ jobId: bigint; expiredAt: number }> {
+/** Anvil's clock, moved past a deadline. `evm_increaseTime` alone does not mine a block. */
+async function warp(seconds: number): Promise<void> {
+  for (const [id, method, params] of [
+    [1, "evm_increaseTime", [seconds]],
+    [2, "evm_mine", []],
+  ] as const) {
+    await fetch(env.rpcUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+    });
+  }
+}
+
+/** Create, budget and fund, each by the account the contract requires. */
+async function fundedJob(): Promise<{ jobId: bigint; expiredAt: number }> {
   const expiredAt = (await blockSeconds()) + WEEK;
   const { jobId } = await chain.job.createJob({
     provider: env.providerAddr,
@@ -62,9 +76,16 @@ async function submittedJob(): Promise<{ jobId: bigint; expiredAt: number }> {
   });
   await chain.job.setBudget(jobId, BUDGET, env.providerWallet);
   await chain.job.approveAndFund(jobId, env.usdcAddr, BUDGET);
-  await chain.job.submit(jobId, DELIVERABLE, env.providerWallet);
-  expect((await chain.job.escrowState(jobId)).status).toBe(2);
+  expect((await chain.job.escrowState(jobId)).status).toBe(1);
   return { jobId, expiredAt };
+}
+
+/** A funded job, then submitted by the provider. */
+async function submittedJob(): Promise<{ jobId: bigint; expiredAt: number }> {
+  const job = await fundedJob();
+  await chain.job.submit(job.jobId, DELIVERABLE, env.providerWallet);
+  expect((await chain.job.escrowState(job.jobId)).status).toBe(2);
+  return job;
 }
 
 /** A rehearsal case on the job at `status`, in a database of its own, holding a first-round
@@ -210,5 +231,59 @@ describe("the settle's recovery on anvil", () => {
       detail: "complete",
     });
     expect(await refereeNonce()).toBe(nonceBefore);
+  });
+
+  // Last: the warp moves anvil's clock for every later job.
+  test("--claim-refund on a case funded but never filed, past the expiry and the margin, refunds the buyer from the referee and the case ends failed", async () => {
+    const job = await fundedJob();
+    const { cases, caseId } = seedCase(job, "funded", {
+      klerosChain: null,
+      coreDisputeId: null,
+      rulingValue: null,
+      rulingTied: null,
+      rulingRoundCount: null,
+    });
+    await warp(WEEK + 120);
+    const now = await blockSeconds();
+    expect(now).toBeGreaterThan(job.expiredAt + Number(REFUND_CLOCK_MARGIN_SECONDS));
+
+    const [dryRun] = await settleCommand(cases, ["--case", caseId, "--claim-refund"], now);
+    expect(dryRun).toMatchObject({
+      dryRun: true,
+      status: "funded",
+      settlement: { action: "claimRefund" },
+      escrow: { status: "Funded", budgetAtomic: BUDGET.toString(), expiredAt: job.expiredAt },
+      send: { action: "claimRefund", jobId: job.jobId.toString(), from: env.evaluatorAddr },
+    });
+    expect(cases.find(caseId)).toMatchObject({ status: "funded", settleAction: null });
+
+    const before = await env.usdcBalanceOf(env.clientAddr);
+    const [out] = await settleCommand(cases, ["--case", caseId, "--claim-refund", "--yes"], now);
+    const hash = out!.txHash as Hex;
+    const tx = await env.publicClient.getTransaction({ hash });
+    expect(tx.from.toLowerCase()).toBe(env.evaluatorAddr.toLowerCase());
+    expect(await env.usdcBalanceOf(env.clientAddr)).toBe(before + BUDGET);
+    expect((await chain.job.escrowState(job.jobId)).status).toBe(5);
+    expect(cases.find(caseId)).toMatchObject({
+      status: "failed",
+      settleAction: "claimRefund",
+      settleTxHash: hash,
+      settledAt: now,
+      escrowOutcome: "refunded",
+      error: "expired; escrow refunded by claimRefund",
+      filingStartedAt: null,
+    });
+    expect(
+      cases
+        .events(caseId)
+        .filter((e) => e.step === "settle")
+        .map((e) => [e.status, e.ref]),
+    ).toEqual([
+      ["sending", null],
+      ["sent", hash],
+      ["ok", hash],
+    ]);
+    // A failed case whose filing never started is out of the cap's count.
+    expect(cases.countFiled("rehearsal")).toBe(0);
   });
 });
