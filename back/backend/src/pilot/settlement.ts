@@ -183,10 +183,16 @@ function refuse(message: string): never {
 
 /**
  * Refuses while the case's latest `settle/sending` event is younger than
- * {SEND_IN_FLIGHT_SECONDS} on the settle's clock. The database stamps the event; a stamp that
- * cannot be read refuses too, since an unknown age never lets a second send through.
+ * {SEND_IN_FLIGHT_SECONDS} on the settle's clock, whatever the row's status. The database stamps
+ * the event; a stamp that cannot be read refuses too, since an unknown age never lets a second
+ * send through. Run it before any read and again inside the transaction that records the next
+ * `settle/sending` event, so two runs cannot both pass it.
  */
-function refuseWhileSendMayRun(cases: PilotCaseRepository, caseId: string, nowSec: number): void {
+export function refuseWhileSendMayRun(
+  cases: PilotCaseRepository,
+  caseId: string,
+  nowSec: number,
+): void {
   const last = cases
     .events(caseId)
     .filter((e) => e.step === "settle" && e.status === "sending")
@@ -525,18 +531,20 @@ type SendAction = Extract<Settlement, { action: "complete" | "reject" | "claimRe
 
 /**
  * The hash of a settle's transaction, written the moment the node accepted it and before its
- * receipt is waited for: on the row while the row is at settling, and as a `settle/sent` event
- * with the action, whatever the row's status, so a row another command moved keeps the hash on
- * its trail. One transaction; it throws only when the database write fails.
+ * receipt is waited for: on the row while it is still at `status` (the status the send was
+ * recorded at; `settling` for a settle), and as a `settle/sent` event with the action, whatever
+ * the row's status, so a row another command moved keeps the hash on its trail. One transaction;
+ * it throws only when the database write fails.
  */
 export function recordBroadcast(
   cases: PilotCaseRepository,
   caseId: string,
+  status: PilotStatus,
   action: SendAction,
   hash: Hex,
 ): void {
   cases.transaction(() => {
-    cases.advance(caseId, "settling", "settling", { settleTxHash: hash });
+    cases.advance(caseId, status, status, { settleTxHash: hash });
     cases.recordEvent(caseId, "settle", "sent", hash, action);
   });
 }
@@ -585,7 +593,7 @@ async function send(
   const hook = {
     onBroadcast: (hash: Hex) => {
       broadcast = hash;
-      recordBroadcast(d.cases, caseId, action, hash);
+      recordBroadcast(d.cases, caseId, "settling", action, hash);
     },
   };
   let txHash: Hex;
