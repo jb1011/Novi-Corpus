@@ -470,6 +470,8 @@ export async function createCustomerCompany(
       businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
       industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
       intakeSynthesized: false,
+      // A customer's own company stands behind a legal body, never behind an agent.
+      purposeKind: "legal_body",
     });
     deps.declarations.insert({
       companyId,

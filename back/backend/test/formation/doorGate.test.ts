@@ -84,6 +84,7 @@ function newCompany(
     businessPurpose: "purpose",
     industryLabel: "Software development",
     intakeSynthesized: true,
+    purposeKind: "agent",
   });
 }
 

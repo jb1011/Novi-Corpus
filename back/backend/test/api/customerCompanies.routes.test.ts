@@ -667,6 +667,7 @@ describe("the company view", () => {
       businessPurpose: "Operating autonomous software agents.",
       industryLabel: "Software development",
       intakeSynthesized: false,
+      purposeKind: "agent",
     });
 
     const view = await (await get(app, `/companies/${companyId}`, token)).json();

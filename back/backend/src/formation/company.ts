@@ -289,6 +289,7 @@ export function createCompany(
         businessPurpose: built.businessPurpose,
         industryLabel: built.industryLabel,
         intakeSynthesized: built.synthesized,
+        purposeKind: "agent",
       });
       // THROWN, not returned. better-sqlite3 rolls a transaction back on an EXCEPTION and on
       // nothing else: a callback that returns `false` COMMITS, and the company row it just

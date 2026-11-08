@@ -25,6 +25,13 @@ import { SANDBOX_AUTOMATIC_OPERATOR } from "../legalBody/sandboxCheck";
  */
 export type CompanyStatus = "draft" | "ready" | "abandoned";
 
+/**
+ * What a company is FOR. `agent`: it stands behind agents of the full product. `legal_body`: it
+ * stands behind a legal body and never behind an agent (a customer's own declared company always,
+ * a formed one when its intake asked for it). Written by the creator, never changed afterwards.
+ */
+export type CompanyPurposeKind = "agent" | "legal_body";
+
 export interface CompanyRecord {
   companyId: string;
   tenantId: string;
@@ -49,6 +56,7 @@ export interface CompanyRecord {
   ein: string | null;
   createdAt: string;
   updatedAt: string;
+  purposeKind: CompanyPurposeKind;
 }
 
 export type NewCompany = Omit<
@@ -73,6 +81,7 @@ interface Row {
   ein: string | null;
   created_at: string;
   updated_at: string;
+  purpose_kind: CompanyPurposeKind;
 }
 
 function toRecord(r: Row): CompanyRecord {
@@ -93,6 +102,7 @@ function toRecord(r: Row): CompanyRecord {
     ein: r.ein,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    purposeKind: r.purpose_kind,
   };
 }
 
@@ -134,6 +144,13 @@ export interface CompanyRepository {
    * `countCustomerOpenByTenant`, and does not use up the formation quota.
    */
   countChargeableByTenant(tenantId: string): number;
+  /**
+   * Formed legal-body companies SPENT or COMMITTED on, over every tenant: provider `doola`,
+   * purpose `legal_body`, and `ready` or carrying a live payment. The `countChargeableByTenant`
+   * rule without the tenant, so a draft nobody pays for and an abandoned company take no place
+   * under the formed door's total cap. A customer's own company is never counted.
+   */
+  countChargeableFormedLegalBodies(): number;
   /**
    * A tenant's customer companies that are still open: provider `customer`, status `draft` or
    * `ready`. The cap on a tenant's open declarations reads it, so an abandoned one has left it.
@@ -280,16 +297,13 @@ export class SqliteCompanyRepository implements CompanyRepository {
    *  an operator command that runs without the migration (`formation:abandon`) constructs this
    *  repository too. */
   private staleStmts?: { list: Database.Statement; one: Database.Statement };
+  /** The statements that name `purpose_kind`, prepared on first use for the same reason: a
+   *  database this build has not migrated lacks the column, and `formation:abandon` constructs
+   *  this repository without migrating. */
+  private purposeStmts?: { insert: Database.Statement; countFormed: Database.Statement };
 
   constructor(private readonly db: Database.Database) {
     this.stmts = {
-      insert: db.prepare(
-        `INSERT INTO companies
-           (company_id, tenant_id, status, provider, environment, synthetic,
-            name_options, business_purpose, industry_label, intake_synthesized)
-         VALUES (@company_id, @tenant_id, @status, @provider, @environment, @synthetic,
-                 @name_options, @business_purpose, @industry_label, @intake_synthesized)`,
-      ),
       find: db.prepare("SELECT * FROM companies WHERE company_id = ?"),
       findOwned: db.prepare("SELECT * FROM companies WHERE company_id = ? AND tenant_id = ?"),
       listByTenant: db.prepare(
@@ -369,9 +383,34 @@ export class SqliteCompanyRepository implements CompanyRepository {
     };
   }
 
+  private purpose(): { insert: Database.Statement; countFormed: Database.Statement } {
+    this.purposeStmts ??= {
+      insert: this.db.prepare(
+        `INSERT INTO companies
+           (company_id, tenant_id, status, provider, environment, synthetic,
+            name_options, business_purpose, industry_label, intake_synthesized, purpose_kind)
+         VALUES (@company_id, @tenant_id, @status, @provider, @environment, @synthetic,
+                 @name_options, @business_purpose, @industry_label, @intake_synthesized,
+                 @purpose_kind)`,
+      ),
+      // `countChargeable`'s rule without the tenant. 'doola' names the formation provider, so a
+      // customer's own company (CUSTOMER_PROVIDER), whatever its purpose, is never counted.
+      countFormed: this.db.prepare(
+        `SELECT COUNT(*) AS n FROM companies c
+          WHERE c.provider = 'doola'
+            AND c.purpose_kind = 'legal_body'
+            AND (c.status = 'ready'
+                 OR EXISTS (SELECT 1 FROM formation_payments p
+                             WHERE p.company_id = c.company_id
+                               AND p.status IN ('quoted','settling')))`,
+      ),
+    };
+    return this.purposeStmts;
+  }
+
   create(input: NewCompany): string {
     const companyId = input.companyId ?? randomUUID();
-    this.stmts.insert.run({
+    this.purpose().insert.run({
       company_id: companyId,
       tenant_id: input.tenantId,
       status: input.status,
@@ -382,6 +421,7 @@ export class SqliteCompanyRepository implements CompanyRepository {
       business_purpose: input.businessPurpose,
       industry_label: input.industryLabel,
       intake_synthesized: input.intakeSynthesized ? 1 : 0,
+      purpose_kind: input.purposeKind,
     });
     return companyId;
   }
@@ -417,6 +457,10 @@ export class SqliteCompanyRepository implements CompanyRepository {
 
   countChargeableByTenant(tenantId: string): number {
     return (this.stmts.countChargeable.get(tenantId) as { n: number }).n;
+  }
+
+  countChargeableFormedLegalBodies(): number {
+    return (this.purpose().countFormed.get() as { n: number }).n;
   }
 
   countCustomerOpenByTenant(tenantId: string): number {

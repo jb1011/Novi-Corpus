@@ -166,6 +166,7 @@ function customerCompany(): string {
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind: "legal_body",
   });
 }
 

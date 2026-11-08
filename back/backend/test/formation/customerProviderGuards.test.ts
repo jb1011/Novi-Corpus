@@ -69,6 +69,7 @@ function customerCompany(status: CompanyStatus): string {
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind: "legal_body",
   });
 }
 
@@ -87,6 +88,7 @@ function formationCompany(
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: DEFAULT_INDUSTRY,
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 

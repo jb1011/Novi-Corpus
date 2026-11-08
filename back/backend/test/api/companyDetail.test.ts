@@ -89,6 +89,7 @@ function newCompany(over: Partial<Parameters<SqliteCompanyRepository["create"]>[
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
     ...over,
   });
 }

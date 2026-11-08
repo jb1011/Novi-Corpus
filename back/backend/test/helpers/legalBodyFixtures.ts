@@ -227,6 +227,7 @@ export function customerCompany(
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind: provider === CUSTOMER_PROVIDER ? "legal_body" : "agent",
   });
   if (provider === CUSTOMER_PROVIDER)
     s.declarations.insert({

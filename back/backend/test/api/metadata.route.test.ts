@@ -72,6 +72,7 @@ function attachCompany(over: { environment?: "sandbox" | "production" } = {}): v
       businessPurpose: "purpose",
       industryLabel: "Software development",
       intakeSynthesized: true,
+      purposeKind: "agent",
     });
   repo.attachCompany(KEY, COMPANY_KEY);
 }

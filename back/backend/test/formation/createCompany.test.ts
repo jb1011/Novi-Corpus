@@ -261,6 +261,7 @@ test("a DRAFT company does not consume the quota — only spent or committed one
     businessPurpose: "p",
     industryLabel: "i",
     intakeSynthesized: true,
+    purposeKind: "agent",
   });
   expect(companies.countChargeableByTenant(TENANT)).toBe(0);
   expect("companyId" in createCompany(deps({ maxPerTenant: 1 }), TENANT, intake(newParty()))).toBe(

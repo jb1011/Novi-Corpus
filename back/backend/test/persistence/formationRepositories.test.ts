@@ -405,6 +405,7 @@ test("abandonFormation is ONE transaction: the step and the company move togethe
     businessPurpose: "p",
     industryLabel: "i",
     intakeSynthesized: true,
+    purposeKind: "agent",
   });
   formation.claimStep(companyId, "create_provider");
   formation.transition(companyId, "create_provider", "pending", "failed", { error: "doola 503" });

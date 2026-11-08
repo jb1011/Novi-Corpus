@@ -82,6 +82,7 @@ function company(status: "draft" | "ready" = "draft"): CompanyRecord {
     businessPurpose: "software",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   return companies.find(id)!;
 }

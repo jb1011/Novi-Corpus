@@ -66,6 +66,7 @@ function company(companyId: string, status: CompanyStatus = "draft"): void {
     businessPurpose: "placeholder",
     industryLabel: "placeholder",
     intakeSynthesized: false,
+    purposeKind: "legal_body",
   });
   if (status !== "draft") expect(companies.setStatus(companyId, "draft", status)).toBe(true);
 }

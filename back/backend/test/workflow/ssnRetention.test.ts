@@ -86,6 +86,7 @@ function holding(ageMs: number): { partyId: string; companyId: string } {
     businessPurpose: "p",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   db.prepare("UPDATE companies SET created_at = ? WHERE company_id = ?").run(
     sqliteUtcTimestamp(NOW - ageMs),

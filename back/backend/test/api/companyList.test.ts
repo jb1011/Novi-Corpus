@@ -41,6 +41,7 @@ function seed(n: number): string[] {
       businessPurpose: `purpose ${i}`,
       industryLabel: "Software development",
       intakeSynthesized: true,
+      purposeKind: "agent",
     });
     ids.push(id);
     // Two agents each, so the batched count has something to group.
@@ -113,6 +114,7 @@ test("the batched counts agree with the per-row ones, including for a company wi
     businessPurpose: "p",
     industryLabel: "Software development",
     intakeSynthesized: true,
+    purposeKind: "agent",
   });
   db.prepare(
     `INSERT INTO formation_payments (payment_id, company_id, status, amount_usdc, nonce, valid_before)
