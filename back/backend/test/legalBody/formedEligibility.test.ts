@@ -41,9 +41,10 @@ import {
 } from "../helpers/legalBodyFixtures";
 
 const tenant: Address = ANVIL_ACCOUNT_2.address;
-/** The name the intake filed (its options are stored without the entity ending) and the number
- *  the state gave it. */
-const FILED_NAME = "Lantern Works";
+/** The full legal name the State's record prints, as the processor stores it for a legal-body
+ *  company: the matched option (the intake stores options without the entity ending) followed by
+ *  the ending, "LLC". And the number the state gave it. */
+const FILED_NAME = "Lantern Works LLC";
 const FILING_NUMBER = "2026-000451207";
 /** Unix seconds, at UTC midnight, as the processor writes `filed_at`. */
 const FILED_AT = 1_793_664_000;
@@ -85,15 +86,13 @@ function formedCompany(
     filing?: "confirmed" | "submitted" | "none";
     legalNameFiled?: string | null;
     filingNumber?: string | null;
-    status?: "draft" | "ready";
   } = {},
 ): string {
   const companyId = seedCompany(s.companies, {
     companyId: `formed-${++n}`,
     tenantId: tenant,
-    status: opts.status ?? "ready",
     purposeKind: opts.purposeKind ?? "legal_body",
-    nameOptions: companyNameOptions(`${FILED_NAME} LLC`, "Lantern Works Two LLC"),
+    nameOptions: companyNameOptions(FILED_NAME, "Lantern Works Two LLC"),
     businessPurpose: "Software services.",
   });
   expect(requests.claimAllSteps(companyId)).toBe(true);
@@ -228,7 +227,7 @@ describe("a company formed for a legal body", () => {
       expect(err.code, name).toBe("company_name_unusable");
       expect(err.status, name).toBe(409);
       expect(err.message, name).toBe(
-        "The filed company name cannot be printed in the agreement as it stands: an operator must set it.",
+        "The filed company name or filing number cannot be printed in the agreement as it stands: an operator must set it.",
       );
       expect(err.message, name).toBe(LEGAL_BODY_SENTENCES.company_name_unusable);
     }

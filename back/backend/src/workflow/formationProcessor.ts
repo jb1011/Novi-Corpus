@@ -5,7 +5,7 @@ import type {
   DoolaEnvironment,
   DoolaRequiredAction,
 } from "../adapters/doola/types";
-import { normalizeCompanyName } from "../formation/intake";
+import { normalizeCompanyName, withEntityEnding } from "../formation/intake";
 import { POLL_BASE_MS, POLL_CAP_MS, type StepBackoff, nextInterval } from "../formation/schedule";
 import { providerRefOf } from "../formation/status";
 import { opsLog } from "../observability/opsLog";
@@ -503,6 +503,12 @@ function advanceFiling(
  * `legal_name_filed`: the manifest hashes that field onto a public chain, so what is stored is
  * ALWAYS our own candidate string — the one whose normalized form matches. No match means no
  * name: `legal.companyName` stays absent, which is honest, and the owner gets a required action.
+ *
+ * WHICH FORM of the candidate depends on what the company is for. A legal-body company's filed
+ * name is printed in its operating agreement and its statement, so it is the full legal name as
+ * the State's record prints it: the candidate and our own entity ending (`withEntityEnding`). An
+ * agent company keeps the bare candidate, exactly as before: the published manifests of the full
+ * product commit to that string, and a changed form would re-hash every one of them.
  */
 function matchFiledName(
   d: FormationAdvanceDeps,
@@ -512,9 +518,10 @@ function matchFiledName(
   const reported = company.name?.trim();
   if (!reported) return null;
   const wanted = normalizeCompanyName(reported);
-  const stored = d.companies.find(companyId)?.nameOptions ?? [];
+  const row = d.companies.find(companyId);
+  const stored = row?.nameOptions ?? [];
   const hit = stored.find((o) => normalizeCompanyName(o.name) === wanted);
-  if (hit) return hit.name;
+  if (hit) return row?.purposeKind === "legal_body" ? withEntityEnding(hit.name) : hit.name;
   opsLog("formation_filed_name_unmatched", {
     level: "warn",
     companyId,

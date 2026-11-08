@@ -12,6 +12,7 @@ import type Database from "better-sqlite3";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { DOOLA_SIGNATURE_HEADER, type DoolaWakeUp } from "../../src/api/routes/doolaWebhook";
+import { companyNameOptions } from "../../src/formation/intake";
 import {
   companyFiled,
   deriveFormationStatus,
@@ -734,4 +735,79 @@ test("F12: a filing confirmed WITHOUT a number gains it on a later poll", async 
   };
   await advanceFormation(deps(), COMPANY_KEY);
   expect(company()?.filingNumber).toBe("2026-001234567");
+});
+
+// ── the filed name: the full legal name for a legal-body company, the bare candidate otherwise ──
+
+/** A company for `purposeKind` with the name options given, its `create_provider` confirmed and no
+ *  agent attached (a legal-body company never takes one). */
+function seedCompanyFiling(
+  purposeKind: "agent" | "legal_body",
+  nameOptions = companyNameOptions("Formation Agent LLC", "Formation Agent Two LLC"),
+) {
+  seedCompany(companies, { purposeKind, nameOptions });
+  requests.claimAllSteps(COMPANY_KEY);
+  requests.transition(COMPANY_KEY, "create_provider", "pending", "confirmed", {
+    providerRef: COMPANY_ID,
+    detail: JSON.stringify({ companyId: COMPANY_ID }),
+  });
+}
+
+/** doola filing the company under `name`, as its list item reports it (without the ending). */
+const filedAs = (name: string | undefined) => {
+  doola.state.company = {
+    doolaCompanyId: COMPANY_ID,
+    name,
+    formationFilingDate: "2026-08-19",
+    formationFilingNumber: "2026-001234567",
+  };
+};
+
+test("a legal-body company's filed name is its candidate followed by the entity ending: its full legal name", async () => {
+  seedCompanyFiling("legal_body");
+  // The second option is the one the state accepted, reported in another case and spacing.
+  filedAs("  formation agent two ");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.legalNameFiled).toBe("Formation Agent Two LLC");
+});
+
+test("an agent company's filed name stays the bare candidate, as its published manifests commit to", async () => {
+  seedCompanyFiling("agent");
+  filedAs("Formation Agent");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.legalNameFiled).toBe("Formation Agent");
+});
+
+test("a candidate that already ends in an entity ending keeps it once, never twice", async () => {
+  // The intake strips ONE trailing ending: "Formation Agent LLC LLC" is stored as
+  // "Formation Agent LLC", the only way a stored candidate ends in one.
+  const options = companyNameOptions("Formation Agent LLC LLC", "Other Name");
+  expect(options[0]?.name).toBe("Formation Agent LLC");
+  seedCompanyFiling("legal_body", options);
+  filedAs("Formation Agent LLC");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBe("Formation Agent LLC");
+});
+
+test("a legal-body company's name healed after the confirmation takes the same full form", async () => {
+  seedCompanyFiling("legal_body");
+  // Confirmed before doola reports any name: no name is written.
+  filedAs(undefined);
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.legalNameFiled).toBeNull();
+
+  filedAs("Formation Agent");
+  expect(await advanceFormation(deps(), COMPANY_KEY)).toMatchObject({ advanced: true });
+  expect(company()?.legalNameFiled).toBe("Formation Agent LLC");
+});
+
+test("a reported name that matches no candidate writes no name, whatever the company is for", async () => {
+  seedCompanyFiling("legal_body");
+  filedAs("Formation Agent Holdings");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.legalNameFiled).toBeNull();
 });

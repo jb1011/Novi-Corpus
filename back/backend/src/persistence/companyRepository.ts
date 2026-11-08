@@ -47,7 +47,9 @@ export interface CompanyRecord {
   /** True = the intake was DERIVED (the migration, or the A1 shim), not typed by a human. */
   intakeSynthesized: boolean;
   /** OUR candidate string that doola's reported name matched (§5) — never doola free text, and
-   *  null until a match is made, which is what keeps `manifest.legal.companyName` honest. */
+   *  null until a match is made, which is what keeps `manifest.legal.companyName` honest. For a
+   *  `legal_body` company, the candidate followed by our entity ending (the full legal name its
+   *  agreement prints); for an `agent` company, the bare candidate. */
   legalNameFiled: string | null;
   /** Unix SECONDS the STATE filed the company. */
   filedAt: number | null;

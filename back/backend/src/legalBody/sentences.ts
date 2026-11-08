@@ -24,7 +24,7 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // A formed company whose filed name or filing number the agreement cannot print as the row holds
   // it: refused, never cleaned.
   company_name_unusable:
-    "The filed company name cannot be printed in the agreement as it stands: an operator must set it.",
+    "The filed company name or filing number cannot be printed in the agreement as it stands: an operator must set it.",
   legal_body_cap:
     "You already hold as many open legal-body orders as you may at once: finish or abandon one before you order another.",
   legal_body_orders:

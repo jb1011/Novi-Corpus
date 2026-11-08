@@ -66,6 +66,19 @@ export function stripEntityEnding(raw: string): string {
 }
 
 /**
+ * A filed candidate's full legal name, as the State's record prints it: the candidate, which the
+ * intake stores without its ending, then the one ending every formation files, joined by one
+ * space. Both halves are ours, never the provider's free text. A candidate that already ends in an
+ * ending (`stripEntityEnding` finds one, as for "Acme LLC LLC" typed at the intake, stored as
+ * "Acme LLC") keeps it once, never twice.
+ */
+export function withEntityEnding(candidate: string): string {
+  return stripEntityEnding(candidate) === candidate
+    ? `${candidate} ${FORMATION_ENTITY_TYPE}`
+    : candidate;
+}
+
+/**
  * The comparison form for "is this the name the state accepted?" (§5).
  *
  * BOTH sides are normalized — ours and doola's — because doola reports the accepted name as free
