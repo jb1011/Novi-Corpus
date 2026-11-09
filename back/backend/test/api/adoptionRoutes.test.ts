@@ -1,15 +1,19 @@
 /**
  * The two adoption doors on REST: the typed data a guardian signs to adopt the operating agreement
- * frozen for its order, and the signed adoption, stored once. Mounted with the other order doors,
- * under the session protection, each starting with the real-human check.
+ * frozen for its order, and the signed adoption, stored once: an order already adopted answers its
+ * stored time, whatever is posted. Mounted with the other order doors, under the session
+ * protection, each starting with the real-human check. A company Novi formed goes through them as
+ * a declared one does.
  *
- * The database is real (in memory); no door here reads the chain. Every name, company and filing
- * number is an invention, and every key is one of anvil's published test accounts.
+ * The database is real (in memory); the adoption doors read no chain, and the few tests that go on
+ * to the link doors give them a fake one. Every name, company and filing number is an invention,
+ * and every key is one of anvil's published test accounts.
  */
 import type Database from "better-sqlite3";
 import { type Hex, getAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
+import { companyNameOptions } from "../../src/formation/intake";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { ADOPTION_DOMAIN_NAME, ADOPTION_PRIMARY_TYPE } from "../../src/legalBody/adoption";
 import { agreementDocNames, buildAgreement, storeAgreement } from "../../src/legalBody/agreement";
@@ -31,6 +35,7 @@ import {
   type Signer,
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
+import { seedCompany } from "../helpers/formationFakes";
 import {
   DAY_MS,
   JWT_SECRET,
@@ -40,12 +45,16 @@ import {
   REGISTRY,
   answerOf,
   appendCheck,
+  asChainPort,
   call,
   customerCompany,
+  fakeLinkChainMembers,
   legalBodyOrderDeps,
+  linkFor,
   noChain,
   openLegalBodyStores,
   sessionOf,
+  signedLink,
 } from "../helpers/legalBodyFixtures";
 
 /** anvil's published accounts #2, #3 and #4: test keys, never real wallets. The guardian and a
@@ -83,7 +92,7 @@ afterEach(() => {
   db.close();
 });
 
-/** The doors of a sandbox deployment on this test's clock; no door here reads the chain. */
+/** The doors of a sandbox deployment on this test's clock, with no chain unless `over` gives one. */
 function orderDeps(over: Partial<LegalBodyOrderDeps> = {}): LegalBodyOrderDeps {
   return legalBodyOrderDeps(s, { chain: noChain, now: () => nowMs, ...over });
 }
@@ -258,6 +267,61 @@ describe("POST /legal-body-orders/:id/adoption", () => {
     expect(second.body).toEqual(first.body);
     expect(snapshot()).toEqual(before);
     expect(adoptionEvents(id)).toHaveLength(1);
+  });
+
+  test("a re-post 11 minutes later, past the window, or with another signature, answers the stored time and writes nothing", async () => {
+    const app = makeApp();
+    const id = (await ordered(app)).legalBodyId;
+    const signed = await servedAndSigned(app, id);
+    const first = await adopt(app, id, signed);
+    expect(first.status).toBe(200);
+    const before = snapshot();
+
+    // Past the deployment's window of 600 seconds: the stored adoption answers before the
+    // signature's age is read.
+    nowMs += 11 * 60_000;
+    for (const body of [
+      signed,
+      await servedAndSigned(app, id, stranger),
+      { issuedAt: signed.issuedAt, signature: "0x01" },
+    ]) {
+      const again = await adopt(app, id, body);
+      expect(again.status).toBe(200);
+      expect(again.body).toEqual(first.body);
+    }
+    expect(snapshot()).toEqual(before);
+    expect(adoptionEvents(id)).toHaveLength(1);
+  });
+
+  test("an adopted order since reserved answers its stored time, as the link door answers its state; one abandoned answers order_closed, as before", async () => {
+    const app = makeApp(orderDeps({ chain: asChainPort(fakeLinkChainMembers()) }));
+    const token = await sessionOf(guardian);
+    const row = await ordered(app);
+    const id = row.legalBodyId;
+    const signed = await servedAndSigned(app, id);
+    const first = await adopt(app, id, signed);
+    expect(first.status).toBe(200);
+    const served = await answerOf(
+      await call(app, "POST", `${orderPath(id)}/link-message`, token, { agentId: "42" }),
+    );
+    expect(served.status).toBe(200);
+    const link = await signedLink(linkFor(row, { deadline: BigInt(served.body.deadline) }));
+    const reserved = await answerOf(await call(app, "POST", `${orderPath(id)}/link`, token, link));
+    expect(reserved.status).toBe(202);
+    expect(s.repo.findById(id)?.bindingState).toBe("reserved");
+
+    const before = snapshot();
+    nowMs += 11 * 60_000;
+    const again = await adopt(app, id, signed);
+    expect(again.status).toBe(200);
+    expect(again.body).toEqual(first.body);
+    expect(snapshot()).toEqual(before);
+
+    const abandoned = (await ordered(app)).legalBodyId;
+    const own = await servedAndSigned(app, abandoned);
+    expect((await adopt(app, abandoned, own)).status).toBe(200);
+    expect((await call(app, "POST", `${orderPath(abandoned)}/abandon`, token)).status).toBe(200);
+    expectRefusal(await adopt(app, abandoned, own), "order_closed", 409);
   });
 
   test("the order's view carries adoptedAt: null until the adoption, then its time, in the read and the list", async () => {
@@ -514,5 +578,96 @@ describe("the adoption doors accept no draft the link would refuse", () => {
       const elsewhere = createOrder(orderDeps({ deployment }), guardian.address, { companyId });
       await refusedOnBoth(makeApp(), elsewhere.id, "other_deployment", 409);
     }
+  });
+});
+
+describe("a company Novi formed, through the adoption doors", () => {
+  /** The filed name the State's record prints, and the number it gave: inventions. */
+  const FILED_NAME = "Lantern Works LLC";
+  let formed = 0;
+
+  /**
+   * A company formed through doola for a legal body, for the guardian, filed with both facts, as
+   * the formed-company tests of the order door seed one: `seedCompany`, its formation steps
+   * opened, `create_provider` confirmed, `await_filing` confirmed, and the filing facts the
+   * processor writes when it confirms that step.
+   */
+  function formedCompany(): string {
+    const requests = new SqliteFormationRepository(db);
+    const companyId = seedCompany(s.companies, {
+      companyId: `formed-${++formed}`,
+      tenantId: guardian.address,
+      purposeKind: "legal_body",
+      nameOptions: companyNameOptions(FILED_NAME, "Lantern Works Two LLC"),
+      businessPurpose: "Software services.",
+    });
+    expect(requests.claimAllSteps(companyId)).toBe(true);
+    expect(
+      requests.transition(companyId, "create_provider", "pending", "confirmed", {
+        providerRef: `doola-${companyId}`,
+      }),
+    ).toBe(true);
+    expect(requests.transition(companyId, "await_filing", "pending", "confirmed")).toBe(true);
+    s.companies.recordFilingFacts(companyId, {
+      filedAt: 1_793_664_000,
+      filingNumber: `2026-00045120${formed}`,
+      legalNameFiled: FILED_NAME,
+    });
+    return companyId;
+  }
+
+  async function place(app: App, companyId: string): Promise<{ id: string; hash: string }> {
+    const res = await answerOf(
+      await call(app, "POST", "/legal-body-orders", await sessionOf(guardian), { companyId }),
+    );
+    expect(res.status).toBe(201);
+    return { id: res.body.id, hash: res.body.agreement.hash };
+  }
+
+  test("filed with both facts: the adoption message, a signed adoption, then the link message passes", async () => {
+    const app = makeApp(orderDeps({ chain: asChainPort(fakeLinkChainMembers()) }));
+    const { id, hash } = await place(app, formedCompany());
+
+    const adopted = await adopt(app, id, await servedAndSigned(app, id));
+    expect(adopted.status).toBe(200);
+    expect(s.adoptions.find(id)?.manifestHash).toBe(hash);
+
+    const served = await answerOf(
+      await call(app, "POST", `${orderPath(id)}/link-message`, await sessionOf(guardian), {
+        agentId: "42",
+      }),
+    );
+    expect(served.status).toBe(200);
+    expect(served.body.typedData.message).toMatchObject({
+      agentId: "42",
+      operatingAgreementHash: hash,
+    });
+  });
+
+  test("revoked by the operator: both adoption doors answer company_not_eligible, on an adopted order and on one not yet adopted, and no row is written", async () => {
+    const app = makeApp();
+    const token = await sessionOf(guardian);
+    const companyId = formedCompany();
+    const adopted = (await place(app, companyId)).id;
+    const adoptedBody = await servedAndSigned(app, adopted);
+    expect((await adopt(app, adopted, adoptedBody)).status).toBe(200);
+    const pending = (await place(app, companyId)).id;
+    const pendingBody = await servedAndSigned(app, pending);
+
+    appendCheck(s.checks, companyId, "revoked");
+    const before = snapshot();
+    for (const [id, body] of [
+      [adopted, adoptedBody],
+      [pending, pendingBody],
+    ] as const) {
+      expectRefusal(
+        await answerOf(await call(app, "POST", messagePath(id), token, {})),
+        "company_not_eligible",
+        409,
+      );
+      expectRefusal(await adopt(app, id, body), "company_not_eligible", 409);
+    }
+    expect(snapshot()).toEqual(before);
+    expect(s.adoptions.find(pending)).toBeUndefined();
   });
 });

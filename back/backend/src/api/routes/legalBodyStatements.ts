@@ -65,17 +65,19 @@ import {
  * hand. A memo replay takes no token, so the writes are bounded on their own:
  *  - a repeat of a recent (body, day, kind, caller) is skipped before the database and the budget
  *    (the last 4096 keys, least recently seen evicted first);
- *  - every other write takes one token from the route's own budget, 60 at once and 1 a second for
- *    all callers together, so a caller who changes its key on every request (a new last
- *    X-Forwarded-For entry) cannot write without bound. A write the budget refuses is dropped and
- *    counted; the answer is the same either way.
+ *  - every other write takes one token from the route's own budget, 600 at once and 1 a second
+ *    for all callers together, so a caller who changes its key on every request (a new last
+ *    X-Forwarded-For entry) cannot write without bound, while a burst of real readers (a page
+ *    shared to an audience) is counted. A write the budget refuses is dropped and counted; the
+ *    answer is the same either way.
  * A failed write and a dropped one each have one ops line per minute at most, counting how many
  * since the last: `legal_body_statement_read_failed` (with the error's name) and
- * `legal_body_statement_read_dropped`. Neither names a caller.
+ * `legal_body_statement_read_dropped`. Neither names a caller. A count held back is printed when
+ * its minute ends, with no further event needed (`StatementReadLines`), and at the API's shutdown.
  */
 
-/** The read rows the route may write, for all callers together: 60 at once, then 1 a second. */
-const READ_ROW_BURST = 60;
+/** The read rows the route may write, for all callers together: 600 at once, then 1 a second. */
+const READ_ROW_BURST = 600;
 const READ_ROW_REFILL_PER_SECOND = 1;
 /** How many recent read keys are remembered, so a repeat never reaches the database. */
 const RECENT_READ_KEYS = 4096;
@@ -105,18 +107,67 @@ class RecentKeys {
   }
 }
 
-/** At most one `event` ops line per window, carrying how many happened since the last line. */
+/**
+ * At most one `event` ops line per window, carrying how many happened since the last line, the
+ * held ones with the fields of the last of them. A count held back is printed when its window
+ * closes, by a timer that never keeps the process alive, or at once by `flush`: never left waiting
+ * for a next event that may not come.
+ */
 function windowedLine(event: string, now: () => number) {
   let loggedAt: number | undefined;
   let count = 0;
-  return (fields: Record<string, unknown> = {}): void => {
-    count += 1;
-    const at = now();
-    if (loggedAt !== undefined && at - loggedAt < THROTTLE_LOG_WINDOW_MS) return;
-    loggedAt = at;
+  let held: Record<string, unknown> = {};
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const print = (fields: Record<string, unknown>): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    loggedAt = now();
     opsLog(event, { ...fields, count });
     count = 0;
   };
+  const note = (fields: Record<string, unknown> = {}): void => {
+    count += 1;
+    const at = now();
+    if (loggedAt === undefined || at - loggedAt >= THROTTLE_LOG_WINDOW_MS) {
+      print(fields);
+      return;
+    }
+    held = fields;
+    if (timer !== undefined) return;
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        if (count > 0) print(held);
+      },
+      loggedAt + THROTTLE_LOG_WINDOW_MS - at,
+    );
+    timer.unref?.();
+  };
+  const flush = (): void => {
+    if (count > 0) print(held);
+  };
+  return { note, flush };
+}
+
+/**
+ * The route's two once-a-minute lines, a failed read write and a dropped one. The composition root
+ * builds them and hands the same object to the API's shutdown, which flushes what they hold before
+ * the process exits; a route given none makes its own.
+ */
+export class StatementReadLines {
+  readonly failed;
+  readonly dropped;
+
+  constructor(now: () => number = Date.now) {
+    this.failed = windowedLine("legal_body_statement_read_failed", now);
+    this.dropped = windowedLine("legal_body_statement_read_dropped", now);
+  }
+
+  /** Prints every count held back, now. */
+  flush(): void {
+    this.failed.flush();
+    this.dropped.flush();
+  }
 }
 
 /** The three answers. The agent id is the canonical decimal the caller supplied. */
@@ -184,8 +235,7 @@ export function mountLegalBodyStatementRoutes(
   const reads = deps.statementReads;
   const readBudget = new TokenBucket(READ_ROW_BURST, READ_ROW_REFILL_PER_SECOND);
   const recentReads = new RecentKeys(RECENT_READ_KEYS);
-  const readFailed = windowedLine("legal_body_statement_read_failed", now);
-  const readDropped = windowedLine("legal_body_statement_read_dropped", now);
+  const lines = reads?.lines ?? new StatementReadLines(now);
 
   /** Writes one read row, after the answer: a recent repeat is skipped, then the budget decides.
    *  Never throws. */
@@ -194,14 +244,14 @@ export function mountLegalBodyStatementRoutes(
     const key = `${read.legalBodyId}|${read.day}|${read.callerKind}|${read.callerDayHash}`;
     if (recentReads.has(key)) return;
     if (!readBudget.take()) {
-      readDropped();
+      lines.dropped.note();
       return;
     }
     try {
       reads.repo.record(read);
       recentReads.add(key);
     } catch (e) {
-      readFailed({ errorName: errorNameOf(e) });
+      lines.failed.note({ errorName: errorNameOf(e) });
     }
   };
 
@@ -227,7 +277,7 @@ export function mountLegalBodyStatementRoutes(
         firstReadAt: at,
       };
     } catch (e) {
-      readFailed({ errorName: errorNameOf(e) });
+      lines.failed.note({ errorName: errorNameOf(e) });
       return;
     }
     setImmediate(() => writeRead(read));

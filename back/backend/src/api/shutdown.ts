@@ -35,6 +35,10 @@ export interface ShutdownDeps {
   tasks?: { settled(timeoutMs?: number): Promise<boolean> };
   /** Closed after the drain: in-flight requests finish, no new connections are accepted. */
   server?: { close(cb?: (err?: Error) => void): void };
+  /** Flushed once the server has closed, right before exit: the counts the once-a-minute ops
+   *  lines still hold (the statement reads'), printed rather than lost. One that throws is
+   *  skipped: a line is never a reason not to exit. */
+  flush?: { flush(): void }[];
   drainMs?: number;
   proc?: SignalSource;
   exit?: (code: number) => void;
@@ -61,7 +65,8 @@ export function shouldInstallSignalHandlers(
  *   1. stop the sweepers — no NEW work while we are trying to finish the old;
  *   2. drain tracked background tasks, bounded, so one wedged doola call cannot hang the deploy;
  *   3. close the HTTP server, letting in-flight requests finish;
- *   4. exit.
+ *   4. print what the once-a-minute ops lines still hold (`flush`);
+ *   5. exit.
  *
  * Re-entrant by design: a second signal during a drain is ignored rather than starting a second
  * shutdown, because an impatient operator pressing Ctrl-C twice should not be how a half-written
@@ -106,6 +111,14 @@ export function installShutdownHandlers(d: ShutdownDeps = {}): (signal: string) 
           done();
         });
       });
+    }
+
+    for (const held of d.flush ?? []) {
+      try {
+        held.flush();
+      } catch {
+        // Nothing to do: the process exits all the same.
+      }
     }
 
     exit(0);

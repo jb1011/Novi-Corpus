@@ -4,10 +4,12 @@
  * never an address. Excluded: the accounts of FUNNEL_EXCLUDE_TENANTS and --exclude-tenants, and
  * every synthetic or sandbox row unless --include-sandbox. A stage whose source this build does
  * not have prints null with the source `not_available`, never 0 (the invite stage, the split of a
- * payment by settlement kind, and the statement reads on a deployment without FUNNEL_SALT). Two
- * stages were not recorded before their table, or their first row, existed: a week wholly before
- * that date prints null too, and the stage's label says "recorded since" the date. The command
- * opens the database read-only, and refuses a database that is not there rather than make one.
+ * payment by settlement kind, and the statement reads on a database that never recorded one,
+ * whatever the command's own FUNNEL_SALT). Two stages were not recorded before their table, or
+ * their first row, existed: a week wholly before that date prints null too, and the stage's label
+ * says "recorded since" the date; the accounts a database knew before the sign-ins were recorded
+ * count in the week they first appear. The command opens the database read-only, and refuses a
+ * database that is not there, or that this build has not migrated, rather than make one.
  *
  * The command opens the database through the configuration, so every test works in a temporary
  * data directory and seeds its rows through its own connection over the same file. With
@@ -17,7 +19,7 @@
  * Every key is one of anvil's published test accounts, every other address a placeholder, and no
  * fixture holds a readable name.
  */
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -529,14 +531,58 @@ describe("the counts", () => {
     expect(out.sources.statement_reads).not.toBe("not_available");
   });
 
-  test("without FUNNEL_SALT the statement reads are null, not_available", async () => {
-    seed();
+  /** The export with FUNNEL_SALT set in the command's environment, then without it. */
+  async function withAndWithoutSalt(args: string[]): Promise<[Export, Export]> {
+    process.env.FUNNEL_SALT = SALT;
+    const salted = await exported(args);
     Reflect.deleteProperty(process.env, "FUNNEL_SALT");
-    const out = await exported(WINDOW);
-    expect(out.sources.statement_reads).toBe("not_available");
-    for (const week of out.weeks) expect(week.statement_reads).toBeNull();
+    const unsalted = await exported(args);
+    return [salted, unsalted];
+  }
+
+  test("a database on which no statement read was ever recorded: the reads are null, not_available, whether or not the command has FUNNEL_SALT", async () => {
+    seed();
+    db.prepare("DELETE FROM statement_reads").run();
+    db.prepare("DELETE FROM meta WHERE key = 'funnel_statement_reads_since'").run();
+    const [salted, unsalted] = await withAndWithoutSalt(WINDOW);
+    expect(unsalted).toEqual(salted);
+    expect(salted.sources.statement_reads).toBe(
+      "not_available; no statement read has been recorded on this database",
+    );
+    for (const week of salted.weeks) expect(week.statement_reads).toBeNull();
     // The other stages are unchanged.
-    expect(out.weeks[2]).toMatchObject({ body_linked: 1, filed: 1 });
+    expect(salted.weeks[2]).toMatchObject({ body_linked: 1, filed: 1 });
+  });
+
+  test("a database that records reads since a day: null before it, counted from it, whether or not the command has FUNNEL_SALT", async () => {
+    seed();
+    recordedSince("funnel_statement_reads_since", "2026-10-20");
+    const [salted, unsalted] = await withAndWithoutSalt(WINDOW);
+    expect(unsalted).toEqual(salted);
+    expect(salted.weeks.map((w) => w.statement_reads)).toEqual([null, null, 3]);
+    expect(salted.sources.statement_reads).toBe(
+      "statement_reads.day; distinct anonymous callers per legal body per day summed; production rows only; not synthetic; recorded since 2026-10-20",
+    );
+  });
+
+  test("accounts the database knew before the sign-ins were recorded: each counted in the week it first appears, and not again at a later sign-in", async () => {
+    db.exec("DROP TABLE tenant_first_seen");
+    db.prepare("DELETE FROM meta WHERE key = 'funnel_first_seen_since'").run();
+    // A's first trace is its company, in week 41; B's its World ID verification, in week 42.
+    company(A, "2026-10-06");
+    verified(B, "2026-10-13");
+    company(B, "2026-10-21");
+    migrate(db);
+    // A signs in in week 43: its first sign-in stays the one the backfill found.
+    expect(new SqliteTenantFirstSeenRepository(db).recordFirstSeen(A, at("2026-10-22"))).toBe(
+      false,
+    );
+
+    const out = await exported([...WINDOW, "--include-sandbox"]);
+    expect(out.weeks.map((w) => w.signed_in)).toEqual([1, 1, 0]);
+    expect(out.sources.signed_in).toBe(
+      "tenant_first_seen.first_seen_at; first sign-in per account; any deployment; recorded since 2026-10-06",
+    );
   });
 
   test("a stage recorded since mid-window: null for the weeks wholly before, counted from the week it began; the label says since when", async () => {
@@ -563,12 +609,15 @@ describe("the counts", () => {
     expect(header).toContain(`statement_reads [${out.sources.statement_reads}]`);
   });
 
-  test("with no date recorded the stage is counted in every week, its label unchanged", async () => {
+  test("with no date recorded the sign-ins are counted in every week, their label unchanged; the reads are null, none recorded", async () => {
     seed();
     db.prepare("DELETE FROM meta WHERE key LIKE 'funnel_%'").run();
     const out = await exported([...WINDOW, "--include-sandbox"]);
     expect(out.weeks.map((w) => w.signed_in)).toEqual([1, 2, 0]);
-    expect(out.weeks.map((w) => w.statement_reads)).toEqual([0, 1, 4]);
+    expect(out.weeks.map((w) => w.statement_reads)).toEqual([null, null, null]);
+    expect(out.sources.statement_reads).toBe(
+      "not_available; no statement read has been recorded on this database",
+    );
     expect(JSON.stringify(out.sources)).not.toContain("recorded since");
   });
 
@@ -605,6 +654,11 @@ describe("the output", () => {
         stage,
       ).toBe(true);
     expect(header).toContain("invite_redeemed [not_available]");
+    // The World ID stage says what its source keeps: each World ID's latest verification.
+    const worldVerified =
+      "guardian_verifications.verified_at; latest accepted verification per account (per World ID; of several the earliest); production rows only";
+    expect(json.sources.world_verified).toBe(worldVerified);
+    expect(header).toContain(`world_verified [${worldVerified}]`);
     expect(lines[3]).toBe("2026-W43,2026-10-19,2026-10-25,0,0,0,null,1,1,0,1,null,null,1,1,3");
   });
 
@@ -685,6 +739,33 @@ describe("refusals", () => {
       `refusing: there is no database at ${missing}/legalbody.db: check DATA_DIR`,
     );
     expect(existsSync(missing)).toBe(false);
+  });
+
+  test("a database this build has not migrated is refused in plain words, not with a database error, and nothing is written to it", async () => {
+    // An earlier build's database, which has tables but not the funnel's; and an empty file.
+    const earlier = mkdtempSync(join(tmpdir(), "funnel-earlier-"));
+    const empty = mkdtempSync(join(tmpdir(), "funnel-empty-"));
+    try {
+      const old = openDatabase(join(earlier, "legalbody.db"));
+      old.exec("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+      old.close();
+      writeFileSync(join(empty, "legalbody.db"), "");
+      for (const dataDir of [earlier, empty]) {
+        process.env.DATA_DIR = dataDir;
+        expect(await refusal(["--since", "2026-10-05"]), dataDir).toBe(
+          "refusing: the database has not been migrated by this build: start the API once first",
+        );
+      }
+      const reopened = openDatabase(join(earlier, "legalbody.db"));
+      expect(reopened.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()).toEqual(
+        [{ name: "meta" }],
+      );
+      reopened.close();
+      expect(statSync(join(empty, "legalbody.db")).size).toBe(0);
+    } finally {
+      rmSync(earlier, { recursive: true, force: true });
+      rmSync(empty, { recursive: true, force: true });
+    }
   });
 
   test("the read-only open reads a database no other connection holds open", async () => {

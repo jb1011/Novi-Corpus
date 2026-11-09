@@ -769,7 +769,6 @@ async function api(method: "GET" | "POST", path: string, g: Guardian, body?: obj
   return answer;
 }
 
-/** The guardian orders a body for its company: a draft, its agreement frozen. */
 /**
  * A new draft of `g`, whose agreement `g` then adopts with its own wallet, as the web app has it
  * do before any link: the served adoption message, signed as it arrives. Answers the order's view

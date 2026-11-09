@@ -2,21 +2,27 @@
  * `tenant_first_seen`: the funnel's "signed in" stage. `POST /auth/verify` records an account's
  * first sign-in once the SIWE address is known, and never moves it: a second sign-in writes
  * nothing. A sign-in that fails records nothing, and a record that cannot be written never fails
- * the sign-in.
+ * the sign-in. A database that already knew accounts when `migrate` created the table has each of
+ * them filled in, once, at the earliest time any table holds for it.
  *
- * The key is one of anvil's published test accounts, never a real wallet.
+ * The key is one of anvil's published test accounts, never a real wallet; every other address is
+ * a placeholder.
  */
+import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
+import { getAddress } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { createSiweMessage } from "viem/siwe";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
+import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
   SqliteTenantFirstSeenRepository,
   type TenantFirstSeenRepository,
 } from "../../src/persistence/tenantFirstSeenRepository";
+import { SqliteWorldStore } from "../../src/persistence/worldStore";
 
 /** anvil's published account 1. */
 const account = privateKeyToAccount(
@@ -141,6 +147,144 @@ test("a malformed account or time is refused before any write", () => {
   expect(() => repo.recordFirstSeen(account.address, 0)).toThrow(/milliseconds/);
   expect(() => repo.recordFirstSeen(account.address, 1.5)).toThrow(/milliseconds/);
   expect(rows()).toEqual([]);
+});
+
+// ── A database that knew accounts before the table ───────────────────────────────────────────
+
+/** A placeholder account, not a key anyone holds. */
+const OTHER = getAddress("0x000000000000000000000000000000000000c0c0");
+const FACTORY = getAddress("0x00000000000000000000000000000000000fac70");
+
+/** The database as an earlier build left it: every table but the sign-ins, and no date for them. */
+function asBeforeTheTable(): void {
+  db.exec("DROP TABLE tenant_first_seen");
+  db.prepare("DELETE FROM meta WHERE key = 'funnel_first_seen_since'").run();
+}
+
+/** `ms` as SQLite's CURRENT_TIMESTAMP writes it (UTC, to the second). */
+const sqlTime = (ms: number): string => new Date(ms).toISOString().slice(0, 19).replace("T", " ");
+
+let seeded = 0;
+function entityOf(tenant: string | null, at: number): void {
+  seeded += 1;
+  db.prepare(
+    `INSERT INTO entities (idempotency_key, name, status, manager, guardian, amendment_delay, ein,
+                           formation_date, owner_tenant_id, created_at)
+     VALUES (?, 'Example Agent', 'created', ?, ?, '172800', '00-0000000', 0, ?, ?)`,
+  ).run(`entity-${seeded}`, FACTORY, FACTORY, tenant, sqlTime(at));
+}
+
+function companyOf(tenant: string, at: number): string {
+  const companyId = new SqliteCompanyRepository(db).create({
+    tenantId: tenant,
+    status: "ready",
+    provider: "doola",
+    environment: "sandbox",
+    synthetic: false,
+    nameOptions: [{ name: "Example Works", entityTypeEnding: "LLC", position: 1 }],
+    businessPurpose: "an example purpose",
+    industryLabel: "Software",
+    intakeSynthesized: false,
+    purposeKind: "legal_body",
+  });
+  db.prepare("UPDATE companies SET created_at = ? WHERE company_id = ?").run(
+    sqlTime(at),
+    companyId,
+  );
+  return companyId;
+}
+
+/** A legal body row, its `created_at` written at the insert: the column is write-once after. */
+function legalBodyOf(tenant: string, companyId: string, at: number): void {
+  db.prepare(
+    `INSERT INTO legal_bodies (legal_body_id, public_id, tenant_id, company_id, chain_id, factory,
+                               guardian, amendment_delay, created_at)
+     VALUES (?, ?, ?, ?, 5042002, ?, ?, 172800, ?)`,
+  ).run(`lb_${randomUUID()}`, randomUUID(), tenant, companyId, FACTORY, tenant, sqlTime(at));
+}
+
+function verificationOf(tenant: string, at: number): void {
+  seeded += 1;
+  new SqliteWorldStore(db).recordVerification({
+    nullifier: `nullifier-${seeded}`,
+    action: "guardian-verification",
+    tenantId: tenant,
+    issuerSchemaId: 1,
+    credential: "proof_of_human",
+    environment: "production",
+    verifiedAt: at,
+    expiresAtMin: null,
+  });
+}
+
+function apiKeyOf(tenant: string, at: number): void {
+  seeded += 1;
+  db.prepare("INSERT INTO api_keys (id, owner_tenant, hash, created_at) VALUES (?, ?, ?, ?)").run(
+    `key-${seeded}`,
+    tenant,
+    "0".repeat(64),
+    at,
+  );
+}
+
+const sinceKept = () =>
+  (
+    db.prepare("SELECT value FROM meta WHERE key = 'funnel_first_seen_since'").get() as
+      | { value: string }
+      | undefined
+  )?.value;
+
+test("a database that already knows accounts: the table is filled with each one's earliest time in any table, checksummed, and the sign-ins are dated from the earliest", () => {
+  const H = 3_600_000;
+  // Anvil account 1: its World ID verification (milliseconds) comes first, in lower case
+  // elsewhere; its agent and its company (CURRENT_TIMESTAMP text) after.
+  verificationOf(account.address, T0 - 40 * H);
+  entityOf(account.address.toLowerCase(), T0 - 20 * H);
+  companyOf(account.address, T0 - 30 * H);
+  // The placeholder: its legal body comes before the company it was written under, and an API
+  // key (milliseconds) after both.
+  const company = companyOf(OTHER, T0 - 5 * H);
+  legalBodyOf(OTHER, company, T0 - 10 * H);
+  apiKeyOf(OTHER.toLowerCase(), T0 - 2 * H);
+  // An agent with no account, and one whose account is not an address: no row for either.
+  entityOf(null, T0 - 50 * H);
+  entityOf("not-an-address", T0 - 60 * H);
+  asBeforeTheTable();
+
+  migrate(db);
+
+  expect(rows().sort((a, b) => a.first_seen_at - b.first_seen_at)).toEqual([
+    { address: account.address, first_seen_at: T0 - 40 * H },
+    { address: OTHER, first_seen_at: T0 - 10 * H },
+  ]);
+  expect(Number(sinceKept())).toBe(T0 - 40 * H);
+
+  // Once, with the table: a later migrate finds it, and an account first seen since is left to
+  // its own sign-in.
+  verificationOf(getAddress("0x000000000000000000000000000000000000d0d0"), T0 - 90 * H);
+  migrate(db);
+  expect(rows()).toHaveLength(2);
+  expect(Number(sinceKept())).toBe(T0 - 40 * H);
+});
+
+test("a database that knows no account yet: no row, and the sign-ins are dated from the migrate", () => {
+  asBeforeTheTable();
+  const before = Date.now();
+  migrate(db);
+  expect(rows()).toEqual([]);
+  expect(Number(sinceKept())).toBeGreaterThanOrEqual(before);
+});
+
+test("a later sign-in of a backfilled account keeps the backfilled time", async () => {
+  const earlier = T0 - 7 * 86_400_000;
+  companyOf(account.address.toLowerCase(), earlier);
+  asBeforeTheTable();
+  migrate(db);
+  expect(rows()).toEqual([{ address: account.address, first_seen_at: earlier }]);
+
+  const a = app(new SqliteTenantFirstSeenRepository(db));
+  expect((await signIn(a)).status).toBe(200);
+  expect(rows()).toEqual([{ address: account.address, first_seen_at: earlier }]);
 });
 
 test("migrate records when the sign-ins began to be recorded, once: when it creates the table", () => {

@@ -128,6 +128,7 @@ import { buildApiApp } from "./app";
 import { ApiError } from "./errors";
 import { TokenBucket } from "./routes/agentBook";
 import { bucketsByKey } from "./routes/legalBodyOrders";
+import { StatementReadLines } from "./routes/legalBodyStatements";
 import type { PilotCaseDeps } from "./routes/pilotCases";
 import { buildWorldIdDeps } from "./routes/worldId";
 import { buildX402DemoDeps } from "./routes/x402Demo";
@@ -1139,6 +1140,9 @@ async function main() {
         }
       : undefined;
 
+  // The statement reads' once-a-minute ops lines: built here so the shutdown below prints what
+  // they still hold.
+  const statementReadLines = cfg.funnel?.salt ? new StatementReadLines() : undefined;
   const app = buildApiApp({
     webOrigin: cfg.webOrigin,
     nonceStore,
@@ -1147,7 +1151,11 @@ async function main() {
     // The funnel's last stage, only where FUNNEL_SALT is set: without the salt no statement read
     // is recorded (a production box cannot boot without it, `assertFunnelConfig`).
     statementReads: cfg.funnel?.salt
-      ? { repo: new SqliteStatementReadRepository(db), salt: cfg.funnel.salt }
+      ? {
+          repo: new SqliteStatementReadRepository(db),
+          salt: cfg.funnel.salt,
+          lines: statementReadLines,
+        }
       : undefined,
     siweDomain: cfg.siweDomain,
     chainId: cfg.chainId,
@@ -1391,6 +1399,7 @@ async function main() {
       ],
       tasks: doolaTasks,
       server,
+      flush: statementReadLines ? [statementReadLines] : [],
     });
 }
 

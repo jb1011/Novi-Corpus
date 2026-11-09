@@ -123,6 +123,10 @@ export interface ApiDeps extends EntityViewDeps {
   statementReads?: {
     repo: import("../persistence/statementReadRepository").StatementReadRepository;
     salt: string;
+    /** The route's once-a-minute lines (a failed write, a dropped one). The composition root
+     *  hands the same object to the shutdown, which prints any count they still hold; absent, the
+     *  route makes its own. */
+    lines?: import("./routes/legalBodyStatements").StatementReadLines;
   };
   siweDomain: string;
   chainId: number;

@@ -5,7 +5,13 @@ import type { NewAgreementAdoption } from "../persistence/legalBodyAdoptionRepos
 import { ECDSA_SIGNATURE } from "../persistence/legalBodyInput";
 import type { LegalBodyRecord } from "../persistence/legalBodyRepository";
 import { assertOpenDraft } from "./linkDoor";
-import { type LegalBodyOrderDeps, orderLockKey, requireOwnedOrder, takeDoorTokens } from "./orders";
+import {
+  type LegalBodyOrderDeps,
+  assertThisDeployment,
+  orderLockKey,
+  requireOwnedOrder,
+  takeDoorTokens,
+} from "./orders";
 import { refusal } from "./sentences";
 import { EIP712_DOMAIN_FIELDS } from "./statement";
 
@@ -244,7 +250,8 @@ export function recordAdoption(
  * The rule both adoption doors share, on the tenant's order, once the tenant passed the
  * real-human check: the tenant's order (the uniform 404), then the draft rule the link applies
  * (`assertOpenDraft`), so a draft the link would refuse is never adopted, with the same code.
- * Answers the order and the text its agreement was frozen with.
+ * Answers the order and the text its agreement was frozen with. The adoption door applies the two
+ * itself (`adoptAgreement`): an order adopted before its link is answered between them.
  */
 function adoptableDraft(
   deps: LegalBodyOrderDeps,
@@ -276,14 +283,42 @@ export function adoptionMessage(
   };
 }
 
+/** The states the link door answers with the order's view rather than refuses (`submitLink`): an
+ *  order in one of them was adopted before its link, so the adoption door answers that adoption. */
+const LINK_ACCEPTED: ReadonlySet<LegalBodyRecord["bindingState"]> = new Set([
+  "reserved",
+  "deployed",
+  "linked",
+]);
+
+/** The order's stored adoption, if it adopts the order's own frozen agreement (the hash the link
+ *  door compares too). */
+function storedAdoption(deps: LegalBodyOrderDeps, row: LegalBodyRecord): number | undefined {
+  const stored = deps.adoptions.find(row.legalBodyId);
+  if (
+    stored === undefined ||
+    row.oaManifestHash === null ||
+    stored.manifestHash.toLowerCase() !== row.oaManifestHash.toLowerCase()
+  )
+    return undefined;
+  return stored.adoptedAt;
+}
+
 /**
  * Stores the guardian's signed adoption of its order's agreement. In this order: a real human
  * (never a waiver), then the tenant's bucket and the doors' budget, as the link doors take them
- * (`takeDoorTokens`, 429 `rate_limited`); the shared rule (`adoptableDraft`); `verifyAdoption`, on
- * this deployment's chain and factory and within its `adoptionMaxAgeSeconds`; then, under the
- * order's lock and in one transaction, the order read again (one abandoned since is 409
- * `order_closed`) and `recordAdoption`. A second adoption of the same order, checked as the
- * first, answers the stored time and writes nothing.
+ * (`takeDoorTokens`, 429 `rate_limited`); the tenant's order (the uniform 404). Then:
+ *  - an order the link door answers by its state (reserved, deployed or linked) of this
+ *    deployment (else 409 `other_deployment`) answers its stored adoption, as the link door
+ *    answers its state; with none stored (an order reserved before adoptions existed), 409
+ *    `order_closed`, as before;
+ *  - any other order passes the draft rule (`assertOpenDraft`, each refusal as before), and an
+ *    open draft already adopted answers its stored adoption;
+ * neither checks the signature or writes anything, so a re-post after the window, or with another
+ * signature, answers the stored time. Else `verifyAdoption`, on this deployment's chain and
+ * factory and within its `adoptionMaxAgeSeconds`; then, under the order's lock and in one
+ * transaction, the order read again (one abandoned since is 409 `order_closed`) and
+ * `recordAdoption`, which keeps a first adoption stored in between.
  */
 export async function adoptAgreement(
   deps: LegalBodyOrderDeps,
@@ -295,7 +330,16 @@ export async function adoptAgreement(
   const nowSec = Math.floor(nowMs / 1000);
   assertRealHuman(deps.world, tenantId, deps.environment);
   takeDoorTokens(deps, tenantId);
-  const { row, frozen } = adoptableDraft(deps, tenantId, id, nowMs);
+  const row = requireOwnedOrder(deps, tenantId, id);
+  if (LINK_ACCEPTED.has(row.bindingState)) {
+    assertThisDeployment(deps, row);
+    const adoptedAt = storedAdoption(deps, row);
+    if (adoptedAt === undefined) throw refusal("order_closed", 409);
+    return { adoptedAt };
+  }
+  const { frozen } = assertOpenDraft(deps, row, nowMs);
+  const adoptedBefore = storedAdoption(deps, row);
+  if (adoptedBefore !== undefined) return { adoptedAt: adoptedBefore };
   const issuedAt = input?.issuedAt as string;
   const { digest } = await verifyAdoption({
     chainId: deps.deployment.chainId,

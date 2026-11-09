@@ -20,9 +20,11 @@ import { operatorConfig, print, refuse } from "./operator";
  *  - signed_in: accounts whose first sign-in (`tenant_first_seen`) falls in the week. The table
  *    has no environment of its own: a sign-in is of the deployment it happened on, so it counts on
  *    a production deployment, or with --include-sandbox;
- *  - world_verified: accounts whose first World ID verification with an accepted credential
+ *  - world_verified: accounts whose LATEST World ID verification with an accepted credential
  *    (`ACCEPTED_CREDENTIALS`, the set the guardian gate takes) falls in the week, a production row
- *    unless --include-sandbox;
+ *    unless --include-sandbox. Latest, not first: a row is one World ID's, and a re-verification
+ *    overwrites its `verified_at` (worldStore.ts), so no first verification is kept. An account
+ *    with several World IDs counts at the earliest of their latest;
  *  - identity_verified: accounts whose CURRENT identity row (the latest, as `identityState` reads
  *    it) passed, at its `completed_at`;
  *  - invite_redeemed: not on this build (no `invite_codes` table): null, `not_available`;
@@ -34,14 +36,21 @@ import { operatorConfig, print, refuse } from "./operator";
  *  - filed: those companies by `filed_at`, the day the State filed;
  *  - body_linked: legal bodies, at their first `linked` event;
  *  - statement_reads: the sum over the days of the week of the distinct anonymous callers of each
- *    legal body's statement (`statement_reads`); null, `not_available`, without FUNNEL_SALT, which
- *    is when no read is recorded.
+ *    legal body's statement (`statement_reads`); null, `not_available`, on a database that has
+ *    never recorded a read (no `funnel_statement_reads_since`: the API records reads only where
+ *    FUNNEL_SALT is set). The database decides, never this command's own FUNNEL_SALT: the command
+ *    may run without the API's environment.
  *
  * NO ZERO FOR A WEEK NOTHING WAS RECORDED IN. Two stages began to be recorded on a date of their
- * own, kept in `meta`: the sign-ins when `migrate` created their table (`funnel_first_seen_since`),
- * the statement reads with the first one recorded (`funnel_statement_reads_since`). A week wholly
- * before that date prints null for the stage, and its label ends "recorded since <YYYY-MM-DD>".
- * With no date kept (a database older than the key), the stage is counted in every week.
+ * own, kept in `meta`: the sign-ins when `migrate` created their table (`funnel_first_seen_since`;
+ * the earliest account the database already knew then, if earlier: those accounts are filled in
+ * at their earliest times), the statement reads with the first one recorded
+ * (`funnel_statement_reads_since`). A week wholly before that date prints null for the stage, and
+ * its label ends "recorded since <YYYY-MM-DD>". With no date kept, the sign-ins (a database older
+ * than the key) are counted in every week, and the statement reads, never recorded, are null.
+ *
+ * A database this build has not migrated (no funnel table) is refused in plain words: the API
+ * makes the tables at its boot, and this command, read-only, makes none.
  *
  * Excluded everywhere: the accounts of FUNNEL_EXCLUDE_TENANTS and --exclude-tenants (the founders),
  * by the account a row belongs to (a company's, payment's, body's or read's by its company's or
@@ -165,7 +174,6 @@ function isoWeekOf(ms: number): string {
  *  carries them). */
 function sourcesOf(o: {
   includeSandbox: boolean;
-  salted: boolean;
   since: { signed_in: string | undefined; statement_reads: string | undefined };
 }): Record<FunnelColumn, string> {
   const since = (day: string | undefined) => (day === undefined ? "" : `; recorded since ${day}`);
@@ -178,7 +186,7 @@ function sourcesOf(o: {
     signed_in: `tenant_first_seen.first_seen_at; first sign-in per account; ${
       o.includeSandbox ? "any deployment" : "a production deployment only"
     }${since(o.since.signed_in)}`,
-    world_verified: `guardian_verifications.verified_at; first accepted credential per account; ${
+    world_verified: `guardian_verifications.verified_at; latest accepted verification per account (per World ID; of several the earliest); ${
       o.includeSandbox ? "any environment" : "production rows only"
     }`,
     identity_verified: `guardian_identity_checks.completed_at; the account's latest check passed; ${rows}`,
@@ -191,11 +199,12 @@ function sourcesOf(o: {
     paid_complimentary: NOT_AVAILABLE,
     filed: `companies.filed_at; purpose_kind legal_body; ${rows}`,
     body_linked: `legal_body_events.created_at; first kind linked per legal body; ${rows}`,
-    statement_reads: o.salted
-      ? `statement_reads.day; distinct anonymous callers per legal body per day summed; ${rows}${since(
-          o.since.statement_reads,
-        )}`
-      : NOT_AVAILABLE,
+    statement_reads:
+      o.since.statement_reads === undefined
+        ? `${NOT_AVAILABLE}; no statement read has been recorded on this database`
+        : `statement_reads.day; distinct anonymous callers per legal body per day summed; ${rows}${since(
+            o.since.statement_reads,
+          )}`,
   };
 }
 
@@ -227,8 +236,17 @@ export function funnelExport(
   const configured = cfg.funnel?.excludeTenants ?? [];
   const excluded = [...new Set([...configured, ...flagged].map((a) => a.toLowerCase()))];
   const includeSandbox = opts.includeSandbox === true;
-  const salted = cfg.funnel?.salt !== undefined;
   const signInsCounted = includeSandbox || legalBodyEnvironment(cfg) === "production";
+  // The funnel's tables are made by the API's `migrate`: on a database without them, every query
+  // below would fail with a database error that says nothing of what to do.
+  const funnelTables = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM sqlite_master
+        WHERE type = 'table' AND name IN ('tenant_first_seen', 'statement_reads')`,
+    )
+    .get() as { n: number };
+  if (funnelTables.n !== 2)
+    refuse("the database has not been migrated by this build: start the API once first");
 
   const params = {
     excluded: JSON.stringify(excluded),
@@ -245,7 +263,9 @@ export function funnelExport(
   const read = () => ({
     since: {
       signed_in: recordedSince(db, FIRST_SEEN_SINCE_KEY),
-      statement_reads: salted ? recordedSince(db, STATEMENT_READS_SINCE_KEY) : undefined,
+      // Whether reads were ever recorded is the database's to say: the API writes this key with
+      // the first one, and this command may run without the API's FUNNEL_SALT.
+      statement_reads: recordedSince(db, STATEMENT_READS_SINCE_KEY),
     },
     signed_in: signInsCounted
       ? times(
@@ -300,22 +320,22 @@ export function funnelExport(
        HAVING ${inWindow("t")}`,
     ),
     // One row per legal body, day and caller: counting the anonymous rows of a week sums the
-    // distinct anonymous callers of each body over its days.
-    statement_reads: salted
-      ? (
-          db
-            .prepare(
-              `SELECT r.day AS day FROM statement_reads r
-                 JOIN legal_bodies b ON b.legal_body_id = r.legal_body_id
-                 JOIN companies c ON c.company_id = b.company_id
-                WHERE r.caller_kind = 'anonymous' AND r.day BETWEEN @since_day AND @until_day
-                  AND ${companyCounted("c")} AND ${notExcluded("b.tenant_id")}`,
-            )
-            .all(params) as { day: string }[]
-        ).map((r) => Date.parse(`${r.day}T00:00:00.000Z`))
-      : null,
+    // distinct anonymous callers of each body over its days. Counted only where the database
+    // says reads are recorded (below).
+    statement_reads: (
+      db
+        .prepare(
+          `SELECT r.day AS day FROM statement_reads r
+             JOIN legal_bodies b ON b.legal_body_id = r.legal_body_id
+             JOIN companies c ON c.company_id = b.company_id
+            WHERE r.caller_kind = 'anonymous' AND r.day BETWEEN @since_day AND @until_day
+              AND ${companyCounted("c")} AND ${notExcluded("b.tenant_id")}`,
+        )
+        .all(params) as { day: string }[]
+    ).map((r) => Date.parse(`${r.day}T00:00:00.000Z`)),
   });
   const rows = db.transaction(read)();
+  const readsRecorded = rows.since.statement_reads !== undefined;
 
   // Every week of the window, a week cut by the window's ends shown as the days it counts.
   const weeks: FunnelWeek[] = [];
@@ -338,7 +358,7 @@ export function funnelExport(
       paid_complimentary: null,
       filed: 0,
       body_linked: 0,
-      statement_reads: rows.statement_reads === null ? null : 0,
+      statement_reads: readsRecorded ? 0 : null,
     };
     weeks.push(week);
     byWeek.set(week.week, week);
@@ -363,7 +383,7 @@ export function funnelExport(
     if (provider === DOOLA) add("company_requested_doola", t);
     if (provider === CUSTOMER_PROVIDER) add("company_requested_customer", t);
   }
-  for (const t of rows.statement_reads ?? []) add("statement_reads", t);
+  if (readsRecorded) for (const t of rows.statement_reads) add("statement_reads", t);
   // A week wholly before a stage began to be recorded has no count for it, not a zero.
   for (const column of ["signed_in", "statement_reads"] as const) {
     const since = rows.since[column];
@@ -377,7 +397,7 @@ export function funnelExport(
     includeSandbox,
     excludedTenants: excluded.length,
     stages: FUNNEL_STAGES,
-    sources: sourcesOf({ includeSandbox, salted, since: rows.since }),
+    sources: sourcesOf({ includeSandbox, since: rows.since }),
     weeks,
   };
 }

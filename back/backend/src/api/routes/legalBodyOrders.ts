@@ -43,8 +43,9 @@ import { assertRealHuman } from "./worldId";
  *    message by which the guardian adopts the draft's frozen agreement, issued on the server's
  *    clock. It writes nothing;
  *  - `POST /legal-body-orders/:id/adoption` with `{ issuedAt, signature }` stores the guardian's
- *    signed adoption, once: 200 with `{ adoptedAt }`, the stored time for a second adoption too.
- *    Both link doors refuse 409 `agreement_not_adopted` until it is stored;
+ *    signed adoption, once: 200 with `{ adoptedAt }`. An order already adopted answers the stored
+ *    time before any signature is checked, whatever is posted, as does one since reserved,
+ *    deployed or linked. Both link doors refuse 409 `agreement_not_adopted` until it is stored;
  *  - `POST /legal-body-orders/:id/link-message` with `{ agentId, ttlSeconds? }` serves the EIP-712
  *    message the identity's owner signs, and writes nothing;
  *  - `POST /legal-body-orders/:id/link` with `{ message, signature }` accepts the signed link and

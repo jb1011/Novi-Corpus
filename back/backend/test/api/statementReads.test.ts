@@ -10,9 +10,10 @@
  *
  * The row is written AFTER the answer is handed back (the caller kind decided before), so a busy
  * database never delays the read; a repeat of a recent (body, day, kind, caller) never reaches the
- * database; and the writes draw on a budget of their own (60 at once, then 1 a second), so a
+ * database; and the writes draw on a budget of their own (600 at once, then 1 a second), so a
  * caller who changes its key on every request cannot write without bound: a write the budget
- * refuses is dropped and counted, the answer unchanged.
+ * refuses is dropped and counted, the answer unchanged. A count the once-a-minute lines hold back
+ * is printed when its minute ends, or at the API's shutdown, never left for a next event.
  *
  * The statement service over a real in-memory database and a fake chain, on a fixed clock. Every
  * key is one of anvil's published test accounts, every other address a placeholder, and every
@@ -21,6 +22,7 @@
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { buildApiApp } from "../../src/api/app";
+import { StatementReadLines } from "../../src/api/routes/legalBodyStatements";
 import { signSession } from "../../src/auth/session";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import {
@@ -43,6 +45,8 @@ import {
 
 const SECRET = "s";
 const SALT = "5a".repeat(32);
+/** The read rows the route writes at once, for all callers together, before the refill. */
+const BURST = 600;
 const DAY = 86_400_000;
 const CLIENT_A = "192.0.2.10";
 const CLIENT_B = "198.51.100.7";
@@ -70,6 +74,8 @@ afterEach(() => {
 interface AppOptions {
   /** The read store; `null`: none, as on a deployment without FUNNEL_SALT. */
   reads?: StatementReadRepository | null;
+  /** The route's once-a-minute lines, as the composition root hands them in; else its own. */
+  lines?: StatementReadLines;
 }
 
 function makeApp(o: AppOptions = {}) {
@@ -79,7 +85,7 @@ function makeApp(o: AppOptions = {}) {
     jwtSecret: SECRET,
     now: () => clock,
     legalBodyStatements: statementDeps(s, chain, { now: () => clock }),
-    statementReads: repo === null ? undefined : { repo, salt: SALT },
+    statementReads: repo === null ? undefined : { repo, salt: SALT, lines: o.lines },
   } as never);
 }
 type App = ReturnType<typeof makeApp>;
@@ -419,53 +425,132 @@ describe("the write: after the answer, once per caller, within a budget", () => 
     expect(store.calls).toBe(1);
     expect(rows()).toHaveLength(1);
 
-    // With the clock that refills the budget held still: 29 more callers, each twice, take 29 of
-    // the 59 writes left; 30 new callers then take the other 30. A repeat that spent a write would
-    // leave some of them dropped.
+    // With the clock that refills the budget held still: 299 more callers, each twice, take 299
+    // of the 599 writes left; 300 new callers then take the other 300. A repeat that spent a
+    // write would leave some of them dropped.
     const callers = (from: number, n: number) =>
-      Array.from({ length: n }, (_, i) => `192.0.2.${from + i}`);
-    for (const client of callers(100, 29)) {
+      Array.from(
+        { length: n },
+        (_, i) => `192.0.${Math.floor((from + i) / 250)}.${(from + i) % 250}`,
+      );
+    for (const client of callers(1_000, 299)) {
       await read(app, { client });
       await read(app, { client });
     }
-    for (const client of callers(150, 30)) await read(app, { client });
-    expect(store.calls).toBe(60);
-    expect(rows()).toHaveLength(60);
+    for (const client of callers(2_000, 300)) await read(app, { client });
+    expect(store.calls).toBe(BURST);
+    expect(rows()).toHaveLength(BURST);
     expect(opsLines("legal_body_statement_read_dropped")).toEqual([]);
   });
 
   test("more callers at once than the budget: at most the budget's rows, every answer 200 and the same; the drops counted once a minute", async () => {
     linkedBody();
-    vi.useFakeTimers({ toFake: ["Date"] });
+    // The held-back count's timer is faked too, so none is left running after the test.
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     vi.setSystemTime(CLOCK_MS);
     const app = makeApp();
     const answers = new Set<string>();
     const many = (from: number, n: number) => Array.from({ length: n }, (_, i) => from + i);
+    const client = (i: number) => `10.0.${Math.floor(i / 250)}.${i % 250}`;
 
-    // 100 callers, each with a new key, inside one second: 60 rows, 40 dropped.
-    for (const i of many(0, 100)) {
-      const res = await read(app, { client: `10.0.${Math.floor(i / 250)}.${i % 250}` });
+    // 1000 callers, each with a new key, inside one second: 600 rows, 400 dropped.
+    for (const i of many(0, 1_000)) {
+      const res = await read(app, { client: client(i) });
       expect(res.status).toBe(200);
       answers.add(await res.text());
     }
     expect(answers.size).toBe(1);
-    expect(rows()).toHaveLength(60);
-    // The first drop writes a line at once; the next 39 wait for the window.
+    expect(rows()).toHaveLength(BURST);
+    // The first drop writes a line at once; the next 399 wait for the window.
     expect(opsLines("legal_body_statement_read_dropped")).toEqual([{ count: 1 }]);
 
     // A minute later, still no refill: 5 more dropped. The first of them writes one line counting
-    // the 39 held back and itself; the other 4 wait for the next window.
+    // the 399 held back and itself; the other 4 wait for the next window.
     clock += 60_000;
-    for (const i of many(100, 5)) await read(app, { client: `10.0.1.${i}` });
-    expect(rows()).toHaveLength(60);
-    expect(opsLines("legal_body_statement_read_dropped")).toEqual([{ count: 1 }, { count: 40 }]);
+    for (const i of many(1_000, 5)) await read(app, { client: client(i) });
+    expect(rows()).toHaveLength(BURST);
+    expect(opsLines("legal_body_statement_read_dropped")).toEqual([{ count: 1 }, { count: 400 }]);
 
     // Ten seconds of refill: ten more rows, whatever the number of callers.
     vi.setSystemTime(CLOCK_MS + 10_000);
-    for (const i of many(110, 15)) await read(app, { client: `10.0.2.${i}` });
-    expect(rows()).toHaveLength(70);
+    for (const i of many(1_100, 15)) await read(app, { client: client(i) });
+    expect(rows()).toHaveLength(BURST + 10);
     const all = printed.join("\n");
     expect(all).not.toContain("10.0.");
+  });
+});
+
+describe("a count held back is always printed", () => {
+  /** An app whose read store always fails: every read is a failed write, one line a minute. */
+  function failingApp(lines?: StatementReadLines) {
+    const broken: StatementReadRepository = {
+      record: () => {
+        throw Object.assign(new Error("SQLITE_BUSY"), { name: "SqliteError" });
+      },
+    };
+    return makeApp({ reads: broken, lines });
+  }
+  const failedLines = () => opsLines("legal_body_statement_read_failed");
+
+  test("when its window closes, with no further event", async () => {
+    linkedBody();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const app = failingApp();
+    await read(app, { client: CLIENT_A });
+    clock += 1_000;
+    await read(app, { client: CLIENT_B });
+    // The second failure is held: the line of the first is less than a minute old.
+    expect(failedLines()).toEqual([{ errorName: "SqliteError", count: 1 }]);
+
+    vi.advanceTimersByTime(58_999);
+    expect(failedLines()).toHaveLength(1);
+    vi.advanceTimersByTime(1);
+    expect(failedLines()).toEqual([
+      { errorName: "SqliteError", count: 1 },
+      { errorName: "SqliteError", count: 1 },
+    ]);
+    // Nothing held any more: no timer, no line.
+    expect(vi.getTimerCount()).toBe(0);
+    vi.advanceTimersByTime(120_000);
+    expect(failedLines()).toHaveLength(2);
+  });
+
+  test("its timer does not keep the process alive", async () => {
+    linkedBody();
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const app = failingApp();
+    await read(app, { client: CLIENT_A });
+    clock += 1_000;
+    await read(app, { client: CLIENT_B });
+    const held = timers.mock.calls.findIndex(([, ms]) => ms === 59_000);
+    expect(held).toBeGreaterThanOrEqual(0);
+    const timer = timers.mock.results[held]?.value as NodeJS.Timeout;
+    expect(timer.hasRef()).toBe(false);
+    clearTimeout(timer);
+  });
+
+  test("at once by flush(), which the API's shutdown calls, and not a second time when the window closes", async () => {
+    linkedBody();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const lines = new StatementReadLines(() => clock);
+    const app = failingApp(lines);
+    await read(app, { client: CLIENT_A });
+    clock += 1_000;
+    await read(app, { client: CLIENT_B });
+    clock += 1_000;
+    await read(app, { client: CLIENT_A });
+    expect(failedLines()).toHaveLength(1);
+
+    lines.flush();
+    expect(failedLines()).toEqual([
+      { errorName: "SqliteError", count: 1 },
+      { errorName: "SqliteError", count: 2 },
+    ]);
+    vi.advanceTimersByTime(120_000);
+    expect(failedLines()).toHaveLength(2);
+    // A flush with nothing held prints nothing.
+    lines.flush();
+    expect(failedLines()).toHaveLength(2);
   });
 });
 

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { getAddress, isAddress } from "viem";
 import { DEFAULT_DESCRIPTION, DEFAULT_INDUSTRY, companyNameOptions } from "../formation/intake";
 import { opsLog } from "../observability/opsLog";
 
@@ -1478,10 +1479,13 @@ const AGREEMENT_ADOPTIONS_DDL = `
   END;
 `;
 
+/** The smallest time in unix MILLISECONDS the funnel's tables take: past the largest value the
+ *  seconds columns take. */
+const MIN_MILLIS = 100_000_000_000;
 /** Unix MILLISECONDS: past the largest value the seconds columns take, so a time in seconds is
  *  refused rather than stored as a day in 1970. */
 const sqlIsMillis = (column: string) =>
-  `typeof(${column}) = 'integer' AND ${column} BETWEEN 100000000000 AND 9007199254740991`;
+  `typeof(${column}) = 'integer' AND ${column} BETWEEN ${MIN_MILLIS} AND ${Number.MAX_SAFE_INTEGER}`;
 
 /**
  * THE FUNNEL'S TWO TABLES (`funnel:export`, design §6.14), which nothing else reads:
@@ -1504,7 +1508,9 @@ const sqlIsMillis = (column: string) =>
  * WHEN EACH BEGAN, in `meta`, so the export prints no zero for a week nothing was recorded in:
  * `funnel_first_seen_since` is written by `migrate` when it creates `tenant_first_seen` (unix
  * milliseconds, as text); `funnel_statement_reads_since` by the first read row recorded
- * (`statementReadRepository.ts`), since reads are recorded only where FUNNEL_SALT is set.
+ * (`statementReadRepository.ts`), since reads are recorded only where FUNNEL_SALT is set. When
+ * `migrate` creates `tenant_first_seen` on a database that already knows accounts, it fills them in
+ * at their earliest times (`backfillTenantFirstSeen`), and the date is the earliest of those.
  */
 const FUNNEL_DDL = `
   CREATE TABLE IF NOT EXISTS tenant_first_seen (
@@ -2354,18 +2360,124 @@ export function migrate(db: Database.Database): void {
   // The agreement adoptions reference `legal_bodies` too, and stand outside that step alike.
   db.exec(AGREEMENT_ADOPTIONS_DDL);
   // The funnel's tables: the statement reads reference `legal_bodies` as well. The sign-ins are
-  // recorded from the moment their table is created, and that moment is kept with it.
-  db.transaction(() => {
-    const created =
+  // recorded from the moment their table is created, and that moment is kept with it; the
+  // accounts the database already knows are filled in with it (`backfillTenantFirstSeen`).
+  // As the legal-body schema step does it: a look first, which takes no write lock, so a start
+  // that finds the tables in place never waits for another process's write; and when something is
+  // missing, an IMMEDIATE transaction that decides again under the write lock. Two processes may
+  // migrate on the same first boot (the API and an operator's command): a deferred transaction
+  // reads first, so both could find no table, and the second's write would then fail at once
+  // (SQLITE_BUSY: no wait helps a read made before the other's commit). An immediate one takes the
+  // lock before it reads: the second waits, then finds the table and writes nothing.
+  const funnelInPlace =
+    (
       db
-        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tenant_first_seen'")
-        .get() === undefined;
-    db.exec(FUNNEL_DDL);
-    if (created)
-      db.prepare(
-        "INSERT OR IGNORE INTO meta (key, value) VALUES ('funnel_first_seen_since', ?)",
-      ).run(String(Date.now()));
-  })();
+        .prepare(
+          `SELECT COUNT(*) AS n FROM sqlite_master
+            WHERE (type = 'table' AND name IN ('tenant_first_seen', 'statement_reads'))
+               OR (type = 'index' AND name = 'idx_statement_reads_day')`,
+        )
+        .get() as { n: number }
+    ).n === 3;
+  if (!funnelInPlace)
+    db.transaction(() => {
+      const created =
+        db
+          .prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tenant_first_seen'",
+          )
+          .get() === undefined;
+      db.exec(FUNNEL_DDL);
+      if (created) {
+        const earliest = backfillTenantFirstSeen(db);
+        db.prepare(
+          "INSERT OR IGNORE INTO meta (key, value) VALUES ('funnel_first_seen_since', ?)",
+        ).run(String(Math.min(earliest ?? Number.POSITIVE_INFINITY, Date.now())));
+      }
+    }).immediate();
+}
+
+/**
+ * Where an account the database already knows appears first: every table that holds an account
+ * (a tenant, a key's or a challenge's owner, a waiver's redeemer, an adoption's guardian) and the
+ * time its row was made, with that time's unit, as its writer stores it: `text` is UTC text as
+ * SQLite's CURRENT_TIMESTAMP writes it; `ms` unix milliseconds (`Date.now()` at the write);
+ * `seconds` unix seconds. A World ID row keeps its latest verification, so its time may be later
+ * than the account's first; the earliest of all the tables is what is kept.
+ */
+const KNOWN_ACCOUNT_SOURCES: readonly {
+  table: string;
+  account: string;
+  time: string;
+  unit: "text" | "ms" | "seconds";
+}[] = [
+  { table: "entities", account: "owner_tenant_id", time: "created_at", unit: "text" },
+  { table: "companies", account: "tenant_id", time: "created_at", unit: "text" },
+  { table: "legal_bodies", account: "tenant_id", time: "created_at", unit: "text" },
+  { table: "company_declarations", account: "tenant_id", time: "created_at", unit: "text" },
+  { table: "guardian_identity_checks", account: "tenant_id", time: "created_at", unit: "text" },
+  { table: "formation_parties", account: "tenant_id", time: "created_at", unit: "text" },
+  { table: "jobs", account: "owner_tenant_id", time: "created_at", unit: "text" },
+  { table: "payment_idempotency", account: "tenant_id", time: "created_at", unit: "text" },
+  { table: "agentbook_registrations", account: "tenant_id", time: "created_at", unit: "text" },
+  { table: "guardian_verifications", account: "tenant_id", time: "verified_at", unit: "ms" },
+  { table: "guardian_attestations", account: "tenant_id", time: "verified_at", unit: "ms" },
+  { table: "guardian_waivers", account: "redeemed_by", time: "redeemed_at", unit: "ms" },
+  { table: "world_requests", account: "tenant_id", time: "created_at", unit: "ms" },
+  { table: "api_keys", account: "owner_tenant", time: "created_at", unit: "ms" },
+  { table: "passkeys", account: "owner_tenant", time: "created_at", unit: "ms" },
+  { table: "webauthn_challenges", account: "owner_tenant", time: "issued_at", unit: "ms" },
+  { table: "link_codes", account: "owner_tenant", time: "issued_at", unit: "ms" },
+  { table: "agreement_adoptions", account: "guardian", time: "adopted_at", unit: "seconds" },
+];
+
+/**
+ * THE ACCOUNTS A DATABASE KNEW BEFORE ITS SIGN-INS WERE RECORDED. Run once, by `migrate`, in the
+ * transaction that creates `tenant_first_seen`: every account any table of `KNOWN_ACCOUNT_SOURCES`
+ * holds gets a row at the earliest time those tables hold for it, so an account that signed in
+ * before this build is not counted as a new sign-in at its next one (the sign-in's INSERT OR
+ * IGNORE keeps the backfilled time). Accounts are compared in lower case and stored checksummed,
+ * the spelling `POST /auth/verify` writes. A value that is not an address, or a time that is not
+ * one, is left out rather than refused: the migrate must not fail on an old row's shape. Answers
+ * the earliest time written, undefined when none was.
+ */
+function backfillTenantFirstSeen(db: Database.Database): number | undefined {
+  // Each unit to milliseconds, and the storage class a time of that unit has.
+  const units = {
+    text: { ms: (c: string) => `(CAST(strftime('%s', ${c}) AS INTEGER) * 1000)`, type: "text" },
+    ms: { ms: (c: string) => c, type: "integer" },
+    seconds: { ms: (c: string) => `(${c} * 1000)`, type: "integer" },
+  } as const;
+  const hasColumns = (table: string, columns: string[]) => {
+    const names = (db.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    return columns.every((c) => names.includes(c));
+  };
+  const selects = KNOWN_ACCOUNT_SOURCES.filter((s) => hasColumns(s.table, [s.account, s.time])).map(
+    ({ table, account, time, unit }) =>
+      `SELECT ${account} AS account, ${units[unit].ms(time)} AS t FROM ${table}
+        WHERE typeof(${account}) = 'text' AND typeof(${time}) = '${units[unit].type}'`,
+  );
+  // The earliest time per account, among the times the table can hold: a value out of range (a
+  // time in seconds in a milliseconds column, text that is no time) is never the earliest.
+  const known = db
+    .prepare(
+      `SELECT lower(account) AS account, MIN(t) AS t FROM (${selects.join(" UNION ALL ")})
+        WHERE t BETWEEN ${MIN_MILLIS} AND ${Number.MAX_SAFE_INTEGER}
+        GROUP BY lower(account)`,
+    )
+    .all() as { account: string; t: number }[];
+  const insert = db.prepare(
+    "INSERT OR IGNORE INTO tenant_first_seen (address, first_seen_at) VALUES (?, ?)",
+  );
+  let earliest: number | undefined;
+  for (const { account, t } of known) {
+    if (!isAddress(account, { strict: false }) || !Number.isSafeInteger(t)) continue;
+    insert.run(getAddress(account), t);
+    earliest = Math.min(earliest ?? t, t);
+  }
+  return earliest;
 }
 
 /** Marker for the one-shot 2026-08-26 re-key (design §2 steps 1-5). */
