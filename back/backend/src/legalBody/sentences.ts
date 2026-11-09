@@ -44,6 +44,14 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   order_revoked: "This order was revoked by the operator, and can no longer be linked.",
   agreement_outdated:
     "This order's agreement was written on a version of the operating agreement this deployment no longer serves: place a new order.",
+  // Both link doors and both link tools, until the guardian has signed the adoption: the guardian
+  // signs it in the web app, never through a tool.
+  agreement_not_adopted:
+    "The operating agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
+  adoption_stale:
+    "This adoption message was issued too long ago, or ahead of the server's clock: ask for a new adoption message and sign that.",
+  adoption_not_valid:
+    "The adoption is not valid: the signature must be your own wallet's signature of the adoption message served for this order, as it was served.",
   invalid_agent_id:
     "The agentId must be the identity's ERC-8004 id as a decimal string: digits only, no leading zero, below 2^256.",
   invalid_link_ttl:

@@ -47,15 +47,21 @@ export const DEFAULT_FORMATION_FILING_WORKING_DAYS = 5;
 
 /** The legal-body flow's settings when unset: the amendment delay of every new legal body (48
  *  hours, in seconds), then the caps on a tenant's open orders, its orders and its creates per 24
- *  hours, and the deployment's creates per 24 hours. Also the fallback for a config with no
- *  `legalBodyFlow` block. */
+ *  hours, the deployment's creates per 24 hours, and the greatest age of a signed adoption of an
+ *  order's agreement (600 seconds, as the statement of authority's). Also the fallback for a
+ *  config with no `legalBodyFlow` block. */
 export const LEGAL_BODY_FLOW_DEFAULTS = Object.freeze({
   amendmentDelaySeconds: 172_800,
   maxOpenPerTenant: 3,
   maxOrdersPerTenantPerDay: 10,
   maxCreatesPerTenantPerDay: 5,
   maxCreatesPerDay: 100,
+  adoptionMaxAgeSeconds: 600,
 });
+
+/** The longest an adoption message may wait for its signature: a draft is linkable for 24 hours
+ *  after it was placed, so an older message could adopt nothing that is still linkable. */
+const LEGAL_BODY_ADOPTION_MAX_AGE_LIMIT_SECONDS = 86_400;
 
 /** Milliseconds between two ticks of the legal-body sweeper when LEGAL_BODY_SWEEP_INTERVAL_MS is
  *  unset. Also the fallback for a config with no `legalBodySweepIntervalMs`. */
@@ -581,6 +587,19 @@ const EnvSchema = z.object({
     blankAsUnset,
     z.coerce.number().int().positive().default(LEGAL_BODY_FLOW_DEFAULTS.maxCreatesPerDay),
   ),
+  /** How long after it was issued, in seconds, a signed adoption of an order's agreement is still
+   *  accepted: a positive whole number, at most 86400 (24 hours). */
+  LEGAL_BODY_ADOPTION_MAX_AGE_SECONDS: z.preprocess(
+    blankAsUnset,
+    z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(LEGAL_BODY_ADOPTION_MAX_AGE_LIMIT_SECONDS, {
+        message: `must be at most ${LEGAL_BODY_ADOPTION_MAX_AGE_LIMIT_SECONDS} seconds (24 hours)`,
+      })
+      .default(LEGAL_BODY_FLOW_DEFAULTS.adoptionMaxAgeSeconds),
+  ),
   /** Milliseconds between two ticks of the legal-body sweeper, which settles reserved orders and
    *  checks bindings: a positive whole number a timer can hold. */
   LEGAL_BODY_SWEEP_INTERVAL_MS: z.preprocess(
@@ -820,6 +839,8 @@ export interface Config {
     maxOrdersPerTenantPerDay: number;
     maxCreatesPerTenantPerDay: number;
     maxCreatesPerDay: number;
+    /** Seconds: how long after it was issued a signed adoption is still accepted. */
+    adoptionMaxAgeSeconds: number;
   };
   /** Milliseconds between two ticks of the legal-body sweeper. Optional in the TYPE only, like
    *  `legalBodyFlow`: loadConfig always sets it, and a reader falls back to
@@ -1307,6 +1328,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       maxOrdersPerTenantPerDay: e.LEGAL_BODY_MAX_ORDERS_PER_TENANT_PER_DAY,
       maxCreatesPerTenantPerDay: e.LEGAL_BODY_MAX_CREATES_PER_TENANT_PER_DAY,
       maxCreatesPerDay: e.LEGAL_BODY_MAX_CREATES_PER_DAY,
+      adoptionMaxAgeSeconds: e.LEGAL_BODY_ADOPTION_MAX_AGE_SECONDS,
     },
     legalBodySweepIntervalMs: e.LEGAL_BODY_SWEEP_INTERVAL_MS,
     legalBodyGasSeedUsdc: e.LEGAL_BODY_GAS_SEED_USDC,

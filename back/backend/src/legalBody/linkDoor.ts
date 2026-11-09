@@ -122,7 +122,8 @@ const FACTORY_ERROR_NAMES: ReadonlySet<string> = new Set(
 /**
  * Rule 1, shared by both functions, on the tenant's order: a frozen draft of this deployment,
  * created less than 24 hours ago, not revoked, for a company still eligible, whose stored agreement
- * re-verifies and was written on the current text, which this deployment serves.
+ * re-verifies and was written on the current text, which this deployment serves, and whose
+ * guardian has adopted that agreement (`adoption.ts`), on every deployment alike.
  */
 function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, nowMs: number): Hex {
   const hash = row.oaManifestHash;
@@ -141,6 +142,10 @@ function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, now
     !servable(deps.environment)
   )
     throw refusal("agreement_outdated", 409);
+  // The link binds the agreement too, but it is the identity owner's signature, who need not be
+  // the member: the agreement is adopted by the guardian's own.
+  if (deps.adoptions.find(row.legalBodyId) === undefined)
+    throw refusal("agreement_not_adopted", 409);
   return hash;
 }
 

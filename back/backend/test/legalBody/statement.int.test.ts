@@ -78,6 +78,7 @@ import { SqliteDocumentIndexRepository } from "../../src/persistence/documentInd
 import { FileDocumentStore } from "../../src/persistence/documentStore";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../../src/persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../../src/persistence/legalBodyStatementRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
@@ -293,6 +294,7 @@ function deploy(opts: DeployOptions = {}): Deployment {
 
   const orderDeps: LegalBodyOrderDeps = {
     repo: legalBodies,
+    adoptions: new SqliteLegalBodyAdoptionRepository(db),
     companies,
     declarations,
     checks,

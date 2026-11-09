@@ -94,6 +94,7 @@ import { SqliteFormationPartyRepository } from "../persistence/formationPartyRep
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
 import { SqliteIdentityRepository } from "../persistence/identityRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
 import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
@@ -625,6 +626,8 @@ async function main() {
     legalBodies && cfg.legalBodyFactory && legalBodyChain
       ? {
           repo: legalBodies,
+          // The guardians' adoptions of their orders' agreements: the link doors require one.
+          adoptions: new SqliteLegalBodyAdoptionRepository(db),
           companies,
           declarations: companyDeclarations,
           checks: companyChecks,
@@ -646,6 +649,7 @@ async function main() {
           maxOrdersPerTenantPerDay: legalBodyFlow.maxOrdersPerTenantPerDay,
           maxCreatesPerTenantPerDay: legalBodyFlow.maxCreatesPerTenantPerDay,
           maxCreatesPerDay: legalBodyFlow.maxCreatesPerDay,
+          adoptionMaxAgeSeconds: legalBodyFlow.adoptionMaxAgeSeconds,
           doorBudget: new TokenBucket(20, 1),
           tenantBucket: bucketsByKey(5, 1 / 10),
           identityBucket: bucketsByKey(3, 1 / 20),

@@ -586,6 +586,7 @@ describe("toOrderView", () => {
         "supersededBy",
         "replacedBy",
         "companyName",
+        "adoptedAt",
       ].sort(),
     );
     expect(deployed).toMatchObject({

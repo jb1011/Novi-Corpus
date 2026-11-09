@@ -1421,6 +1421,63 @@ const STATEMENT_LOG_DDL = `
   END;
 `;
 
+/**
+ * THE ADOPTIONS OF AN ORDER'S OPERATING AGREEMENT (see `legalBodyAdoptionRepository.ts`): one row
+ * per order, written when its guardian signs the adoption of the agreement frozen for it, and
+ * never changed. The link doors refuse an order with no row here.
+ *
+ * Its own table, outside `LEGAL_BODIES_DDL`, for the reasons given at `statement_log`: the
+ * legal-body schema step compares, drops and creates only its two tables, and `migrate` creates
+ * this one after that step, once `legal_bodies` exists. Its foreign key holds in place every order
+ * that has a row here, so the step's drop of the two empty tables finds this one empty too. Named
+ * without the `legal_bod` prefix of those two tables, as `statement_log` is, so a listing of those
+ * tables by that prefix finds exactly them.
+ *
+ * Written once: no UPDATE, no DELETE, and no INSERT over an existing order or rowid (REPLACE
+ * deletes the row it collides with without firing the delete guard). The no-replace guard relies
+ * on `CHECK (rowid > 0)`, as `legal_bodies` does: for an automatic rowid SQLite shows a BEFORE
+ * INSERT trigger a placeholder (-1), which must never match a stored row.
+ *
+ * The shapes are those of the legal-body tables: hashes `0x` and 64 LOWER-CASE hex digits, the
+ * guardian an address, the times unix SECONDS, and the signature 65 bytes of lower-case hex (r, s
+ * and v: the only form the adoption accepts).
+ */
+const AGREEMENT_ADOPTIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS agreement_adoptions (
+    legal_body_id TEXT PRIMARY KEY NOT NULL REFERENCES legal_bodies(legal_body_id),
+    manifest_hash TEXT NOT NULL CHECK (${sqlIsHash("manifest_hash")}),
+    text_id       TEXT NOT NULL CHECK (typeof(text_id) = 'text' AND length(text_id) > 0),
+    text_version  TEXT NOT NULL CHECK (typeof(text_version) = 'text' AND length(text_version) > 0),
+    guardian      TEXT NOT NULL CHECK (${sqlIsAddress("guardian")}),
+    issued_at     INTEGER NOT NULL CHECK (${sqlIsSeconds("issued_at")}),
+    signature     TEXT NOT NULL CHECK (typeof(signature) = 'text' AND signature GLOB '0x*'
+      AND length(CAST(signature AS BLOB)) = 132 AND length(signature) = 132
+      AND substr(signature, 3) NOT GLOB '*[^0-9a-f]*'),
+    digest        TEXT NOT NULL CHECK (${sqlIsHash("digest")}),
+    adopted_at    INTEGER NOT NULL CHECK (${sqlIsSeconds("adopted_at")}),
+    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CHECK (rowid > 0)
+  );
+
+  CREATE TRIGGER IF NOT EXISTS trg_agreement_adoptions_no_update
+  BEFORE UPDATE ON agreement_adoptions
+  BEGIN
+    SELECT RAISE(ABORT, 'agreement_adoptions rows are written once');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_agreement_adoptions_no_delete
+  BEFORE DELETE ON agreement_adoptions
+  BEGIN
+    SELECT RAISE(ABORT, 'agreement_adoptions rows are written once');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_agreement_adoptions_no_replace
+  BEFORE INSERT ON agreement_adoptions FOR EACH ROW
+  WHEN EXISTS (SELECT 1 FROM agreement_adoptions
+                WHERE legal_body_id = NEW.legal_body_id OR rowid = NEW.rowid)
+  BEGIN
+    SELECT RAISE(ABORT, 'agreement_adoptions rows are written once');
+  END;
+`;
+
 /** Create tables if absent. Idempotent. */
 export function migrate(db: Database.Database): void {
   db.exec(`
@@ -2247,6 +2304,8 @@ export function migrate(db: Database.Database): void {
   // The statement log references `legal_bodies`, so it comes once they exist. Outside the
   // legal-body schema step, which compares and recreates only its own two tables.
   db.exec(STATEMENT_LOG_DDL);
+  // The agreement adoptions reference `legal_bodies` too, and stand outside that step alike.
+  db.exec(AGREEMENT_ADOPTIONS_DDL);
 }
 
 /** Marker for the one-shot 2026-08-26 re-key (design §2 steps 1-5). */
