@@ -54,6 +54,7 @@ import { resolveFormationDeployment } from "../formation";
 import { createCompany } from "../formation/company";
 import { newChainHeadCache } from "../formation/payment";
 import { formationSummary } from "../formation/status";
+import { foundingFromEnv, foundingLimiter } from "../founding/config";
 import { HederaMirror } from "../hedera/mirror";
 import type { IdentityDeps } from "../identity/state";
 import { buildJobDeps } from "../jobs/composition";
@@ -1146,6 +1147,8 @@ async function main() {
         }
       : undefined;
 
+  const foundingEnv = foundingFromEnv(process.env);
+
   const app = buildApiApp({
     webOrigin: cfg.webOrigin,
     nonceStore,
@@ -1310,6 +1313,7 @@ async function main() {
     standingExposure,
     // The pilot's cases, where the pilot or the Kleros block is set.
     pilotCases,
+    founding: { ...foundingEnv, db, take: foundingLimiter() },
   });
 
   const port = Number(process.env.PORT ?? 8789);
