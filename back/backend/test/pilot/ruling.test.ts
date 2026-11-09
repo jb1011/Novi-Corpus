@@ -6,7 +6,12 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
-import { KlerosHttpError, KlerosTransportError } from "../../src/adapters/kleros/errors";
+import {
+  KlerosHttpError,
+  KlerosRefusal,
+  KlerosTransportError,
+  KlerosWrongDeploymentError,
+} from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
@@ -463,16 +468,48 @@ describe("pollOnce", () => {
     expect(s.cases.find(s.row.caseId)).toEqual(ruled);
   });
 
-  test.each<[string, Partial<DisputeRead>, string]>([
+  // The time of the read: a read that kept the stored ruling must not renew the trust a settle
+  // puts in it. A pending read leaves the time the ruling was taken at; a read that failed the
+  // options check, or that contradicts the stored verdict (a tie in the appeal period, a value the
+  // settlement does not know), clears it, so the next settle reads Kleros live.
+  const MISMATCH_WORDS =
+    "a read of the ruled case failed the options check; the stored ruling is kept, and the next settle reads Kleros again before acting on it";
+  const CONTRADICTS_WORDS =
+    "a read of the ruled case contradicts the stored verdict; the stored ruling is kept, and the next settle reads Kleros again before acting on it";
+  test.each<[string, Partial<DisputeRead>, string, "kept" | "cleared", string]>([
     [
       "an options mismatch",
       { rulingOptions: [{ value: "1", title: "Something else" }] },
       "options_mismatch",
+      "cleared",
+      MISMATCH_WORDS,
     ],
-    ["a tie at Appeal", { ruling: "0", tied: true }, "tied"],
+    [
+      "an options mismatch at Executed",
+      {
+        status: "Executed",
+        ruled: true,
+        rulingOptions: [
+          { value: "1", title: "Refund the client" },
+          { value: "2", title: "Pay the provider" },
+        ],
+      },
+      "options_mismatch",
+      "cleared",
+      MISMATCH_WORDS,
+    ],
+    ["a tie at Appeal", { ruling: "0", tied: true }, "tied", "cleared", CONTRADICTS_WORDS],
+    ["an unexpected value", { ruling: "7" }, "unexpected", "cleared", CONTRADICTS_WORDS],
+    [
+      "a read at Vote",
+      { status: "Vote", ruling: "0", tied: true },
+      "pending",
+      "kept",
+      "a read of the ruled case was not final; the stored ruling is kept",
+    ],
   ])(
     "a re-read of a ruled row that is %s keeps the stored ruling and records the outcome",
-    async (_name, o, kind) => {
+    async (_name, o, kind, readTime, words) => {
       let next = read({ ruling: "2" });
       const service = stubService(() => next);
       const t = setup({ stage: testnetStage(service) });
@@ -495,16 +532,16 @@ describe("pollOnce", () => {
         rulingTied: ruled.rulingTied,
         rulingLabel: ruled.rulingLabel,
         rulingRoundCount: 1,
-        // The time of the read is the one the stored ruling was taken at: a read that kept it
-        // must not renew the trust a settle puts in it.
-        rulingReadAt: ruled.rulingReadAt,
+        rulingReadAt: readTime === "kept" ? ruled.rulingReadAt : null,
         rulingDeadline: "2026-11-01T00:00:00.000Z",
       });
+      expect(ruled.rulingReadAt).not.toBeNull();
       expect(after.rulingReadAt).not.toBe(Math.floor(t.clock.now / 1000));
       expect(t.cases.events(row.caseId).at(-1)).toMatchObject({
         step: "ruling",
         status: kind,
         ref: "186",
+        detail: words,
       });
     },
   );
@@ -864,6 +901,24 @@ describe("pollUntilRuled when reads fail", () => {
     ]);
   });
 
+  test("a failed read's text is the service's own, redacted: never the platform's sentence, never a file path", async () => {
+    const f = failing((n) =>
+      n === 1
+        ? new KlerosTransportError(
+            "Kleros dispute_get: insufficient funds for gas at /var/lib/kleros/transport/client.js",
+          )
+        : {},
+    );
+    await pollUntilRuled(f.deps, f.row.caseId, {});
+    const text = "Kleros dispute_get: insufficient funds for gas at client.js";
+    expect(f.logs.filter((l) => l.opslog === "pilot_poll_read_failed")).toEqual([
+      expect.objectContaining({ error: text }),
+    ]);
+    expect(f.cases.events(f.row.caseId).filter((e) => e.status === "read_failed")).toEqual([
+      expect.objectContaining({ step: "ruling", detail: text }),
+    ]);
+  });
+
   test("a refused key leaves a read_failed event too, then stops the watch", async () => {
     const f = failing(() => new KlerosHttpError(401, "no"));
     const r = await pollUntilRuled(f.deps, f.row.caseId, {});
@@ -876,7 +931,41 @@ describe("pollUntilRuled when reads fail", () => {
     await expect(pollUntilRuled(f.deps, f.row.caseId, {})).rejects.toThrow(/a bug/);
     expect(f.service.reads).toHaveLength(1);
     expect(f.logs).toEqual([]);
+    expect(f.cases.events(f.row.caseId)).toEqual([]);
   });
+
+  test.each<[string, () => Error, string]>([
+    [
+      "a refusal of the service",
+      () =>
+        new KlerosRefusal(
+          "dispute_get",
+          "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at /var/lib/kleros/fees.json",
+        ),
+      "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at fees.json",
+    ],
+    [
+      "a read of another deployment",
+      () => new KlerosWrongDeploymentError("arbitrum-sepolia-testnet", "arbitrum-one"),
+      'Kleros read names chain "arbitrum-one", but this service is bound to arbitrum-sepolia-testnet',
+    ],
+  ])(
+    "%s escapes on the first read, and leaves one read_failed event in the service's words",
+    async (_name, failure, text) => {
+      const f = failing(failure);
+      await expect(pollUntilRuled(f.deps, f.row.caseId, {})).rejects.toThrow(failure().message);
+      expect(f.service.reads).toHaveLength(1);
+      expect(f.logs).toEqual([]);
+      expect(f.cases.events(f.row.caseId)).toEqual([
+        expect.objectContaining({
+          step: "ruling",
+          status: "read_failed",
+          ref: "186",
+          detail: text,
+        }),
+      ]);
+    },
+  );
 
   test("a refusal escapes without a read", async () => {
     const f = failing(() => ({}));

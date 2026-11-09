@@ -30,6 +30,7 @@ import {
 } from "../../src/legalBody/statements";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
+import { SqliteLegalBodyTreasuryRepository } from "../../src/persistence/legalBodyTreasuryRepository";
 import { filingDateToUnix } from "../../src/workflow/formationProcessor";
 import { ACTION, CHAIN_ID, FACTORY, recordHuman } from "../helpers/customerCompanyFixtures";
 import { seedCompany } from "../helpers/formationFakes";
@@ -291,6 +292,31 @@ describe("a declared company is stated exactly as before", () => {
     ]);
     expect(out).toMatchObject({ legalBodyId: row.legalBodyId, standing: "active" });
     expect(formationSteps).not.toHaveBeenCalled();
+  });
+
+  test("a treasury of record declared for the body leaves the signed statement the bytes it was: its 33 fields, domain version 2", async () => {
+    const row = linkedBody(declaredCompany(), CUSTOMER_BODY);
+    // The guardian declared the agent's wallet as the chain shows it (the row's identity owner),
+    // with a provider and a link to its limits: the unsigned record beside the statement.
+    new SqliteLegalBodyTreasuryRepository(s.db).append({
+      legalBodyId: row.legalBodyId,
+      address: OWNER,
+      provider: "other",
+      providerName: "Example Wallets",
+      limitsReadableAt: "https://limits.example.test/wallets/0001",
+      registryTxHash: null,
+      at: CLOCK_S - 60,
+    });
+
+    const out = expectStatement(await agent42());
+    expect(JSON.stringify(out.statement)).toBe(JSON.stringify(SIGNED_BEFORE));
+    expect(claimsHash(statementFromJson(out.statement.message))).toBe(CLAIMS_BEFORE);
+    // The key set, in its order: the 33 signed fields and no other.
+    expect(Object.keys(out.statement.message)).toEqual(Object.keys(SIGNED_BEFORE.message));
+    expect(Object.keys(out.statement.message)).toHaveLength(33);
+    expect(out.statement.domain.version).toBe("2");
+    expect(JSON.stringify(out)).not.toContain("limits.example");
+    expect(JSON.stringify(out)).not.toContain("Example Wallets");
   });
 
   test("its transparency row is the one it was", async () => {

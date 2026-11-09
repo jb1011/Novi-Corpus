@@ -1531,6 +1531,68 @@ const FUNNEL_DDL = `
   CREATE INDEX IF NOT EXISTS idx_statement_reads_day ON statement_reads(day);
 `;
 
+/**
+ * THE TREASURY OF RECORD (see `legalBodyTreasuryRepository.ts`): what the guardian of a linked
+ * legal body declared about the wallet its agent pays from, one row per declaration, append-only.
+ * The latest row of a body, by `declared_at`, is its record; a new attach appends a row.
+ *
+ * Its own table, outside `LEGAL_BODIES_DDL`, for the reasons the statement log is (see
+ * `STATEMENT_LOG_DDL`): the legal-body schema step never sees it, `migrate` creates it once
+ * `legal_bodies` exists, and its foreign key holds in place every body it has a row for. Named off
+ * the `legal_bod` prefix for the same reason, so a listing of the legal-body tables by that prefix
+ * still finds exactly them.
+ *
+ * WITHOUT ROWID: the primary key is the row's only identity, so no INSERT can name a rowid and
+ * REPLACE a stored row through it. The triggers refuse an UPDATE, a DELETE, and an INSERT that is
+ * not after the body's latest declaration, which also refuses one over an existing key: so a
+ * REPLACE never reaches its conflict resolution, and the rows of a body are in the order they
+ * were made.
+ *
+ * The shapes. The address is `0x` and 40 hex digits, never the zero address in any casing. The
+ * provider is one of four, and only `other` has a name, of 1 to 80 characters. The link is
+ * `https://` and at most 300 characters. The registry transaction hash, when there is one, is
+ * `0x` and 64 lower-case hex digits. `declared_at` is unix SECONDS. Only the guardian declares.
+ */
+const TREASURY_DECLARATIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS treasury_declarations (
+    legal_body_id      TEXT NOT NULL REFERENCES legal_bodies(legal_body_id),
+    address            TEXT NOT NULL CHECK (${sqlIsAddress("address")}
+      AND lower(address) <> '0x0000000000000000000000000000000000000000'),
+    provider           TEXT NOT NULL
+      CHECK (provider IN ('crossmint', 'circle', 'other', 'own_key')),
+    provider_name      TEXT CHECK (provider_name IS NULL OR (typeof(provider_name) = 'text'
+      AND length(provider_name) BETWEEN 1 AND 80)),
+    limits_readable_at TEXT CHECK (limits_readable_at IS NULL OR (typeof(limits_readable_at) = 'text'
+      AND length(CAST(limits_readable_at AS BLOB)) = length(limits_readable_at)
+      AND length(limits_readable_at) BETWEEN 9 AND 300
+      AND substr(limits_readable_at, 1, 8) = 'https://')),
+    declared_by        TEXT NOT NULL DEFAULT 'guardian' CHECK (declared_by = 'guardian'),
+    declared_at        INTEGER NOT NULL CHECK (${sqlIsSeconds("declared_at")}),
+    registry_tx_hash   TEXT CHECK (registry_tx_hash IS NULL OR (${sqlIsHash("registry_tx_hash")})),
+    created_at         TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (legal_body_id, declared_at),
+    CHECK ((provider = 'other') = (provider_name IS NOT NULL))
+  ) WITHOUT ROWID;
+
+  CREATE TRIGGER IF NOT EXISTS trg_treasury_declarations_no_update
+  BEFORE UPDATE ON treasury_declarations
+  BEGIN
+    SELECT RAISE(ABORT, 'treasury_declarations is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_treasury_declarations_no_delete
+  BEFORE DELETE ON treasury_declarations
+  BEGIN
+    SELECT RAISE(ABORT, 'treasury_declarations is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_treasury_declarations_in_order
+  BEFORE INSERT ON treasury_declarations FOR EACH ROW
+  WHEN NEW.declared_at <= (SELECT MAX(declared_at) FROM treasury_declarations
+                            WHERE legal_body_id = NEW.legal_body_id)
+  BEGIN
+    SELECT RAISE(ABORT, 'treasury_declarations is append-only: a declaration comes after the body''s latest, in order');
+  END;
+`;
+
 /** Create tables if absent. Idempotent. */
 export function migrate(db: Database.Database): void {
   db.exec(`
@@ -2395,6 +2457,8 @@ export function migrate(db: Database.Database): void {
         ).run(String(Math.min(earliest ?? Number.POSITIVE_INFINITY, Date.now())));
       }
     }).immediate();
+  // The treasury of record references `legal_bodies` too, and stands outside that step likewise.
+  db.exec(TREASURY_DECLARATIONS_DDL);
 }
 
 /**

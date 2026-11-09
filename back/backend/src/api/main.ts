@@ -67,6 +67,7 @@ import {
   LegalBodySweeper,
 } from "../legalBody/sweeper";
 import { STATEMENT_OF_AUTHORITY } from "../legalBody/texts/statementOfAuthority";
+import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { opsLog } from "../observability/opsLog";
 import { AGENT_BOOK_CAIP2, createAgentBookReader } from "../payments/agentBookReader";
 import { buildEntityPaymentService } from "../payments/entityPayment";
@@ -97,6 +98,7 @@ import { SqliteIdentityRepository } from "../persistence/identityRepository";
 import { SqliteLegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
+import { SqliteLegalBodyTreasuryRepository } from "../persistence/legalBodyTreasuryRepository";
 import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
 import { SqliteOaAnchorRepository } from "../persistence/oaAnchorRepository";
 import { SqlitePasskeyStore } from "../persistence/passkeyStore";
@@ -688,6 +690,17 @@ async function main() {
     : undefined;
 
   /**
+   * THE TREASURY OF RECORD's dependencies, wherever the order doors' are: the record, over the db
+   * handle the legal-body store writes through (a declaration and its event are one transaction of
+   * that store), and the registry a declaration is checked against, read through this process's
+   * `ArcAdapter`: `getAgentWallet` on `cfg.identityRegistry`, the registry the statements read. The
+   * public lookups read the same record for the block they serve beside a statement.
+   */
+  const legalBodyTreasury: LegalBodyTreasuryDeps | undefined = legalBodyOrders
+    ? { repo: new SqliteLegalBodyTreasuryRepository(db), registry: arc }
+    : undefined;
+
+  /**
    * The CUSTOMER COMPANY doors' dependencies (declare an existing Wyoming LLC, abandon it, upload
    * its evidence), built ONCE and only where `customerDoorsEnabled`: the legal-body factory is set
    * and, on a production deployment, the deployment charges, so a body could never read `active`
@@ -1220,6 +1233,8 @@ async function main() {
     legalBodyGasSeed,
     // The public statement, where the feature is on and the attestation key is set.
     legalBodyStatements,
+    // The treasury of record: its door beside the order doors, its record read by the lookups.
+    legalBodyTreasury,
     // The inbound receiver (design §6). Present only with credentials: a box that cannot verify a
     // signature has no business owning the URL.
     doola:

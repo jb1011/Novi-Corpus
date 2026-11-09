@@ -19,7 +19,7 @@ import {
   type WalletClient,
 } from "viem";
 import { beforeEach, expect, test, vi } from "vitest";
-import { JobAdapter } from "../../../src/adapters/arc/jobAdapter";
+import { type BroadcastOptions, JobAdapter } from "../../../src/adapters/arc/jobAdapter";
 import { RECEIPT_TIMEOUT_MS } from "../../../src/adapters/arc/receipts";
 import { ReputationAdapter } from "../../../src/adapters/arc/reputationAdapter";
 import { resetSenderNonces } from "../../../src/adapters/arc/senderLock";
@@ -228,5 +228,76 @@ test.each(receiptSites)(
     await expect(run(makeAdapters({ rejectWith: new Error("socket hang up") }))).rejects.toThrow(
       "socket hang up",
     );
+  },
+);
+
+// ── THE HASH, THE MOMENT IT EXISTS ───────────────────────────────────────────────────────────
+//
+// The three settlement sends hand the hash to an opt-in hook between the broadcast and the
+// receipt wait, so a caller can write it down before a failed wait or a crash can take it away.
+
+/** The three sends that take the hook, each given it as its last argument. */
+const hookSites: {
+  name: string;
+  run: (a: Adapters, opts?: BroadcastOptions) => Promise<Hex>;
+}[] = [
+  { name: "complete", run: (a, o) => a.job.complete(3n, REASON, o) },
+  { name: "reject", run: (a, o) => a.job.reject(3n, REASON, a.job.evaluatorWallet!, o) },
+  { name: "claimRefund", run: (a, o) => a.job.claimRefund(3n, undefined, o) },
+];
+
+test.each(hookSites)(
+  "$name hands the hash to onBroadcast after the broadcast and before the receipt wait",
+  async ({ run }) => {
+    const a = makeAdapters({ receipts: ["success"] });
+    const seen: { hash: Hex; broadcasts: number; waits: number }[] = [];
+    const h = await run(a, {
+      onBroadcast: (hash) =>
+        seen.push({ hash, broadcasts: a.broadcasts(), waits: a.waits().length }),
+    });
+    expect(seen).toEqual([{ hash: hashOf(1), broadcasts: 1, waits: 0 }]);
+    expect(h).toBe(hashOf(1));
+    expect(a.waits()).toEqual([{ hash: hashOf(1), timeout: RECEIPT_TIMEOUT_MS }]);
+  },
+);
+
+test.each(hookSites)(
+  "$name has handed the hash over when the wait then fails on the transport",
+  async ({ run }) => {
+    const a = makeAdapters({ rejectWith: new Error("socket hang up") });
+    const seen: Hex[] = [];
+    await expect(run(a, { onBroadcast: (hash) => seen.push(hash) })).rejects.toThrow(
+      "socket hang up",
+    );
+    expect(seen).toEqual([hashOf(1)]);
+  },
+);
+
+test.each(hookSites)(
+  "$name lets a throw from onBroadcast through and takes no receipt wait",
+  async ({ run }) => {
+    const a = makeAdapters({ receipts: ["success"] });
+    await expect(
+      run(a, {
+        onBroadcast: () => {
+          throw new Error("the write failed");
+        },
+      }),
+    ).rejects.toThrow("the write failed");
+    expect(a.broadcasts()).toBe(1);
+    expect(a.waits()).toEqual([]);
+  },
+);
+
+test.each(hookSites)(
+  "$name with no hook, or options without one, broadcasts once and waits once",
+  async ({ run }) => {
+    for (const opts of [undefined, {}]) {
+      resetSenderNonces();
+      const a = makeAdapters({ receipts: ["success"] });
+      expect(await run(a, opts)).toBe(hashOf(1));
+      expect(a.broadcasts()).toBe(1);
+      expect(a.waits()).toEqual([{ hash: hashOf(1), timeout: RECEIPT_TIMEOUT_MS }]);
+    }
   },
 );

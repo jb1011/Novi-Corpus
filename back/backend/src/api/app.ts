@@ -15,6 +15,7 @@ import type { LegalBodyOrderDeps } from "../legalBody/orders";
 import type { LegalBodyStatementDeps } from "../legalBody/statements";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
 import { STATEMENT_OF_AUTHORITY } from "../legalBody/texts/statementOfAuthority";
+import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { mountMcpRoute } from "../mcp/transport";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
@@ -108,6 +109,14 @@ export interface ApiDeps extends EntityViewDeps {
    * Its amount is 0, and the door answers 409 `gas_seed_disabled`, unless the deployment sets one.
    */
   legalBodyGasSeed?: GasSeedDeps;
+  /**
+   * The treasury of record: the record of what each linked body's guardian declared about the
+   * wallet its agent pays from, and the registry a declaration is checked against. Its door is
+   * mounted beside the order doors, and only with them; the two public lookup answers read its
+   * record for the `treasury` block they serve beside a signed statement. Absent, the door is a 404
+   * and every such block is null.
+   */
+  legalBodyTreasury?: LegalBodyTreasuryDeps;
   webOrigin: string;
   nonceStore: import("../auth/nonceStore").NonceStore;
   /**
@@ -649,7 +658,12 @@ export function buildApiApp(deps: ApiDeps) {
   // deployment wires the feature.
   if (deps.legalBodyOrders) {
     protect("/legal-body-orders");
-    mountLegalBodyOrderRoutes(app, deps.legalBodyOrders, deps.legalBodyGasSeed);
+    mountLegalBodyOrderRoutes(
+      app,
+      deps.legalBodyOrders,
+      deps.legalBodyGasSeed,
+      deps.legalBodyTreasury,
+    );
   }
   // After the `/companies/*` requireAuth line above, so both document routes inherit auth.
   mountDocumentRoutes(app, deps);
