@@ -40,6 +40,11 @@ export const ARC_TESTNET_CHAIN_ID = 5042002;
  *  unset. Also the fallback for a config with no formation block. */
 export const DEFAULT_BYO_MAX_OPEN_PER_TENANT = 3;
 
+/** How many working days the formed door's waiting screen says a filing usually takes, when
+ *  FORMATION_FILING_WORKING_DAYS is unset: five, until doola gives its own figure. Also the
+ *  fallback for a deployment with no formation block. */
+export const DEFAULT_FORMATION_FILING_WORKING_DAYS = 5;
+
 /** The legal-body flow's settings when unset: the amendment delay of every new legal body (48
  *  hours, in seconds), then the caps on a tenant's open orders, its orders and its creates per 24
  *  hours, and the deployment's creates per 24 hours. Also the fallback for a config with no
@@ -396,6 +401,17 @@ const EnvSchema = z.object({
    * arriving is `agents × facts × 2` transactions. Ten is the stated bound behind that arithmetic.
    */
   FORMATION_MAX_AGENTS_PER_COMPANY: z.coerce.number().int().positive().default(10),
+  /**
+   * How many working days the formed door's waiting screen says a filing usually takes, served on
+   * `/config.legalBodies.filingWorkingDays`. A whole number from 1 to 30. The screen never promises
+   * a date: it says "usually", and this figure is replaced by doola's own once they give it.
+   */
+  FORMATION_FILING_WORKING_DAYS: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(30)
+    .default(DEFAULT_FORMATION_FILING_WORKING_DAYS),
   /** Tri-state, same shape as FORMATION_REQUIRED: unset = TRUE in sandbox. Real names/addresses
    *  are then neither collected nor sent to doola's development environment (§3 PII). */
   FORMATION_SANDBOX_SYNTHETIC_PII: z.string().optional(),
@@ -988,6 +1004,10 @@ export interface Config {
      *  the TYPE only (loadConfig always sets it); a reader falls back to
      *  DEFAULT_BYO_MAX_OPEN_PER_TENANT. */
     byoMaxOpenPerTenant?: number;
+    /** FORMATION_FILING_WORKING_DAYS: what the formed door's waiting screen says a filing usually
+     *  takes. Optional in the TYPE only (loadConfig always sets it); a reader falls back to
+     *  DEFAULT_FORMATION_FILING_WORKING_DAYS. */
+    filingWorkingDays?: number;
     /** Sandbox files with a labeled synthetic identity instead of a real natural person. */
     sandboxSyntheticPii: boolean;
     /**
@@ -1456,6 +1476,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       dailyCeiling: e.FORMATION_DAILY_CEILING,
       maxAgentsPerCompany: e.FORMATION_MAX_AGENTS_PER_COMPANY,
       byoMaxOpenPerTenant: e.BYO_MAX_OPEN_PER_TENANT,
+      filingWorkingDays: e.FORMATION_FILING_WORKING_DAYS,
       sandboxSyntheticPii: boolWithDerivedDefault(
         e.FORMATION_SANDBOX_SYNTHETIC_PII,
         e.DOOLA_ENVIRONMENT === "sandbox",

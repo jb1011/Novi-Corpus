@@ -377,7 +377,11 @@ describe("each tool answers what its door answers for the same input", () => {
     expect(reserved.viaTool.body).toEqual({ status: "reserved", order: reserved.viaDoor.body });
     expect(reserved.viaTool.body.order).toEqual(
       orderViewOf(
-        { repo: reserved.tool.s.repo, declarations: reserved.tool.s.declarations },
+        {
+          repo: reserved.tool.s.repo,
+          declarations: reserved.tool.s.declarations,
+          companies: reserved.tool.s.companies,
+        },
         rowIn(reserved.tool, reserved.id),
       ),
     );

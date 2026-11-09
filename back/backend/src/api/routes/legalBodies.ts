@@ -37,7 +37,8 @@ import { TokenBucket } from "./agentBook";
  *
  * A Minimal legal body's answer carries the signed statement instead, under the statement's own
  * rules (`legalBody/publicStatement.ts`): its `filingNumber` and `legalName` only by the names rule
- * of `assembleStatement` (a passed check, a linked binding, nothing revoked), and
+ * of `assembleStatement` (a passed check, or for a company Novi formed its confirmed filing; a
+ * linked binding; nothing revoked), and
  * `guardianHumanVerified`, a flag. It does not name the guardian: `identityOwnerAtCreation` is the
  * identity's owner as the chain records it, which may be the guardian's own wallet. It never
  * carries the EIN.

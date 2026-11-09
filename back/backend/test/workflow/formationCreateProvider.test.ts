@@ -170,6 +170,7 @@ function bindParty(over: { country?: string; phone?: string | null } = {}): stri
     businessPurpose: "A test agent.",
     industryLabel: "Software development",
     intakeSynthesized: true,
+    purposeKind: "agent",
   });
   claimEntity({ companyId: COMPANY_KEY, provider: "doola", environment: "sandbox" });
   const id = parties.create({

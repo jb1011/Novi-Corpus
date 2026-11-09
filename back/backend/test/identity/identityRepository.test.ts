@@ -250,6 +250,7 @@ describe("SqliteIdentityRepository", () => {
         businessPurpose: "placeholder",
         industryLabel: "placeholder",
         intakeSynthesized: false,
+        purposeKind: "legal_body",
       });
     expect(companies.setStatus(company(tenant(3)), "draft", "abandoned")).toBe(true);
     // Passed, but too recently to be unused.
@@ -303,6 +304,7 @@ describe("SqliteIdentityRepository", () => {
       businessPurpose: "placeholder",
       industryLabel: "placeholder",
       intakeSynthesized: false,
+      purposeKind: "legal_body",
     });
     const declarations = new SqliteCompanyDeclarationRepository(db);
     declarations.insert({

@@ -22,15 +22,16 @@ import type {
   CompanyDeclaration,
   CompanyDeclarationRepository,
 } from "../persistence/companyDeclarationRepository";
-import type { CompanyRecord } from "../persistence/companyRepository";
+import type { CompanyPurposeKind, CompanyRecord } from "../persistence/companyRepository";
 import {
+  DAO_SUPPLEMENT_DOC_TYPE,
   type DocumentIndexRecord,
   type DocumentIndexRepository,
   documentFileName,
 } from "../persistence/documentIndexRepository";
 import { parseDetail } from "../persistence/formationRepository";
 import type { FormationRequestRecord } from "../persistence/formationRepository";
-import type { EntityRecord, ScheduledPolicyRecord } from "../types";
+import type { EntityRecord, FormationPin, ScheduledPolicyRecord } from "../types";
 import { parseSqliteUtc } from "../util/sqliteTime";
 import { usesManifestScheme } from "../workflow/onboarding";
 
@@ -175,13 +176,24 @@ export interface CompanyView {
    * Converted here, once, by the same parser the sweeper reads these columns with.
    */
   createdAt: number;
+  /** What the company is for: `agent`, a company agents attach to, or `legal_body`, a company
+   *  that stands behind one legal body and takes no agents. Every company has one. */
+  purpose: CompanyPurposeKind;
+  /** Where the company came from: `customer` for a customer's own company, which its guardian
+   *  declared, else the formation provider that filed it (`doola`). Every company has one. */
+  provider: CompanyProvider;
   /**
-   * A CUSTOMER'S OWN COMPANY carries three keys more: this one, `declared` and `verification`. A
-   * company filed through formation has none of the three, so its key set is exactly what it
-   * always was.
+   * The DAO supplement to the company's articles, once an operator has recorded doola's amended
+   * articles: when the latest was recorded (unix SECONDS, like `filedAt`) and the hash of its
+   * bytes, in the spelling the index stores. Null until one is recorded, and on a surface given no
+   * document index. Recorded, never claimed: no sentence may call the company a DAO from this
+   * field alone.
    */
-  provider?: typeof CUSTOMER_PROVIDER;
+  daoSupplement: { recordedAt: number; sha256: string } | null;
   /**
+   * A CUSTOMER'S OWN COMPANY carries two keys more: this one and `verification`. A company filed
+   * through formation has neither, so its key set ends at `daoSupplement`.
+   *
    * What the guardian declared: the company and its filing, as typed, and the version of the
    * wording they signed. Never the declarant's name or title. Still the declarant's word until the
    * operator's check passes, which is why it is served on the tenant's own authenticated view and
@@ -199,6 +211,16 @@ export interface CompanyView {
     checkedAt: number | null;
     reasonCode: CheckReasonCode | null;
   } | null;
+}
+
+/** A company's provider as the view serves it: `customer`, or the formation provider every pin
+ *  names. */
+export type CompanyProvider = typeof CUSTOMER_PROVIDER | FormationPin["provider"];
+
+/** The view of a dao_supplement row of the index, or null without one. */
+function daoSupplementOf(row: DocumentIndexRecord | undefined): CompanyView["daoSupplement"] {
+  if (row === undefined) return null;
+  return { recordedAt: Math.floor(parseSqliteUtc(row.createdAt) / 1000), sha256: row.sha256 };
 }
 
 /** The facts a customer's company is described by: its declaration and the operator's latest
@@ -236,12 +258,15 @@ export interface CompanyListDeps {
   formationSteps?: FormationStepsLookup;
   /** Read for the customer rows of the page only. */
   customerFacts?: CustomerFactsLookup;
+  /** The document index, for the page's DAO supplements, read in one statement. Absent, every
+   *  row's `daoSupplement` is null. */
+  documents?: Pick<DocumentIndexRepository, "latestOfType">;
 }
 
 /**
- * A tenant's companies, NEWEST FIRST, in FOUR queries however long the page is while every row is
- * a formation company (M5). Each customer row adds two of its own: a declaration read and a
- * latest-check read.
+ * A tenant's companies, NEWEST FIRST, in FIVE queries however long the page is while every row is
+ * a formation company (M5), the fifth the page's DAO supplements. Each customer row adds two of
+ * its own: a declaration read and a latest-check read.
  *
  * Every row used to ask for its own steps, its own live-payment count and its own agent count:
  * 3N+1 queries per page view, on two authenticated surfaces. The ordering is the repository's,
@@ -254,6 +279,7 @@ export function listCompanyViews(deps: CompanyListDeps, tenantId: string): Compa
   const steps = deps.formationStepsMany?.(ids);
   const agents = deps.companies.countAgentsMany(ids);
   const paying = livePaymentLookup(deps.companies, ids);
+  const supplements = deps.documents?.latestOfType(DAO_SUPPLEMENT_DOC_TYPE, ids);
   return rows.map((company) => {
     // ONE steps read and ONE payment read per row, named once each: `state` is a projection of
     // those rows, and asking twice is two queries AND two possibly-different answers.
@@ -266,6 +292,7 @@ export function listCompanyViews(deps: CompanyListDeps, tenantId: string): Compa
       agents.get(company.companyId) ?? 0,
       // Two reads per customer row, and none for a formation row.
       customerFactsOf(deps.customerFacts, company),
+      supplements?.get(company.companyId),
     );
   });
 }
@@ -283,10 +310,10 @@ export function listCompanyViews(deps: CompanyListDeps, tenantId: string): Compa
  * differently and both are right: the list batches one query for the whole page, and the detail
  * counts the agent rows it is already about to render.
  *
- * `customer` is a customer company's declaration and latest check. The three customer keys are
+ * `customer` is a customer company's declaration and latest check. The two customer keys are
  * decided by the company's PROVIDER, never by whether facts were passed: a formation company never
- * grows them, and a customer company always says what it is, with nulls where its facts could not
- * be read.
+ * grows them, and a customer company always has them, with nulls where its facts could not be
+ * read. `daoSupplement` is the company's latest dao_supplement row of the index, if any.
  */
 export function toCompanyView(
   company: CompanyRecord,
@@ -294,6 +321,7 @@ export function toCompanyView(
   paying: boolean,
   agents: number,
   customer?: CustomerCompanyFacts,
+  daoSupplement?: DocumentIndexRecord,
 ): CompanyView {
   const view: CompanyView = {
     companyId: company.companyId,
@@ -307,13 +335,16 @@ export function toCompanyView(
     filingNumber: company.filingNumber,
     agents,
     createdAt: parseSqliteUtc(company.createdAt),
+    purpose: company.purposeKind,
+    // As stored: the customer door writes `customer`, the formation door the pin's provider.
+    provider: company.provider as CompanyProvider,
+    daoSupplement: daoSupplementOf(daoSupplement),
   };
   if (company.provider !== CUSTOMER_PROVIDER) return view;
   const declaration = customer?.declaration;
   const latest = customer?.latestCheck;
   return {
     ...view,
-    provider: CUSTOMER_PROVIDER,
     // The public half of the declaration: these three survive the erasure of an abandoned
     // company's personal fields, and the declarant's name and title are never read here.
     declared: declaration
@@ -683,7 +714,8 @@ export interface CompanyDetailView extends CompanyView {
 export interface CompanyDetailDeps {
   companies: import("../persistence/companyRepository").CompanyRepository;
   formationSteps?: FormationStepsLookup;
-  documents?: Pick<DocumentIndexRepository, "listByCompany">;
+  /** The documents the page lists, and the latest DAO supplement among them. */
+  documents?: Pick<DocumentIndexRepository, "listByCompany" | "latestOfType">;
   repo: Pick<import("../persistence/entityRepository").EntityRepository, "listByCompany">;
   formation?: {
     parties: Pick<
@@ -718,6 +750,9 @@ export function toCompanyDetailView(
       paying,
       attachedAgents.length,
       customerFactsOf(deps.customerFacts, company),
+      deps.documents
+        ?.latestOfType(DAO_SUPPLEMENT_DOC_TYPE, [company.companyId])
+        .get(company.companyId),
     ),
     status: company.status,
     synthetic: company.synthetic,

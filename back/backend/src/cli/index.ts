@@ -16,6 +16,7 @@ import { runOnboarding } from "../workflow/onboarding";
 import { OnboardingRunner } from "../workflow/runner";
 import { registerCompanyCheckCommands } from "./companyChecks";
 import { type CliContext, buildContext } from "./context";
+import { registerFormedCompanyCommands } from "./formedCompanies";
 import { registerIdentityCommands } from "./identity";
 import { registerPilotCommands } from "./pilot";
 import { registerSchedulerCommands } from "./scheduler";
@@ -785,6 +786,10 @@ export function buildCli(
   // ── company:* and legal-body:revoke — the operator's check of a customer's declaration ────────
   // DB-only, like the formation commands: each opens the configured database itself.
   registerCompanyCheckCommands(program);
+
+  // ── company:dao-supplement, company:filed-name — what doola settles by hand for a formed company
+  // DB-only, like the company commands: each opens the configured database itself.
+  registerFormedCompanyCommands(program);
 
   // ── identity:* — the operator's record of the guardian's identity check ────────────────────────
   // DB-only, like the company commands: each opens the configured database itself.

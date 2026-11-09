@@ -32,6 +32,7 @@ import {
   type CompanyRepository,
   SqliteCompanyRepository,
 } from "../../src/persistence/companyRepository";
+import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import {
   type LegalBodyRecord,
   SqliteLegalBodyRepository,
@@ -100,16 +101,19 @@ export const noChain = new Proxy({} as LegalBodyChainPort, {
 /** The order deps of a sandbox deployment (the agreement's wording is a draft, which only a
  *  sandbox serves), with no identity record, as on the testnet box, which holds no PII key; with
  *  room in every throttle and a sleep that returns at once, so a door's wait for a receipt takes
- *  no real time. The chain is whatever `over` gives. */
+ *  no real time. A formed company's formation steps are read from the same database. The chain is
+ *  whatever `over` gives. */
 export function legalBodyOrderDeps(
   s: LegalBodyStores,
   over: Partial<LegalBodyOrderDeps> = {},
 ): LegalBodyOrderDeps {
+  const requests = new SqliteFormationRepository(s.db);
   return {
     repo: s.repo,
     companies: s.companies,
     declarations: s.declarations,
     checks: s.checks,
+    formationSteps: (companyId) => requests.stepsOf(companyId),
     world: worldFor(s.store),
     identity: undefined,
     chain: noChain,
@@ -134,7 +138,7 @@ export function legalBodyOrderDeps(
 /** The order's view as a door answers it for the row as stored now, its facts read from the
  *  stores. */
 export function orderViewOf(
-  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations">,
+  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations" | "companies">,
   row: LegalBodyRecord,
 ): LegalBodyOrderView {
   return toOrderView(row, orderViewFacts(deps, row));
@@ -143,7 +147,7 @@ export function orderViewOf(
 /** The order's binding as a door answers it for the row as stored now, its facts read from the
  *  stores. */
 export function bindingViewOf(
-  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations">,
+  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations" | "companies">,
   row: LegalBodyRecord,
 ): BindingView {
   return toBindingView(row, orderViewFacts(deps, row));
@@ -227,6 +231,7 @@ export function customerCompany(
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind: provider === CUSTOMER_PROVIDER ? "legal_body" : "agent",
   });
   if (provider === CUSTOMER_PROVIDER)
     s.declarations.insert({

@@ -177,6 +177,7 @@ function sandboxFormationCompany(): string {
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 

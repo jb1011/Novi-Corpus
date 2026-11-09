@@ -112,6 +112,7 @@ function company(status: "draft" | "ready" = "draft"): string {
     businessPurpose: "software",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 

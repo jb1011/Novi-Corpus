@@ -4,6 +4,7 @@ import { manifestHash, serializeManifestBytes } from "../oa/manifest";
 import { opsLog } from "../observability/opsLog";
 import type { DocumentStore } from "../persistence/documentStore";
 import type { Address } from "../types";
+import type { CompanySource } from "./provider";
 import type { LegalText, LegalTextStatus } from "./texts/index";
 import type { AgreementFields } from "./texts/operatingAgreement";
 
@@ -12,9 +13,10 @@ import type { AgreementFields } from "./texts/operatingAgreement";
  * owner's link signs and the legal body records.
  *
  * The manifest is canonical JSON (RFC 8785, one trailing newline) and commits to the chain, the
- * guardian, the amendment delay, the kind of company, and the text by id, version, status and
- * hash. It holds no company name, no filing number and no agentId: the name is committed through
- * the terms hash, so the manifest itself can be published without naming anyone.
+ * guardian, the amendment delay, the kind of company and where it came from (`customer` for a
+ * customer's own, `novi` for one Novi formed), and the text by id, version, status and hash. It
+ * holds no company name, no filing number and no agentId: the name is committed through the terms
+ * hash, so the manifest itself can be published without naming anyone.
  *
  * One buffer is built, hashed and written: the file on disk is the bytes the hash was taken over.
  */
@@ -30,7 +32,7 @@ export type LegalBodyManifest = {
   guardian: Address;
   /** Seconds. */
   amendmentDelay: number;
-  company: { source: "customer"; jurisdiction: "WY"; entityType: "LLC" };
+  company: { source: CompanySource; jurisdiction: "WY"; entityType: "LLC" };
   /** `hash` is keccak256 of the terms document's UTF-8 bytes (`computeOaHash`). */
   terms: { textId: string; textVersion: string; textStatus: LegalTextStatus; hash: Hex };
 };
@@ -49,7 +51,9 @@ export interface BuiltAgreement {
 const AGREEMENT_VERSION = 1;
 
 /**
- * Builds the terms document and its manifest from one set of fields.
+ * Builds the terms document and its manifest from one set of fields, and the company's source
+ * (`companySourceOf` of its provider), which the manifest states and the link signs. Given by every
+ * caller, never defaulted: a formed company's manifest must never say `customer`.
  *
  * Addresses are written in their checksummed form, in the text and in the manifest, so that the
  * same address in another letter case gives the same agreement (and an address that is not one
@@ -59,6 +63,7 @@ const AGREEMENT_VERSION = 1;
 export function buildAgreement(
   fields: AgreementFields,
   text: LegalText<AgreementFields>,
+  company: { source: CompanySource },
 ): BuiltAgreement {
   const guardian = getAddress(fields.guardian);
   const factory = getAddress(fields.factory);
@@ -70,7 +75,7 @@ export function buildAgreement(
     chain: { chainId: fields.chainId, factory, identityRegistry },
     guardian,
     amendmentDelay: fields.amendmentDelaySeconds,
-    company: { source: "customer", jurisdiction: fields.jurisdiction, entityType: "LLC" },
+    company: { source: company.source, jurisdiction: fields.jurisdiction, entityType: "LLC" },
     terms: {
       textId: text.id,
       textVersion: text.version,

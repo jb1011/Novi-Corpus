@@ -33,6 +33,7 @@ const ANSWERING_MODULES = [
   "legalBody/binding.ts",
   "legalBody/checkLink.ts",
   "legalBody/gasSeed.ts",
+  "formation/company.ts",
   "api/routes/legalBodyOrders.ts",
   "mcp/server.ts",
 ];
@@ -62,6 +63,7 @@ const NAMED_CODES = [
   "busy",
   "rate_limited",
   "company_not_eligible",
+  "company_name_unusable",
   "order_expired",
   "order_revoked",
   "order_closed",

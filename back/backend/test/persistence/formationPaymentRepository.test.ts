@@ -53,6 +53,7 @@ function company(): string {
     businessPurpose: "software",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 

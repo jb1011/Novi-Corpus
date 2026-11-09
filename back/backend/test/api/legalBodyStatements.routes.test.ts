@@ -533,6 +533,8 @@ test("the composition root builds the statement's dependencies only with the sto
     /^ {10}companies,$/m,
     /^ {10}checks: companyChecks,$/m,
     /^ {10}declarations: companyDeclarations,$/m,
+    // Whether the State filed a company Novi formed, and its EIN: the order doors' reader.
+    /^ {10}formationSteps: \(companyId: string\) => formationRequests\.stepsOf\(companyId\),$/m,
     /^ {10}world: worldId,$/m,
     /^ {10}deployment: \{ chainId: cfg\.chainId, factory: legalBodyChain\.factory \},$/m,
     /^ {10}identityRegistry: cfg\.identityRegistry,$/m,

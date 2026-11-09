@@ -243,6 +243,9 @@ export const CreateCompanyBodySchema = CompanyIntakeBodySchema.extend({
     .min(1, "partyId is required"),
   /** The sandbox deployment's marker, checked against this box's own setting in `createCompany`. */
   synthetic: z.boolean({ invalid_type_error: "synthetic must be a boolean" }).optional(),
+  /** A company for a legal body; left out, a company for agents. On this door only: the MCP
+   *  `create_company` schema has no such field. */
+  for: z.literal("legal_body").optional(),
 }).strict();
 
 /**

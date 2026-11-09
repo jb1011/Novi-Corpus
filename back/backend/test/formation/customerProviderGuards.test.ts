@@ -69,6 +69,7 @@ function customerCompany(status: CompanyStatus): string {
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind: "legal_body",
   });
 }
 
@@ -87,6 +88,7 @@ function formationCompany(
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: DEFAULT_INDUSTRY,
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 
@@ -142,6 +144,24 @@ test("the onboard door refuses a ready customer company with its one company-una
   expect(
     formationDoorRefusal(door, { tenantId: TENANT, companyId: formationCompany("ready") }),
   ).toBeNull();
+});
+
+test("a customer company that reads purpose agent is refused all the same: the provider decides too", () => {
+  // A row no door writes: a raw insert names no purpose and gets the column's default. The
+  // purpose check would let it through, so the provider check is what refuses it.
+  db.prepare(
+    `INSERT INTO companies (company_id, tenant_id, status, provider, environment,
+                            name_options, business_purpose, industry_label)
+     VALUES ('co_customer_agent', ?, 'ready', 'customer', 'sandbox', '[]', ?, ?)`,
+  ).run(TENANT, CUSTOMER_COMPANY_PLACEHOLDER, CUSTOMER_COMPANY_PLACEHOLDER);
+  const company = companies.find("co_customer_agent")!;
+  expect([company.provider, company.purposeKind]).toEqual(["customer", "agent"]);
+  for (const derived of ["none", "in_progress", "filed", "complete"] as const)
+    expect(companyAcceptsAgents(company, derived, false)).toBe(false);
+  const door = { formation: { required: true, maxAgentsPerCompany: 10, requests, companies } };
+  expect(formationDoorRefusal(door, { tenantId: TENANT, companyId: "co_customer_agent" })).toBe(
+    companyUnavailableMessage(),
+  );
 });
 
 // ── the fee ─────────────────────────────────────────────────────────────────────────────────

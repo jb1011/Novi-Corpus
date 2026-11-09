@@ -49,7 +49,7 @@ const TEMPLATE_SHA256_BY_VERSION: Readonly<Record<string, string>> = {
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
 const build = (fields: AgreementFields = FIELDS): BuiltAgreement =>
-  buildAgreement(fields, LEGAL_BODY_OPERATING_AGREEMENT);
+  buildAgreement(fields, LEGAL_BODY_OPERATING_AGREEMENT, { source: "customer" });
 
 let logLines: string[] = [];
 beforeEach(() => {
@@ -217,7 +217,7 @@ test("the hash is keccak256 of the manifest bytes, trailing newline included", (
 
 test("the manifest carries the status of the text it was built from", () => {
   const approved = { ...LEGAL_BODY_OPERATING_AGREEMENT, status: "approved" as const };
-  const a = buildAgreement(FIELDS, approved);
+  const a = buildAgreement(FIELDS, approved, { source: "customer" });
   expect(JSON.parse(a.manifest).terms.textStatus).toBe("approved");
   // The approved copy renders the same text, so only the status moves the hash.
   expect(a.termsDoc).toBe(build().termsDoc);

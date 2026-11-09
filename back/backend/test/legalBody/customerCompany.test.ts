@@ -254,6 +254,8 @@ function companyRow(over: { tenantId?: Address; provider?: string; status?: Comp
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind:
+      (over.provider ?? CUSTOMER_PROVIDER) === CUSTOMER_PROVIDER ? "legal_body" : "agent",
   });
 }
 
@@ -335,6 +337,8 @@ describe("on a production deployment, with the wording approved", () => {
       businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
       industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
       intakeSynthesized: false,
+      // It stands behind a legal body, never behind an agent.
+      purposeKind: "legal_body",
     });
 
     const fields = fieldsOf(TYPED, owner.address);

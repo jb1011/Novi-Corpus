@@ -170,7 +170,12 @@ const COMPANIES_DDL = `
       filing_number  TEXT,
       ein            TEXT,
       created_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      updated_at  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      -- What the company is FOR: 'agent' stands behind agents of the full product, 'legal_body'
+      -- behind a legal body and never behind an agent. Written by its creator and never changed.
+      -- LAST, because a database created before it gets it from the guarded ALTER in migrate(),
+      -- which appends: the fresh and the upgraded table then list the same columns in one order.
+      purpose_kind TEXT NOT NULL DEFAULT 'agent' CHECK (purpose_kind IN ('agent', 'legal_body'))
     );
     -- (tenant_id, created_at DESC) because listByTenant -- the reuse picker's ordering contract,
     -- shared by GET /companies and MCP list_companies -- reads exactly that, and the old
@@ -2018,6 +2023,35 @@ export function migrate(db: Database.Database): void {
   ] as const)
     if (!checkCols.includes(col))
       db.exec(`ALTER TABLE company_checks ADD COLUMN ${col} ${definition}`);
+
+  // companies.purpose_kind (see COMPANIES_DDL), ALTER-if-missing, the house idiom. HERE, before
+  // the first refusal below: `formation:abandon` runs without `migrate()` and constructs the
+  // company repository, so a migration that refuses further down must still leave the column.
+  const companyCols = (db.prepare("PRAGMA table_info(companies)").all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (!companyCols.includes("purpose_kind"))
+    db.exec(
+      "ALTER TABLE companies ADD COLUMN purpose_kind TEXT NOT NULL DEFAULT 'agent' CHECK (purpose_kind IN ('agent', 'legal_body'))",
+    );
+  // The backfill, on EVERY boot: DEFAULT 'agent' is the truth for every row written before the
+  // column existed but one kind. A customer's own declared company (provider 'customer',
+  // CUSTOMER_PROVIDER) stands behind a legal body, never behind an agent. Not once under a `meta`
+  // marker: after a rollback to the build before this one and a roll forward again, the customer
+  // companies that build wrote read 'agent' and this has to correct them. Idempotent, and it
+  // touches no other row. `updated_at` is left alone, since nothing about the company changed.
+  // ASKED FIRST, with a read: an UPDATE takes the write lock even when it matches no row, and a
+  // start that finds everything in sync must not wait for another process's writer
+  // (legalBodySchemaVersion.test.ts).
+  const customerRowsToCorrect = db
+    .prepare(
+      "SELECT EXISTS (SELECT 1 FROM companies WHERE provider = 'customer' AND purpose_kind <> 'legal_body') AS found",
+    )
+    .get() as { found: number };
+  if (customerRowsToCorrect.found === 1)
+    db.exec(
+      "UPDATE companies SET purpose_kind = 'legal_body' WHERE provider = 'customer' AND purpose_kind <> 'legal_body'",
+    );
 
   // formation_parties: PR 1's shape was keyed by entity_key with no tenant column, which cannot
   // express a party that exists BEFORE its entity does (the intake handle, design §5). Rebuild

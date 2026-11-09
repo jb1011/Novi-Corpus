@@ -66,6 +66,7 @@ function company(companyId: string, status: CompanyStatus = "draft"): void {
     businessPurpose: "placeholder",
     industryLabel: "placeholder",
     intakeSynthesized: false,
+    purposeKind: "legal_body",
   });
   if (status !== "draft") expect(companies.setStatus(companyId, "draft", status)).toBe(true);
 }
@@ -229,6 +230,44 @@ describe("the three columns", () => {
       expiresAt: NOW + RETENTION,
       bytesDeletedAt: null,
     });
+  });
+
+  test("an operator's document stores its source with no expiry, and the rules of a customer's upload never touch it", () => {
+    company("co_abandoned", "abandoned");
+    const providerDocId = `operator:dao_supplement:${H("d5")}`;
+    const rec: NewDocumentIndexRecord = {
+      id: documentIndexId("co_abandoned", providerDocId),
+      companyId: "co_abandoned",
+      docType: "dao_supplement",
+      sha256: H("d5"),
+      contentType: "application/pdf",
+      size: PDF.length,
+      providerDocId,
+      path: documentStoreName("co_abandoned", "dao_supplement", "d5".repeat(32)),
+      source: "operator",
+    };
+    expect(documents.insert(rec)).toBe(true);
+    expect(documents.findOwned("co_abandoned", rec.id)).toMatchObject({
+      source: "operator",
+      expiresAt: null,
+      bytesDeletedAt: null,
+      createdAt: expect.stringMatching(SQLITE_UTC),
+    });
+    // Old, on an abandoned company checked after it: still never a customer's upload.
+    setCreatedAt(rec.id, UPLOADED);
+    check("co_abandoned", "passed");
+    expect(expired()).toEqual([]);
+    expect(documents.countCustomerUploads("co_abandoned")).toEqual({ present: 0, all: 0 });
+    expect(documents.markBytesDeleted(rec.id, NOW)).toBe(false);
+
+    // A source outside the three is refused, before anything is written.
+    expect(() =>
+      documents.insert({
+        ...rec,
+        id: "doc-other",
+        source: "partner" as NewDocumentIndexRecord["source"],
+      }),
+    ).toThrow("document index: source must be one of provider, customer, operator");
   });
 });
 

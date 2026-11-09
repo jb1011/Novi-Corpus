@@ -116,6 +116,7 @@ function seedCompanyWithQuote(): { companyId: string; nonce: Hex } {
     businessPurpose: "software",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   const nonce = `0x${"a1".repeat(32)}` as Hex;
   payments.create({

@@ -354,6 +354,7 @@ function formationDeps(environment: "sandbox" | "production", attach = true) {
       businessPurpose: "purpose",
       industryLabel: "Software development",
       intakeSynthesized: true,
+      purposeKind: "agent",
     });
     const partyId = parties.create({
       tenantId: "t1",

@@ -58,6 +58,7 @@ function bound(): { partyId: string; companyId: string } {
     businessPurpose: "Building agents.",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   expect(parties.bindToCompany(partyId, companyId, TENANT)).toBe(true);
   return { partyId, companyId };

@@ -5,7 +5,11 @@ import type {
   DoolaEnvironment,
   DoolaRequiredAction,
 } from "../adapters/doola/types";
-import { normalizeCompanyName } from "../formation/intake";
+import {
+  type CompanyNameOption,
+  normalizeCompanyName,
+  withEntityEnding,
+} from "../formation/intake";
 import { POLL_BASE_MS, POLL_CAP_MS, type StepBackoff, nextInterval } from "../formation/schedule";
 import { providerRefOf } from "../formation/status";
 import { opsLog } from "../observability/opsLog";
@@ -497,12 +501,46 @@ function advanceFiling(
 }
 
 /**
+ * Which stored name option a reported name is: the option's own `name` (the bare candidate, as the
+ * intake stored it, without its entity ending), or null when it is none of them or the reported
+ * name is blank or absent. Both sides are compared under `normalizeCompanyName` (NFC, trimmed, a
+ * trailing entity ending dropped, any case), so "Lantern Works LLC" is the option "Lantern Works".
+ *
+ * PURE: it reads nothing and logs nothing, so every place a reported name arrives holds it to the
+ * one rule (the processor's `matchFiledName`, `company:filed-name`, and the operator's record of a
+ * filing). Which form a caller then stores is the caller's: the processor adds the entity ending
+ * for a legal-body company (`withEntityEnding`), and keeps the bare candidate for an agent company.
+ */
+export function matchFiledNameAgainst(
+  options: readonly CompanyNameOption[],
+  reported: string | null | undefined,
+): string | null {
+  const trimmed = reported?.trim();
+  if (!trimmed) return null;
+  const wanted = normalizeCompanyName(trimmed);
+  return options.find((o) => normalizeCompanyName(o.name) === wanted)?.name ?? null;
+}
+
+/**
  * Which of OUR name candidates the state actually accepted (design §5).
  *
  * doola reports the accepted name as free text, and free text is exactly what must never reach
  * `legal_name_filed`: the manifest hashes that field onto a public chain, so what is stored is
  * ALWAYS our own candidate string — the one whose normalized form matches. No match means no
  * name: `legal.companyName` stays absent, which is honest, and the owner gets a required action.
+ *
+ * WHICH FORM of the candidate depends on what the company is for. A legal-body company's filed
+ * name is printed in its operating agreement and its statement, so it is the full legal name as
+ * the State's record prints it: the candidate and our own entity ending (`withEntityEnding`). An
+ * agent company keeps the bare candidate, exactly as before: the published manifests of the full
+ * product commit to that string, and a changed form would re-hash every one of them.
+ *
+ * A LEGAL-BODY COMPANY'S NAME, ONCE HELD, IS NEVER REWRITTEN HERE. Its filed name may be the
+ * operator's, typed from the State's record (`company:filed-name`), and the record is the truth:
+ * a later poll that matches a candidate must not put the candidate's form back. So for such a
+ * company that already holds a name this returns null, which both writers (the confirmation and
+ * `healFilingFacts`) store as "no new name" (`recordFilingFacts` keeps a value against a null). An
+ * agent company is matched on every poll, exactly as before.
  */
 function matchFiledName(
   d: FormationAdvanceDeps,
@@ -511,10 +549,11 @@ function matchFiledName(
 ): string | null {
   const reported = company.name?.trim();
   if (!reported) return null;
-  const wanted = normalizeCompanyName(reported);
-  const stored = d.companies.find(companyId)?.nameOptions ?? [];
-  const hit = stored.find((o) => normalizeCompanyName(o.name) === wanted);
-  if (hit) return hit.name;
+  const row = d.companies.find(companyId);
+  if (row?.purposeKind === "legal_body" && row.legalNameFiled !== null) return null;
+  const stored = row?.nameOptions ?? [];
+  const hit = matchFiledNameAgainst(stored, reported);
+  if (hit !== null) return row?.purposeKind === "legal_body" ? withEntityEnding(hit) : hit;
   opsLog("formation_filed_name_unmatched", {
     level: "warn",
     companyId,

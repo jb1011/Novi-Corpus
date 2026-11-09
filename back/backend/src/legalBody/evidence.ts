@@ -49,12 +49,15 @@ export type AcceptEvidenceResult =
 /** The five bytes every PDF starts with. */
 const PDF_SIGNATURE = Buffer.from("%PDF-", "latin1");
 
-/** The sha256 in the one spelling the index and the operator's checks keep: 0x, lower-case hex. */
-function sha256Of(bytes: Uint8Array): Hex {
+/** The sha256 in the one spelling the index and the operator's checks keep: 0x, lower-case hex.
+ *  An operator's document (`company:dao-supplement`) is indexed in the same spelling. */
+export function sha256Of(bytes: Uint8Array): Hex {
   return `0x${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
-function startsAsPdf(bytes: Uint8Array): boolean {
+/** Whether the bytes start with the five bytes every PDF starts with: the one check an upload, or an
+ *  operator's document (`company:dao-supplement`), is held to beyond its size and its hash. */
+export function startsAsPdf(bytes: Uint8Array): boolean {
   return (
     bytes.length >= PDF_SIGNATURE.length && PDF_SIGNATURE.every((byte, i) => bytes[i] === byte)
   );

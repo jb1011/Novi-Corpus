@@ -13,6 +13,7 @@
 import type DatabaseType from "better-sqlite3";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import {
+  companyAcceptsAgents,
   companyAgentCapMessage,
   companyUnavailableMessage,
   formationDoorRefusal,
@@ -71,7 +72,12 @@ function deps(over: { required?: boolean; maxAgentsPerCompany?: number } = {}) {
 
 /** A company the tenant owns, in whatever state the case under test needs. */
 function newCompany(
-  over: { tenantId?: string; status?: "draft" | "ready" | "abandoned"; companyId?: string } = {},
+  over: {
+    tenantId?: string;
+    status?: "draft" | "ready" | "abandoned";
+    companyId?: string;
+    purposeKind?: "agent" | "legal_body";
+  } = {},
 ): string {
   return companies.create({
     companyId: over.companyId,
@@ -84,6 +90,7 @@ function newCompany(
     businessPurpose: "purpose",
     industryLabel: "Software development",
     intakeSynthesized: true,
+    purposeKind: over.purposeKind ?? "agent",
   });
 }
 
@@ -155,6 +162,25 @@ test("unknown, FOREIGN, DRAFT and ABANDONED companies get the SAME message", () 
     expect(formationDoorRefusal(deps(), { tenantId: TENANT, companyId })).toBe(
       companyUnavailableMessage(),
     );
+});
+
+test("a LEGAL-BODY company takes no agent: refused with the same message, in every filing state", () => {
+  // It stands behind a legal body, never behind an agent, whatever its provider: a formed company
+  // asked for with `for: "legal_body"` is a doola company in every other respect.
+  const companyId = newCompany({ companyId: "c-legal-body", purposeKind: "legal_body" });
+  expect(formationDoorRefusal(deps(), { tenantId: TENANT, companyId })).toBe(
+    companyUnavailableMessage(),
+  );
+  expect(formationDoorRefusal(deps({ required: false }), { tenantId: TENANT, companyId })).toBe(
+    companyUnavailableMessage(),
+  );
+  // The predicate the claim's attach CAS re-reads inside its transaction answers the same.
+  const company = companies.find(companyId)!;
+  for (const derived of ["none", "in_progress", "filed", "complete"] as const)
+    expect(companyAcceptsAgents(company, derived, false)).toBe(false);
+  // …and the same company for agents is accepted, so the purpose alone decides.
+  const agents = companies.find(newCompany({ companyId: "c-agents" }))!;
+  expect(companyAcceptsAgents(agents, "none", false)).toBe(true);
 });
 
 test("a company whose create_provider FAILED is refused — the filing will not happen", () => {

@@ -5,11 +5,12 @@ import { type LegalText, defineLegalText } from "./index";
  * The operating agreement of a legal body that has no treasury: the text whose hash the legal
  * body's manifest commits to, and so the text the identity owner's link signature reaches.
  *
- * It names the company by its checked name and filing number, each between double quotes, which
- * the field rules forbid inside a field. Only string fields are placeholders: the amendment delay
- * and the chain id are carried by the manifest, beside this text's hash, and the legal body itself
- * records the delay. The final wording is counsel's: when it arrives, it is added as a new version
- * with the status `approved`.
+ * It names the company by its name and filing number, each between double quotes, which the field
+ * rules forbid inside a field: a declared company by its checked name and number, a formed company
+ * by its filed name and number (`companyFields.ts` holds both to one rule). Only string fields are
+ * placeholders: the amendment delay and the chain id are carried by the manifest, beside this
+ * text's hash, and the legal body itself records the delay. The final wording is counsel's: when
+ * it arrives, it is added as a new version with the status `approved`.
  */
 export interface AgreementFields {
   companyName: string;

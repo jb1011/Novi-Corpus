@@ -256,6 +256,8 @@ function companyRow(over: { provider?: string; status?: CompanyStatus } = {}): s
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind:
+      (over.provider ?? CUSTOMER_PROVIDER) === CUSTOMER_PROVIDER ? "legal_body" : "agent",
   });
 }
 
@@ -633,6 +635,7 @@ test("the repository is still constructed, and still works, on a database withou
       businessPurpose: "Example purpose",
       industryLabel: "Example industry",
       intakeSynthesized: false,
+      purposeKind: "agent",
     });
     expect(repo.setStatus(companyId, "draft", "abandoned")).toBe(true);
   } finally {

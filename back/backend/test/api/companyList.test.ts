@@ -12,6 +12,7 @@ import { listCompanyViews } from "../../src/api/views";
 import { companyNameOptions } from "../../src/formation/intake";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
+import { SqliteDocumentIndexRepository } from "../../src/persistence/documentIndexRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 
 const TENANT = "0x000000000000000000000000000000000000000A";
@@ -19,12 +20,14 @@ const TENANT = "0x000000000000000000000000000000000000000A";
 let db: DatabaseType.Database;
 let companies: SqliteCompanyRepository;
 let requests: SqliteFormationRepository;
+let documents: SqliteDocumentIndexRepository;
 
 beforeEach(() => {
   db = openDatabase(":memory:");
   migrate(db);
   companies = new SqliteCompanyRepository(db);
   requests = new SqliteFormationRepository(db);
+  documents = new SqliteDocumentIndexRepository(db);
 });
 afterEach(() => db.close());
 
@@ -41,6 +44,7 @@ function seed(n: number): string[] {
       businessPurpose: `purpose ${i}`,
       industryLabel: "Software development",
       intakeSynthesized: true,
+      purposeKind: "agent",
     });
     ids.push(id);
     // Two agents each, so the batched count has something to group.
@@ -55,10 +59,11 @@ function seed(n: number): string[] {
   return ids;
 }
 
-test("a page of companies costs FOUR queries, however many rows it has", () => {
+test("a page of companies costs FIVE queries, however many rows it has", () => {
   seed(6);
   // Every row used to ask for its own steps, its own live-payment count and its own agent count:
   // 3N+1 per page view, on two authenticated surfaces, for three answers one grouped scan gives.
+  // The fifth is the DAO supplement, read for the whole page at once.
   const calls: string[] = [];
   const spyCompanies: SqliteCompanyRepository = Object.create(companies);
   for (const m of [
@@ -83,11 +88,21 @@ test("a page of companies costs FOUR queries, however many rows it has", () => {
       },
     });
 
+  const spyDocuments: SqliteDocumentIndexRepository = Object.create(documents);
+  for (const m of ["listByCompany", "listByCompanies", "latestOfType"] as const)
+    Object.defineProperty(spyDocuments, m, {
+      value: (...args: never[]) => {
+        calls.push(m);
+        return (documents[m] as (...a: never[]) => unknown)(...args);
+      },
+    });
+
   const views = listCompanyViews(
     {
       companies: spyCompanies,
       formationStepsMany: (ids) => spyRequests.stepsOfMany(ids),
       formationSteps: (id) => spyRequests.stepsOf(id),
+      documents: spyDocuments,
     },
     TENANT,
   );
@@ -95,6 +110,7 @@ test("a page of companies costs FOUR queries, however many rows it has", () => {
   expect(views).toHaveLength(6);
   expect(calls.sort()).toEqual([
     "countAgentsMany",
+    "latestOfType",
     "listByTenant",
     "livePaymentCountMany",
     "stepsOfMany",
@@ -113,6 +129,7 @@ test("the batched counts agree with the per-row ones, including for a company wi
     businessPurpose: "p",
     industryLabel: "Software development",
     intakeSynthesized: true,
+    purposeKind: "agent",
   });
   db.prepare(
     `INSERT INTO formation_payments (payment_id, company_id, status, amount_usdc, nonce, valid_before)

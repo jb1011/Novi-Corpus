@@ -585,20 +585,24 @@ describe("the reads a view makes per row", () => {
     abandoned: { isRevoked: 1 },
   };
 
-  test("at most three event reads and one declaration read per row, by state", () => {
+  test("at most three event reads and one declaration read per row, by state, and no company read for a declared company", () => {
     const rows = oneRowPerState();
     for (const [state, row] of Object.entries(rows) as [BindingState, LegalBodyRecord][]) {
       const events: Counts = {};
       const finds: Counts = {};
+      const companyFinds: Counts = {};
       orderViewFacts(
         {
           repo: counting(s.repo, EVENT_READS, events),
           declarations: counting(s.declarations, ["find"], finds),
+          companies: counting(s.companies, ["find"], companyFinds),
         },
         row,
       );
       expect(events, state).toEqual(EXPECTED[state]);
       expect(finds, state).toEqual({ find: 1 });
+      // The declaration names a declared company: its company row is not read.
+      expect(companyFinds, state).toEqual({});
       const total = Object.values(events).reduce((a, b) => a + b, 0);
       expect(total, state).toBeLessThanOrEqual(3);
     }

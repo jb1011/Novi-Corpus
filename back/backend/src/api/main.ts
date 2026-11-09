@@ -628,6 +628,9 @@ async function main() {
           companies,
           declarations: companyDeclarations,
           checks: companyChecks,
+          // The steps the attestation reads too: a formed company is eligible once its filing is
+          // confirmed.
+          formationSteps: (companyId: string) => formationRequests.stepsOf(companyId),
           world: worldId,
           // The guardian identity record built above: on production an order requires a verified
           // one, as the declared door does; a sandbox never reads it.
@@ -1090,6 +1093,8 @@ async function main() {
           companies,
           checks: companyChecks,
           declarations: companyDeclarations,
+          // The order doors' reader: whether the State filed a company Novi formed, and its EIN.
+          formationSteps: (companyId: string) => formationRequests.stepsOf(companyId),
           world: worldId,
           // The guardian identity record built above: on production the lookup by agent states,
           // unsigned, whether it is verified; a sandbox never reads it.
@@ -1180,6 +1185,8 @@ async function main() {
             // The submitter. Present only where the box CHARGES, so a deployment that has
             // stopped can still read its payments while having no settle path wired at all.
             paymentExecutor: formationPayment.required ? formationExecutor : undefined,
+            // What the formed door's waiting screen says a filing usually takes.
+            filingWorkingDays: formationCfg.filingWorkingDays,
           }
         : undefined,
     // The view dependencies, as ONE object shared with the MCP surface below (C8).

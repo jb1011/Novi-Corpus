@@ -340,18 +340,18 @@ describe("activeLegalBodies", () => {
     chain.addBody(otherCreator, {
       creator: getAddress("0x00000000000000000000000000000000000a0002"),
     });
-    const notCustomers = linkedBody("5");
+    const forAgents = linkedBody("5");
     const find = s.companies.find.bind(s.companies);
     vi.spyOn(s.companies, "find").mockImplementation((companyId: string) => {
       const company = find(companyId);
-      return company && companyId === notCustomers.companyId
-        ? { ...company, provider: "example-formation-provider" }
+      return company && companyId === forAgents.companyId
+        ? { ...company, provider: "doola", purposeKind: "agent" }
         : company;
     });
 
     expect(agentIdsOf(await list())).toEqual([good.agentId]);
     expect(opsLines("legal_body_statement_integrity")).toEqual([
-      { legalBodyId: notCustomers.legalBodyId, problem: "unsupported_provider" },
+      { legalBodyId: forAgents.legalBodyId, problem: "unsupported_purpose" },
       { legalBodyId: otherCreator.legalBodyId, problem: "not_ours" },
       { legalBodyId: noCreator.legalBodyId, problem: "not_ours" },
       { legalBodyId: otherAgent.legalBodyId, problem: "agent_mismatch" },
