@@ -14,6 +14,7 @@ import {
 } from "../pilot/composition";
 import { type PilotContext, openPilotContext } from "../pilot/context";
 import { withoutEmDash } from "../pilot/job";
+import { isKlerosError, klerosTextOf, withoutPaths } from "../pilot/klerosCheck";
 import {
   PERIOD_OVERDUE_GRACE_MS,
   type PollDeps,
@@ -21,16 +22,24 @@ import {
   type RulingOutcome,
   pollOnce,
   pollUntilRuled,
+  recordReadFailed,
 } from "../pilot/ruling";
 import {
+  CLAIM_REFUND_EXPIRY_ROUTE,
+  type ExpiryRefundEscrowRead,
+  REFUND_CLOCK_MARGIN_SECONDS,
+  type SettleDeps,
+  SettleRefusal,
   type Settlement,
+  adoptSettleTx,
   checkEscrowIsOwn,
   checkOwnConfig,
+  clearDroppedSettleTx,
   decideSettlement,
+  refundExpiredCase,
   settleCase,
 } from "../pilot/settlement";
-import { publicErrorMessage } from "../workflow/publicError";
-import { parseCaseId, refuse } from "./pilotArgs";
+import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
 
 /**
  * THE PILOT'S SETTLEMENT COMMANDS: reading a filed case's ruling from Kleros, and carrying it
@@ -39,7 +48,11 @@ import { parseCaseId, refuse } from "./pilotArgs";
  * Like the other pilot commands, each one parses its options before it opens its own narrow
  * context, prints JSON objects and throws on a refusal. `pilot:poll` only reads Kleros and the
  * escrow and writes the row: it sends no transaction. `pilot:settle` prints its decision and
- * sends it only with `--yes`.
+ * sends it only with `--yes`; with `--claim-refund` on a case no ruling settles (funded,
+ * submitted, contested or failed) it takes the escrow back after the expiry and its clock margin,
+ * and the case ends failed. Its two recovery options send nothing:
+ * `--tx` adopts a settle hash the case lost once the chain proves it, and `--dropped` clears one
+ * the network dropped; each prints what it read and writes only with `--yes`.
  */
 export interface PilotSettlementDeps {
   open: () => PilotContext;
@@ -96,6 +109,20 @@ function print(output: Record<string, unknown>): void {
   console.log(JSON.stringify(output, null, 2));
 }
 
+/**
+ * The words a command fails with, never with an absolute file path. A settle's refusal is printed
+ * whole: its words are already redacted, and it ends saying nothing was sent. Any other failure
+ * goes through `klerosTextOf`: a failure of the Kleros client (an outage, an HTTP status, a
+ * refusal of the service, a read of another deployment) is in the service's own words, redacted,
+ * since `publicErrorMessage`'s fixed sentences would read a fee wallet's "insufficient funds" in
+ * Kleros's answer as the platform's own wallet; every other one, a chain or an escrow read's
+ * included, goes through `publicErrorMessage` with its paths cut, as `klerosTextOf` does it.
+ */
+function failureText(e: unknown): string {
+  if (e instanceof SettleRefusal) return withoutEmDash(withoutPaths(e.message));
+  return klerosTextOf(e);
+}
+
 function parseMaxMinutes(value: string | undefined, watch: boolean): number {
   if (value === undefined) return DEFAULT_MAX_MINUTES;
   if (!watch) refuse("--max-minutes is accepted with --watch only");
@@ -141,7 +168,8 @@ async function settlementPreview(
       coreDisputeId: row.coreDisputeId ?? undefined,
     });
   } catch (e) {
-    return { unavailable: withoutEmDash(publicErrorMessage(e)) };
+    // In the words a command fails with: never a file path.
+    return { unavailable: failureText(e) };
   }
 }
 
@@ -196,7 +224,14 @@ async function poll(
     sleep: deps.sleep,
   };
   if (watch === null) {
-    const r = await pollOnce(d, caseId);
+    let r: PollResult;
+    try {
+      r = await pollOnce(d, caseId);
+    } catch (e) {
+      // As the watch does: a failed read leaves its line on the case's trail.
+      if (isKlerosError(e)) recordReadFailed(ctx.cases, caseId, e);
+      throw e;
+    }
     print({
       caseId,
       ...readLine(r),
@@ -227,6 +262,29 @@ interface SettleOptions {
   yes: boolean;
 }
 
+/** `--script` names the rehearsal fake's script, so it means nothing in another mode. */
+function checkScriptMode(ctx: PilotContext, script: FakeScript | undefined): void {
+  const mode = ctx.cfg.pilot?.mode;
+  if (script !== undefined && mode !== "rehearsal")
+    refuse(`--script is accepted in rehearsal mode only, and this box is in ${mode} mode`);
+}
+
+/** The settle's dependencies: the Kleros stage the box's mode selects, then the chain. */
+function settleDepsOf(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  script: FakeScript | undefined,
+): SettleDeps {
+  const stage = deps.buildStage(ctx.cfg, { script: script ?? DEFAULT_SCRIPT, readsUntilAppeal: 1 });
+  return {
+    chain: deps.buildChain(ctx),
+    cases: ctx.cases,
+    stage,
+    expected: expectedOf(ctx.cfg),
+    now: deps.now,
+  };
+}
+
 /** Why nothing is sent, for each decision that sends nothing. */
 const NOTHING_TO_SEND: Record<Extract<Settlement, { action: "none" }>["why"], string> = {
   released_elsewhere: "the escrow is already released to the provider",
@@ -236,8 +294,7 @@ const NOTHING_TO_SEND: Record<Extract<Settlement, { action: "none" }>["why"], st
   tied: "the round is tied: poll again, a tie may resolve inside the appeal period",
   refused: "the court refused to arbitrate: the escrow waits for the expiry, then --claim-refund",
   appealed: "the case was appealed: read the round, then act on it with --accept-round <n> --yes",
-  too_close_to_expiry:
-    "the job expires within ten minutes: run again after the expiry with --claim-refund",
+  too_close_to_expiry: `the job expires within ten minutes, or expired at most ${REFUND_CLOCK_MARGIN_SECONDS} seconds ago: run again with --claim-refund more than ${REFUND_CLOCK_MARGIN_SECONDS} seconds after its expiry`,
   unknown_status: "the job is at a status the settlement does not act on: read the chain",
   options_mismatch: "the dispute's ruling options are not the expected ones: a person reads them",
   unexpected_ruling: "the ruling is not a value the settlement knows: a person reads it",
@@ -254,12 +311,14 @@ async function settle(
   caseId: string,
   o: SettleOptions,
 ): Promise<void> {
-  const mode = ctx.cfg.pilot?.mode;
-  if (o.script !== undefined && mode !== "rehearsal")
-    refuse(`--script is accepted in rehearsal mode only, and this box is in ${mode} mode`);
+  checkScriptMode(ctx, o.script);
+  const row = ctx.cases.find(caseId);
+  // A case no ruling settles: only the expiry gives its escrow back. A filing in doubt is
+  // refused there, naming the command that resolves it.
+  if (o.claimRefundOnly && row !== undefined && CLAIM_REFUND_EXPIRY_ROUTE.has(row.status))
+    return refundExpired(ctx, deps, caseId, o);
   // A rehearsal case that holds a read is settled from it. One with none yet is read once, from
   // a fresh fake that answers its script's verdict at once, so the script must be the filing's.
-  const row = ctx.cases.find(caseId);
   if (
     row !== undefined &&
     row.mode === "rehearsal" &&
@@ -272,21 +331,11 @@ async function settle(
     refuse(
       `case ${caseId} has no ruling read yet: pass --script with the script the case was filed with`,
     );
-  const stage = deps.buildStage(ctx.cfg, {
-    script: o.script ?? DEFAULT_SCRIPT,
-    readsUntilAppeal: 1,
+  const r = await settleCase(settleDepsOf(ctx, deps, o.script), caseId, {
+    send: o.yes,
+    acceptRound: o.acceptRound,
+    claimRefundOnly: o.claimRefundOnly,
   });
-  const r = await settleCase(
-    {
-      chain: deps.buildChain(ctx),
-      cases: ctx.cases,
-      stage,
-      expected: expectedOf(ctx.cfg),
-      now: deps.now,
-    },
-    caseId,
-    { send: o.yes, acceptRound: o.acceptRound, claimRefundOnly: o.claimRefundOnly },
-  );
   const after = ctx.cases.find(caseId);
   const base = { caseId, mode: after?.mode, settlement: r.settlement, status: after?.status };
   if (r.settlement.action === "none") {
@@ -307,6 +356,159 @@ async function settle(
     return;
   }
   print({ ...base, txHash: r.txHash });
+}
+
+const isoOf = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString();
+
+/** The escrow a refund read, as it prints: the expiry also as a date. */
+const escrowView = (e: ExpiryRefundEscrowRead) => ({
+  status: e.status,
+  budgetAtomic: e.budgetAtomic,
+  expiredAt: e.expiredAt,
+  expiresAt: isoOf(e.expiredAt),
+  refundMarginSeconds: e.refundMarginSeconds,
+});
+
+/** `pilot:settle --claim-refund` on a case no ruling settles: the escrow read and the claimRefund
+ *  it leads to, sent with `--yes`; or, for an escrow the chain already refunded, what the case
+ *  records of it, written with `--yes`. */
+async function refundExpired(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  caseId: string,
+  o: SettleOptions,
+): Promise<void> {
+  const r = await refundExpiredCase(settleDepsOf(ctx, deps, o.script), caseId, { send: o.yes });
+  const after = ctx.cases.find(caseId);
+  const base = {
+    caseId,
+    mode: after?.mode,
+    status: after?.status,
+    settlement: r.settlement,
+    escrow: escrowView(r.escrow),
+  };
+  if (r.settlement.action === "none") {
+    const why = NOTHING_TO_SEND[r.settlement.why];
+    if (!r.record) {
+      print({ ...base, next: `nothing to send or to record: ${why}, and the case records it` });
+      return;
+    }
+    if (!o.yes) {
+      // A release is recorded on a failed case only: its own complete landed.
+      const outcome = r.settlement.why === "released_elsewhere" ? "release" : "refund";
+      const writes =
+        after?.status === "failed"
+          ? `record the ${outcome} on the case`
+          : "record the refund and fail the case";
+      print({
+        dryRun: true,
+        ...base,
+        write: r.record,
+        next: `nothing to send: ${why}; nothing was written: run the same command with --yes to ${writes}`,
+      });
+      return;
+    }
+    print({ ...base, wrote: r.record, next: `nothing to send: ${why}` });
+    return;
+  }
+  if (!o.yes) {
+    print({
+      dryRun: true,
+      ...base,
+      send: r.send,
+      next: "nothing was sent: run the same command with --yes to send it",
+    });
+    return;
+  }
+  print({ ...base, send: r.send, txHash: r.txHash });
+}
+
+/** `pilot:settle --tx`: the proof of the hash and the write it leads to; written with `--yes`. */
+async function adopt(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  caseId: string,
+  hash: `0x${string}`,
+  o: { script: FakeScript | undefined; yes: boolean },
+): Promise<void> {
+  checkScriptMode(ctx, o.script);
+  const r = await adoptSettleTx(settleDepsOf(ctx, deps, o.script), caseId, hash, {
+    write: o.yes,
+  });
+  const after = ctx.cases.find(caseId);
+  const base = { caseId, mode: after?.mode, status: after?.status };
+  if (r.unchanged) {
+    print({ ...base, txHash: r.hash, next: "nothing to change: the case already holds this hash" });
+    return;
+  }
+  const proof = { ...r.proof, blockTime: isoOf(r.proof.blockTime) };
+  if (!o.yes) {
+    print({
+      dryRun: true,
+      ...base,
+      proof,
+      write: r.write,
+      next: "nothing was written: run the same command with --yes to record it",
+    });
+    return;
+  }
+  print({
+    ...base,
+    proof,
+    wrote: r.write,
+    ...(r.write.status === "settling"
+      ? {
+          next: `the transaction reverted: run pilot:settle --case ${caseId} to decide again from the chain`,
+        }
+      : {}),
+  });
+}
+
+/** `pilot:settle --dropped`: what proved the drop and the write it leads to; written with
+ *  `--yes`. */
+async function dropped(
+  ctx: PilotContext,
+  deps: PilotSettlementDeps,
+  caseId: string,
+  o: { script: FakeScript | undefined; yes: boolean },
+): Promise<void> {
+  checkScriptMode(ctx, o.script);
+  const r = await clearDroppedSettleTx(settleDepsOf(ctx, deps, o.script), caseId, {
+    write: o.yes,
+  });
+  const after = ctx.cases.find(caseId);
+  const base = { caseId, mode: after?.mode, status: after?.status };
+  if (!o.yes) {
+    print({
+      dryRun: true,
+      ...base,
+      read: r.read,
+      write: r.write,
+      next: "nothing was written: run the same command with --yes to clear the hash",
+    });
+    return;
+  }
+  print({ ...base, read: r.read, wrote: r.write, next: afterDrop(caseId, r) });
+}
+
+/**
+ * What runs after a cleared drop. A settling case is decided again from the chain, which records
+ * an escrow already settled. Any other is the expiry refund's: it claims the refund, again for a
+ * dropped claimRefund, or records a refund the chain already shows, or the release of a failed
+ * case's own complete; on any other Completed escrow it refuses, and the words say so.
+ */
+function afterDrop(caseId: string, r: Awaited<ReturnType<typeof clearDroppedSettleTx>>): string {
+  const refund = `pilot:settle --case ${caseId} --claim-refund`;
+  if (r.write.status === "settling")
+    return `run pilot:settle --case ${caseId} to decide again from the chain`;
+  const status = r.read.escrowStatus;
+  if (status === "Expired" || status === "Rejected")
+    return `run ${refund} to record the refund the chain shows`;
+  if (status === "Completed")
+    return r.write.status === "failed" && r.read.action === "complete"
+      ? `run ${refund} to record the release the chain shows`
+      : `nothing is left to refund: the chain shows the job Completed, its escrow released to the provider, and ${refund} refuses the case; read the chain before acting`;
+  return `run ${refund} to refund it${r.read.action === "claimRefund" ? " again" : ""} from the chain`;
 }
 
 export function registerPilotSettlementCommands(
@@ -339,7 +541,7 @@ export function registerPilotSettlementCommands(
         try {
           await poll(ctx, deps, caseId, opts.watch ? { maxMinutes } : null, script);
         } catch (e) {
-          throw new Error(withoutEmDash(publicErrorMessage(e)));
+          throw new Error(failureText(e));
         } finally {
           ctx.close();
         }
@@ -352,19 +554,32 @@ export function registerPilotSettlementCommands(
       "carry a pilot case's ruling out on Arc (test data): pay the provider, refund the client, or refund by expiry; prints the decision and sends it with --yes",
     )
     .requiredOption("--case <caseId>", "the pilot case")
-    .option("--claim-refund", "take the expiry path: claimRefund, refused before the expiry")
+    .option(
+      "--claim-refund",
+      `take the expiry path: claimRefund, refused until ${REFUND_CLOCK_MARGIN_SECONDS} seconds after the expiry; on a funded, submitted, contested or failed case it takes the escrow back and the case ends failed`,
+    )
     .option("--accept-round <n>", "act on an appealed case's ruling when round <n> is the one read")
     .option(
       "--script <name>",
       "rehearsal mode only: the script the case was filed with, needed when the case holds no ruling read yet",
     )
-    .option("--yes", "confirm: send the transaction")
+    .option(
+      "--tx <hash>",
+      "adopt a settle transaction the case lost, once it is proven to be the referee's settle of the case's job; sends nothing",
+    )
+    .option(
+      "--dropped",
+      "clear the transaction hash of a settling case, the claimRefund hash of a funded, submitted, contested or failed case, or the complete or reject hash of a failed case, once the network is proven to have dropped it, so the next run decides again; sends nothing",
+    )
+    .option("--yes", "confirm: send the transaction, or with --tx or --dropped write the row")
     .action(
       async (opts: {
         case: string;
         claimRefund?: boolean;
         acceptRound?: string;
         script?: string;
+        tx?: string;
+        dropped?: boolean;
         yes?: boolean;
       }) => {
         // Options are parsed before the context opens, so a bad one never opens the database.
@@ -372,17 +587,30 @@ export function registerPilotSettlementCommands(
         const acceptRound = parseAcceptRound(opts.acceptRound);
         if (acceptRound !== undefined && opts.claimRefund)
           refuse("--accept-round and --claim-refund cannot both be given");
+        if (opts.tx !== undefined && opts.dropped)
+          refuse("--tx and --dropped cannot both be given");
+        // The two recovery options send nothing, so the options that shape a send mean nothing.
+        const recovery = opts.tx !== undefined ? "--tx" : opts.dropped ? "--dropped" : undefined;
+        if (recovery !== undefined && opts.claimRefund)
+          refuse(`${recovery} and --claim-refund cannot both be given`);
+        if (recovery !== undefined && acceptRound !== undefined)
+          refuse(`${recovery} and --accept-round cannot both be given`);
+        const tx = opts.tx === undefined ? undefined : parseTxHash("--tx", opts.tx);
         const script = parseScript(opts.script);
+        const yes = !!opts.yes;
         const ctx = deps.open();
         try {
-          await settle(ctx, deps, caseId, {
-            acceptRound,
-            claimRefundOnly: !!opts.claimRefund,
-            script,
-            yes: !!opts.yes,
-          });
+          if (tx !== undefined) await adopt(ctx, deps, caseId, tx, { script, yes });
+          else if (opts.dropped) await dropped(ctx, deps, caseId, { script, yes });
+          else
+            await settle(ctx, deps, caseId, {
+              acceptRound,
+              claimRefundOnly: !!opts.claimRefund,
+              script,
+              yes,
+            });
         } catch (e) {
-          throw new Error(withoutEmDash(publicErrorMessage(e)));
+          throw new Error(failureText(e));
         } finally {
           ctx.close();
         }

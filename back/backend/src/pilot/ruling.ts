@@ -4,7 +4,7 @@ import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { opsLog } from "../observability/opsLog";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage } from "./composition";
-import { klerosTextOf } from "./klerosCheck";
+import { type KlerosError, isKlerosError, klerosTextOf } from "./klerosCheck";
 import type { PilotCaseRecord, PilotStatus } from "./types";
 
 /**
@@ -177,10 +177,22 @@ function readableRow(
     refuse(
       `case ${caseId} is ruled (${rulingOfStoredRead(row).kind}); a rehearsal ruling is final once read, and a fresh fake can only replay its script: settle it with pilot:settle`,
     );
-  const stageChain = d.stage.deployment === null ? "fake" : d.stage.deployment.chain;
-  if (row.klerosChain !== stageChain)
-    refuse(`case ${caseId}'s dispute is on ${row.klerosChain} and this stage reads ${stageChain}`);
+  const problem = stageChainProblem(d.stage, row);
+  if (problem !== null) refuse(problem);
   return row as ReturnType<typeof readableRow>;
+}
+
+/**
+ * Why the stage cannot read the row's dispute, or null when it can: the stage's service reads one
+ * Kleros chain, its deployment's or the fake's for a rehearsal, and the same dispute id on another
+ * chain is somebody else's case. Checked before any request; the poll and the settle's re-read
+ * both run it, each refusing in its own words.
+ */
+export function stageChainProblem(stage: KlerosStage, row: PilotCaseRecord): string | null {
+  const stageChain = stage.deployment === null ? "fake" : stage.deployment.chain;
+  return row.klerosChain === stageChain
+    ? null
+    : `case ${row.caseId}'s dispute is on ${row.klerosChain} and this stage reads ${stageChain}`;
 }
 
 /**
@@ -188,11 +200,13 @@ function readableRow(
  * columns with the time of the read. Advances `filed` or `evidence_unknown` to `ruled` when the
  * outcome is final (pay, refund, refused, or a tie at Executed). On a row already ruled, a read
  * that is neither final nor an appeal keeps the stored ruling: only the period and the deadline
- * are written, with an event naming the outcome. The time of the read is not written, because a
- * settle trusts a stored ruling for ten minutes after that time and a read that failed the
- * options check must not renew the trust. An appeal is written in full. A rehearsal row at ruled
- * is refused. Refuses, before any request, a row of another mode than the stage's, a row without
- * a chain or a dispute id, a row at another status, and a row whose chain is not the one the
+ * are written, with an event naming the outcome. A settle trusts a stored ruling for ten minutes
+ * after the time of its read, so such a read never renews that time: a pending read leaves it as
+ * it is, and a read that contradicts the stored verdict (one that failed the options check, a tie
+ * in the appeal period, or an unexpected value) clears it, so the next settle reads Kleros live
+ * before acting on the verdict. An appeal is written in full. A rehearsal row at ruled is
+ * refused. Refuses, before any request, a row of another mode than the stage's, a row without a
+ * chain or a dispute id, a row at another status, and a row whose chain is not the one the
  * stage's service reads.
  */
 export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult> {
@@ -224,10 +238,17 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   // settle sees the new round instead of acting on the first one.
   const appeal = read.roundCount > 1;
   const keepRuling = from === "ruled" && !final && !appeal;
+  // A kept read that is not merely pending revokes the trust in the stored verdict: one that
+  // failed the options check, a tie in the appeal period, or a value the settlement does not know
+  // contradicts the verdict read for the same round. With no time of read, the next settle reads
+  // Kleros live instead of acting on it from the row. A pending read (a Commit or a Vote) already
+  // reads as pending from the row, through the period it writes.
+  const revokes = outcome.kind !== "pending";
   const written: Partial<PilotCaseRecord> = keepRuling
     ? {
         rulingStatus: patch.rulingStatus,
         rulingDeadline: patch.rulingDeadline,
+        ...(revokes ? { rulingReadAt: null } : {}),
       }
     : patch;
   d.cases.transaction(() => {
@@ -252,13 +273,43 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
         "ruling",
         outcome.kind,
         row.coreDisputeId,
-        "a read of the ruled case was not final; the stored ruling is kept",
+        revokes
+          ? `a read of the ruled case ${outcome.kind === "options_mismatch" ? "failed the options check" : "contradicts the stored verdict"}; the stored ruling is kept, and the next settle reads Kleros again before acting on it`
+          : "a read of the ruled case was not final; the stored ruling is kept",
       );
   });
   if (read.deadline === null) return { read, outcome };
   const behind = at - Date.parse(read.deadline);
   if (Number.isNaN(behind)) return { read, outcome, deadlineUnreadable: true };
   return behind > 0 ? { read, outcome, overdueMs: behind } : { read, outcome };
+}
+
+/** Whether `e` is a Kleros read that failed: no usable answer (a transport error) or an HTTP
+ *  status. Any other error is a refusal or a bug, never a failed read. */
+export function isKlerosReadFailure(e: unknown): e is KlerosTransportError | KlerosHttpError {
+  return e instanceof KlerosTransportError || e instanceof KlerosHttpError;
+}
+
+/**
+ * A failed Kleros read as the case's trail keeps it: one `ruling/read_failed` event, in the
+ * service's own words, redacted (`klerosTextOf`), which it returns. A failed read (an outage, an
+ * HTTP status, a refusal of the service, a read of another deployment) is Kleros's answer, not
+ * the platform's, so never `publicErrorMessage`'s fixed sentences.
+ */
+export function recordReadFailed(
+  cases: PilotCaseRepository,
+  caseId: string,
+  e: KlerosError,
+): string {
+  const text = klerosTextOf(e);
+  cases.recordEvent(
+    caseId,
+    "ruling",
+    "read_failed",
+    cases.find(caseId)?.coreDisputeId ?? null,
+    text,
+  );
+  return text;
 }
 
 const DEFAULT_INTERVAL_MS = 30_000;
@@ -281,10 +332,11 @@ const AUTH_REFUSED: ReadonlySet<number> = new Set([401, 403]);
  * injected clock, then stops with the last outcome. A transport or HTTP error is written as the
  * ops line `pilot_poll_read_failed` and a `read_failed` event on the case's trail, and the watch
  * goes on, up to `MAX_FAILED_READS_IN_A_ROW` in a row; any other error, a refusal included,
- * escapes. An HTTP 401 or 403 stops the watch at
- * once with the reason `auth_refused`. A stop at the cap, on failing reads or on a refused key
- * writes the ops line `pilot_poll_capped` with its reason. `reads` counts every request, failed
- * ones included. `onRead` sees every read that answered, as it is taken.
+ * escapes, and a refusal of the service or a read of another deployment leaves its `read_failed`
+ * event first. An HTTP 401 or 403 stops the watch at once with the reason `auth_refused`. A stop at
+ * the cap, on failing reads or on a refused key writes the ops line `pilot_poll_capped` with its
+ * reason. `reads` counts every request, failed ones included. `onRead` sees every read that
+ * answered, as it is taken.
  */
 export async function pollUntilRuled(
   d: PollDeps,
@@ -317,16 +369,13 @@ export async function pollUntilRuled(
     try {
       r = await pollOnce(d, caseId);
     } catch (e) {
-      if (!(e instanceof KlerosTransportError || e instanceof KlerosHttpError)) throw e;
-      // The service's own words, redacted: a failed read is Kleros's answer, not the platform's.
-      const text = klerosTextOf(e);
-      d.cases.recordEvent(
-        caseId,
-        "ruling",
-        "read_failed",
-        d.cases.find(caseId)?.coreDisputeId ?? null,
-        text,
-      );
+      if (!isKlerosReadFailure(e)) {
+        // A refusal of the service, or a read of another deployment, stops the watch: waiting
+        // does not change it. Its line is left on the trail first, as every failed read's is.
+        if (isKlerosError(e)) recordReadFailed(d.cases, caseId, e);
+        throw e;
+      }
+      const text = recordReadFailed(d.cases, caseId, e);
       if (e instanceof KlerosHttpError && AUTH_REFUSED.has(e.status))
         return capped("auth_refused", text);
       failedInARow++;
