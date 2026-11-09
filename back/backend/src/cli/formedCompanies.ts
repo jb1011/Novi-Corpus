@@ -76,8 +76,9 @@ function storesOf(db: Database.Database): Stores {
 }
 
 /**
- * The company, held to what both commands need of it: filed through doola, for a legal body, and
- * filed by the State (`await_filing` confirmed, `companyFiled`, the rule the order door reads).
+ * The company, held to what both commands need of it: filed through doola, for a legal body, not
+ * abandoned (the order door never takes an abandoned company, `companyEligible`), and filed by the
+ * State (`await_filing` confirmed, `companyFiled`, the rule the order door reads).
  */
 function formedLegalBodyCompany(s: Stores, companyId: string): CompanyRecord {
   const company = s.companies.find(companyId);
@@ -88,6 +89,8 @@ function formedLegalBodyCompany(s: Stores, companyId: string): CompanyRecord {
     );
   if (company.purposeKind !== "legal_body")
     refuse(`company ${companyId} was formed for agents, not for a legal body`);
+  if (company.status === "abandoned")
+    refuse(`company ${companyId} is abandoned: nothing can be recorded on it`);
   const steps = s.requests.stepsOf(companyId);
   if (!companyFiled(steps))
     refuse(
@@ -147,20 +150,25 @@ function readSupplement(path: string): Buffer {
  * notes back before any file exists, and a failed file write rolls them back too. Other
  * connections see the row only once the transaction commits, after the file is in place, so a row
  * never points at a file that is not there.
+ *
+ * The company is checked before the file is read, so a wrong company id is refused as such
+ * whatever `--document` names; the transaction checks it again, since the check before it holds
+ * no lock.
  */
 function recordDaoSupplement(companyId: string, opts: SupplementOptions): void {
   const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
   const operatorOsUser = osUser();
-  const bytes = readSupplement(opts.document);
-  const sha256 = sha256Of(bytes);
-  const providerDocId = `operator:${DAO_SUPPLEMENT_DOC_TYPE}:${sha256}`;
-  const docId = documentIndexId(companyId, providerDocId);
-  // The whole hash in the name, without its 0x, as a customer's upload is named.
-  const path = documentStoreName(companyId, DAO_SUPPLEMENT_DOC_TYPE, sha256.slice(2));
-  const document = { docId, sha256, size: bytes.length };
 
   withDatabase((db, docStoreDir) => {
     const s = storesOf(db);
+    formedLegalBodyCompany(s, companyId);
+    const bytes = readSupplement(opts.document);
+    const sha256 = sha256Of(bytes);
+    const providerDocId = `operator:${DAO_SUPPLEMENT_DOC_TYPE}:${sha256}`;
+    const docId = documentIndexId(companyId, providerDocId);
+    // The whole hash in the name, without its 0x, as a customer's upload is named.
+    const path = documentStoreName(companyId, DAO_SUPPLEMENT_DOC_TYPE, sha256.slice(2));
+    const document = { docId, sha256, size: bytes.length };
     const docStore = new FileDocumentStore(docStoreDir);
     const found = db
       .transaction(() => {
@@ -237,6 +245,10 @@ const NO_STORED_OPTION =
   "matches no stored option: the State's record is the truth, so it is written as typed; check it against the record once more";
 const NO_ENTITY_ENDING =
   "no entity ending (LLC, L.L.C., Limited Liability Company): the State's record of an LLC carries its ending; check the name";
+/** The order door holds a formed company to its filed name AND its filing number
+ *  (`filedCompanyNames`); this build has no command that records the number. */
+const NO_FILING_NUMBER =
+  "the company has no filing number: it cannot be ordered until one is recorded";
 
 interface FiledNameOptions {
   name: string;
@@ -364,8 +376,9 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
           assertNoAgreementPrintsIt(bodies, nowMs);
         }
         const matched = matchFiledNameAgainst(company.nameOptions, name) !== null;
+        const numbered = company.filingNumber !== null;
         const legalBodies = bodies.map((b) => b.legalBodyId);
-        if (opts.yes !== true) return { previous, matched, legalBodies, written: false };
+        if (opts.yes !== true) return { previous, matched, numbered, legalBodies, written: false };
         // Unreachable when false: the name differs from the one held, in this transaction.
         if (!s.companies.recordFilingFacts(companyId, { legalNameFiled: name }))
           throw new Error(`company ${companyId}: the filed name did not change`);
@@ -374,7 +387,7 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
             act: "filed_name_recorded",
             companyId,
           });
-        return { previous, matched, legalBodies, written: true };
+        return { previous, matched, numbered, legalBodies, written: true };
       })
       .immediate();
 
@@ -382,6 +395,7 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
       ...(found.matched ? [] : [NO_STORED_OPTION]),
       // Every company these commands take is a legal-body company (`formedLegalBodyCompany`).
       ...(hasEntityEnding(name) ? [] : [NO_ENTITY_ENDING]),
+      ...(found.numbered ? [] : [NO_FILING_NUMBER]),
     ];
     const warnings = advice.length === 0 ? {} : { warnings: advice };
     if (!found.written) {

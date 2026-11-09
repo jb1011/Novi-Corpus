@@ -110,7 +110,8 @@ afterEach(() => {
  * A company formed through doola for `tenant`, its formation steps opened and `create_provider`
  * confirmed, as the saga leaves them. `filing` says how far the state got: `confirmed` writes the
  * filing facts the processor writes when it confirms `await_filing`; `submitted` leaves the step
- * waiting on the state; `none` leaves it pending.
+ * waiting on the state; `none` leaves it pending. `abandoned` moves the company's row from
+ * `ready` to `abandoned` once the rest is written.
  */
 function formedCompany(
   opts: {
@@ -118,6 +119,8 @@ function formedCompany(
     provider?: string;
     filing?: "confirmed" | "submitted" | "none";
     legalNameFiled?: string | null;
+    filingNumber?: string | null;
+    abandoned?: boolean;
   } = {},
 ): string {
   const companyId = seedCompany(companies, {
@@ -135,13 +138,16 @@ function formedCompany(
     }),
   ).toBe(true);
   const filing = opts.filing ?? "confirmed";
-  if (filing === "none") return companyId;
-  expect(requests.transition(companyId, "await_filing", "pending", filing)).toBe(true);
-  companies.recordFilingFacts(companyId, {
-    filedAt: FILED_AT,
-    filingNumber: FILING_NUMBER,
-    legalNameFiled: opts.legalNameFiled === undefined ? FILED_NAME : opts.legalNameFiled,
-  });
+  if (filing !== "none") {
+    expect(requests.transition(companyId, "await_filing", "pending", filing)).toBe(true);
+    companies.recordFilingFacts(companyId, {
+      filedAt: FILED_AT,
+      filingNumber: opts.filingNumber === undefined ? FILING_NUMBER : opts.filingNumber,
+      legalNameFiled: opts.legalNameFiled === undefined ? FILED_NAME : opts.legalNameFiled,
+    });
+  }
+  if (opts.abandoned === true)
+    expect(companies.setStatus(companyId, "ready", "abandoned")).toBe(true);
   return companyId;
 }
 
@@ -386,6 +392,38 @@ describe("company:dao-supplement", () => {
     expect(supplementRows(declared)).toEqual([]);
   });
 
+  test("refuses an abandoned company and writes nothing: no row, no note, no file", async () => {
+    const companyId = formedCompany();
+    const body = draftBody(companyId);
+    const eventsBefore = legalBodies.listEvents(body).length;
+    expect(companies.setStatus(companyId, "ready", "abandoned")).toBe(true);
+    const path = fileOf("abandoned.pdf", pdf("abandoned"));
+    for (const more of [["--yes"], ["--replace", "--yes"], []])
+      expect(await refusal(supplementArgs(companyId, path, ...more)), more.join(" ")).toBe(
+        `refusing: company ${companyId} is abandoned: nothing can be recorded on it`,
+      );
+    expect(supplementRows(companyId)).toEqual([]);
+    expect(legalBodies.listEvents(body)).toHaveLength(eventsBefore);
+    expect(storeFiles()).toEqual([]);
+  });
+
+  test("the company is checked before the file: an unknown or unfiled company with a file that is not a PDF is refused for the company", async () => {
+    const notPdf = fileOf("notes.pdf", Buffer.from("plain text, not a PDF\n"));
+    expect(await refusal(supplementArgs("no-such-company", notPdf, "--yes"))).toBe(
+      "refusing: no company no-such-company",
+    );
+    const unfiled = formedCompany({ filing: "submitted" });
+    expect(await refusal(supplementArgs(unfiled, notPdf, "--yes"))).toMatch(
+      /^refusing: the State's filing of company formed-\d+ is not confirmed yet/,
+    );
+    const abandoned = formedCompany({ abandoned: true });
+    expect(await refusal(supplementArgs(abandoned, join(dir, "missing.pdf"), "--yes"))).toBe(
+      `refusing: company ${abandoned} is abandoned: nothing can be recorded on it`,
+    );
+    expect(supplementRows(unfiled)).toEqual([]);
+    expect(storeFiles()).toEqual([]);
+  });
+
   test("refuses a file that is not a PDF, an empty one, one over 10 MiB and one that cannot be read; the refusal names no path", async () => {
     const companyId = formedCompany();
     const cases: [string, string, RegExp][] = [
@@ -598,6 +636,8 @@ interface FiledNameRecorded {
 const NO_STORED_OPTION = /^matches no stored option/;
 const NO_ENTITY_ENDING =
   "no entity ending (LLC, L.L.C., Limited Liability Company): the State's record of an LLC carries its ending; check the name";
+const NO_FILING_NUMBER =
+  "the company has no filing number: it cannot be ordered until one is recorded";
 
 /** One poll of the formation processor, doola reporting the company filed under `name`. */
 async function poll(companyId: string, name: string): Promise<void> {
@@ -717,6 +757,43 @@ describe("company:filed-name", () => {
       const { output } = await run<FiledNameRecorded>(filedNameArgs(companyId, name));
       expect(output.warnings ?? [], name).not.toContain(NO_ENTITY_ENDING);
     }
+  });
+
+  test("a filed company with no filing number is written, with a warning in the dry run and the write: it cannot be ordered until one is recorded", async () => {
+    const companyId = formedCompany({ legalNameFiled: null, filingNumber: null });
+    expect(companies.find(companyId)?.filingNumber).toBeNull();
+    // A stored option with its ending, so the missing number is the only advice.
+    const { output: dry } = await run<{ warnings: string[] }>(
+      filedNameArgs(companyId, "Lantern Works LLC"),
+    );
+    expect(dry.warnings).toEqual([NO_FILING_NUMBER]);
+    const { output } = await run<FiledNameRecorded>(
+      filedNameArgs(companyId, "Lantern Works LLC", "--yes"),
+    );
+    expect(output).toMatchObject({ recorded: true, matched: true, replaced: null });
+    expect(output.warnings).toEqual([NO_FILING_NUMBER]);
+    expect(filedNameOf(companyId)).toBe("Lantern Works LLC");
+    // The order door holds the company to both facts, so it still refuses it.
+    const { deps } = orderStores();
+    expect(orderRefusal(() => createOrder(deps, tenant, { companyId })).code).toBe(
+      "company_not_eligible",
+    );
+
+    // With every other piece of advice, it comes last.
+    const other = formedCompany({ legalNameFiled: null, filingNumber: null });
+    const { output: all } = await run<{ warnings: string[] }>(filedNameArgs(other, "Lantern Labs"));
+    expect(all.warnings).toEqual([
+      expect.stringMatching(NO_STORED_OPTION),
+      NO_ENTITY_ENDING,
+      NO_FILING_NUMBER,
+    ]);
+
+    // A company with its number carries no such warning.
+    const numbered = formedCompany({ legalNameFiled: null });
+    const { output: plain } = await run<FiledNameRecorded>(
+      filedNameArgs(numbered, "Lantern Works LLC", "--yes"),
+    );
+    expect(plain.warnings ?? []).not.toContain(NO_FILING_NUMBER);
   });
 
   test("without --yes it says what it would set, with the same warning, and writes nothing", async () => {
@@ -919,6 +996,26 @@ describe("company:filed-name", () => {
     );
     expect(filedNameOf(forAgents)).toBeNull();
     expect(filedNameOf(declared)).toBeNull();
+  });
+
+  test("refuses an abandoned company and writes nothing: no name, no note", async () => {
+    const unset = formedCompany({ legalNameFiled: null, abandoned: true });
+    for (const more of [["--yes"], []])
+      expect(await refusal(filedNameArgs(unset, UNMATCHED_NAME, ...more)), more.join(" ")).toBe(
+        `refusing: company ${unset} is abandoned: nothing can be recorded on it`,
+      );
+    expect(filedNameOf(unset)).toBeNull();
+
+    // A held name is not corrected either, and its closed order gets no note.
+    const held = formedCompany();
+    const body = bodyOf(held, "abandoned");
+    const eventsBefore = legalBodies.listEvents(body).length;
+    expect(companies.setStatus(held, "ready", "abandoned")).toBe(true);
+    expect(await refusal(filedNameArgs(held, "Lantern Works, LLC", "--replace", "--yes"))).toBe(
+      `refusing: company ${held} is abandoned: nothing can be recorded on it`,
+    );
+    expect(filedNameOf(held)).toBe(FILED_NAME);
+    expect(legalBodies.listEvents(body)).toHaveLength(eventsBefore);
   });
 
   test("refuses the reserved operator name system", async () => {
