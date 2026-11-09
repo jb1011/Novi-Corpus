@@ -1092,9 +1092,11 @@ describe("settleCase: a send that may still be running is never sent again", () 
   });
 
   test("a re-send after a reverted receipt is not held by the window: the revert ended that send", async () => {
-    const s = setup({ script: "refund", revertReject: true });
-    // On the database's clock, so the reverted run's own sending event is seconds old.
-    s.clock.sec = Math.floor(Date.now() / 1000);
+    // On the database's clock, so the reverted run's own sending event is seconds old, with the
+    // job's expiry a week after it.
+    const wall = Math.floor(Date.now() / 1000);
+    const s = setup({ script: "refund", revertReject: true, expiredAt: wall + 7 * 86_400 });
+    s.clock.sec = wall;
     const caseId = seed(s);
     const err = await settleCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ChainTxRevertedError);
@@ -1124,10 +1126,11 @@ describe("settleCase: a settling row whose hash reverted is sent on once", () =>
   });
 
   test("two settles at once on it send one new transaction, and the row holds the sending run's hash", async () => {
-    const s = setup({ script: "refund", revertReject: true });
     // On the database's clock, as for the race on a row with no hash: the run that moves second
-    // measures the first one's sending event against this clock.
-    s.clock.sec = Math.floor(Date.now() / 1000);
+    // measures the first one's sending event against this clock. The job expires a week later.
+    const wall = Math.floor(Date.now() / 1000);
+    const s = setup({ script: "refund", revertReject: true, expiredAt: wall + 7 * 86_400 });
+    s.clock.sec = wall;
     const { caseId } = await revertedRow(s);
     const results = await Promise.allSettled([
       settleCase(s.deps, caseId, { send: true }),
@@ -4152,11 +4155,13 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
   });
 
   test("two runs at once on a case never sent on: one claimRefund goes out, the other refuses", async () => {
-    // On the fixed clock the first run's sending event reads as old: the action it wrote is
-    // what the second one finds.
-    const s = setup({ chainStatus: 1 });
+    // An hour past the database's clock, with the expiry before it: the first run's sending
+    // event, which the database stamps, reads as an hour old, so the hold lets the second run
+    // through and the action the first one wrote is what it finds.
+    const wall = Math.floor(Date.now() / 1000);
+    const s = setup({ chainStatus: 1, expiredAt: wall - 3600 });
+    s.clock.sec = wall + 3600;
     const caseId = seedUnfiled(s, "funded");
-    s.clock.sec = REFUND_TIME;
     const results = await Promise.allSettled([
       refundUnfiledCase(s.deps, caseId, { send: true }),
       refundUnfiledCase(s.deps, caseId, { send: true }),
@@ -4247,9 +4252,12 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
   });
 
   test("a row another command moves during the send keeps the hash on its trail, and the run says so", async () => {
-    const s = setup({ chainStatus: 1 });
+    // On the database's clock, with the expiry before it: the run's own sending event is stamped
+    // by the database, and the next run measures it.
+    const wall = Math.floor(Date.now() / 1000);
+    const s = setup({ chainStatus: 1, expiredAt: wall - 3600 });
+    s.clock.sec = wall;
     const caseId = seedUnfiled(s, "funded");
-    s.clock.sec = REFUND_TIME;
     const job = s.deps.chain.job;
     const real = job.claimRefund.bind(job);
     job.claimRefund = async (...a: Parameters<typeof job.claimRefund>) => {
@@ -4270,7 +4278,9 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
       ["sent", hash, "claimRefund"],
       ["sent", hash, "claimRefund succeeded after the row left funded"],
     ]);
-    // The next run reads the chain and records the refund on the failed row, sending nothing.
+    // Once the window of the send has passed, the next run reads the chain and records the
+    // refund on the failed row, sending nothing.
+    s.clock.sec += SEND_IN_FLIGHT_SECONDS;
     await refundUnfiledCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(s.cases.find(caseId)).toMatchObject({
