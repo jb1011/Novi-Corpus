@@ -101,6 +101,8 @@ import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
 import { SqliteOaAnchorRepository } from "../persistence/oaAnchorRepository";
 import { SqlitePasskeyStore } from "../persistence/passkeyStore";
 import { SqlitePaymentIdempotencyStore } from "../persistence/paymentIdempotencyStore";
+import { SqliteStatementReadRepository } from "../persistence/statementReadRepository";
+import { SqliteTenantFirstSeenRepository } from "../persistence/tenantFirstSeenRepository";
 import {
   assertCircleCoverage,
   assertPaymentAddressSeparation,
@@ -1140,6 +1142,13 @@ async function main() {
   const app = buildApiApp({
     webOrigin: cfg.webOrigin,
     nonceStore,
+    // The funnel's first stage: every box records an account's first sign-in.
+    tenantFirstSeen: new SqliteTenantFirstSeenRepository(db),
+    // The funnel's last stage, only where FUNNEL_SALT is set: without the salt no statement read
+    // is recorded (a production box cannot boot without it, `assertFunnelConfig`).
+    statementReads: cfg.funnel?.salt
+      ? { repo: new SqliteStatementReadRepository(db), salt: cfg.funnel.salt }
+      : undefined,
     siweDomain: cfg.siweDomain,
     chainId: cfg.chainId,
     identityRegistry: cfg.identityRegistry,

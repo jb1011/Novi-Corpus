@@ -1478,6 +1478,48 @@ const AGREEMENT_ADOPTIONS_DDL = `
   END;
 `;
 
+/** Unix MILLISECONDS: past the largest value the seconds columns take, so a time in seconds is
+ *  refused rather than stored as a day in 1970. */
+const sqlIsMillis = (column: string) =>
+  `typeof(${column}) = 'integer' AND ${column} BETWEEN 100000000000 AND 9007199254740991`;
+
+/**
+ * THE FUNNEL'S TWO TABLES (`funnel:export`, design §6.14), which nothing else reads:
+ *
+ *  - `tenant_first_seen`: an account's first sign-in, one row per address, written by
+ *    `POST /auth/verify` with INSERT OR IGNORE, so the time never moves
+ *    (`tenantFirstSeenRepository.ts`). The address is checksummed: one spelling per account.
+ *  - `statement_reads`: the reads of a legal body's public statement, one row per body, UTC day,
+ *    caller kind and caller, written by the by-agent route with INSERT OR IGNORE
+ *    (`statementReadRepository.ts`). The caller is stored only as sha256 of the limiter's key, the
+ *    day and FUNNEL_SALT: the key itself (a client's network address) is never stored.
+ *    `statement_log` cannot hold them: it skips a statement whose claims did not change.
+ *
+ * Outside `LEGAL_BODIES_DDL`, as `statement_log` is, and created after the legal-body schema step
+ * because `statement_reads` references `legal_bodies`. Not write-once: they hold measurements, and
+ * an erasure must be able to delete an account's row. The times are unix MILLISECONDS, the day
+ * `YYYY-MM-DD` (a real day: `date(day)` gives it back unchanged) and the hash `0x` and 64
+ * lower-case hex digits.
+ */
+const FUNNEL_DDL = `
+  CREATE TABLE IF NOT EXISTS tenant_first_seen (
+    address       TEXT PRIMARY KEY NOT NULL CHECK (${sqlIsAddress("address")}),
+    first_seen_at INTEGER NOT NULL CHECK (${sqlIsMillis("first_seen_at")})
+  );
+
+  CREATE TABLE IF NOT EXISTS statement_reads (
+    legal_body_id   TEXT NOT NULL REFERENCES legal_bodies(legal_body_id),
+    day             TEXT NOT NULL CHECK (typeof(day) = 'text' AND length(CAST(day AS BLOB)) = 10
+      AND length(day) = 10 AND day GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+      AND date(day) IS day),
+    caller_kind     TEXT NOT NULL CHECK (caller_kind IN ('owner', 'anonymous')),
+    caller_day_hash TEXT NOT NULL CHECK (${sqlIsHash("caller_day_hash")}),
+    first_read_at   INTEGER NOT NULL CHECK (${sqlIsMillis("first_read_at")}),
+    PRIMARY KEY (legal_body_id, day, caller_kind, caller_day_hash)
+  );
+  CREATE INDEX IF NOT EXISTS idx_statement_reads_day ON statement_reads(day);
+`;
+
 /** Create tables if absent. Idempotent. */
 export function migrate(db: Database.Database): void {
   db.exec(`
@@ -2306,6 +2348,8 @@ export function migrate(db: Database.Database): void {
   db.exec(STATEMENT_LOG_DDL);
   // The agreement adoptions reference `legal_bodies` too, and stand outside that step alike.
   db.exec(AGREEMENT_ADOPTIONS_DDL);
+  // The funnel's tables: the statement reads reference `legal_bodies` as well.
+  db.exec(FUNNEL_DDL);
 }
 
 /** Marker for the one-shot 2026-08-26 re-key (design §2 steps 1-5). */

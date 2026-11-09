@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import type { AuthVars } from "../../auth/middleware";
+import { verifySession } from "../../auth/session";
 import type { SignedStatementJson } from "../../legalBody/publicStatement";
 import type { Standing } from "../../legalBody/standing";
 import {
@@ -8,6 +9,11 @@ import {
   statementForAgent,
 } from "../../legalBody/statements";
 import { opsLog } from "../../observability/opsLog";
+import {
+  type StatementReadCaller,
+  callerDayHash,
+  utcDay,
+} from "../../persistence/statementReadRepository";
 import type { ApiDeps } from "../app";
 import {
   AnswerMemo,
@@ -18,6 +24,7 @@ import {
   RATE_LIMITED_BODY,
   THROTTLE_LOG_WINDOW_MS,
   UNAVAILABLE_BODY,
+  clientKeyOf,
   createClientLimiter,
   errorNameOf,
 } from "./legalBodies";
@@ -40,6 +47,16 @@ import {
  *
  * On production a body answer also carries `guardianIdentityVerified`, beside the statement and
  * outside it: the signed statement is untouched (statement v3 signs the fact).
+ *
+ * EVERY ANSWER THAT IS A BODY'S SIGNED STATEMENT IS A READ (the funnel's last stage), the memo's
+ * replays included, recorded in `statement_reads` where FUNNEL_SALT is set (`deps.statementReads`)
+ * and nowhere else: once per body, UTC day, caller kind and caller. The caller is the per-client
+ * limiter's key, kept only as sha256 of the key, the day and the salt. It is `owner` when the
+ * request carries a valid session of the body's own tenant, else `anonymous`. The route stays
+ * public: a bearer is read when present, never required, and one that is missing, malformed,
+ * expired or signed with another secret is no session, so the caller reads as anonymous and
+ * nothing else changes. The record changes nothing in the answer, for any caller, and a record
+ * that fails is an ops line naming the error, never the answer's failure.
  */
 
 /** The three answers. The agent id is the canonical decimal the caller supplied. */
@@ -70,6 +87,30 @@ export type ByAgentAnswer =
       statement: SignedStatementJson;
     };
 
+/** What the memo keeps for an agent: the answer, and the legal body it states when it states one,
+ *  so that a replay is recorded as a read like the answer it replays. */
+interface Memoised {
+  answer: ByAgentAnswer;
+  legalBodyId: string | null;
+}
+
+/**
+ * The tenant of the request's session, when it carries a valid one: read, never required. The
+ * header is parsed as `requireAuth` parses it. A missing, malformed, expired or foreign bearer is
+ * no session at all, and fails nothing.
+ */
+async function sessionTenantOf(c: Context, secret: string): Promise<string | undefined> {
+  const header = c.req.header("authorization");
+  if (header === undefined) return undefined;
+  const [scheme, token] = header.split(" ");
+  if (scheme !== "Bearer" || !token) return undefined;
+  try {
+    return (await verifySession(token, secret)).tenantId;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Mounts nothing without `deps.legalBodyStatements`: the route is then a 404. */
 export function mountLegalBodyStatementRoutes(
   app: Hono<{ Variables: AuthVars }>,
@@ -79,7 +120,39 @@ export function mountLegalBodyStatementRoutes(
   if (!st) return;
   const now = () => (deps.now ?? Date.now)();
   /** Keyed by the canonical agent id. */
-  const memo = new AnswerMemo<ByAgentAnswer>(MEMO_TTL_MS, MEMO_MAX_ENTRIES, now);
+  const memo = new AnswerMemo<Memoised>(MEMO_TTL_MS, MEMO_MAX_ENTRIES, now);
+  const reads = deps.statementReads;
+  /** When the last failed-record line was written: a memo replay costs no token, so a failing
+   *  store under a scanner would otherwise write one line per request. One per window. */
+  let readFailLoggedAt: number | undefined;
+
+  /** Records a read of the body's statement where FUNNEL_SALT is set. Never throws: the answer is
+   *  served whatever happens here, and the ops line names the error only, never the caller. */
+  const recordRead = async (c: Context, legalBodyId: string): Promise<void> => {
+    if (reads === undefined) return;
+    try {
+      const at = now();
+      const day = utcDay(at);
+      const tenant = await sessionTenantOf(c, deps.jwtSecret);
+      const callerKind: StatementReadCaller =
+        tenant !== undefined && st.repo.findOwned(tenant, legalBodyId) !== undefined
+          ? "owner"
+          : "anonymous";
+      reads.repo.record({
+        legalBodyId,
+        day,
+        callerKind,
+        callerDayHash: callerDayHash(clientKeyOf(c), day, reads.salt),
+        firstReadAt: at,
+      });
+    } catch (e) {
+      const at = now();
+      if (readFailLoggedAt === undefined || at - readFailLoggedAt >= THROTTLE_LOG_WINDOW_MS) {
+        readFailLoggedAt = at;
+        opsLog("legal_body_statement_read_failed", { errorName: errorNameOf(e) });
+      }
+    }
+  };
   const clientBucket = createClientLimiter(deps);
   /** When the last throttle line was written, so a sustained drain costs one line per minute. */
   let throttleLoggedAt: number | undefined;
@@ -112,9 +185,11 @@ export function mountLegalBodyStatementRoutes(
 
     const hit = memo.get(agentId);
     if (hit !== undefined) {
-      // Definitive by construction: replayed as checked, with no token and no read.
+      // Definitive by construction: replayed as checked, with no token and no chain read. A
+      // replayed statement is a read of it all the same.
+      if (hit.legalBodyId !== null) await recordRead(c, hit.legalBodyId);
       c.header("Cache-Control", FRESH_CACHE_CONTROL);
-      return c.json(hit);
+      return c.json(hit.answer);
     }
     // The caller's own allowance first, so a scanner runs itself out before the shared one.
     if (!clientBucket(c).take()) return throttled(c, "client");
@@ -167,7 +242,9 @@ export function mountLegalBodyStatementRoutes(
               : {}),
             statement: outcome.statement,
           };
-    memo.set(agentId, answer);
+    const legalBodyId = outcome.kind === "statement" ? outcome.legalBodyId : null;
+    memo.set(agentId, { answer, legalBodyId });
+    if (legalBodyId !== null) await recordRead(c, legalBodyId);
     c.header("Cache-Control", FRESH_CACHE_CONTROL);
     return c.json(answer);
   });

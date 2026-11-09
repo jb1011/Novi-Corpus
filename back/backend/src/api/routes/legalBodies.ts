@@ -258,6 +258,29 @@ export class AnswerMemo<T> {
 type HeaderBearing = { req: { header(name: string): string | undefined } };
 
 /**
+ * The per-client limiter's key for a request (R2, see `createClientLimiter`): its LAST non-empty
+ * `X-Forwarded-For` entry, trimmed and in lower case, or `"direct"` for a request with none.
+ *
+ * The last NON-EMPTY entry. Trimmed and lowercased so one caller cannot hold two buckets by
+ * spelling itself two ways — and non-empty because a trailing comma is legal here and is what a
+ * proxy appending to an empty inbound value leaves behind. Read literally, that empty tail became
+ * the key, which is falsy, so those callers fell through to the shared `direct` bucket and pooled
+ * one allowance between them. Only a header with nothing in it at all is `direct`.
+ *
+ * Exported for the statement route's read record, which counts callers by this same key and keeps
+ * only a salted hash of it. The key is a client's network address: never a log line.
+ */
+export function clientKeyOf(c: HeaderBearing): string {
+  const appended = c.req
+    .header("x-forwarded-for")
+    ?.split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry !== "")
+    .pop();
+  return appended ?? "direct";
+}
+
+/**
  * ONE per-client allowance per deployment, shared by every public read surface that asks for it
  * (audit C9). Keyed on the dependency object, which is the composition root's single instance, so
  * `/legal-bodies/:address` and the paid `/verify/:publicId` draw from the SAME bucket per caller:
@@ -286,18 +309,7 @@ export function createClientLimiter(deps: ApiDeps): (c: HeaderBearing) => TokenB
   /** One bucket per caller (R2), bounded and least-recently-used-first. */
   const clients = new Map<string, TokenBucket>();
   const limiter = (c: HeaderBearing): TokenBucket => {
-    // The last NON-EMPTY entry. Trimmed and lowercased so one caller cannot hold two buckets by
-    // spelling itself two ways — and non-empty because a trailing comma is legal here and is what
-    // a proxy appending to an empty inbound value leaves behind. Read literally, that empty tail
-    // became the key, which is falsy, so those callers fell through to the shared `direct` bucket
-    // and pooled one allowance between them. Only a header with nothing in it at all is `direct`.
-    const appended = c.req
-      .header("x-forwarded-for")
-      ?.split(",")
-      .map((entry) => entry.trim().toLowerCase())
-      .filter((entry) => entry !== "")
-      .pop();
-    const key = appended ?? "direct";
+    const key = clientKeyOf(c);
     const found = clients.get(key);
     // Re-inserted on every use, so insertion order IS least-recently-used order and the entry
     // evicted below is the coldest one — never the scanner's own exhausted bucket.
