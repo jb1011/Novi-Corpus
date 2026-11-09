@@ -70,7 +70,8 @@ type NoAction = Extract<Settlement, { action: "none" }>;
 
 /**
  * The last ten minutes before the expiry: a pay or refund sent then may land after the expiry,
- * when the job can only be refunded, so the referee waits and takes the expiry path instead.
+ * when anyone's claimRefund may take the escrow back first and the settle itself sends nothing
+ * but the refund, so the referee waits and takes the expiry path instead.
  */
 export const EXPIRY_MARGIN_SECONDS = 600;
 
@@ -141,9 +142,11 @@ const WAIT_FOR: Record<Exclude<RulingOutcome["kind"], "pay" | "refund">, NoActio
 
 /**
  * The decision, by the chain's status first: a settled escrow is reported and never sent on;
- * past the expiry and its clock margin the job can only be refunded, whatever the ruling; before
- * that, only a Submitted job with a pay or refund ruling is acted on, and not in the last ten
- * minutes before the expiry.
+ * past the expiry and its clock margin the settle sends nothing but the refund, whatever the
+ * ruling: the pilot's rule, which this table is, not the contract's. Before that, only a Submitted
+ * job with a pay or refund ruling is acted on, and not from ten minutes before the expiry until
+ * the clock margin after it has passed (the 60 seconds of {REFUND_CLOCK_MARGIN_SECONDS}), when the
+ * refund path opens.
  *
  * `nowSeconds` and the escrow's `expiredAt` are unix seconds; the contract's `claimRefund` needs
  * the clock strictly past `expiredAt`, and the decision waits a further
@@ -216,9 +219,9 @@ const SETTLEABLE: ReadonlySet<PilotStatus> = new Set([
 /**
  * The statuses whose escrow no ruling's settle takes back, refunded by claimRefund once the job
  * expired (`refundUnfiledCase`): a case funded but never filed, one whose filing went back to
- * contested with nothing filed, and a failed one. After the expiry and its margin the contract
- * allows no move but the refund to the client, whatever a dispute says, so a filing that started
- * changes nothing there.
+ * contested with nothing filed, and a failed one. Past the expiry and its margin the settle sends
+ * nothing but the refund, whatever a dispute says: the pilot's rule (the settlement's decision
+ * table), so a filing that started changes nothing there.
  */
 export const UNFILED_REFUND_STATUSES: ReadonlySet<PilotStatus> = new Set([
   "funded",
@@ -452,7 +455,7 @@ export async function settleCase(
     refuse(`case ${caseId} is a ${row.mode} case and this stage is ${d.stage.mode}`);
   if (!SETTLEABLE.has(row.status))
     refuse(
-      `case ${caseId} is ${row.status}; a settlement starts at filed, evidence_unknown, ruled, settling or settled`,
+      `case ${caseId} is ${row.status}; a settlement starts at filed, evidence_unknown, ruled, settling or settled${UNFILED_REFUND_STATUSES.has(row.status) ? `; after its expiry, pilot:settle --case ${caseId} --claim-refund takes its escrow back` : ""}`,
     );
   if (row.jobId === null) refuse(`case ${caseId} has no job id`);
   const jobId = BigInt(row.jobId);
@@ -474,10 +477,7 @@ export async function settleCase(
   if (row.status === "settling" && row.settleTxHash !== null) {
     const hash = row.settleTxHash as Hex;
     const receipt = await receiptStatus(d, hash);
-    if (receipt === null)
-      refuse(
-        `case ${caseId}'s ${row.settleAction} ${hash} has no receipt yet; wait until it is mined or dropped, then run again`,
-      );
+    if (receipt === null) refuse(noReceiptYet(row, hash));
     if (receipt === "success") landed = hash;
   }
 
@@ -1100,9 +1100,11 @@ export async function adoptSettleTx(
       `case ${caseId} is ${status}; a settle transaction is adopted on a settling or settled case only`,
     );
   if (row.settleTxHash !== null) {
+    // On a settling row the plain settle reads the held hash first: a settle recorded from the
+    // chain with no hash of its own is one this hash can then be attached to.
     if (!sameHash(row.settleTxHash, hash))
       refuse(
-        `case ${caseId} is ${status} with settle transaction ${row.settleTxHash}, not ${hash}; a hash the row holds is never replaced`,
+        `case ${caseId} is ${status} with settle transaction ${row.settleTxHash}, not ${hash}; a hash the row holds is never replaced${status === "settling" ? `: run pilot:settle --case ${caseId} first, which reads the held hash and the chain, and once the case is settled with no hash, --tx attaches this one` : ""}`,
       );
     return { unchanged: true, hash: row.settleTxHash as Hex, status };
   }
@@ -1204,6 +1206,19 @@ function dropTakes(row: PilotCaseRecord): boolean {
 }
 
 /**
+ * Why a run waits on the hash the row holds while the node has no receipt for it: the transaction
+ * is pending, or was dropped. Where `--dropped` takes the row, the words name it, the command that
+ * clears a dropped hash; anywhere else only the wait.
+ */
+function noReceiptYet(row: PilotCaseRecord, hash: Hex): string {
+  const { caseId } = row;
+  const sent = `case ${caseId}'s ${row.settleAction ?? "settle transaction"} ${hash}`;
+  return dropTakes(row)
+    ? `${sent} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again`
+    : `${sent} has no receipt yet; wait until it is mined, then run again`;
+}
+
+/**
  * `pilot:settle --dropped`: the hash of a send, cleared once the network is proven to have
  * dropped it, so the next run decides again. It sends nothing. A settling row that holds a hash,
  * a row of the expiry refund (funded, submitted, contested or failed) that holds the hash of its
@@ -1247,7 +1262,9 @@ export async function clearDroppedSettleTx(
   }
   // A row that is not settling is read again by the expiry refund, never by the plain settle.
   const settling = row.status === "settling";
-  const reader = settling ? "pilot:settle" : `pilot:settle --case ${caseId} --claim-refund`;
+  const reader = settling
+    ? `pilot:settle --case ${caseId}`
+    : `pilot:settle --case ${caseId} --claim-refund`;
   if (row.settleTxHash === null) refuse(`case ${caseId} holds no settle transaction hash to clear`);
   const hash = row.settleTxHash as Hex;
   // The send as the refusals and the event name it: its action, or words for a row with none.
@@ -1387,20 +1404,22 @@ function filingInDoubt(row: PilotCaseRecord): string {
   const { caseId } = row;
   const confirm = row.mode === "rehearsal" ? "" : ` --${row.mode}`;
   const force = row.mode === "rehearsal" ? "" : " --force";
+  const setIds = `pilot:case set-ids ${caseId} --core <n> --by <name> --yes`;
   if (row.status === "filing")
-    return `case ${caseId} is filing: a filing of it may still be running, and its dispute may exist; wait until ${FILING_IN_PROGRESS_SECONDS / 60} minutes after its filing started, then record its dispute ids with pilot:case set-ids, which moves it to filed, or run pilot:dispute --case ${caseId}${confirm} --yes, which freezes a filing that stopped, at evidence_unknown when it holds a dispute id and at filing_unknown when it holds none; at filed or evidence_unknown, pilot:settle --case ${caseId} --claim-refund settles it`;
-  return `case ${caseId} is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids, then pilot:settle --case ${caseId} --claim-refund takes its expiry path, or, once Kleros confirms none exists, mark it failed with pilot:case fail ${caseId} --reason <why>${force} --yes, then run this command again`;
+    return `case ${caseId} is filing: a filing of it may still be running, and its dispute may exist; wait until ${FILING_IN_PROGRESS_SECONDS / 60} minutes after its filing started, then record its dispute ids with ${setIds}, which moves it to filed, or run pilot:dispute --case ${caseId}${confirm} --yes, which freezes a filing that stopped, at evidence_unknown when it holds a dispute id and at filing_unknown when it holds none; at filed or evidence_unknown, pilot:settle --case ${caseId} --claim-refund settles it`;
+  return `case ${caseId} is filing_unknown: its dispute may exist on Kleros; record its ids with ${setIds}, then pilot:settle --case ${caseId} --claim-refund takes its expiry path, or, once Kleros confirms none exists, mark it failed with pilot:case fail ${caseId} --reason <why>${force} --yes, then run this command again`;
 }
 
 /**
  * `pilot:settle --claim-refund` on a case no ruling settles (funded, submitted, contested or
  * failed): its job's escrow back to the buyer by the referee's claimRefund, once the expiry and
- * its clock margin passed, and the row to `failed` with the escrow refunded. After the expiry the
- * contract allows no move but this refund, whatever a dispute says, so a case whose filing
- * started is refunded the same way. The cap's rule is unchanged: a failed row counts while its
- * filing started, so a case whose filing never started takes no slot, and one whose filing
- * started and went back to contested takes the slot a plain fail of it would. A case at filing or
- * filing_unknown is refused, naming the command that resolves it first.
+ * its clock margin passed, and the row to `failed` with the escrow refunded. Past the expiry and
+ * its margin the settle sends nothing but the refund, whatever a dispute says: the pilot's rule
+ * (the settlement's decision table), so a case whose filing started is refunded the same way. The
+ * cap's rule is unchanged: a failed row counts while its filing started, so a case whose filing
+ * never started takes no slot, and one whose filing started and went back to contested takes the
+ * slot a plain fail of it would. A case at filing or filing_unknown is refused, naming the
+ * command that resolves it first.
  *
  * Before any read: the mode, the status, the job id, the configured deployment, and the in-flight
  * hold while an earlier send may still be running. A row that holds a hash reads that
@@ -1448,12 +1467,7 @@ export async function refundUnfiledCase(
   if (row.settleTxHash !== null) {
     const hash = row.settleTxHash as Hex;
     const receipt = await receiptStatus(d, hash);
-    if (receipt === null)
-      refuse(
-        dropTakes(row)
-          ? `case ${caseId}'s ${held} ${hash} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again`
-          : `case ${caseId}'s ${held ?? "settle transaction"} ${hash} has no receipt yet; wait until it is mined, then run again`,
-      );
+    if (receipt === null) refuse(noReceiptYet(row, hash));
     if (receipt === "success") landed = hash;
   }
 

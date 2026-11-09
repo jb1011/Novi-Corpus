@@ -779,7 +779,9 @@ describe("settleCase: once only", () => {
     expect(s.cases.find(caseId)).toMatchObject({ status: "settling", settleTxHash: pending });
     for (const send of [true, false])
       await expect(settleCase(s.deps, caseId, { send })).rejects.toThrow(
-        new RegExp(`${pending}.*wait until it is mined or dropped, then run again`),
+        new RegExp(
+          `^refusing: case ${caseId}'s complete ${pending} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again; nothing was sent$`,
+        ),
       );
     expect(s.node.sends).toHaveLength(1);
     expect(s.cases.find(caseId)!.status).toBe("settling");
@@ -2077,16 +2079,30 @@ describe("settleCase: refusals and the ruling read", () => {
     },
   );
 
-  test.each<[PilotStatus]>([["contested"], ["filing"], ["failed"], ["filing_unknown"]])(
-    "a row at %s is refused before any read or send",
-    async (status) => {
-      const s = setup();
-      const caseId = seed(s, { status });
-      await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(/refusing/);
-      expect(s.fake.calls).toEqual([]);
-      expect(s.node.sends).toEqual([]);
-    },
-  );
+  test.each<[PilotStatus, string]>([
+    ["funded", "; after its expiry, pilot:settle --case <id> --claim-refund takes its escrow back"],
+    [
+      "submitted",
+      "; after its expiry, pilot:settle --case <id> --claim-refund takes its escrow back",
+    ],
+    [
+      "contested",
+      "; after its expiry, pilot:settle --case <id> --claim-refund takes its escrow back",
+    ],
+    ["failed", "; after its expiry, pilot:settle --case <id> --claim-refund takes its escrow back"],
+    ["filing", ""],
+    ["filing_unknown", ""],
+  ])("a row at %s is refused before any read or send", async (status, refund) => {
+    const s = setup();
+    const caseId = seed(s, { status });
+    await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      new RegExp(
+        `^refusing: case ${caseId} is ${status}; a settlement starts at filed, evidence_unknown, ruled, settling or settled${refund.replace("<id>", caseId)}; nothing was sent$`,
+      ),
+    );
+    expect(s.fake.calls).toEqual([]);
+    expect(s.node.sends).toEqual([]);
+  });
 
   test("a pending ruling inside the job's life sends nothing and keeps the row filed", async () => {
     const s = setup({ script: "stalled" });
@@ -2852,7 +2868,7 @@ describe("adoptSettleTx: a row that holds a hash, or is at another status", () =
       for (const write of [true, false])
         await expect(adoptSettleTx(s.deps, caseId, other, { write })).rejects.toThrow(
           new RegExp(
-            `case ${caseId} is ${status} with settle transaction ${HELD_HASH}, not ${other}; a hash the row holds is never replaced; nothing was sent$`,
+            `case ${caseId} is ${status} with settle transaction ${HELD_HASH}, not ${other}; a hash the row holds is never replaced${status === "settling" ? `: run pilot:settle --case ${caseId} first, which reads the held hash and the chain, and once the case is settled with no hash, --tx attaches this one` : ""}; nothing was sent$`,
           ),
         );
       expect(await adoptSettleTx(s.deps, caseId, HELD_HASH, { write: true })).toEqual({
@@ -3212,7 +3228,7 @@ describe("clearDroppedSettleTx: a settle hash the network dropped", () => {
       const before = snapshot(s, caseId);
       await expect(clearDroppedSettleTx(s.deps, caseId, { write: true })).rejects.toThrow(
         new RegExp(
-          `case ${caseId}'s reject ${hash} has a receipt \\(${status}\\): it was mined, not dropped; run pilot:settle to read it; nothing was sent$`,
+          `case ${caseId}'s reject ${hash} has a receipt \\(${status}\\): it was mined, not dropped; run pilot:settle --case ${caseId} to read it; nothing was sent$`,
         ),
       );
       expect(snapshot(s, caseId)).toEqual(before);
@@ -3240,7 +3256,7 @@ describe("clearDroppedSettleTx: a settle hash the network dropped", () => {
     mined.cases.patch(minedId, { settleAction: null });
     await expect(clearDroppedSettleTx(mined.deps, minedId, { write: true })).rejects.toThrow(
       new RegExp(
-        `^refusing: case ${minedId}'s settle \\(no action recorded\\) ${hash} has a receipt \\(success\\): it was mined, not dropped; run pilot:settle to read it; nothing was sent$`,
+        `^refusing: case ${minedId}'s settle \\(no action recorded\\) ${hash} has a receipt \\(success\\): it was mined, not dropped; run pilot:settle --case ${minedId} to read it; nothing was sent$`,
       ),
     );
   });
@@ -3271,7 +3287,7 @@ describe("clearDroppedSettleTx: a settle hash the network dropped", () => {
       for (const write of [true, false])
         await expect(clearDroppedSettleTx(s.deps, caseId, { write })).rejects.toThrow(
           new RegExp(
-            `^refusing: job 7 is ${name}, not Funded, Submitted, Completed, Rejected or Expired, so ${DROPPED_HASH} is not cleared, and pilot:settle refuses the case while it holds the hash; read the chain before acting; nothing was sent$`,
+            `^refusing: job 7 is ${name}, not Funded, Submitted, Completed, Rejected or Expired, so ${DROPPED_HASH} is not cleared, and pilot:settle --case ${caseId} refuses the case while it holds the hash; read the chain before acting; nothing was sent$`,
           ),
         );
       expect(snapshot(s, caseId)).toEqual(before);
@@ -4464,8 +4480,8 @@ describe("refundUnfiledCase: a case whose filing started", () => {
     const confirm = mode === "rehearsal" ? "" : ` --${mode}`;
     const force = mode === "rehearsal" ? "" : " --force";
     return status === "filing"
-      ? `case ${caseId} is filing: a filing of it may still be running, and its dispute may exist; wait until 30 minutes after its filing started, then record its dispute ids with pilot:case set-ids, which moves it to filed, or run pilot:dispute --case ${caseId}${confirm} --yes, which freezes a filing that stopped, at evidence_unknown when it holds a dispute id and at filing_unknown when it holds none; at filed or evidence_unknown, pilot:settle --case ${caseId} --claim-refund settles it`
-      : `case ${caseId} is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids, then pilot:settle --case ${caseId} --claim-refund takes its expiry path, or, once Kleros confirms none exists, mark it failed with pilot:case fail ${caseId} --reason <why>${force} --yes, then run this command again`;
+      ? `case ${caseId} is filing: a filing of it may still be running, and its dispute may exist; wait until 30 minutes after its filing started, then record its dispute ids with pilot:case set-ids ${caseId} --core <n> --by <name> --yes, which moves it to filed, or run pilot:dispute --case ${caseId}${confirm} --yes, which freezes a filing that stopped, at evidence_unknown when it holds a dispute id and at filing_unknown when it holds none; at filed or evidence_unknown, pilot:settle --case ${caseId} --claim-refund settles it`
+      : `case ${caseId} is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids ${caseId} --core <n> --by <name> --yes, then pilot:settle --case ${caseId} --claim-refund takes its expiry path, or, once Kleros confirms none exists, mark it failed with pilot:case fail ${caseId} --reason <why>${force} --yes, then run this command again`;
   };
 
   test.each<[PilotStatus, PilotMode, KlerosChainOnRow]>([

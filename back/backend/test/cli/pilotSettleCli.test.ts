@@ -563,10 +563,13 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
   });
 
   test.each<[PilotStatus, RegExp]>([
-    ["filing", /is filing: a filing of it may still be running.*pilot:case set-ids.*pilot:dispute/],
+    [
+      "filing",
+      /is filing: a filing of it may still be running.*pilot:case set-ids pc_[0-9a-f]{12} --core <n> --by <name> --yes, which.*pilot:dispute/,
+    ],
     [
       "filing_unknown",
-      /is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids.*pilot:case fail/,
+      /is filing_unknown: its dispute may exist on Kleros; record its ids with pilot:case set-ids pc_[0-9a-f]{12} --core <n> --by <name> --yes, then.*pilot:case fail/,
     ],
   ])(
     "a case at %s is refused, naming the command that resolves it, and nothing is sent",
@@ -600,7 +603,9 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
     const f = makeFake({ chainStatus: 1, nowSec: REFUND_TIME });
     const caseId = seedUnfiled(f, "funded");
     await expect(f.run(["pilot:settle", "--case", caseId, "--yes"])).rejects.toThrow(
-      new RegExp(`case ${caseId} is funded; a settlement starts at filed`),
+      new RegExp(
+        `case ${caseId} is funded; a settlement starts at filed, evidence_unknown, ruled, settling or settled; after its expiry, pilot:settle --case ${caseId} --claim-refund takes its escrow back; nothing was sent$`,
+      ),
     );
     expect(f.sent).toEqual([]);
   });
