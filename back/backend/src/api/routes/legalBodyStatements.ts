@@ -44,8 +44,8 @@ import {
  *
  * Every body answer carries `treasury` after the statement, outside it and unsigned, on both
  * environments: the treasury of record its guardian declared (`legalBody/treasury.ts`), only while
- * its address is the agent's wallet the statement signs (Ruling 3); null otherwise, and null on the
- * unsigned `unknown`.
+ * its address is the agent's wallet the statement signs (Ruling 3) and that statement is in force
+ * (`active` or `pending`); null otherwise, and null on the unsigned `unknown`.
  */
 
 /** The three answers. The agent id is the canonical decimal the caller supplied. */
@@ -78,8 +78,9 @@ export type ByAgentAnswer =
       guardianIdentityVerified?: boolean;
       statement: SignedStatementJson;
       /** NOT SIGNED, both environments: the treasury of record while the registry shows its address
-       *  as the agent's wallet the statement signs, else null. Always served; optional in the type
-       *  only, for an answer stored before this key existed (the pilot's filed records). */
+       *  as the agent's wallet the statement signs and the statement is in force, else null.
+       *  Always served; optional in the type only, for an answer stored before this key existed
+       *  (the pilot's filed records). */
       treasury?: TreasuryBlock | null;
     };
 

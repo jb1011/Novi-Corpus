@@ -46,8 +46,9 @@ import { TokenBucket } from "./agentBook";
  *
  * Beside that statement, outside it and unsigned, a Minimal answer carries `treasury`: the
  * treasury of record its guardian declared (`legalBody/treasury.ts`), only while its address is the
- * agent's wallet the statement signs, so always the address asked about; null otherwise, and null
- * whenever there is no statement.
+ * agent's wallet the statement signs, so always the address asked about, and only while that
+ * statement is in force (`active` or `pending`); null otherwise, and null whenever there is no
+ * statement.
  */
 
 /** The lookup's own dependencies. Optional on `ApiDeps` as a whole, so a deployment that never
@@ -222,7 +223,8 @@ type MinimalAnswer =
       formation: null;
       checkedAt: string;
       statement: SignedStatementJson;
-      /** Not signed: the treasury of record, while the registry shows its address (Ruling 3). */
+      /** Not signed: the treasury of record, while the registry shows its address (Ruling 3) and
+       *  the statement is in force. */
       treasury: TreasuryBlock | null;
     };
 

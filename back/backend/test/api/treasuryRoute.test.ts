@@ -173,6 +173,13 @@ const lookup = async (app: App, path: string) => {
 
 const rows = () => s.db.prepare("SELECT * FROM treasury_declarations").all();
 
+/** Records the operator's revocation of the body, as `legal-body:revoke` does: an event, with the
+ *  row left in its state. */
+const revoke = (row: LegalBodyRecord) =>
+  s.repo.recordEvent(row.legalBodyId, "revoked", "operator:ops.example", null, {
+    reason: "Recorded for a test.",
+  });
+
 /** A REST refusal: the house envelope, with the code's fixed sentence. */
 const refused = (status: number, code: string) => ({
   status,
@@ -296,6 +303,28 @@ describe("the door, POST /legal-body-orders/:id/treasury", () => {
     expect(rows()).toEqual([]);
   });
 
+  test("a link whose written authority is not the host it leads to: 400 treasury_invalid; a plain link is stored as written", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    for (const limitsReadableAt of ["https:///path", "https://:@limits.example.test/x"])
+      expect(
+        await declareOver(app, row.legalBodyId, {
+          address: WALLET,
+          provider: "crossmint",
+          limitsReadableAt,
+        }),
+        limitsReadableAt,
+      ).toMatchObject(refused(400, "treasury_invalid"));
+    expect(rows()).toEqual([]);
+    const accepted = await declareOver(app, row.legalBodyId, {
+      address: WALLET,
+      provider: "crossmint",
+      limitsReadableAt: LIMITS,
+    });
+    expect(accepted).toMatchObject({ status: 200, body: { limitsReadableAt: LIMITS } });
+    expect(rows()).toHaveLength(1);
+  });
+
   test("an address the registry does not show: 409 treasury_wallet_mismatch", async () => {
     const row = linkedBody();
     expect(
@@ -348,6 +377,65 @@ describe("the door, POST /legal-body-orders/:id/treasury", () => {
     const body = await lookup(app, byAgent);
     expect(body.statement).not.toBeNull();
     expect(body.treasury).toBeNull();
+  });
+});
+
+describe("a body Novi no longer states as in force", () => {
+  test("a linked body the operator revoked: 409 order_revoked, no row and no event, and both lookups serve no block", async () => {
+    const row = linkedBody();
+    revoke(row);
+    const app = makeApp();
+    expect(
+      await declareOver(app, row.legalBodyId, { address: WALLET, provider: "crossmint" }),
+    ).toMatchObject(refused(409, "order_revoked"));
+    expect(getAgentWallet).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+    expect(s.repo.listEvents(row.legalBodyId).filter((e) => e.kind === "note")).toEqual([]);
+    // By agent first: its statement logs the wallet the lookup by address finds the body by.
+    for (const path of [byAgent, byAddress(WALLET)]) {
+      const body = await lookup(app, path);
+      expect(body.standing, path).toBe("inactive");
+      expect(body.treasury, path).toBeNull();
+    }
+  });
+
+  test("a declaration made while active is served beside an active statement, and null once the standing reads inactive, the wallet still matching", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    const declared = await declareOver(app, row.legalBodyId, {
+      address: WALLET,
+      provider: "own_key",
+    });
+    expect(declared.status).toBe(200);
+    const active = await lookup(app, byAgent);
+    expect(active.standing).toBe("active");
+    expect(active.treasury).toEqual(declared.body);
+
+    revoke(row);
+    clock += MEMO_WINDOW_MS;
+    for (const path of [byAgent, byAddress(WALLET)]) {
+      const body = await lookup(app, path);
+      expect(body.standing, path).toBe("inactive");
+      expect(body.statement.message.agentWallet, path).toBe(WALLET);
+      expect(body.treasury, path).toBeNull();
+    }
+    expect(rows()).toHaveLength(1);
+  });
+
+  test("a body whose company is not paid for yet reads pending: the block is served", async () => {
+    const companyId = readyCompany(s, { status: "draft" });
+    s.checks.append(passedCheck(companyId));
+    const row = bodyIn("linked", s, companyId);
+    chain.link(row, { wallet: WALLET });
+    const app = makeApp();
+    const declared = await declareOver(app, row.legalBodyId, {
+      address: WALLET,
+      provider: "circle",
+    });
+    expect(declared.status).toBe(200);
+    const body = await lookup(app, byAgent);
+    expect(body.standing).toBe("pending");
+    expect(body.treasury).toEqual(declared.body);
   });
 });
 

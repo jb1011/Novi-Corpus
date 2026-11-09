@@ -125,6 +125,13 @@ async function refusalOf(run: () => Promise<unknown>): Promise<ApiError> {
 
 const rows = () =>
   s.db.prepare("SELECT * FROM treasury_declarations ORDER BY legal_body_id, declared_at").all();
+/** Records the operator's revocation of the body, as `legal-body:revoke` does: an event, with the
+ *  row left in its state. */
+const revoke = (row: LegalBodyRecord) =>
+  s.repo.recordEvent(row.legalBodyId, "revoked", "operator:ops.example", null, {
+    reason: "Recorded for a test.",
+  });
+
 const notes = (row: LegalBodyRecord) =>
   s.repo
     .listEvents(row.legalBodyId)
@@ -216,6 +223,24 @@ describe("a declaration the registry confirms", () => {
   });
 });
 
+describe("a link to the limits is stored as written, and only when that is where it leads", () => {
+  test.each([
+    ["a host in capitals", "https://LIMITS.example.test/wallets/0001"],
+    ["a port other than the default", "https://limits.example.test:8443/wallets/0001"],
+    ["a query right after the host", "https://limits.example.test?wallet=0001"],
+    ["a fragment right after the host", "https://limits.example.test#wallet-0001"],
+    ["a bare host", "https://limits.example.test"],
+  ])("%s: accepted", async (_, url) => {
+    const row = bodyInState();
+    const declared = await declare(row, {
+      address: WALLET,
+      provider: "crossmint",
+      limitsReadableAt: url,
+    });
+    expect(declared.limitsReadableAt).toBe(url);
+  });
+});
+
 describe("refused, with nothing stored and no event", () => {
   test("an address the registry does not show as the agent's wallet: 409 treasury_wallet_mismatch", async () => {
     const row = bodyInState();
@@ -261,6 +286,24 @@ describe("refused, with nothing stored and no event", () => {
       { ...ok, limitsReadableAt: "https://limits.example.test/<x>" },
     ],
     ["an empty link", { ...ok, limitsReadableAt: "" }],
+    // The authority as written must be the host the link leads to.
+    ["a link with an empty authority", { ...ok, limitsReadableAt: "https:///path" }],
+    [
+      "a link with empty credentials",
+      { ...ok, limitsReadableAt: "https://:@limits.example.test/x" },
+    ],
+    [
+      "a link with a user before its host",
+      { ...ok, limitsReadableAt: "https://limits.example.test@elsewhere.example.test/x" },
+    ],
+    [
+      "a link whose host is written percent-encoded",
+      { ...ok, limitsReadableAt: "https://limits%2Eexample.test/x" },
+    ],
+    [
+      "a link that writes the default port",
+      { ...ok, limitsReadableAt: "https://limits.example.test:443/x" },
+    ],
     ["a link that is not text", { ...ok, limitsReadableAt: 42 }],
     ["another provider with no name", { address: WALLET, provider: "other" }],
     [
@@ -309,6 +352,34 @@ describe("refused, with nothing stored and no event", () => {
     expect(refused).toMatchObject({ code: "treasury_invalid", status: 400 });
     expect(refused.message).toBe(LEGAL_BODY_SENTENCES.treasury_invalid);
     expect(getAgentWallet).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+    expect(notes(row)).toEqual([]);
+  });
+
+  test("a linked body the operator revoked: 409 order_revoked, the registry not read, nothing written", async () => {
+    const row = bodyInState();
+    revoke(row);
+    // A revocation leaves the row linked: only its event says so.
+    expect(s.repo.findById(row.legalBodyId)?.bindingState).toBe("linked");
+    const refused = await refusalOf(() => declare(row, ok));
+    expect(refused).toMatchObject({ code: "order_revoked", status: 409 });
+    expect(refused.message).toBe(LEGAL_BODY_SENTENCES.order_revoked);
+    expect(getAgentWallet).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+    expect(notes(row)).toEqual([]);
+    expect(opsLines("legal_body_treasury_declared")).toEqual([]);
+  });
+
+  test("a body revoked while the registry is read: 409 order_revoked, nothing written", async () => {
+    const row = bodyInState();
+    getAgentWallet.mockImplementationOnce(async () => {
+      revoke(row);
+      return WALLET;
+    });
+    expect(await refusalOf(() => declare(row, ok))).toMatchObject({
+      code: "order_revoked",
+      status: 409,
+    });
     expect(rows()).toEqual([]);
     expect(notes(row)).toEqual([]);
   });
@@ -528,13 +599,27 @@ describe("what is served", () => {
   test("Ruling 3: served only while its address is the agent's wallet the same answer read, in any letter case", async () => {
     const row = bodyInState();
     const declared = await declare(row, { address: WALLET, provider: "own_key" });
-    expect(servedTreasury(declared, WALLET)).toEqual(treasuryView(declared));
-    expect(servedTreasury(declared, WALLET.toLowerCase() as Address)).toEqual(
+    const stated = (agentWallet: Address) => ({ agentWallet, standing: "active" as const });
+    expect(servedTreasury(declared, stated(WALLET))).toEqual(treasuryView(declared));
+    expect(servedTreasury(declared, stated(WALLET.toLowerCase() as Address))).toEqual(
       treasuryView(declared),
     );
-    expect(servedTreasury(declared, ELSEWHERE)).toBeNull();
-    expect(servedTreasury(declared, zeroAddress)).toBeNull();
-    expect(servedTreasury(undefined, WALLET)).toBeNull();
+    expect(servedTreasury(declared, stated(ELSEWHERE))).toBeNull();
+    expect(servedTreasury(declared, stated(zeroAddress))).toBeNull();
+    expect(servedTreasury(undefined, stated(WALLET))).toBeNull();
+  });
+
+  test("served only beside a statement in force: active or pending; inactive or unknown, null with the wallet matching", async () => {
+    const row = bodyInState();
+    const declared = await declare(row, { address: WALLET, provider: "crossmint" });
+    for (const standing of ["active", "pending"] as const)
+      expect(servedTreasury(declared, { agentWallet: WALLET, standing }), standing).toEqual(
+        treasuryView(declared),
+      );
+    for (const standing of ["inactive", "unknown"] as const)
+      expect(servedTreasury(declared, { agentWallet: WALLET, standing }), standing).toBeNull();
+    // Ruling 3 still applies on top: in force, but another wallet.
+    expect(servedTreasury(declared, { agentWallet: ELSEWHERE, standing: "active" })).toBeNull();
   });
 
   test("Ruling 8: neither sentence says non-custodial, insured, guaranteed or verified wallet", () => {
