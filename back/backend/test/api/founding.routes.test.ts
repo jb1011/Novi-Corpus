@@ -202,7 +202,9 @@ test("an older founding table drops the fields the form no longer asks for", () 
   expect(cols).not.toContain("consent_at");
   expect(cols).not.toContain("ip_hash");
   expect(
-    db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'founding_reviews'").get(),
+    db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'founding_reviews'")
+      .get(),
   ).toBeUndefined();
   expect(
     db
