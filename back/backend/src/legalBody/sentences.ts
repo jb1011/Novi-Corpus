@@ -104,6 +104,10 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // …and an address the registry does not show as the agent's wallet when the door reads it.
   treasury_wallet_mismatch:
     "The registry does not show this address as the agent's wallet: finish the attach first.",
+  // …and a linked body the operator revoked: its own sentence, which speaks of the body, where
+  // `order_revoked` speaks of linking an order.
+  legal_body_revoked:
+    "This legal body was revoked by the operator: nothing more can be declared on it.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */

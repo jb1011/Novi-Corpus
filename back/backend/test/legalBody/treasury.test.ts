@@ -356,28 +356,32 @@ describe("refused, with nothing stored and no event", () => {
     expect(notes(row)).toEqual([]);
   });
 
-  test("a linked body the operator revoked: 409 order_revoked, the registry not read, nothing written", async () => {
+  test("a linked body the operator revoked: 409 legal_body_revoked, the registry not read, nothing written", async () => {
     const row = bodyInState();
     revoke(row);
     // A revocation leaves the row linked: only its event says so.
     expect(s.repo.findById(row.legalBodyId)?.bindingState).toBe("linked");
     const refused = await refusalOf(() => declare(row, ok));
-    expect(refused).toMatchObject({ code: "order_revoked", status: 409 });
-    expect(refused.message).toBe(LEGAL_BODY_SENTENCES.order_revoked);
+    expect(refused).toMatchObject({ code: "legal_body_revoked", status: 409 });
+    expect(refused.message).toBe(LEGAL_BODY_SENTENCES.legal_body_revoked);
+    // Its own sentence, which speaks of the body, not of linking an order.
+    expect(refused.message).toBe(
+      "This legal body was revoked by the operator: nothing more can be declared on it.",
+    );
     expect(getAgentWallet).not.toHaveBeenCalled();
     expect(rows()).toEqual([]);
     expect(notes(row)).toEqual([]);
     expect(opsLines("legal_body_treasury_declared")).toEqual([]);
   });
 
-  test("a body revoked while the registry is read: 409 order_revoked, nothing written", async () => {
+  test("a body revoked while the registry is read: 409 legal_body_revoked, nothing written", async () => {
     const row = bodyInState();
     getAgentWallet.mockImplementationOnce(async () => {
       revoke(row);
       return WALLET;
     });
     expect(await refusalOf(() => declare(row, ok))).toMatchObject({
-      code: "order_revoked",
+      code: "legal_body_revoked",
       status: 409,
     });
     expect(rows()).toEqual([]);

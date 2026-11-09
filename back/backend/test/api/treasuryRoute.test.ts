@@ -381,13 +381,13 @@ describe("the door, POST /legal-body-orders/:id/treasury", () => {
 });
 
 describe("a body Novi no longer states as in force", () => {
-  test("a linked body the operator revoked: 409 order_revoked, no row and no event, and both lookups serve no block", async () => {
+  test("a linked body the operator revoked: 409 legal_body_revoked, no row and no event, and both lookups serve no block", async () => {
     const row = linkedBody();
     revoke(row);
     const app = makeApp();
     expect(
       await declareOver(app, row.legalBodyId, { address: WALLET, provider: "crossmint" }),
-    ).toMatchObject(refused(409, "order_revoked"));
+    ).toMatchObject(refused(409, "legal_body_revoked"));
     expect(getAgentWallet).not.toHaveBeenCalled();
     expect(rows()).toEqual([]);
     expect(s.repo.listEvents(row.legalBodyId).filter((e) => e.kind === "note")).toEqual([]);

@@ -197,8 +197,8 @@ function parseInput(input: unknown):
 /**
  * The guardian declares the treasury of record of its legal body, in this order:
  *  1. the body is the tenant's (one 404 for unknown and not-yours) and `linked`: any other state is
- *     409 `order_closed`. A body the operator revoked is 409 `order_revoked`: a revocation is an
- *     event and leaves the row `linked`;
+ *     409 `order_closed`. A body the operator revoked is 409 `legal_body_revoked`: a revocation
+ *     is an event and leaves the row `linked`;
  *  2. the declaration is one the record takes (400 `treasury_invalid`): only the five fields; an
  *     address in EIP-55 or lower case, never the zero address; one of the four providers; a name
  *     for another provider and for no other; a link to the limits, when given, `https://` and at
@@ -207,7 +207,7 @@ function parseInput(input: unknown):
  *  3. the registry shows the address as the agent's wallet, read now, in any letter case: else 409
  *     `treasury_wallet_mismatch`. A registry that cannot be read is 503 `chain_unavailable`;
  *  4. one transaction: the body is read again and must still be `linked` (else `order_closed`) and
- *     not revoked (else `order_revoked`), the declaration is appended, and the tenant's
+ *     not revoked (else `legal_body_revoked`), the declaration is appended, and the tenant's
  *     `treasury_declared` note is written, naming the provider only;
  *  5. one ops line, naming the body and the provider.
  * Nothing is written before step 4. The real-human check, the door's throttle and the deployment
@@ -224,7 +224,7 @@ export async function declareTreasury(
   if (row === undefined) throw refusal("not_found", 404);
   if (row.bindingState !== "linked") throw refusal("order_closed", 409);
   // A revocation is an event, and leaves the row linked: a revoked body takes no declaration.
-  if (deps.bodies.isRevoked(row.legalBodyId)) throw refusal("order_revoked", 409);
+  if (deps.bodies.isRevoked(row.legalBodyId)) throw refusal("legal_body_revoked", 409);
   const agentId = row.agentId;
   // A linked row holds its agent (the table's CHECKs).
   if (agentId === null)
@@ -245,7 +245,7 @@ export async function declareTreasury(
   const stored = deps.bodies.transaction((): TreasuryDeclaration => {
     if (deps.bodies.findById(row.legalBodyId)?.bindingState !== "linked")
       throw refusal("order_closed", 409);
-    if (deps.bodies.isRevoked(row.legalBodyId)) throw refusal("order_revoked", 409);
+    if (deps.bodies.isRevoked(row.legalBodyId)) throw refusal("legal_body_revoked", 409);
     const appended = deps.repo.append({
       legalBodyId: row.legalBodyId,
       ...declared,
