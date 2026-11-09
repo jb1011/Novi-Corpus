@@ -1,0 +1,52 @@
+---
+title: Novi 2.0
+description: "The agent acts in the company's name, under permissions the company publishes."
+section: novi-2
+register: plain
+reviewed: 2026-11-06
+---
+
+{/* Sources: design 10.6 (the copy, block by block), 4.6 D6 (its Minimal Novi badge follows MAINNET_LIVE in src/sections.mjs). */}
+
+import { Card, CardGrid, Figure } from '~/components';
+import { SECTIONS } from '~/sections.mjs';
+
+Minimal Novi says which company stands behind an agent. Novi 2.0 lets the company say what the agent may do for it. Each permission is published, so whoever deals with the agent can read it before relying on it.
+
+This page says what is coming. The <a href="/next/roadmap/">roadmap</a> says in which order.
+
+## What is coming
+
+<CardGrid cols={2}>
+	<Card icon="key" title="Grants of authority">
+		The company publishes what the agent may do in its name, within which limits, for how long.
+	</Card>
+	<Card icon="pen" title="Actor signatures">
+		The agent signs an act for the company; the signature points at the grant that allows it.
+	</Card>
+	<Card icon="receipt" title="Invoices">
+		The agent invoices in the company's name, tied to a signed act.
+	</Card>
+	<Card icon="inbox" title="Paid to the company">
+		What the agent earns is the company's income, not a wallet in its owner's name.
+	</Card>
+	<Card icon="bot" title="The agent asks first">
+		An agent requests a legal body over MCP; its owner finishes in one link.
+	</Card>
+	<Card icon="scroll" title="Code as the agreement">
+		Wyoming's DAO LLC law lets such a company keep some of its rules in code; the record points at them.
+	</Card>
+	<Card icon="wallet" title="Treasury of record">
+		The agent's own wallet, named in its record, with a partner wallet for owners who want one.
+	</Card>
+</CardGrid>
+
+## Where Novi 2.0 sits
+
+<Figure
+	name="d6"
+	caption="Minimal Novi says who stands behind the agent; Novi Managed what it holds and pays; Novi 2.0 what it may do in the company's name."
+	text={`Three products in a row. Minimal Novi, ${SECTIONS['minimal-novi'].badge}: who stands behind the agent. Novi Managed, ${SECTIONS['novi-managed'].badge.toLowerCase()}: what it holds and pays. Novi 2.0, ${SECTIONS['novi-2'].badge.toLowerCase()}: what it may do in the company's name.`}
+/>
+
+<p class="nc-nextline"><a href="/next/agents-as-actors/">Agents as actors</a> · <a href="/next/agent-first/">The agent asks first</a> · <a href="/next/dao-llc-features/">Code as the agreement</a> · <a href="/next/roadmap/">Roadmap</a></p>

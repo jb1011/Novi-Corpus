@@ -113,6 +113,7 @@ function company(companyId: string, provider: string, status: CompanyStatus = "d
     businessPurpose: "placeholder",
     industryLabel: "placeholder",
     intakeSynthesized: false,
+    purposeKind: provider === "customer" ? "legal_body" : "agent",
   });
   if (status !== "draft") expect(companies.setStatus(companyId, "draft", status)).toBe(true);
 }

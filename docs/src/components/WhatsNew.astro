@@ -1,0 +1,46 @@
+---
+// "What's new" (design 4.4): dated entries with a section tag, newest first.
+// Reads the `entries` front matter of help/changelog.md unless entries are passed in,
+// so the landing's short list and the full page share one source.
+//   <WhatsNew limit={3} />
+import { getEntry } from 'astro:content';
+import SectionBadge from './SectionBadge.astro';
+import { SECTIONS } from '../sections.mjs';
+import { formatShortDate, isoDate } from '../format.mjs';
+
+type SectionId = keyof typeof SECTIONS;
+interface Item {
+	date: Date | string;
+	section: SectionId;
+	text: string;
+	href?: string;
+}
+
+interface Props {
+	entries?: Item[];
+	limit?: number;
+}
+
+const { limit } = Astro.props;
+const source = Astro.props.entries ?? (await getEntry('docs', 'help/changelog'))?.data.entries ?? [];
+const items = source
+	.map((e) => ({ ...e, date: new Date(e.date) }))
+	.sort((a, b) => b.date.getTime() - a.date.getTime())
+	.slice(0, limit ?? source.length);
+---
+
+{
+	items.length ? (
+		<ul class="nc-news">
+			{items.map((e) => (
+				<li>
+					<time datetime={isoDate(e.date)}>{formatShortDate(e.date)}</time>
+					<SectionBadge section={e.section} text={SECTIONS[e.section].label} />
+					<span>{e.href ? <a href={e.href}>{e.text}</a> : e.text}</span>
+				</li>
+			))}
+		</ul>
+	) : (
+		<p class="nc-news-empty">No entries yet.</p>
+	)
+}

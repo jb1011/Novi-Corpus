@@ -1,0 +1,63 @@
+---
+title: Minimal Novi
+description: "A registered legal body for an agent you already run: a Wyoming DAO LLC, one guardian, a public link, a signed answer."
+section: minimal-novi
+register: plain
+network: arc-mainnet
+reviewed: 2026-11-06
+---
+
+{/* Sources: design 10.2 (the copy, block by block), 2.2 M3, 4.6 D1, decision 1 (8). */}
+
+import { Card, CardGrid, Figure } from '~/components';
+
+Minimal Novi gives your agent a registered legal body. The company is a Wyoming DAO LLC we form for you, or a Wyoming LLC you already own. One person, the guardian, answers for it. The agent's public identity and the legal body name each other, and anyone can check the link in a signed answer.
+
+We never hold your agent's money, keys or identity. We cannot change or dissolve a legal body on our own.
+
+## The four parts
+
+<CardGrid cols={2}>
+	<Card icon="building" title="Company" href="/start/wyoming-dao-llc/" more="What a Wyoming DAO LLC is">
+		A Wyoming DAO LLC we form for you, or a Wyoming LLC you already own.
+	</Card>
+	<Card icon="personcheck" title="Guardian" href="/live/guardian/" more="The guardian">
+		One real person, shown by World ID, with an identity check saying who. The name is not published.
+	</Card>
+	<Card icon="link" title="Legal body" href="/live/identity-and-link/" more="Agent identity, link and pointer">
+		The link between the company and the agent, on a public ledger; a change to its agreement needs the guardian's signature and a public wait.
+	</Card>
+	<Card icon="seal" title="Signed answer" href="/check/check-an-agent/" more="Check an agent">
+		One web address you can open in a browser or call from your own software; the answer is signed and good for five minutes.
+	</Card>
+</CardGrid>
+
+## How the parts fit together
+
+<Figure
+	name="d1"
+	caption="The legal body links one company and one agent both ways; Novi Corpus reads the link and signs an answer about it, and holds nothing else."
+	text={[
+		'The company, a Wyoming DAO LLC, is named in the agreement its guardian approves. The guardian is one person who answers for it.',
+		"The legal body is the link between the company and the agent, kept on a public ledger. A change to its agreement needs the guardian's signature, then waits in public.",
+		"The agent's public identity on the Arc network names its legal body, and the legal body names the agent, so neither side can claim the link alone.",
+		'Novi Corpus reads both sides and signs an answer, good for five minutes, that anyone can check. It holds no money, keys or identity.',
+	]}
+/>
+
+## Two ways in
+
+<CardGrid cols={2}>
+	<Card icon="door" title="Bring your own company" href="/live/bring-your-own-company/">
+		You already own a Wyoming company: declare it, approve the agreement, link your agent.
+	</Card>
+	<Card icon="bot" title="Bring your own agent" href="/live/bring-your-own-agent/">
+		You bring the agent; a Wyoming DAO LLC is formed for it through our filing provider, then linked.
+	</Card>
+</CardGrid>
+
+## The beta
+
+Invite only, for people in the US and the UK, up to ten companies formed. <a href="/live/beta-access/">Who can join the beta</a> · <a href="/live/pricing/">Pricing</a>
+
+<p class="nc-nextline">Next: <a href="/check/check-an-agent/">Check an agent</a> · <a href="/live/guardian/">The guardian</a> · <a href="/live/legal-texts/">The agreement and the declaration</a></p>

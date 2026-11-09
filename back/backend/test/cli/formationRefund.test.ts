@@ -65,6 +65,7 @@ function seed(status: "settled" | "quoted"): { companyId: string; paymentId: str
     businessPurpose: "software",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   const paymentId = payments.create({
     companyId,

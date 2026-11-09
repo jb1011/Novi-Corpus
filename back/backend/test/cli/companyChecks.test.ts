@@ -51,6 +51,7 @@ import {
   FORMATION_PROVIDER,
   type Signer,
   customerCompanyDeps,
+  everyGuardianVerified,
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
 
@@ -126,7 +127,11 @@ afterEach(() => {
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────────────────────
 
-/** A customer's company, declared with a real signature by a verified human. */
+/**
+ * A customer's company, declared with a real signature by a verified human. The door writes the
+ * declarant's name from the guardian's identity record, so the record holds the name this
+ * declaration names (its first and last names) and the body leaves the name out.
+ */
 async function declare(signer: Signer, nullifier: string, typed: Typed): Promise<string> {
   const nowMs = Date.now();
   recordHuman(store, signer.address, nullifier, nowMs);
@@ -138,11 +143,15 @@ async function declare(signer: Signer, nullifier: string, typed: Typed): Promise
   );
   const served = statementTypedDataWire(CHAIN_ID, FACTORY, message);
   const signature = await signer.signTypedData(JSON.parse(JSON.stringify(served)));
-  const { companyId } = await createCustomerCompany(customerDeps(nowMs), signer.address, {
-    ...typed,
-    issuedAt: issuedAt.toString(),
-    signature,
-  });
+  const { declarantName, ...body } = typed;
+  const [first = "", last = ""] = declarantName.split(" ");
+  const { companyId } = await createCustomerCompany(
+    customerCompanyDeps({ db, companies, declarations, checks, store }, () => nowMs, {
+      identity: everyGuardianVerified(() => nowMs, { first, last }),
+    }),
+    signer.address,
+    { ...body, issuedAt: issuedAt.toString(), signature },
+  );
   return companyId;
 }
 
@@ -161,6 +170,7 @@ function formationCompany(): string {
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 

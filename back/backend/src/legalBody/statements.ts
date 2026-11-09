@@ -2,6 +2,7 @@ import {
   type Address,
   type Hex,
   type LocalAccount,
+  getAddress,
   isAddress,
   isAddressEqual,
   zeroAddress,
@@ -14,10 +15,13 @@ import type {
   StatementSnapshot,
 } from "../adapters/arc/legalBodyChain";
 import { type WorldIdDeps, realHumanState } from "../api/routes/worldId";
+import { companyFiled, einIssued } from "../formation/status";
+import { type IdentityDeps, agreesWithWorld, currentRecord } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
-import type { CompanyRepository } from "../persistence/companyRepository";
+import type { CompanyRecord, CompanyRepository } from "../persistence/companyRepository";
+import type { FormationRequestRecord } from "../persistence/formationRepository";
 import {
   type Deployment,
   type LegalBodyPublicFinders,
@@ -29,10 +33,15 @@ import type {
   LegalBodyStatementRepository,
   StatementEvidence,
 } from "../persistence/legalBodyStatementRepository";
-import { wyomingDate } from "../util/wyomingCalendar";
-import { type Attestation, deriveAttestationState, publicCompanyNames } from "./attestation";
+import { calendarDateOfUtcMidnight, wyomingDate } from "../util/wyomingCalendar";
+import {
+  type Attestation,
+  deriveAttestationState,
+  filedCompanyNames,
+  publicCompanyNames,
+} from "./attestation";
 import { type FilingFacts, filingFacts } from "./filings";
-import { CUSTOMER_PROVIDER } from "./provider";
+import { CUSTOMER_PROVIDER, type CompanySource } from "./provider";
 import {
   type LegalBodyStatement,
   type SignedStatementJson,
@@ -73,7 +82,14 @@ export interface LegalBodyStatementDeps {
   companies: CompanyRepository;
   checks: CompanyCheckRepository;
   declarations: CompanyDeclarationRepository;
+  /** A company's formation steps, as the order doors read them: whether the State has filed a
+   *  company Novi formed (`companyFiled`), and whether the IRS issued its EIN (`einIssued`). A
+   *  customer's company has none, and they are never read for one. */
+  formationSteps: (companyId: string) => FormationRequestRecord[];
   world: WorldIdDeps | undefined;
+  /** The guardian identity record, read on production only, for the unsigned
+   *  `guardianIdentityVerified` fact; a sandbox never reads it. */
+  identity: IdentityDeps | undefined;
   chain: StatementChainPort;
   deployment: Deployment;
   identityRegistry: Address;
@@ -105,6 +121,10 @@ export type StatementOutcome =
       publicId: string;
       standing: Standing;
       statement: SignedStatementJson;
+      /** Not signed: whether the guardian's identity record is verified at the statement's issue,
+       *  on production; always false on a sandbox. The lookup by agent states it beside the
+       *  statement until statement v3 signs it. */
+      guardianIdentityVerified: boolean;
     };
 
 /** The stage of a statement that reads the chain, or signs. */
@@ -395,6 +415,7 @@ async function stateRow(
     publicId: row.publicId,
     standing: statement.standing,
     statement: signed,
+    guardianIdentityVerified: facts.guardianIdentityVerified,
   };
 }
 
@@ -404,7 +425,12 @@ interface RecordedFacts {
   attestation: Attestation;
   names: { legalName: string; filingNumber: string } | null;
   filing: FilingFacts;
+  /** For a company Novi formed, the IRS issued its EIN; false for a customer's own company. */
+  einIssued: boolean;
   guardianHumanVerified: boolean;
+  /** Not signed (statement v3 will sign it): on production, whether the guardian's identity record
+   *  is verified at the issue. */
+  guardianIdentityVerified: boolean;
   /** Unix seconds: the statement's issue, the day the filing facts are counted on. */
   issuedAt: number;
   /** The ids and values the claims rest on, for the log. */
@@ -414,60 +440,125 @@ interface RecordedFacts {
 /**
  * The recorded facts of a row, EACH ROW READ ONCE, in this order, so the attestation, the names
  * and the filing facts all rest on the same reads:
- *  - the company: refused when missing (`company_missing`), or when it is not a customer's own
- *    (`unsupported_provider`), before anything more is read;
- *  - its latest check;
+ *  - the company: refused when missing (`company_missing`), and, for a company Novi formed, when
+ *    it was formed for agents (`unsupported_purpose`): such a company never stands behind a legal
+ *    body. Both before anything more is read;
+ *  - its latest check: a revocation revokes any company; a pass establishes a customer's own;
+ *  - for a company Novi formed only, its formation steps: whether the State filed it, and whether
+ *    the IRS issued its EIN. A customer's company has none, and they are never read for one;
  *  - the body's first `revoked` event, if any: that one row, never the body's whole event log;
- *  - the attestation, from those reads, as the attestation's own rule derives it for a customer's
- *    company (never filed through formation; paid once the company is `ready`);
- *  - the names a public surface may show, from the declaration and that same check;
- *  - the filing facts on the Wyoming date of the issue, from the formation date and the last
- *    annual report of the latest check when it is a pass;
+ *  - the attestation, from those reads, as the attestation's own rule derives it: a customer's
+ *    company by its passed check, a formed one by its confirmed filing; paid once the company is
+ *    `ready`. No control check is ever made of a formed company;
+ *  - the names a public surface may show: a customer's from the declaration and that same check
+ *    (`publicCompanyNames`); a formed company's from its row (`filedCompanyNames`, the rule
+ *    `companyNamesForOrder` applies), and only once the State filed it and while it is not
+ *    abandoned. That rule reads the row alone, eligible or not, so these two gates are kept here;
+ *  - the filing facts on the Wyoming date of the issue: a customer's from the formation date and
+ *    the last annual report of the latest check when it is a pass; a formed company's from the
+ *    date the State filed it (`filed_at`, the day doola reported, stored at its UTC midnight) once
+ *    the filing is confirmed, with no report recorded (`formedOn`: a filed company whose `filed_at`
+ *    is missing or not such a date reads `unverified`, and writes an ops line);
  *  - whether the guardian is a verified human. A failed read of it throws: it says nothing about
- *    the guardian.
+ *    the guardian;
+ *  - on production, whether the guardian's identity record is verified at the issue
+ *    (`currentRecord`) and is the person of the account's current World row (`agreesWithWorld`):
+ *    false when the tenant has no record, the record is another person's, or the record is not
+ *    wired on this deployment. A sandbox never reads it, and states false. Not signed: the lookup by agent
+ *    states it beside the statement.
  * A database read that fails throws.
  */
 function recordedFacts(deps: LegalBodyStatementDeps, row: PublicRow): RecordedFacts {
   const company = deps.companies.find(row.companyId);
   if (company === undefined) throw new RowRefused(row.legalBodyId, "company_missing");
-  if (company.provider !== CUSTOMER_PROVIDER)
-    throw new RowRefused(row.legalBodyId, "unsupported_provider");
+  const customer = company.provider === CUSTOMER_PROVIDER;
+  if (!customer && company.purposeKind !== "legal_body")
+    throw new RowRefused(row.legalBodyId, "unsupported_purpose");
   const latest = deps.checks.latest(row.companyId);
+  const steps = customer ? [] : deps.formationSteps(row.companyId);
+  const filed = !customer && companyFiled(steps);
   const revocationEventId = deps.repo.firstRevocationEventId(row.legalBodyId);
   const attestation = deriveAttestationState({
     provider: company.provider,
     latestCheck: latest,
-    formationFiled: false,
+    formationFiled: filed,
     paid: company.status === "ready",
     bodyRevoked: revocationEventId !== null,
   });
-  const names = publicCompanyNames(deps.declarations.find(row.companyId), latest);
-  const passed = latest?.result === "passed" ? latest : undefined;
+  const names = customer
+    ? publicCompanyNames(deps.declarations.find(row.companyId), latest)
+    : filed && company.status !== "abandoned"
+      ? filedCompanyNames(company)
+      : null;
+  // A pass is the evidence of a customer's company only: a formed company's facts are its own.
+  const passed = customer && latest?.result === "passed" ? latest : undefined;
   const lastReport =
     passed?.lastReportPeriod === undefined
       ? null
       : { period: passed.lastReportPeriod, filedOn: passed.lastReportFiledOn ?? null };
-  const issuedAt = Math.floor((deps.now ?? Date.now)() / 1000);
+  const nowMs = (deps.now ?? Date.now)();
+  const issuedAt = Math.floor(nowMs / 1000);
   const filing = filingFacts({
-    formationDate: passed?.formationDate ?? null,
+    formationDate: customer
+      ? (passed?.formationDate ?? null)
+      : filed
+        ? formedOn(row, company)
+        : null,
     lastReport,
     today: wyomingDate(issuedAt),
   });
   const guardianHumanVerified = realHumanState(deps.world, row.tenantId, deps.environment).ok;
+  // On the statement's own clock, so the fact is of the instant the statement is issued at. The
+  // record is keyed by the checksummed tenant id, and the repository refuses any other spelling:
+  // a row an older version stored unchecksummed must not make the answer throw. A record of
+  // another person than the account's current World row does not count (`agreesWithWorld`), nor
+  // a test record (written on a sandbox, or synthetic) on production.
+  const identityTenant = getAddress(row.tenantId);
+  const record =
+    deps.environment === "production" && deps.identity !== undefined
+      ? currentRecord(deps.identity.repo, identityTenant, nowMs, deps.environment)
+      : undefined;
+  const guardianIdentityVerified =
+    record !== undefined && agreesWithWorld(record, deps.world, identityTenant);
   return {
     provider: company.provider,
     attestation,
     names,
     filing,
+    einIssued: !customer && einIssued(steps),
     guardianHumanVerified,
+    guardianIdentityVerified,
     issuedAt,
     evidence: {
       checkId: passed?.checkId ?? null,
       revocationEventId,
       companyStatus: company.status,
       humanVerified: guardianHumanVerified,
+      identityVerified: guardianIdentityVerified,
     },
   };
+}
+
+/**
+ * The date the State filed a formed company whose filing is confirmed: the calendar date its
+ * `filed_at` stores (the day doola reported, kept at its UTC midnight), or null when `filed_at` is
+ * missing (doola reported no date with the filing) or is not such a date. A null makes the filing
+ * facts `unverified`, so the standing reads `unknown`, and writes one ops line naming the body, the
+ * company and the reason's code, never the stored value, so an operator knows why. Like this
+ * module's other lines it is written by every statement and listing that reads it: the module
+ * de-duplicates no line, the statement routes spend the shared read budget, and `/transparency`
+ * computes its listing at most once per its ten-second cache.
+ */
+function formedOn(row: PublicRow, company: CompanyRecord): string | null {
+  const date = company.filedAt === null ? null : calendarDateOfUtcMidnight(company.filedAt);
+  if (date === null)
+    opsLog("legal_body_statement_filing_date_unusable", {
+      level: "warn",
+      legalBodyId: row.legalBodyId,
+      companyId: row.companyId,
+      problem: company.filedAt === null ? "filed_at_missing" : "filed_at_not_a_stored_date",
+    });
+  return date;
 }
 
 /** The statement, unsigned, from one block's chain facts and the row's recorded facts. The chain
@@ -500,6 +591,7 @@ function assembled(
       attestation: facts.attestation,
       names: facts.names,
       filing: facts.filing,
+      einIssued: facts.einIssued,
       guardianHumanVerified: facts.guardianHumanVerified,
       environment: deps.environment,
       issuedAt: facts.issuedAt,
@@ -585,7 +677,8 @@ export interface TransparencyLegalBody {
   filingNumber: string;
   jurisdiction: "WY";
   entityType: "LLC";
-  source: "customer";
+  /** The statement's: `customer` for a customer's own company, `novi` for one Novi formed. */
+  source: CompanySource;
   environment: "sandbox" | "production";
   standing: "active";
   /** ISO 8601: when the binding check first saw the current link. */
@@ -682,7 +775,7 @@ export async function activeLegalBodies(
       filingNumber: statement.filingNumber,
       jurisdiction: statement.jurisdiction,
       entityType: statement.entityType,
-      source: "customer",
+      source: statement.source,
       environment: statement.environment,
       standing: "active",
       linkedSince: new Date(row.pointerSeenAt * 1000).toISOString(),

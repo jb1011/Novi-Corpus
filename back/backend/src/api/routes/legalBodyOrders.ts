@@ -21,6 +21,12 @@ import {
 import { resolveOrder } from "../../legalBody/resolver";
 import { refusal, refusedLinkSentence } from "../../legalBody/sentences";
 import type { LegalTextStatus } from "../../legalBody/texts/index";
+import {
+  type LegalBodyTreasuryDeps,
+  type TreasuryInput,
+  declareTreasury,
+  treasuryView,
+} from "../../legalBody/treasury";
 import { opsLog } from "../../observability/opsLog";
 import { withKeyedLock } from "../../payments/keyedMutex";
 import { ApiError, readJson } from "../errors";
@@ -57,10 +63,15 @@ import { assertRealHuman } from "./worldId";
  *  - `POST /legal-body-orders/:id/gas-seed` sends the identity's owner of a `deployed` order a
  *    small native amount to pay for its pointer transaction with, once per tenant, ever: 200 with
  *    `{ status: "sent", txHash }`. Mounted where the deployment wires it; while its amount is 0 it
- *    answers 409 `gas_seed_disabled`.
+ *    answers 409 `gas_seed_disabled`;
+ *  - `POST /legal-body-orders/:id/treasury` with `{ address, provider, providerName?,
+ *    limitsReadableAt?, registryTxHash? }` records the treasury of record of a `linked` body: the
+ *    wallet its agent pays from, once the registry shows it as the agent's wallet. 200 with the
+ *    block the lookups serve (`TreasuryBlock`). Mounted where the deployment wires the record.
  *
  * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/linkDoor.ts`,
- * `legalBody/resolver.ts`, `legalBody/binding.ts`, `legalBody/gasSeed.ts`); these handlers decide
+ * `legalBody/resolver.ts`, `legalBody/binding.ts`, `legalBody/gasSeed.ts`,
+ * `legalBody/treasury.ts`); these handlers decide
  * only what is a well-formed request, and the refresh which of the domain's two passes to run.
  * Every door starts with the real-human check (a verified credential, never a waiver), the reads
  * included; the domain functions of the order door, the two link doors and the binding door
@@ -142,6 +153,7 @@ export function mountLegalBodyOrderRoutes(
   app: Hono<{ Variables: AuthVars }>,
   deps: LegalBodyOrderDeps,
   gasSeed?: GasSeedDeps,
+  treasury?: LegalBodyTreasuryDeps,
 ): void {
   // On every POST door, the abandon and refresh doors included: they read no body, and still
   // bound what a caller may send them. A declared length over the limit is refused before a byte
@@ -280,6 +292,34 @@ export function mountLegalBodyOrderRoutes(
       door("gas_seed", async () =>
         c.json(await requestGasSeed(gasSeed, c.get("tenantId"), c.req.param("id"))),
       ),
+    );
+
+  // The treasury of record reads the registry, so it takes a token as the link doors do: after
+  // the real-human check and before the order is read, so a probe of order ids spends tokens too.
+  // A row of another factory or chain is read-only here. `declareTreasury` reads the order again
+  // and makes every other check itself, the body's fields included: any field it does not define
+  // is refused.
+  if (treasury)
+    app.post("/legal-body-orders/:id/treasury", limit, (c) =>
+      door("treasury", async () => {
+        const body = await readJson(c);
+        const tenantId = realHuman(c.get("tenantId"));
+        takeDoorTokens(deps, tenantId);
+        const row = requireOwnedOrder(deps, tenantId, c.req.param("id"));
+        assertThisDeployment(deps, row);
+        const declared = await declareTreasury(
+          {
+            repo: treasury.repo,
+            registry: treasury.registry,
+            bodies: deps.repo,
+            now: deps.now ?? Date.now,
+          },
+          tenantId,
+          row.legalBodyId,
+          body as TreasuryInput,
+        );
+        return c.json(treasuryView(declared));
+      }),
     );
 }
 

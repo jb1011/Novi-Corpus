@@ -38,6 +38,7 @@ const PAYING = {
   DOOLA_API_KEY: "dk_live_key",
   DOOLA_WEBHOOK_SECRET: "whsec_live",
   FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+  IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
   FORMATION_PAYMENT_REQUIRED: "true",
   FORMATION_REVENUE_ADDRESS: REVENUE,
   FORMATION_SETTLE_SUBMITTER_KEY: SUBMITTER_KEY,
@@ -198,6 +199,7 @@ test("the doola arm of the identity floor still names DOOLA_ENVIRONMENT (no mess
     DOOLA_API_KEY: "dk_test_key",
     DOOLA_WEBHOOK_SECRET: "whsec_test",
     FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+    IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
   };
   expect(() => loadConfig(unwired)).toThrow(
     /DOOLA_ENVIRONMENT=production requires the World ID block/,

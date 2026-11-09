@@ -19,7 +19,8 @@ contract BreakGlassOneShot {
     /// @notice The only address allowed to fire the ceremony: whoever deployed this helper.
     /// @dev    Separate from the controller admin on purpose — the deployer is the operator
     ///         running the runbook; the admin's authority is expressed by the grant in step 1,
-    ///         which is what actually gates the power. Without the grant, `execute` reverts.
+    ///         which is what actually gates the power. Without the grant, `execute` reverts with
+    ///         {NotGranted} and the helper stays unspent.
     address public immutable admin;
     address public immutable target;
     /// @notice Selector of {callData}; the role the controller must have granted this helper.
@@ -35,6 +36,10 @@ contract BreakGlassOneShot {
     error NotAdmin();
     error AlreadyUsed();
     error CallDataTooShort();
+    /// @dev The helper holds neither its selector role nor WILDCARD on the controller. Firing now
+    ///      would spend the helper on a relay the controller is certain to refuse, and a grant made
+    ///      later to the spent helper could never be renounced by it.
+    error NotGranted();
 
     /// @notice The ceremony's receipt. `ok` is the ONLY success signal — `execute` itself does not
     ///         revert when the action fails, because reverting would roll the revocation back.
@@ -66,15 +71,19 @@ contract BreakGlassOneShot {
     ///         {BreakGlassExecuted} event, which carries the revert data). A failed action needs a
     ///         FRESH grant and a FRESH helper; this one can never fire again.
     ///
-    ///         The renounces are unconditional and need no `hasRole` pre-check: OZ's
-    ///         `renounceRole` -> `_revokeRole` is a no-op for a role the account does not hold,
-    ///         and the controller's fallback is the canonical authority on whether the relay was
-    ///         permitted (an ungranted helper simply gets `NotAuthorized` back in `data`).
+    ///         The renounces are unconditional: OZ's `renounceRole` -> `_revokeRole` is a no-op
+    ///         for a role the account does not hold, so the helper needs no per-role check to
+    ///         decide what to give back. The `NotGranted` pre-check only decides whether the
+    ///         ceremony fires; once it fires, the helper is spent whatever the target does.
     /// @return ok   whether the relayed call succeeded — the ONLY success signal.
     /// @return data the target's return data, or its revert data when `ok` is false.
     function execute() external returns (bool ok, bytes memory data) {
         if (msg.sender != admin) revert NotAdmin();
         if (used) revert AlreadyUsed();
+        if (
+            !controller.hasRole(bytes32(selector), address(this))
+                && !controller.hasRole(controller.WILDCARD_ROLE(), address(this))
+        ) revert NotGranted();
         used = true;
 
         // Euler encoding: payload with the target appended as the trailing 20 bytes.

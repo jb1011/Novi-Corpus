@@ -10,6 +10,7 @@ import type {
 import type { LegalBodyStatementDeps } from "../../src/legalBody/statements";
 import type { NewCompanyCheck } from "../../src/persistence/companyCheckRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
+import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../../src/persistence/legalBodyStatementRepository";
 import {
@@ -305,19 +306,24 @@ function bodyOf(row: LegalBodyRecord): {
 }
 
 /** The statement service over these stores and this chain: a sandbox deployment, World ID wired
- *  over the stores' World store, the test attestor, and the fixed clock. */
+ *  over the stores' World store, a formed company's formation steps read from the same database,
+ *  no identity record (as on the testnet box, which holds no PII key), the test attestor, and the
+ *  fixed clock. */
 export function statementDeps(
   s: StatementStores,
   chain: StatementChainPort,
   over: Partial<LegalBodyStatementDeps> = {},
 ): LegalBodyStatementDeps {
+  const requests = new SqliteFormationRepository(s.db);
   return {
     repo: s.repo,
     statements: s.statements,
     companies: s.companies,
     checks: s.checks,
     declarations: s.declarations,
+    formationSteps: (companyId) => requests.stepsOf(companyId),
     world: worldFor(s.store),
+    identity: undefined,
     chain,
     deployment: { chainId: CHAIN_ID, factory: FACTORY },
     identityRegistry: REGISTRY,

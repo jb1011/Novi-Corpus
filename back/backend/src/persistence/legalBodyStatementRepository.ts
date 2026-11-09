@@ -45,7 +45,18 @@ export interface StatementEvidence {
   revocationEventId: number | null;
   companyStatus: "draft" | "ready" | "abandoned";
   humanVerified: boolean;
+  /** On production, whether the guardian's identity record was verified at the issue; false on a
+   *  sandbox. Not signed, so not in the claims hash: a change of it alone adds no row. Every row
+   *  written holds it; rows logged before it was added do not, so a read may lack it
+   *  (`LoggedStatementEvidence`). */
+  identityVerified: boolean;
 }
+
+/** The evidence as a logged row holds it: `identityVerified` is absent from the rows logged before
+ *  it was added, and is read as it is, absent, never filled in. */
+export type LoggedStatementEvidence = Omit<StatementEvidence, "identityVerified"> & {
+  identityVerified?: boolean;
+};
 
 export interface NewStatementRecord {
   legalBodyId: string;
@@ -68,8 +79,10 @@ export interface NewStatementRecord {
   evidence: StatementEvidence;
 }
 
-export interface StatementRecord extends NewStatementRecord {
+export interface StatementRecord extends Omit<NewStatementRecord, "evidence"> {
   id: number;
+  /** As logged: a row logged before `identityVerified` was added holds no such key. */
+  evidence: LoggedStatementEvidence;
   /** UTC, `YYYY-MM-DD HH:MM:SS`, as SQLite's CURRENT_TIMESTAMP writes it. */
   createdAt: string;
 }
@@ -78,7 +91,7 @@ export interface LegalBodyStatementRepository {
   /**
    * One immediate transaction: insert only when the body's latest row differs in claims hash or
    * attestor. Answers whether a row was inserted. Addresses are stored checksummed and the hash
-   * lower-case, so both compare in any letter case; the evidence is stored as exactly its four
+   * lower-case, so both compare in any letter case; the evidence is stored as exactly its five
    * fields. A statement no row may hold throws a `LegalBodyInputError` before anything is written;
    * a body that does not exist is refused by the database's foreign key.
    */
@@ -126,7 +139,7 @@ function toRecord(r: Row): StatementRecord {
     observedAtBlock: r.observed_at_block,
     issuedAt: r.issued_at,
     // Valid JSON, by the table's CHECK.
-    evidence: JSON.parse(r.evidence) as StatementEvidence,
+    evidence: JSON.parse(r.evidence) as LoggedStatementEvidence,
     createdAt: r.created_at,
   };
 }
@@ -158,7 +171,7 @@ function requireIdOrNull(field: string, value: unknown): number | null {
 }
 
 /**
- * The evidence exactly as it is stored: its four fields, in one order, and nothing a caller's
+ * The evidence exactly as it is stored: its five fields, in one order, and nothing a caller's
  * object carried besides them.
  */
 function requireEvidence(value: unknown): StatementEvidence {
@@ -172,7 +185,15 @@ function requireEvidence(value: unknown): StatementEvidence {
     );
   if (typeof e.humanVerified !== "boolean")
     throw new LegalBodyInputError("evidence.humanVerified must be a boolean");
-  return { checkId, revocationEventId, companyStatus, humanVerified: e.humanVerified };
+  if (typeof e.identityVerified !== "boolean")
+    throw new LegalBodyInputError("evidence.identityVerified must be a boolean");
+  return {
+    checkId,
+    revocationEventId,
+    companyStatus,
+    humanVerified: e.humanVerified,
+    identityVerified: e.identityVerified,
+  };
 }
 
 /**

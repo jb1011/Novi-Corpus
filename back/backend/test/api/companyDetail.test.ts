@@ -89,6 +89,7 @@ function newCompany(over: Partial<Parameters<SqliteCompanyRepository["create"]>[
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
     ...over,
   });
 }
@@ -302,4 +303,100 @@ test("a box that merely DESCRIBES old filings still answers — it just reports 
   });
   expect(res.status).toBe(200);
   expect((await res.json()).park.awaitingSsnDecision).toBe(false);
+});
+
+// ── what the company is for, where it came from, and its DAO supplement ─────────────────────
+
+/** The two dao_supplement rows below are written straight to the index, as the operator's
+ *  `company:dao-supplement` command records one: source `operator`, a `0x` hash, the provider
+ *  document id `operator:dao_supplement:<sha256>`. `createdAt` is the database's UTC clock text. */
+function recordSupplement(companyId: string, sha256: string, createdAt: string): void {
+  const providerDocId = `operator:dao_supplement:${sha256}`;
+  db.prepare(
+    `INSERT INTO documents (id, company_id, doc_type, sha256, content_type, size, provider_doc_id,
+                            path, source, created_at)
+     VALUES (?, ?, 'dao_supplement', ?, 'application/pdf', 2048, ?, ?, 'operator', ?)`,
+  ).run(
+    documentIndexId(companyId, providerDocId),
+    companyId,
+    sha256,
+    providerDocId,
+    documentStoreName(companyId, "dao_supplement", sha256),
+    createdAt,
+  );
+}
+
+const list = async (tenantId = OWNER) =>
+  (
+    (await (
+      await app().request("/companies", {
+        headers: { authorization: `Bearer ${await token(tenantId)}` },
+      })
+    ).json()) as { companies: Record<string, unknown>[] }
+  ).companies;
+
+test("a doola legal-body company says so: purpose legal_body, provider doola, and no DAO supplement yet", async () => {
+  const id = newCompany({ purposeKind: "legal_body" });
+  expect(await detail(id)).toMatchObject({
+    purpose: "legal_body",
+    provider: "doola",
+    daoSupplement: null,
+  });
+  expect((await list()).find((c) => c.companyId === id)).toMatchObject({
+    purpose: "legal_body",
+    provider: "doola",
+    daoSupplement: null,
+  });
+});
+
+test("a doola company for agents: purpose agent, provider doola", async () => {
+  const id = newCompany();
+  expect(await detail(id)).toMatchObject({
+    purpose: "agent",
+    provider: "doola",
+    daoSupplement: null,
+  });
+});
+
+test("the DAO supplement is the latest dao_supplement row of the index: its time in unix seconds and its hash", async () => {
+  const id = newCompany({ purposeKind: "legal_body" });
+  const first = `0x${"1".repeat(64)}`;
+  const older = `0x${"2".repeat(64)}`;
+  const replaced = `0x${"3".repeat(64)}`;
+  recordSupplement(id, first, "2026-11-20 10:00:00");
+  expect((await detail(id)).daoSupplement).toEqual({
+    recordedAt: Date.UTC(2026, 10, 20, 10) / 1000,
+    sha256: first,
+  });
+
+  // Written after it but dated before it: not the latest.
+  recordSupplement(id, older, "2026-11-20 09:00:00");
+  expect((await detail(id)).daoSupplement).toMatchObject({ sha256: first });
+
+  // A replacement in the same second as the first: the one recorded last.
+  recordSupplement(id, replaced, "2026-11-20 10:00:00");
+  const expected = { recordedAt: Date.UTC(2026, 10, 20, 10) / 1000, sha256: replaced };
+  expect((await detail(id)).daoSupplement).toEqual(expected);
+  // The list row reads the same, and another company of the tenant reads none.
+  const other = newCompany({ purposeKind: "legal_body" });
+  const rows = await list();
+  expect(rows.find((c) => c.companyId === id)?.daoSupplement).toEqual(expected);
+  expect(rows.find((c) => c.companyId === other)?.daoSupplement).toBeNull();
+});
+
+test("a box with no document index reads no DAO supplement, and says so with null", async () => {
+  const id = newCompany({ purposeKind: "legal_body" });
+  recordSupplement(id, `0x${"4".repeat(64)}`, "2026-11-20 10:00:00");
+  const res = await buildApiApp({
+    webOrigin: "*",
+    jwtSecret: JWT_SECRET,
+    repo,
+    companies,
+    docStore: { getBytesAsync: async () => Buffer.from("") },
+    formationSteps: (k: string) => requests.stepsOf(k),
+  } as never).request(`/companies/${id}`, {
+    headers: { authorization: `Bearer ${await token(OWNER)}` },
+  });
+  expect(res.status).toBe(200);
+  expect((await res.json()).daoSupplement).toBeNull();
 });

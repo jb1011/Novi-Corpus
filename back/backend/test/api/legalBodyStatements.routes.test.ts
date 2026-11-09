@@ -189,6 +189,7 @@ describe("the three answers", () => {
       "links",
       "checkedAt",
       "statement",
+      "treasury",
     ]);
     expect(body).toEqual({
       agentId: "42",
@@ -199,6 +200,7 @@ describe("the three answers", () => {
       links: { transparency: TRANSPARENCY, statement: `${STATEMENT_BASE}42` },
       checkedAt: CHECKED_AT,
       statement: expect.any(Object),
+      treasury: null,
     });
     expect(Object.keys(body.links)).toEqual(["transparency", "statement"]);
     await expect(
@@ -243,6 +245,7 @@ describe("the three answers", () => {
       links: { transparency: TRANSPARENCY },
       checkedAt: CHECKED_AT,
       statement: null,
+      treasury: null,
     });
     expect(Object.keys(body)).toEqual([
       "agentId",
@@ -253,6 +256,7 @@ describe("the three answers", () => {
       "links",
       "checkedAt",
       "statement",
+      "treasury",
     ]);
     expect(text).not.toContain("rpc.example");
 
@@ -533,6 +537,8 @@ test("the composition root builds the statement's dependencies only with the sto
     /^ {10}companies,$/m,
     /^ {10}checks: companyChecks,$/m,
     /^ {10}declarations: companyDeclarations,$/m,
+    // Whether the State filed a company Novi formed, and its EIN: the order doors' reader.
+    /^ {10}formationSteps: \(companyId: string\) => formationRequests\.stepsOf\(companyId\),$/m,
     /^ {10}world: worldId,$/m,
     /^ {10}deployment: \{ chainId: cfg\.chainId, factory: legalBodyChain\.factory \},$/m,
     /^ {10}identityRegistry: cfg\.identityRegistry,$/m,

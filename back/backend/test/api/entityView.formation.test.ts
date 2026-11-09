@@ -49,6 +49,7 @@ const COMPANY: CompanyRecord = {
   businessPurpose: "purpose",
   industryLabel: "Software development",
   intakeSynthesized: true,
+  purposeKind: "agent",
   legalNameFiled: null,
   filedAt: null,
   filingNumber: null,

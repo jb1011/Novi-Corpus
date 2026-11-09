@@ -47,6 +47,7 @@ import {
   SqliteCompanyRepository,
 } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
+import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
 import {
   ACTION,
@@ -55,11 +56,14 @@ import {
   ANVIL_ACCOUNT_4,
   APPROVED,
   CHAIN_ID,
+  DECLARANT_OF_RECORD,
   FACTORY,
   FORMATION_PROVIDER,
   SANDBOX_TYPED,
   type Signer,
   customerCompanyDeps,
+  everyGuardianVerified,
+  identityOver,
   recordHuman as recordHumanIn,
   sandboxCustomerCompanyDeps,
   worldFor as worldOf,
@@ -76,9 +80,9 @@ const SECOND_NULLIFIER = "1002";
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 
-/** A declaration as a production caller types it. */
+/** A declaration as a production caller types it: the declarant's title, never the name, which the
+ *  door writes from the guardian's identity record (DECLARANT_OF_RECORD under `deps`). */
 const TYPED: CustomerStatementInput = {
-  declarantName: "Ada Example",
   declarantTitle: "Manager",
   companyName: "Example Holdings LLC",
   filingNumber: "TEST-0001",
@@ -123,20 +127,38 @@ const worldFor = (opts?: Parameters<typeof worldOf>[1]) => worldOf(store, opts);
 
 const stores = () => ({ db, companies, declarations, checks, store });
 
-/** A production deployment that charges, serving the approved wording. */
+/** A production deployment that charges, serving the approved wording, where every guardian's
+ *  identity is verified with the fixture's names of record. */
 function deps(over: Partial<CustomerCompanyDeps> = {}): CustomerCompanyDeps {
   return customerCompanyDeps(stores(), () => nowMs, over);
 }
+
+/**
+ * The same deployment, where the guardian's name of record is `name`: its first name, with an
+ * empty last name. The door writes the first name, a space and the last name, then strips the
+ * space at the end, so the declarant's name it holds to the rule is `name` itself.
+ */
+function writtenAs(name: string, over: Partial<CustomerCompanyDeps> = {}): CustomerCompanyDeps {
+  return deps({ identity: everyGuardianVerified(() => nowMs, { first: name, last: "" }), ...over });
+}
+
+/** The same deployment, with the identity record wired and holding nothing: no guardian is
+ *  verified. */
+const noIdentityRecord = (over: Partial<CustomerCompanyDeps> = {}): CustomerCompanyDeps =>
+  deps({ identity: identityOver(new SqliteIdentityRepository(db), () => nowMs), ...over });
 
 /** A sandbox deployment: the draft wording, and a World configuration that is not production. */
 function sandboxDeps(over: Partial<CustomerCompanyDeps> = {}): CustomerCompanyDeps {
   return sandboxCustomerCompanyDeps(stores(), () => nowMs, over);
 }
 
-/** The fields the server builds from a declaration, written out here on their own. */
+/** The fields the server builds from a declaration, written out here on their own: on production
+ *  the declarant's name is the record's. */
 function fieldsOf(typed: CustomerStatementInput, guardian: Address): StatementFields {
   return {
-    declarantName: typed.declarantName ?? "Novi Sandbox Declarant",
+    declarantName:
+      typed.declarantName ??
+      (typed.synthetic === true ? "Novi Sandbox Declarant" : DECLARANT_OF_RECORD),
     declarantTitle: typed.declarantTitle ?? "Manager",
     companyName: typed.companyName,
     jurisdiction: "WY",
@@ -232,6 +254,8 @@ function companyRow(over: { tenantId?: Address; provider?: string; status?: Comp
     businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
     industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
     intakeSynthesized: false,
+    purposeKind:
+      (over.provider ?? CUSTOMER_PROVIDER) === CUSTOMER_PROVIDER ? "legal_body" : "agent",
   });
 }
 
@@ -263,21 +287,29 @@ function paymentRow(companyId: string, status: string): void {
   ).run(`pay-${companyId}-${status}`, companyId, status, `nonce-${companyId}-${status}`);
 }
 
+/** The steps of the create after the human, in their order. */
+const STEPS = ["1b", 2, "2b", 3, 4, 5, 6, 7] as const;
+type Step = (typeof STEPS)[number];
+
 /**
  * A request that is right before step `from` and wrong at it and at every later step: on a
- * production deployment, the draft wording (2), the synthetic flag (3), a zero-width space in the
- * declarant's name (4), the human's cap at zero (5), the tenant's cap at zero (6) and a statement
- * issued eleven minutes ago (7). The owner, a verified human, passes step 1.
+ * production deployment, no identity record for the guardian (1b), the draft wording (2), a typed
+ * declarant name (2b), the synthetic flag (3), a zero-width space in the declarant's title (4), the
+ * human's cap at zero (5), the tenant's cap at zero (6) and a statement issued eleven minutes ago
+ * (7). The owner, a verified human, passes step 1.
  */
-async function wrongFrom(from: 2 | 3 | 4 | 5 | 6 | 7) {
+async function wrongFrom(from: Step) {
+  const wrongAt = (step: Step): boolean => STEPS.indexOf(from) <= STEPS.indexOf(step);
   const typed: CustomerStatementInput = { ...TYPED };
-  if (from <= 3) typed.synthetic = true;
-  if (from <= 4) typed.declarantName = "Ada\u200BExample";
-  const d = deps({
-    text: from <= 2 ? STATEMENT_OF_AUTHORITY : APPROVED,
-    world: worldFor({ maxCompaniesPerHuman: from <= 5 ? 0 : undefined }),
-    maxOpenPerTenant: from <= 6 ? 0 : 3,
-  });
+  if (wrongAt("2b")) typed.declarantName = DECLARANT_OF_RECORD;
+  if (wrongAt(3)) typed.synthetic = true;
+  if (wrongAt(4)) typed.declarantTitle = "Mana\u200Bger";
+  const over: Partial<CustomerCompanyDeps> = {
+    text: wrongAt(2) ? STATEMENT_OF_AUTHORITY : APPROVED,
+    world: worldFor({ maxCompaniesPerHuman: wrongAt(5) ? 0 : undefined }),
+    maxOpenPerTenant: wrongAt(6) ? 0 : 3,
+  };
+  const d = wrongAt("1b") ? noIdentityRecord(over) : deps(over);
   const body = await signed(typed, { issuedAt: nowSeconds() - 660n });
   return { d, body };
 }
@@ -305,6 +337,8 @@ describe("on a production deployment, with the wording approved", () => {
       businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
       industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
       intakeSynthesized: false,
+      // It stands behind a legal body, never behind an agent.
+      purposeKind: "legal_body",
     });
 
     const fields = fieldsOf(TYPED, owner.address);
@@ -315,7 +349,8 @@ describe("on a production deployment, with the wording approved", () => {
       companyId: result.companyId,
       tenantId: owner.address,
       humanNullifier: OWNER_NULLIFIER,
-      declarantName: "Ada Example",
+      // Written from the guardian's identity record, never typed.
+      declarantName: DECLARANT_OF_RECORD,
       declarantTitle: "Manager",
       statementText: sentence,
       statementHash: keccak256(stringToBytes(sentence)),
@@ -415,7 +450,7 @@ describe("on a production deployment, with the wording approved", () => {
 
 describe("the order of checks: each step refuses with its own code, before every later step, and writes nothing", () => {
   test("step 1, the human: unverified is guardian_not_verified (403), a waiver waiver_not_accepted (403), no World ID unavailable (503)", async () => {
-    const { d, body } = await wrongFrom(2);
+    const { d, body } = await wrongFrom("1b");
     expect(await refusalOf(createCustomerCompany(d, second.address, body))).toMatchObject({
       code: "guardian_not_verified",
       status: 403,
@@ -431,6 +466,18 @@ describe("the order of checks: each step refuses with its own code, before every
     expectNothingWritten();
   });
 
+  test("step 1b, the guardian's identity record: none verified is guardian_identity_not_verified (403), none wired identity_unavailable (503)", async () => {
+    const { d, body } = await wrongFrom("1b");
+    expect(await refusalOf(createCustomerCompany(d, owner.address, body))).toMatchObject({
+      code: "guardian_identity_not_verified",
+      status: 403,
+    });
+    expect(
+      await refusalOf(createCustomerCompany({ ...d, identity: undefined }, owner.address, body)),
+    ).toMatchObject({ code: "identity_unavailable", status: 503 });
+    expectNothingWritten();
+  });
+
   test("step 2, the wording: a draft on a production deployment (the doors answer legal_text_not_approved, 503)", async () => {
     const { d, body } = await wrongFrom(2);
     await expect(createCustomerCompany(d, owner.address, body)).rejects.toBeInstanceOf(
@@ -438,6 +485,15 @@ describe("the order of checks: each step refuses with its own code, before every
     );
     expect(await refusalOf(createCustomerCompany(d, owner.address, body))).toMatchObject({
       code: "legal_text_not_approved",
+    });
+    expectNothingWritten();
+  });
+
+  test("step 2b, a typed declarant name: declarant_name_is_written_by_novi (400)", async () => {
+    const { d, body } = await wrongFrom("2b");
+    expect(await refusalOf(createCustomerCompany(d, owner.address, body))).toMatchObject({
+      code: "declarant_name_is_written_by_novi",
+      status: 400,
     });
     expectNothingWritten();
   });
@@ -456,7 +512,7 @@ describe("the order of checks: each step refuses with its own code, before every
     expect(await refusalOf(createCustomerCompany(d, owner.address, body))).toMatchObject({
       code: "validation_error",
       status: 400,
-      details: [{ field: "declarantName", problem: expect.any(String) }],
+      details: [{ field: "declarantTitle", problem: expect.any(String) }],
     });
     expectNothingWritten();
   });
@@ -571,8 +627,12 @@ test("prepareCustomerStatement runs steps 1 to 4 only: it refuses as the create 
   const refused = (d: CustomerCompanyDeps, tenant: Address, input: CustomerStatementInput) =>
     refusalOfCall(() => prepareCustomerStatement(d, tenant, input)).code;
   expect(refused(deps(), second.address, TYPED)).toBe("waiver_not_accepted");
+  expect(refused(noIdentityRecord(), owner.address, TYPED)).toBe("guardian_identity_not_verified");
   expect(refused(deps({ text: STATEMENT_OF_AUTHORITY }), owner.address, TYPED)).toBe(
     "legal_text_not_approved",
+  );
+  expect(refused(deps(), owner.address, { ...TYPED, declarantName: DECLARANT_OF_RECORD })).toBe(
+    "declarant_name_is_written_by_novi",
   );
   expect(
     refused(sandboxDeps(), owner.address, {
@@ -702,8 +762,11 @@ describe("a replay", () => {
 
 describe("the field rules", () => {
   test("surrounding spaces and a decomposed accent are stored normalised, and the signature covers the normalised form", async () => {
+    // The declarant's name is the record's: spaces around its names and a decomposed accent are
+    // normalised as a typed field is.
+    const recorded = { first: "  Rene\u0301e ", last: " Example " };
+    const d = deps({ identity: everyGuardianVerified(() => nowMs, recorded) });
     const typed: CustomerStatementInput = {
-      declarantName: "  Rene\u0301e   Example ",
       declarantTitle: " Managing  Member ",
       companyName: "  Example   Holdings LLC ",
       filingNumber: " TEST-0001  ",
@@ -717,16 +780,21 @@ describe("the field rules", () => {
       guardian: owner.address,
     };
     // The fields the server will put in front of the wallet are the normalised ones.
-    expect(prepareCustomerStatement(deps(), owner.address, typed).fields).toEqual(normalised);
-    // A signature over the fields as typed does not match them…
-    const asTyped = { ...typed, jurisdiction: "WY", guardian: owner.address } as StatementFields;
+    expect(prepareCustomerStatement(d, owner.address, typed).fields).toEqual(normalised);
+    // A signature over the fields as typed and recorded does not match them…
+    const asTyped = {
+      ...typed,
+      declarantName: `${recorded.first} ${recorded.last}`,
+      jurisdiction: "WY",
+      guardian: owner.address,
+    } as StatementFields;
     expect(
       await refusalOf(
-        createCustomerCompany(deps(), owner.address, { ...typed, ...(await sign(asTyped)) }),
+        createCustomerCompany(d, owner.address, { ...typed, ...(await sign(asTyped)) }),
       ),
     ).toMatchObject({ code: "statement_not_valid" });
     // …and one over the normalised fields does, with the fields as typed beside it.
-    const { companyId } = await createCustomerCompany(deps(), owner.address, {
+    const { companyId } = await createCustomerCompany(d, owner.address, {
       ...typed,
       ...(await sign(normalised)),
     });
@@ -779,8 +847,13 @@ describe("the field rules", () => {
   test.each(refusedValues)(
     "%s is refused, and the refusal does not repeat the value",
     async (_label, field, value, problem) => {
-      const body = { ...(await signed(TYPED)), [field]: value };
-      const refusal = await refusalOf(createCustomerCompany(deps(), owner.address, body));
+      // A value under test for the declarant's name is the guardian's name of record; any other
+      // is the body's.
+      const named = field === "declarantName";
+      const body = named ? await signed(TYPED) : { ...(await signed(TYPED)), [field]: value };
+      const refusal = await refusalOf(
+        createCustomerCompany(named ? writtenAs(value) : deps(), owner.address, body),
+      );
       expect(refusal).toMatchObject({
         code: "validation_error",
         status: 400,
@@ -796,10 +869,7 @@ describe("the field rules", () => {
   test("a tab, a line separator and an ideographic space are refused too, never collapsed into a space", () => {
     for (const space of ["\t", "\u2028", "\u3000"]) {
       const refusal = refusalOfCall(() =>
-        prepareCustomerStatement(deps(), owner.address, {
-          ...TYPED,
-          declarantName: `Ada${space}Example`,
-        }),
+        prepareCustomerStatement(writtenAs(`Ada${space}Example`), owner.address, TYPED),
       );
       expect(refusal).toMatchObject({
         code: "validation_error",
@@ -808,12 +878,15 @@ describe("the field rules", () => {
     }
   });
 
-  /** The fields as the server builds them, or the names of the fields it refused. */
+  /** The fields as the server builds them, or the names of the fields it refused. A declarant's
+   *  name under test is the guardian's name of record (`writtenAs`), never the body's. */
   function outcome(over: Partial<Record<keyof CustomerStatementInput, unknown>>) {
+    const { declarantName, ...typed } = over;
+    const d = typeof declarantName === "string" ? writtenAs(declarantName) : deps();
     try {
-      return prepareCustomerStatement(deps(), owner.address, {
+      return prepareCustomerStatement(d, owner.address, {
         ...TYPED,
-        ...over,
+        ...typed,
       } as CustomerStatementInput).fields;
     } catch (err) {
       const details = refusalFrom(err).details as { field: string }[];
@@ -886,8 +959,8 @@ describe("the field rules", () => {
       prepareCustomerStatement(deps(), owner.address, null as unknown as CustomerStatementInput),
     );
     expect(nothing).toMatchObject({ code: "validation_error" });
+    // The declarant's name is the record's, so a body with nothing in it lacks the typed fields.
     expect((nothing.details as { field: string }[]).map((d) => d.field)).toEqual([
-      "declarantName",
       "declarantTitle",
       "companyName",
       "filingNumber",
@@ -1075,7 +1148,7 @@ describe("abandoning a customer company", () => {
       // Nothing moved, and nothing was erased.
       expect(companies.find(companyId)?.status).toBe("draft");
       expect(declarations.find(companyId)).toMatchObject({
-        declarantName: "Ada Example",
+        declarantName: DECLARANT_OF_RECORD,
         piiErasedAt: null,
       });
     }
@@ -1155,7 +1228,6 @@ describe("the counts behind the caps", () => {
 
 test("one ops line per company created, with no personal field in it; a replay writes none", async () => {
   const typed: CustomerStatementInput = {
-    declarantName: "Ada Example",
     declarantTitle: "Managing Member",
     companyName: "Example Holdings LLC",
     filingNumber: "TEST-4242",
@@ -1194,7 +1266,7 @@ test("one ops line per company created, with no personal field in it; a replay w
   // Nothing the create printed holds a name, a title or a filing number.
   const all = printed().join("\n");
   for (const value of [
-    "Ada Example",
+    DECLARANT_OF_RECORD,
     "Managing Member",
     "Novi Sandbox Declarant",
     "Example Holdings",

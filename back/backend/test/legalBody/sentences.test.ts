@@ -33,6 +33,8 @@ const ANSWERING_MODULES = [
   "legalBody/binding.ts",
   "legalBody/checkLink.ts",
   "legalBody/gasSeed.ts",
+  "legalBody/treasury.ts",
+  "formation/company.ts",
   "api/routes/legalBodyOrders.ts",
   "mcp/server.ts",
 ];
@@ -62,6 +64,7 @@ const NAMED_CODES = [
   "busy",
   "rate_limited",
   "company_not_eligible",
+  "company_name_unusable",
   "order_expired",
   "order_revoked",
   "order_closed",
@@ -80,6 +83,9 @@ const NAMED_CODES = [
   "owner_pays_own_gas",
   "not_needed",
   "gas_seed_unconfirmed",
+  "treasury_invalid",
+  "treasury_wallet_mismatch",
+  "legal_body_revoked",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";

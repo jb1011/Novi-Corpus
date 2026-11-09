@@ -1,0 +1,29 @@
+---
+// A line icon from the shared set (src/components/icons.mjs).
+// Usage: <Icon name="building" />  ·  <Icon name="arrow" size="16" label="Next" />
+import { ICONS } from './icons.mjs';
+
+interface Props {
+	name: keyof typeof ICONS;
+	/** Rendered size in px (default 20). */
+	size?: number | string;
+	/** Accessible label; without one the icon is decorative. */
+	label?: string;
+	class?: string;
+}
+
+const { name, size = 20, label, class: className } = Astro.props;
+const body = ICONS[name];
+if (!body) throw new Error(`Icon.astro: unknown icon "${name}"`);
+---
+
+<svg
+	class:list={['nc-icon', className]}
+	viewBox="0 0 24 24"
+	width={size}
+	height={size}
+	role={label ? 'img' : undefined}
+	aria-label={label}
+	aria-hidden={label ? undefined : 'true'}
+	set:html={body}
+/>

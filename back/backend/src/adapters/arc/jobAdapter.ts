@@ -108,6 +108,17 @@ export interface JobAdapterDeps {
   receiptTimeoutMs?: number;
 }
 
+/**
+ * What a caller of `complete`, `reject` or `claimRefund` may pass to hear of its transaction
+ * before the receipt. `onBroadcast` is called with the hash once the node has accepted the
+ * transaction and before the receipt wait, so a caller that writes the hash down then still holds
+ * it when the wait fails or the process stops during it. A throw from it propagates, and the wait
+ * is not taken. Without it, each of the three calls behaves as it does with no options.
+ */
+export interface BroadcastOptions {
+  onBroadcast?: (hash: Hex) => void;
+}
+
 export interface JobResult {
   id: bigint;
   client: Address;
@@ -383,9 +394,9 @@ export class JobAdapter {
 
   /**
    * complete — evaluator marks the job complete, releasing escrowed USDC to the provider.
-   * Requires evaluatorWallet to be configured in deps.
+   * Requires evaluatorWallet to be configured in deps. `opts` as {BroadcastOptions} says.
    */
-  async complete(jobId: bigint, reason: Hex): Promise<Hex> {
+  async complete(jobId: bigint, reason: Hex, opts?: BroadcastOptions): Promise<Hex> {
     if (!this.d.evaluatorWallet) {
       throw new Error("complete: evaluatorWallet not configured");
     }
@@ -404,6 +415,7 @@ export class JobAdapter {
         args: [jobId, reason, "0x"],
       }),
     });
+    opts?.onBroadcast?.(h);
     await this.mined(h, "complete");
     return h;
   }
@@ -436,8 +448,15 @@ export class JobAdapter {
    * Both wallets are LOCAL keys, so this is the ordinary lock-and-number path every platform send
    * takes. No pre-flight simulate: the decision was made from a fresh `escrowState` read, and a
    * simulate here would only re-ask a question whose answer is already in hand.
+   *
+   * `opts` as {BroadcastOptions} says.
    */
-  async reject(jobId: bigint, reason: Hex, wallet: WalletClient): Promise<Hex> {
+  async reject(
+    jobId: bigint,
+    reason: Hex,
+    wallet: WalletClient,
+    opts?: BroadcastOptions,
+  ): Promise<Hex> {
     const who =
       wallet.account?.address?.toLowerCase() ===
       this.d.evaluatorWallet?.account?.address?.toLowerCase()
@@ -451,6 +470,7 @@ export class JobAdapter {
         args: [jobId, reason, "0x"],
       }),
     });
+    opts?.onBroadcast?.(h);
     await this.mined(h, "reject");
     return h;
   }
@@ -465,9 +485,13 @@ export class JobAdapter {
    * job's client whichever key that is. The default stays the client, for the reason above and so
    * every existing caller is unchanged. A caller that settles on another party's behalf, such as
    * the Kleros pilot's referee, passes its own wallet and pays that gas itself. Named in a refusal
-   * as `reject` names it.
+   * as `reject` names it. `opts` as {BroadcastOptions} says.
    */
-  async claimRefund(jobId: bigint, wallet: WalletClient = this.d.clientWallet): Promise<Hex> {
+  async claimRefund(
+    jobId: bigint,
+    wallet: WalletClient = this.d.clientWallet,
+    opts?: BroadcastOptions,
+  ): Promise<Hex> {
     const who =
       wallet.account?.address?.toLowerCase() ===
       this.d.evaluatorWallet?.account?.address?.toLowerCase()
@@ -481,6 +505,7 @@ export class JobAdapter {
         args: [jobId],
       }),
     });
+    opts?.onBroadcast?.(h);
     await this.mined(h, "claimRefund");
     return h;
   }

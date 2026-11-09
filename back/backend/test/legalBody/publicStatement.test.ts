@@ -199,6 +199,7 @@ function inputs(over: Over = {}): StatementInputs {
     attestation: ACTIVE,
     names: NAMES,
     filing: NOT_YET_DUE,
+    einIssued: false,
     guardianHumanVerified: true,
     environment: "sandbox",
     issuedAt: ISSUED_AT,
@@ -498,6 +499,32 @@ describe("assembleStatement", () => {
       expect(getAddress(a)).toBe(a);
   });
 
+  describe("the source and the EIN", () => {
+    test("a customer's own company: source customer, and never an EIN, whatever the facts say", () => {
+      expect(statementOf({ provider: "customer", einIssued: true })).toMatchObject({
+        source: "customer",
+        einIssued: false,
+      });
+    });
+
+    test.each(["doola", "example-formation-provider"])(
+      "a company of provider %s, which Novi formed: source novi, and the EIN as the facts say",
+      (provider) => {
+        expect(statementOf({ provider })).toMatchObject({ source: "novi", einIssued: false });
+        expect(statementOf({ provider, einIssued: true })).toMatchObject({
+          source: "novi",
+          einIssued: true,
+        });
+        // Nothing else of the golden vector moves with the source and the EIN.
+        expect(statementOf({ provider, einIssued: true })).toStrictEqual({
+          ...GOLDEN,
+          source: "novi",
+          einIssued: true,
+        });
+      },
+    );
+  });
+
   describe("the binding", () => {
     test("linked when the agent's pointer is the row's body, in any letter case", () => {
       expect(statementOf({ agent: { ...AGENT, linked: lower(BODY) } }).bindingState).toBe("linked");
@@ -592,35 +619,28 @@ describe("assembleStatement", () => {
         "agent_mismatch",
       ],
       ["the row's agent id is empty", { row: { agentId: "" } }, "agent_mismatch"],
-      [
-        "the company is not a customer's",
-        { provider: "example-formation-provider" },
-        "unsupported_provider",
-      ],
     ])("%s: %s", (_name, over, problem) => {
       expect(problemOf(over)).toBe(problem);
     });
 
-    test("checked in order: the body, then its creator, then the agent, then the provider", () => {
+    test("checked in order: the body, then its creator, then the agent", () => {
       const allWrong: Over = {
         body: { ...BODY_SNAPSHOT, body: OTHER_BODY, creator: OTHER_OWNER, metaAgentId: 43n },
         agent: { ...AGENT, agentId: 43n },
-        provider: "example-formation-provider",
       };
       expect(problemOf(allWrong)).toBe("body_mismatch");
       expect(
         problemOf({
           body: { ...BODY_SNAPSHOT, creator: undefined, metaAgentId: 43n },
           agent: { ...AGENT, agentId: 43n },
-          provider: "example-formation-provider",
         }),
       ).toBe("not_ours");
-      expect(
-        problemOf({
-          body: { ...BODY_SNAPSHOT, metaAgentId: 43n },
-          provider: "example-formation-provider",
-        }),
-      ).toBe("agent_mismatch");
+      expect(problemOf({ body: { ...BODY_SNAPSHOT, metaAgentId: 43n } })).toBe("agent_mismatch");
+    });
+
+    test("a company of any provider is stated: no provider is refused", () => {
+      for (const provider of ["customer", "doola", "example-formation-provider"])
+        expect(problemOf({ provider }), provider).toBe("none");
     });
 
     test("addresses are compared in any letter case", () => {

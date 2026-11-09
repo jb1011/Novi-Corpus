@@ -1,0 +1,42 @@
+<!-- Novi Corpus docs diagram D13 (tall). Generated from the approved v0.5 mockup builder;
+     colours come only from classes, styled by src/styles/diagrams.css. Inlined by Figure.astro. -->
+<svg xmlns="http://www.w3.org/2000/svg" class="tall" viewBox="0 0 340 490" role="img" aria-label="The managed account"><title>The managed account</title><desc>The owner sets the rules; the agent&#x27;s account pays and takes jobs within them.</desc>
+<defs>
+      <pattern id="d13t-dots" width="22" height="22" patternUnits="userSpaceOnUse"><circle cx="1.5" cy="1.5" r="1.1" class="dot"/></pattern>
+      <linearGradient id="d13t-card" x1="0" y1="0" x2="0" y2="1"><stop offset="0" class="g-top"/><stop offset="1" class="g-bot"/></linearGradient>
+      <radialGradient id="d13t-glow" cx="50%" cy="50%" r="60%"><stop offset="0" class="glow-in"/><stop offset="1" class="glow-out"/></radialGradient>
+      <marker id="d13t-a" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah"/></marker>
+      <marker id="d13t-aa" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-acc"/></marker>
+      <marker id="d13t-am" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-amber"/></marker>
+      <marker id="d13t-al" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="ah-live"/></marker>
+    </defs>
+<rect x="0" y="0" width="340" height="490" fill="url(#d13t-dots)"/>
+<rect class="cbg" x="0" y="4" width="340" height="92" rx="14" fill="url(#d13t-card)"/>
+<rect class="cst r-ink" x="0.5" y="4.5" width="339" height="91" rx="14"/>
+<rect class="ictile r-ink" x="18" y="22" width="40" height="40" rx="10"/>
+<g class="ic r-ink" transform="translate(26 30) scale(1.0)"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></g>
+<text class="eb r-ink" x="72" y="38">OWNER</text>
+<text class="tt" x="72" y="63">Sets the rules</text>
+<path class="ln" d="M40 97 V134" marker-end="url(#d13t-a)"/>
+<rect class="cbg" x="0" y="136" width="340" height="92" rx="14" fill="url(#d13t-card)"/>
+<rect class="cst r-amber" x="0.5" y="136.5" width="339" height="91" rx="14"/>
+<rect class="ictile r-amber" x="18" y="154" width="40" height="40" rx="10"/>
+<g class="ic r-amber" transform="translate(26 162) scale(1.0)"><rect x="3" y="6" width="18" height="14" rx="2"/><path d="M3 10h18M16 15h2"/></g>
+<text class="eb r-amber" x="72" y="170">USDC ACCOUNT</text>
+<text class="tt" x="72" y="195">The agent's account</text>
+<path class="ln ln-amber" d="M12 229 V430"/>
+<path class="ln ln-amber" d="M12 314 H26" marker-end="url(#d13t-am)"/>
+<path class="ln ln-amber" d="M12 430 H26" marker-end="url(#d13t-am)"/>
+<rect class="cbg" x="28" y="268" width="312" height="92" rx="14" fill="url(#d13t-card)"/>
+<rect class="cst r-amber" x="28.5" y="268.5" width="311" height="91" rx="14"/>
+<rect class="ictile r-amber" x="46" y="286" width="40" height="40" rx="10"/>
+<g class="ic r-amber" transform="translate(54 294) scale(1.0)"><path d="M21 3L3 10l7 3 3 7zM10 13l11-10"/></g>
+<text class="eb r-amber" x="100" y="302">PAYMENTS</text>
+<text class="tt" x="100" y="327">Within the caps</text>
+<rect class="cbg" x="28" y="384" width="312" height="92" rx="14" fill="url(#d13t-card)"/>
+<rect class="cst r-amber" x="28.5" y="384.5" width="311" height="91" rx="14"/>
+<rect class="ictile r-amber" x="46" y="402" width="40" height="40" rx="10"/>
+<g class="ic r-amber" transform="translate(54 410) scale(1.0)"><path d="M3 12l4-4 5 3 5-3 4 4-9 7z"/><path d="M8 13l3 2M11 11l3 2"/></g>
+<text class="eb r-amber" x="100" y="418">ESCROWED JOBS</text>
+<text class="tt" x="100" y="443">Hire, be hired</text>
+</svg>

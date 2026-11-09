@@ -616,6 +616,73 @@ async function adoptSubmit(
   });
 }
 
+/** A function of the job contract, by the name its ABI gives it. */
+export type JobFunction = ReturnType<
+  typeof decodeFunctionData<typeof iErc8183JobAbi>
+>["functionName"];
+
+/** The call a sent transaction must be: `fn`, or one of the functions listed, on job `jobId`,
+ *  sent by `sender`. */
+export interface JobCallWanted {
+  fn: JobFunction | readonly JobFunction[];
+  /** How a refusal for another job id says what the call does: funds, submits, settles. */
+  verb: string;
+  jobId: bigint;
+  sender: string;
+  /** The sender's part in the case, as a refusal names it: buyer, seller, referee. */
+  role: string;
+  /** What a refusal for a transaction the node cannot answer for yet tells the operator to do. */
+  retry: string;
+}
+
+/** The functions as a refusal names them: `fund`, or `complete, reject or claimRefund`. */
+function namesOf(fn: JobCallWanted["fn"]): string {
+  if (typeof fn === "string") return fn;
+  return fn.length < 2 ? fn.join("") : `${fn.slice(0, -1).join(", ")} or ${fn.at(-1)}`;
+}
+
+/**
+ * Whether one sent transaction is the call `want` names on the configured job contract: the
+ * transaction and its decoded call when it is, or what did not match (recipient, sender, call or
+ * job id). Hashes and addresses only; never the calldata. The receipt is the caller's to read.
+ */
+export async function jobCallOf(
+  chain: PilotChain,
+  hash: Hex,
+  want: JobCallWanted,
+): Promise<
+  | {
+      tx: Awaited<ReturnType<PilotChain["publicClient"]["getTransaction"]>>;
+      functionName: JobFunction;
+      args: readonly unknown[];
+    }
+  | string
+> {
+  let tx: Awaited<ReturnType<typeof chain.publicClient.getTransaction>>;
+  try {
+    tx = await chain.publicClient.getTransaction({ hash });
+  } catch {
+    return `could not be read from the node yet; ${want.retry}`;
+  }
+  if (tx.to === null || tx.to === undefined || !sameAddress(tx.to, chain.jobContract))
+    return `has recipient ${tx.to ?? "none"}, not the job contract ${chain.jobContract}`;
+  if (!sameAddress(tx.from, want.sender))
+    return `has sender ${tx.from}, not the ${want.role} ${want.sender}`;
+  let call: ReturnType<typeof decodeFunctionData<typeof iErc8183JobAbi>>;
+  try {
+    call = decodeFunctionData({ abi: iErc8183JobAbi, data: tx.input });
+  } catch {
+    return `is not a call of the job contract's ${namesOf(want.fn)}`;
+  }
+  const allowed: readonly string[] = typeof want.fn === "string" ? [want.fn] : want.fn;
+  if (!allowed.includes(call.functionName))
+    return `calls ${call.functionName}, not ${namesOf(want.fn)}`;
+  const args = call.args as readonly unknown[];
+  const calledJob = args[0];
+  if (calledJob !== want.jobId) return `${want.verb} job ${calledJob}, not job ${want.jobId}`;
+  return { tx, functionName: call.functionName, args };
+}
+
 /**
  * Whether one sent transaction is the `fn` call of this job by `sender`: the decoded arguments
  * and the receipt when it is, or what did not match (recipient, sender, call, job id or receipt).
@@ -639,25 +706,8 @@ async function callProofOf(
   | string
 > {
   const { chain } = d;
-  let tx: Awaited<ReturnType<typeof chain.publicClient.getTransaction>>;
-  try {
-    tx = await chain.publicClient.getTransaction({ hash });
-  } catch {
-    return "could not be read from the node yet; resume again once it is mined";
-  }
-  if (tx.to === null || tx.to === undefined || !sameAddress(tx.to, chain.jobContract))
-    return `has recipient ${tx.to ?? "none"}, not the job contract ${chain.jobContract}`;
-  if (!sameAddress(tx.from, want.sender))
-    return `has sender ${tx.from}, not the ${want.role} ${want.sender}`;
-  let call: ReturnType<typeof decodeFunctionData<typeof iErc8183JobAbi>>;
-  try {
-    call = decodeFunctionData({ abi: iErc8183JobAbi, data: tx.input });
-  } catch {
-    return `is not a call of the job contract's ${want.fn}`;
-  }
-  if (call.functionName !== want.fn) return `calls ${call.functionName}, not ${want.fn}`;
-  const calledJob = (call.args as readonly unknown[])[0];
-  if (calledJob !== want.jobId) return `${want.verb} job ${calledJob}, not job ${want.jobId}`;
+  const call = await jobCallOf(chain, hash, { ...want, retry: "resume again once it is mined" });
+  if (typeof call === "string") return call;
   let receipt: Awaited<ReturnType<typeof chain.publicClient.getTransactionReceipt>>;
   try {
     receipt = await chain.publicClient.getTransactionReceipt({ hash });
@@ -665,7 +715,7 @@ async function callProofOf(
     return "has a receipt that could not be read yet; resume again once it is mined";
   }
   if (receipt.status !== "success") return "has a receipt that says it reverted on chain";
-  return { args: call.args as readonly unknown[], receipt };
+  return { args: call.args, receipt };
 }
 
 /**

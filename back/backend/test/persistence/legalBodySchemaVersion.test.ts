@@ -84,11 +84,13 @@ function migrated(): Database.Database {
   return db;
 }
 
-/** One legal body with its `created` event, written as an earlier run would have left it. */
+/** One legal body with its `created` event, written as an earlier run would have left it, under a
+ *  customer's company as the declared door writes it: its purpose `legal_body`, so a start finds
+ *  the company in sync too. */
 function addBody(db: Database.Database) {
   db.prepare(
-    `INSERT INTO companies (company_id, tenant_id, status, provider, environment, name_options, business_purpose, industry_label)
-     VALUES ('co_1', ?, 'ready', 'customer', 'sandbox', '["Acme LLC"]', 'existing', 'existing')`,
+    `INSERT INTO companies (company_id, tenant_id, status, provider, environment, name_options, business_purpose, industry_label, purpose_kind)
+     VALUES ('co_1', ?, 'ready', 'customer', 'sandbox', '["Acme LLC"]', 'existing', 'existing', 'legal_body')`,
   ).run(TENANT);
   db.prepare(
     `INSERT INTO legal_bodies (legal_body_id, public_id, tenant_id, company_id, chain_id, factory, guardian, amendment_delay)
@@ -321,8 +323,8 @@ test("a schema that differs at the SAME version is refused, naming what differs"
 /** One legal body and its company, with no event: the event log stays empty. */
 function addBodyWithoutAnEvent(db: Database.Database) {
   db.prepare(
-    `INSERT INTO companies (company_id, tenant_id, status, provider, environment, name_options, business_purpose, industry_label)
-     VALUES ('co_1', ?, 'ready', 'customer', 'sandbox', '["Acme LLC"]', 'existing', 'existing')`,
+    `INSERT INTO companies (company_id, tenant_id, status, provider, environment, name_options, business_purpose, industry_label, purpose_kind)
+     VALUES ('co_1', ?, 'ready', 'customer', 'sandbox', '["Acme LLC"]', 'existing', 'existing', 'legal_body')`,
   ).run(TENANT);
   db.prepare(
     `INSERT INTO legal_bodies (legal_body_id, public_id, tenant_id, company_id, chain_id, factory, guardian, amendment_delay)

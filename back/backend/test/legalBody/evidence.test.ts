@@ -115,6 +115,7 @@ function customerCompany(companyId: string): void {
     businessPurpose: "not applicable: an existing company",
     industryLabel: "not applicable: an existing company",
     intakeSynthesized: false,
+    purposeKind: "legal_body",
   });
 }
 

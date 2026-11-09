@@ -26,13 +26,31 @@ library ControllerSelectors {
     }
 
     /// @notice The executor's grants for legal bodies whose identities the customer owns. Both
-    ///         are pinned to the LegalBodyFactory (setBoundTarget) BEFORE they are granted, so
-    ///         there is never a moment where they are relayable to another target. They are
-    ///         added by an admin ceremony after the factory is deployed, so they are not part
-    ///         of `granted()`, which is the controller's constructor set.
+    ///         must be pinned to the LegalBodyFactory BEFORE they are granted, so there is never
+    ///         a moment where they are relayable to another target: use {minimalPins}, which
+    ///         pairs each selector with its target, rather than these bare selectors. They are
+    ///         not part of `granted()`, which is the controller's constructor set for the full
+    ///         product.
     function minimalGrants() internal pure returns (bytes4[] memory s) {
         s = new bytes4[](2);
         s[0] = LegalBodyFactory.createLegalBody.selector;
         s[1] = LegalBodyFactory.scheduleOperatingAgreementUpdate.selector;
+    }
+
+    /// @notice The Minimal grants paired with their only target. Every selector of
+    ///         `minimalGrants()` appears exactly once, pinned to `factory`, so no deploy script or
+    ///         test can grant one of them without naming where it may go. They can be passed to
+    ///         the controller's constructor as its pin arrays when the factory exists first, and
+    ///         they drive the printed admin ceremony otherwise (pins before grants).
+    function minimalPins(address factory)
+        internal
+        pure
+        returns (bytes4[] memory selectors, address[] memory targets)
+    {
+        selectors = minimalGrants();
+        targets = new address[](selectors.length);
+        for (uint256 i = 0; i < selectors.length; i++) {
+            targets[i] = factory;
+        }
     }
 }

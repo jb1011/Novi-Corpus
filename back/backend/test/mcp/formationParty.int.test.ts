@@ -464,12 +464,15 @@ const COMPANY_VIEW_KEYS = [
   "businessPurpose",
   "companyId",
   "createdAt",
+  "daoSupplement",
   "environment",
   "filedAt",
   "filingNumber",
   "industryLabel",
   "legalNameFiled",
   "nameOptions",
+  "provider",
+  "purpose",
   "state",
 ];
 
@@ -489,7 +492,9 @@ test("create_company is gated on FORMATION; list_companies on the company store,
   // before the handler ever sees it, so a model that helpfully passed one would have got back a
   // companyId with no indication the number had been thrown away and the slow EIN route taken —
   // while the number sat in the client's context window and its logs, which is the entire harm
-  // §4.1 exists to prevent. The web form is the only place one is ever collected.
+  // §4.1 exists to prevent. The web form is the only place one is ever collected. `for` is
+  // declared for the same reason: this tool creates companies for agents only, and a caller asking
+  // for a legal-body company is refused by name rather than handed a company for agents.
   expect(Object.keys(create.inputSchema.properties ?? {})).toEqual([
     "partyId",
     "names",
@@ -497,6 +502,7 @@ test("create_company is gated on FORMATION; list_companies on the company store,
     "industryLabel",
     "synthetic",
     "ssn",
+    "for",
   ]);
   expect(create.description).toMatch(/NEVER takes an SSN/);
   expect(create.description).toMatch(/web form/);

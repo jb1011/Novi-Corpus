@@ -3,8 +3,10 @@ import { cors } from "hono/cors";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
+import { DEFAULT_FORMATION_FILING_WORKING_DAYS } from "../config/env";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
 import type { FoundingDeps } from "../founding/config";
+import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
 import type { EvidenceDeps } from "../legalBody/evidence";
 import type { GasSeedDeps } from "../legalBody/gasSeed";
@@ -12,6 +14,9 @@ import { DEFAULT_LINK_TTL_SECONDS, MAX_SERVED_LINK_TTL_SECONDS } from "../legalB
 import { MIN_SERVED_LINK_TTL_SECONDS } from "../legalBody/linkDoor";
 import type { LegalBodyOrderDeps } from "../legalBody/orders";
 import type { LegalBodyStatementDeps } from "../legalBody/statements";
+import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
+import { STATEMENT_OF_AUTHORITY } from "../legalBody/texts/statementOfAuthority";
+import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { mountMcpRoute } from "../mcp/transport";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
@@ -106,6 +111,14 @@ export interface ApiDeps extends EntityViewDeps {
    * Its amount is 0, and the door answers 409 `gas_seed_disabled`, unless the deployment sets one.
    */
   legalBodyGasSeed?: GasSeedDeps;
+  /**
+   * The treasury of record: the record of what each linked body's guardian declared about the
+   * wallet its agent pays from, and the registry a declaration is checked against. Its door is
+   * mounted beside the order doors, and only with them; the two public lookup answers read its
+   * record for the `treasury` block they serve beside a signed statement. Absent, the door is a 404
+   * and every such block is null.
+   */
+  legalBodyTreasury?: LegalBodyTreasuryDeps;
   webOrigin: string;
   nonceStore: import("../auth/nonceStore").NonceStore;
   siweDomain: string;
@@ -245,6 +258,18 @@ export interface ApiDeps extends EntityViewDeps {
      * no settle path wired at all rather than one that would refuse at the last moment.
      */
     paymentExecutor?: import("../payments/formationSettle").FormationExecutorDeps;
+    /**
+     * FORMATION_FILING_WORKING_DAYS: what the formed door's waiting screen says a filing usually
+     * takes, served on `/config.legalBodies.filingWorkingDays`. Absent reads as
+     * DEFAULT_FORMATION_FILING_WORKING_DAYS, the setting's own default.
+     */
+    filingWorkingDays?: number;
+    /**
+     * FORMATION_MAX_TOTAL: how many formed legal-body companies this deployment takes in all
+     * (`countChargeableFormedLegalBodies`). The setting is not built yet; absent, nothing caps the
+     * formed door, and `/config.legalBodies.formedDoor` never reads `cap_reached`.
+     */
+    maxTotal?: number;
   };
 
   /**
@@ -276,6 +301,20 @@ export interface ApiDeps extends EntityViewDeps {
   /** Optional World ID guardian gate (proof-of-personhood). Present only when the WORLD_*
    *  portal credentials are set; absent -> routes not mounted and onboarding is ungated. */
   worldId?: import("./routes/worldId").WorldIdDeps;
+  /**
+   * The guardian identity record (who the guardian is; World ID proves one real person). Present
+   * wherever the PII key is set, since the names of record are encrypted under it; absent on a box
+   * without the key (the testnet box), where `/world-id/me` answers the block with state `none`
+   * and `assertIdentityVerified` refuses a production door with `identity_unavailable`.
+   */
+  identity?: IdentityDeps;
+  /**
+   * The beta's invite codes (trust-and-access PR 2b), with `required`, the BETA_INVITES_REQUIRED
+   * switch. Not wired yet: PR 2b adds the repository and wires the object. Absent, a production
+   * deployment never offers the formed door (`/config.legalBodies.formedDoor` reads `hidden`), so
+   * the door cannot open on mainnet without invite codes.
+   */
+  invites?: { required: boolean };
   /** AgentBook (design 2026-08-25 v3). Present wherever the World Chain READ config is, which is
    *  everywhere — reading "is this agent human-backed?" needs nothing but an RPC URL. Its
    *  `registrar` is the optional WRITE half, present iff `canRegisterAgentBook(cfg)`; that
@@ -363,16 +402,58 @@ export type LegalBodyConfig =
       gasSeedOffered: boolean;
       /** A new customer company lands `draft` and owes a payment. */
       paymentRequired: boolean;
+      /** The guardian must pass the identity check before a door files: on production only. */
+      identityRequired: boolean;
+      /**
+       * Whether the web app shows the door that forms a company through doola: `offered`;
+       * `cap_reached`, when the deployment has taken all the formed companies it takes and every
+       * other gate holds; `hidden` otherwise. See `formedDoorOf`.
+       */
+      formedDoor: FormedDoor;
+      /** How many working days the formed door's waiting screen says a filing usually takes. */
+      filingWorkingDays: number;
       /** The link window a client may ask for, in seconds, counted from the chain's clock. */
       linkTtl: { min: number; max: number; default: number };
     };
+
+/** The three words `/config.legalBodies.formedDoor` answers. */
+export type FormedDoor = "offered" | "cap_reached" | "hidden";
+
+/** What the formed door's answer reads off the deps. */
+type FormedDoorDeps = Pick<ApiDeps, "formation" | "identity" | "invites">;
+
+/**
+ * Whether the formed door is offered on a deployment of this legal-body environment.
+ *
+ * On a sandbox deployment it is offered wherever doola is configured. On a production deployment
+ * it is offered only when every gate holds: doola pinned to production, a deployment that charges,
+ * both legal texts approved, the guardian identity record wired, invite codes required, and the
+ * formed legal-body companies below the total cap. It reads `cap_reached` when the cap is the only
+ * gate that fails, and `hidden` otherwise. The count is read last, and only on production.
+ */
+function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production"): FormedDoor {
+  const formation = deps.formation;
+  if (environment === "sandbox") return formation ? "offered" : "hidden";
+  const gated =
+    formation !== undefined &&
+    formation.pin.environment === "production" &&
+    formation.payment?.required === true &&
+    LEGAL_BODY_OPERATING_AGREEMENT.status === "approved" &&
+    STATEMENT_OF_AUTHORITY.status === "approved" &&
+    deps.identity !== undefined &&
+    deps.invites?.required === true;
+  if (!gated) return "hidden";
+  const cap = formation.maxTotal ?? Number.POSITIVE_INFINITY;
+  return formation.companies.countChargeableFormedLegalBodies() < cap ? "offered" : "cap_reached";
+}
 
 /** The `/config.legalBodies` answer of these deps. */
 export function legalBodyConfigOf(
   deps: Pick<
     ApiDeps,
     "legalBodyOrders" | "customerCompanies" | "legalBodyStatements" | "legalBodyGasSeed"
-  >,
+  > &
+    FormedDoorDeps,
 ): LegalBodyConfig {
   const orders = deps.legalBodyOrders;
   if (!orders) return { available: false };
@@ -386,6 +467,9 @@ export function legalBodyConfigOf(
     factory: orders.deployment.factory,
     gasSeedOffered: (deps.legalBodyGasSeed?.amountWei ?? 0n) > 0n,
     paymentRequired: deps.customerCompanies?.paymentRequired ?? false,
+    identityRequired: orders.environment === "production",
+    formedDoor: formedDoorOf(deps, orders.environment),
+    filingWorkingDays: deps.formation?.filingWorkingDays ?? DEFAULT_FORMATION_FILING_WORKING_DAYS,
     linkTtl: {
       min: Number(MIN_SERVED_LINK_TTL_SECONDS),
       max: Number(MAX_SERVED_LINK_TTL_SECONDS),
@@ -568,7 +652,12 @@ export function buildApiApp(deps: ApiDeps) {
   // deployment wires the feature.
   if (deps.legalBodyOrders) {
     protect("/legal-body-orders");
-    mountLegalBodyOrderRoutes(app, deps.legalBodyOrders, deps.legalBodyGasSeed);
+    mountLegalBodyOrderRoutes(
+      app,
+      deps.legalBodyOrders,
+      deps.legalBodyGasSeed,
+      deps.legalBodyTreasury,
+    );
   }
   // After the `/companies/*` requireAuth line above, so both document routes inherit auth.
   mountDocumentRoutes(app, deps);

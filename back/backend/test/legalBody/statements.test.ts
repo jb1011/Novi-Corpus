@@ -655,6 +655,7 @@ describe("the log", () => {
         revocationEventId: null,
         companyStatus: "ready",
         humanVerified: true,
+        identityVerified: false,
       },
     });
 
@@ -687,6 +688,7 @@ describe("the log", () => {
       revocationEventId: null,
       companyStatus: "draft",
       humanVerified: false,
+      identityVerified: false,
     });
   });
 
@@ -914,21 +916,24 @@ describe("a refusal for integrity", () => {
     );
   });
 
-  test("the row's company is not a customer's own: unsupported_provider, with nothing else read", async () => {
+  test("the row's company was formed for agents: unsupported_purpose, with nothing else read", async () => {
     const row = linkedBody();
     const company = s.companies.find(row.companyId);
     if (company === undefined) throw new Error("no company");
     vi.spyOn(s.companies, "find").mockReturnValue({
       ...company,
-      provider: "example-formation-provider",
+      provider: "doola",
+      purposeKind: "agent",
     });
     const check = vi.spyOn(s.checks, "latest");
+    const formationSteps = vi.fn(() => []);
     await expectRefused(
-      (signer) => agent42(statementDeps(s, chain, { signer })),
+      (signer) => agent42(statementDeps(s, chain, { signer, formationSteps })),
       row.legalBodyId,
-      "unsupported_provider",
+      "unsupported_purpose",
     );
     expect(check).not.toHaveBeenCalled();
+    expect(formationSteps).not.toHaveBeenCalled();
   });
 
   test("a candidate without its body, agent or owner: row_incomplete, before any chain read", async () => {

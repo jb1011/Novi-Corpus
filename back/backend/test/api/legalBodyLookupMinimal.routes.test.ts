@@ -178,6 +178,7 @@ const MINIMAL_KEYS = [
   "formation",
   "checkedAt",
   "statement",
+  "treasury",
 ];
 
 test("a full-product answer is the same, byte for byte, with the statement wired or not, even for an address a Minimal body also has", async () => {
@@ -269,6 +270,7 @@ describe("the Minimal branch", () => {
       formation: null,
       checkedAt: CHECKED_AT,
       statement: expect.any(Object),
+      treasury: null,
     });
     expect(Object.keys(body.links)).toEqual(["transparency", "metadata", "statement"]);
     expect(body.statement.message).toMatchObject({
@@ -351,6 +353,7 @@ describe("the Minimal branch", () => {
         formation: null,
         checkedAt: CHECKED_AT,
         statement: null,
+        treasury: null,
       });
       expect(Object.keys(body)).toEqual(MINIMAL_KEYS);
       expect(text).not.toContain("rpc.example");

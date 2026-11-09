@@ -1,0 +1,65 @@
+---
+// A diagram (design 4.6, 4.7): the wide drawing for desktop and the tall twin for phones,
+// both inlined from src/assets/diagrams/ so they take the theme's colours by class.
+// CSS shows the tall one at 820 px and below (as in the mockups), and also whenever the
+// figure is too narrow for the wide one's text to stay at 12 px or more (src/styles/diagrams.css).
+// A caption and a text version in <details> sit under every drawing.
+//
+//   <Figure name="d1" caption="The legal body links one company and one agent both ways."
+//     text={['The company ...', 'The legal body ...']} />
+import { MAINNET_LIVE } from '../sections.mjs';
+
+const files = import.meta.glob('../assets/diagrams/*.svg', {
+	query: '?raw',
+	import: 'default',
+	eager: true,
+}) as Record<string, string>;
+
+interface Props {
+	/** File stem in src/assets/diagrams: d0, d1, d6, d13 (each has -wide.svg and -tall.svg). */
+	name: string;
+	caption: string;
+	/** Text equivalent: one paragraph, or a list. A default slot works too. */
+	text?: string | string[];
+}
+
+const { name, caption, text } = Astro.props;
+// A drawing may carry two forms of the Minimal Novi badge (D6): <g data-mainnet="live"> and
+// <g data-mainnet="pending">. Keep the one that matches the mainnet switch (design 2.6).
+const dropForm = MAINNET_LIVE ? 'pending' : 'live';
+const load = (variant: 'wide' | 'tall') => {
+	const svg = files[`../assets/diagrams/${name}-${variant}.svg`];
+	if (!svg) throw new Error(`Figure.astro: missing src/assets/diagrams/${name}-${variant}.svg`);
+	return svg
+		.replace(/<!--[\s\S]*?-->\s*/g, '')
+		.replace(new RegExp(`<g data-mainnet="${dropForm}">[\\s\\S]*?</g>\\s*`, 'g'), '');
+};
+const wide = load('wide');
+const tall = load('tall');
+const hasSlot = Astro.slots.has('default');
+---
+
+<figure class="nc-figure dg" data-diagram={name}>
+	<div class="dg-frame">
+		<Fragment set:html={wide} />
+		<Fragment set:html={tall} />
+	</div>
+	<figcaption>{caption}</figcaption>
+	{
+		(text || hasSlot) && (
+			<details>
+				<summary>Text version of this diagram</summary>
+				{Array.isArray(text) ? (
+					<ul>
+						{text.map((t) => (
+							<li>{t}</li>
+						))}
+					</ul>
+				) : (
+					text && <p>{text}</p>
+				)}
+				<slot />
+			</details>
+		)
+	}
+</figure>

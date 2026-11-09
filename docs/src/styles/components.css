@@ -1,0 +1,490 @@
+/*
+ * Novi Corpus docs: content components (design 4.4).
+ * Cards, grids, link groups, callouts, step flows, addresses, "What's new".
+ * Colours come from tokens.css; --sc is the section colour of the nearest [data-section].
+ */
+
+/* ---------- Cards ---------- */
+
+.nc-grid {
+	display: grid;
+	gap: 0.875rem;
+	margin: 1rem 0 1.25rem;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.nc-grid[data-cols='3'] {
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+@media (max-width: 720px) {
+	.nc-grid[data-cols='3'] {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+@media (max-width: 600px) {
+	.nc-grid {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+/* Starlight spaces every child of markdown content; not inside our grids and cards. */
+.sl-markdown-content :is(.nc-grid, .nc-card, .nc-linkgroup) > * {
+	margin-top: 0;
+}
+
+.nc-card {
+	display: flex;
+	flex-direction: column;
+	gap: 0.375rem;
+	min-height: 44px;
+	padding: 1.125rem;
+	border: 1px solid var(--nc-line-strong);
+	border-radius: var(--nc-radius-card);
+	background: linear-gradient(180deg, var(--nc-card-top), var(--nc-card-bottom));
+	color: var(--nc-ink);
+	text-decoration: none;
+	transition: border-color 0.15s;
+}
+a.nc-card:hover {
+	border-color: color-mix(in srgb, var(--sc) 55%, transparent);
+	color: var(--nc-ink);
+}
+.nc-card-tile {
+	width: 38px;
+	height: 38px;
+	border-radius: 10px;
+	display: grid;
+	place-items: center;
+	flex: none;
+	background: color-mix(in srgb, var(--sc) 14%, transparent);
+	color: var(--sc);
+	margin-bottom: 0.375rem;
+}
+.nc-card-text {
+	display: flex;
+	flex-direction: column;
+	gap: 0.375rem;
+}
+.nc-card-title {
+	font-weight: 500;
+	font-size: 1rem;
+	line-height: 1.35;
+	color: var(--nc-ink);
+}
+.nc-card-body {
+	color: var(--nc-muted);
+	font-size: 0.906rem;
+	line-height: 1.5;
+}
+.nc-card-body > :first-child {
+	margin-top: 0;
+}
+.nc-card-body > :last-child {
+	margin-bottom: 0;
+}
+.nc-card-more {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.3rem;
+	margin-top: auto;
+	padding-top: 0.25rem;
+	font-size: 0.844rem;
+	color: var(--nc-accent-soft);
+}
+[data-theme='light'] .nc-card-more {
+	color: var(--nc-accent);
+}
+.nc-card > .nc-badge {
+	margin-top: auto;
+	align-self: flex-start;
+}
+.nc-card-more + .nc-badge {
+	margin-top: 0.5rem;
+}
+.nc-card-compact {
+	flex-direction: row;
+	align-items: center;
+	gap: 0.875rem;
+}
+.nc-card-compact .nc-card-tile {
+	margin: 0;
+}
+.nc-card-compact .nc-card-text {
+	gap: 0.125rem;
+}
+
+/* ---------- Link group ---------- */
+
+.nc-linkgroup {
+	padding: 1.125rem;
+	border: 1px solid var(--nc-line-strong);
+	border-radius: var(--nc-radius-card);
+	background: linear-gradient(180deg, var(--nc-card-top), var(--nc-card-bottom));
+}
+.nc-linkgroup-head {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+	color: var(--nc-ink);
+	font-weight: 500;
+	text-decoration: none;
+	margin-bottom: 0.5rem;
+}
+.nc-linkgroup-head .nc-card-tile {
+	margin: 0;
+}
+.nc-linkgroup ul {
+	list-style: none;
+	margin: 0.25rem 0 0;
+	padding: 0;
+	border-top: 1px solid var(--nc-line);
+}
+.nc-linkgroup li {
+	margin: 0;
+	border-bottom: 1px solid var(--nc-line);
+}
+.nc-linkgroup li:last-child {
+	border-bottom: 0;
+}
+.nc-linkgroup li a {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.5rem;
+	min-height: 44px;
+	color: var(--nc-muted);
+	font-size: 0.906rem;
+	text-decoration: none;
+}
+.nc-linkgroup li a:hover {
+	color: var(--nc-ink);
+}
+
+/* ---------- Callouts ---------- */
+
+.nc-aside {
+	--ac: var(--nc-muted);
+	margin-top: 1.25rem;
+	padding: 0.875rem 1.125rem 1rem;
+	border: 1px solid color-mix(in srgb, var(--ac) 35%, transparent);
+	border-inline-start: 3px solid var(--ac);
+	border-radius: 0 12px 12px 0;
+	background: color-mix(in srgb, var(--ac) 7%, transparent);
+	color: var(--nc-ink-2);
+}
+.nc-aside[data-variant='law'] {
+	--ac: var(--nc-highlight);
+	--at: var(--nc-highlight-text);
+}
+.nc-aside[data-variant='agent'] {
+	--ac: var(--nc-accent);
+	--at: var(--nc-accent-soft);
+}
+.nc-aside[data-variant='example'] {
+	--ac: var(--nc-cream);
+	--at: var(--nc-ink-2);
+}
+.nc-aside[data-variant='dev'] {
+	--ac: var(--nc-muted-2);
+	--at: var(--nc-muted);
+}
+.nc-aside[data-variant='notsay'] {
+	--ac: var(--nc-amber);
+	--at: var(--nc-amber);
+}
+[data-theme='light'] .nc-aside[data-variant='agent'] {
+	--at: var(--nc-accent);
+}
+[data-theme='light'] .nc-aside[data-variant='example'] {
+	--ac: #b9b2a3;
+	--at: var(--nc-ink-2);
+}
+.nc-aside-title {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	margin: 0 0 0.375rem;
+	font-size: 0.875rem;
+	font-weight: 600;
+	color: var(--at, var(--nc-ink-2));
+}
+.nc-aside-content {
+	font-size: 0.95rem;
+}
+.nc-aside-content > :first-child {
+	margin-top: 0;
+}
+.nc-aside-content small {
+	font-size: 0.8125rem;
+	color: var(--nc-muted);
+}
+
+/* Starlight's own asides, in the brand's geometry. */
+.starlight-aside {
+	border-radius: 0 12px 12px 0;
+}
+
+/* ---------- Step flow: Starlight <Steps>, numbered in the section colour ---------- */
+
+.sl-steps {
+	--bullet-size: 1.875rem;
+	--bullet-margin: 0.375rem;
+}
+.sl-steps > li::before {
+	background: color-mix(in srgb, var(--sc, var(--nc-accent)) 10%, transparent) !important;
+	color: var(--nc-ink) !important;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sc, var(--nc-accent)) 55%, transparent) !important;
+	font-weight: 500 !important;
+}
+.sl-steps > li::after {
+	background-color: var(--nc-line-strong) !important;
+}
+
+/* ---------- Addresses ---------- */
+
+.nc-addr {
+	font-family: var(--nc-mono);
+	font-variant-numeric: tabular-nums;
+	overflow-wrap: anywhere;
+	word-break: break-all;
+}
+.nc-address {
+	margin-top: 1rem;
+	padding: 0.75rem 1rem;
+	border: 1px solid var(--nc-line-strong);
+	border-radius: var(--nc-radius-code);
+	background: var(--nc-paper-2);
+}
+.nc-address-label {
+	font-size: 0.8125rem;
+	color: var(--nc-muted);
+	margin-bottom: 0.25rem;
+}
+.nc-address .nc-addr {
+	display: block;
+	background: transparent;
+	padding: 0;
+	font-size: 0.875rem;
+	color: var(--nc-ink);
+}
+.nc-address-meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.25rem 1rem;
+	margin-top: 0.375rem;
+	font-size: 0.8125rem;
+	color: var(--nc-muted); /* muted-2 is under 4.5:1 on paper-2 */
+}
+.nc-addr-link {
+	margin-inline-start: 0.375rem;
+	font-size: 0.8125rem;
+}
+
+/* ---------- What's new ---------- */
+
+.nc-news {
+	list-style: none;
+	margin: 0.75rem 0 0;
+	padding: 0;
+}
+.nc-news li {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 0.5rem 0.75rem;
+	margin: 0;
+	padding: 0.625rem 0;
+	border-bottom: 1px solid var(--nc-line);
+	font-size: 0.906rem;
+	color: var(--nc-ink-2);
+}
+.nc-news time {
+	min-width: 3.5rem;
+	font-size: 0.8125rem;
+	color: var(--nc-muted-2);
+	font-variant-numeric: tabular-nums;
+}
+.nc-news-empty {
+	color: var(--nc-muted);
+	font-size: 0.906rem;
+}
+
+/* The lead paragraph (the headline of a page, design 4.4). */
+.sl-markdown-content .lead {
+	font-size: 1.125rem;
+	color: var(--nc-ink-2);
+}
+
+/* A card badge may wrap in a narrow column (design 4.8: nothing scrolls sideways at 390 px). */
+.nc-card > .nc-badge {
+	white-space: normal;
+}
+
+/* ---------- Landing (design 10.1) ---------- */
+
+/* The hero: the page title, the tagline and a search box, centred, over a faint dot grid. */
+.nc-hero {
+	position: relative;
+	text-align: center;
+	padding: 3.5rem 0 2.75rem;
+}
+.nc-hero::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	background:
+		radial-gradient(600px 260px at 50% 0%, color-mix(in srgb, var(--nc-accent) 18%, transparent), transparent 70%),
+		radial-gradient(color-mix(in srgb, var(--nc-ink) 7%, transparent) 1.1px, transparent 1.2px) 0 0 / 22px 22px;
+	-webkit-mask-image: linear-gradient(#000 40%, transparent);
+	mask-image: linear-gradient(#000 40%, transparent);
+}
+.nc-hero > * {
+	position: relative;
+}
+.content-panel .nc-hero h1#_top {
+	font-size: clamp(2.25rem, 5vw, 2.875rem);
+	margin: 0;
+}
+.nc-hero .nc-subtitle {
+	margin: 0.875rem auto 1.625rem;
+	max-width: 640px;
+	font-size: 1.15rem;
+}
+.nc-hero-search {
+	display: flex;
+	align-items: center;
+	gap: 0.625rem;
+	width: min(520px, 100%);
+	min-height: 44px;
+	margin: 0 auto;
+	padding: 0 0.875rem;
+	border: 1px solid var(--nc-line-strong);
+	border-radius: 10px;
+	background: var(--nc-paper-2);
+	color: var(--nc-muted);
+	font: inherit;
+	font-size: 0.9375rem;
+	cursor: pointer;
+}
+.nc-hero-search:hover {
+	border-color: color-mix(in srgb, var(--nc-accent) 55%, transparent);
+	color: var(--nc-ink);
+}
+.nc-hero-search kbd {
+	margin-left: auto;
+	padding: 0 0.3rem;
+	border: 1px solid var(--nc-line-strong);
+	border-radius: 5px;
+	font-family: var(--__sl-font-mono, monospace);
+	font-size: 0.75rem;
+	color: var(--nc-muted);
+}
+
+/* Common tasks: three columns of links under an eyebrow. */
+.nc-tasks {
+	display: grid;
+	grid-template-columns: repeat(3, minmax(0, 1fr));
+	gap: 1.5rem;
+	margin-top: 1rem;
+}
+.sl-markdown-content .nc-tasks > *,
+.sl-markdown-content .nc-tasks-col > * {
+	margin-top: 0;
+}
+.nc-eyebrow {
+	margin: 0 0 0.375rem;
+	font-size: 0.75rem;
+	font-weight: 500;
+	letter-spacing: 0.12em;
+	text-transform: uppercase;
+	color: var(--nc-muted-2);
+}
+.nc-tasks ul {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+.nc-tasks li {
+	margin: 0;
+}
+.nc-tasks a {
+	display: flex;
+	align-items: center;
+	min-height: 44px;
+	color: var(--nc-muted);
+	font-size: 0.906rem;
+	text-decoration: none;
+}
+.nc-tasks a:hover {
+	color: var(--nc-ink);
+}
+
+/* Two blocks side by side (For agents, What's new). */
+.nc-split {
+	display: grid;
+	grid-template-columns: repeat(2, minmax(0, 1fr));
+	gap: 1.75rem;
+}
+.sl-markdown-content .nc-split > * {
+	margin-top: 0;
+}
+.nc-split h2 {
+	margin-top: 0;
+}
+.nc-split .nc-grid {
+	grid-template-columns: minmax(0, 1fr);
+}
+@media (max-width: 720px) {
+	.nc-tasks,
+	.nc-split {
+		grid-template-columns: minmax(0, 1fr);
+	}
+}
+
+/* ---------- Page pieces (design 10.2 to 10.6) ---------- */
+
+/* "Before you start": a list with a tick in the section colour. */
+.nc-ticks ul {
+	list-style: none;
+	padding: 0;
+}
+.nc-ticks li {
+	position: relative;
+	padding-left: 1.75rem;
+}
+.nc-ticks li::before {
+	content: '';
+	position: absolute;
+	left: 0;
+	top: 0.3em;
+	width: 1.05rem;
+	height: 1.05rem;
+	background: var(--sc, var(--nc-accent));
+	-webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center / contain no-repeat;
+	mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12.5l4.5 4.5L19 7.5'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* The "Next:" line at the end of a page. */
+.sl-markdown-content .nc-nextline {
+	margin-top: 2rem;
+	padding-top: 1rem;
+	border-top: 1px solid var(--nc-line);
+	color: var(--nc-muted);
+	font-size: 0.9375rem;
+}
+
+/* A plain list of links (LinkList): the link-group rows without a heading. */
+.nc-linklist {
+	max-width: 520px;
+	padding: 0.25rem 1.125rem;
+}
+.nc-linklist ul {
+	border-top: 0;
+	margin: 0;
+}
+
+/* A badge beside a heading (the Status page's section groups). */
+.sl-markdown-content h2 .nc-badge,
+.sl-markdown-content h3 .nc-badge {
+	margin-left: 0.5rem;
+	vertical-align: 0.2em;
+}

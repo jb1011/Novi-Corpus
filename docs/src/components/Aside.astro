@@ -1,0 +1,35 @@
+---
+// Custom callouts (design 4.4), beside Starlight's :::note and :::caution.
+//   law      the plain point first, the section number small at the end
+//   agent    "If you are an agent"
+//   example  a worked example
+//   dev      "For developers": one per plain page, at the end (the claims check skips it)
+//   notsay   "What this does not say" (the check page)
+//
+//   <Aside variant="law">A DAO LLC is a Wyoming company ... <small>W.S. 17-31-104</small></Aside>
+import Icon from './Icon.astro';
+import type { ICONS } from './icons.mjs';
+
+const VARIANTS = {
+	law: { title: 'The law', icon: 'scales' },
+	agent: { title: 'If you are an agent', icon: 'bot' },
+	example: { title: 'Example', icon: 'quote' },
+	dev: { title: 'For developers', icon: 'code' },
+	notsay: { title: 'What this does not say', icon: 'info' },
+} satisfies Record<string, { title: string; icon: keyof typeof ICONS }>;
+
+interface Props {
+	variant: keyof typeof VARIANTS;
+	title?: string;
+}
+
+const { variant } = Astro.props;
+const v = VARIANTS[variant];
+if (!v) throw new Error(`Aside.astro: unknown variant "${variant}"`);
+const title = Astro.props.title ?? v.title;
+---
+
+<aside class="nc-aside" data-variant={variant} aria-label={title}>
+	<p class="nc-aside-title"><Icon name={v.icon} size={18} /><span>{title}</span></p>
+	<div class="nc-aside-content"><slot /></div>
+</aside>

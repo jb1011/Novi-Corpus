@@ -185,6 +185,7 @@ async function mintAnchoredEntity(): Promise<{ key: string; v1Hash: Hex; rec: En
     businessPurpose: "purpose",
     industryLabel: "Software development",
     intakeSynthesized: true,
+    purposeKind: "agent",
   });
   const rec = formedEntity({
     idempotencyKey: key,

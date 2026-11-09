@@ -139,9 +139,9 @@ async function me(app: ReturnType<typeof makeApp>, tenantId: Address = TENANT): 
   return res.json();
 }
 
-/** The answer without `realHuman`. */
-function withoutRealHuman(answer: Json): Json {
-  const { realHuman: _realHuman, ...rest } = answer;
+/** The answer without `realHuman` and `identity`, the two keys a mounted door adds. */
+function withoutDoorKeys(answer: Json): Json {
+  const { realHuman: _realHuman, identity: _identity, ...rest } = answer;
   return rest;
 }
 
@@ -209,12 +209,13 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
 );
 
 describe("GET /world-id/me with neither legal-body door mounted", () => {
-  test("the answer carries no realHuman and is the answer it always was", async () => {
+  test("the answer carries no realHuman and no identity and is the answer it always was", async () => {
     const w = world({ maxEntitiesPerHuman: 3 });
     const app = makeApp(w);
 
     const unverified = await me(app);
     expect(unverified).not.toHaveProperty("realHuman");
+    expect(unverified).not.toHaveProperty("identity");
     expect(unverified).toEqual({
       verified: false,
       required: w.requireGuardian,
@@ -237,7 +238,7 @@ describe("GET /world-id/me with neither legal-body door mounted", () => {
     });
   });
 
-  test("mounting a door adds realHuman and changes no other key", async () => {
+  test("mounting a door adds realHuman and identity and changes no other key", async () => {
     const w = world({ maxEntitiesPerHuman: 3 });
     const NO_ROW = getAddress("0x00000000000000000000000000000000000000d1");
     const WAIVED = getAddress("0x00000000000000000000000000000000000000d2");
@@ -257,7 +258,8 @@ describe("GET /world-id/me with neither legal-body door mounted", () => {
         const after = await me(makeApp(w, doors), tenantId);
         const label = `${tenantId} ${JSON.stringify(doors)}`;
         expect(typeof after.realHuman, label).toBe("boolean");
-        expect(withoutRealHuman(after), label).toEqual(before);
+        expect(typeof after.identity?.state, label).toBe("string");
+        expect(withoutDoorKeys(after), label).toEqual(before);
       }
     }
   });

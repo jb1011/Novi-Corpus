@@ -56,6 +56,7 @@ import { newChainHeadCache } from "../formation/payment";
 import { formationSummary } from "../formation/status";
 import { foundingFromEnv, foundingLimiter } from "../founding/config";
 import { HederaMirror } from "../hedera/mirror";
+import type { IdentityDeps } from "../identity/state";
 import { buildJobDeps } from "../jobs/composition";
 import { expireStaleCustomerCompanies } from "../legalBody/customerCompany";
 import { expireEvidenceBytes } from "../legalBody/evidence";
@@ -67,6 +68,7 @@ import {
   LegalBodySweeper,
 } from "../legalBody/sweeper";
 import { STATEMENT_OF_AUTHORITY } from "../legalBody/texts/statementOfAuthority";
+import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { opsLog } from "../observability/opsLog";
 import { AGENT_BOOK_CAIP2, createAgentBookReader } from "../payments/agentBookReader";
 import { buildEntityPaymentService } from "../payments/entityPayment";
@@ -93,8 +95,10 @@ import { SqliteEntityRepository } from "../persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
+import { SqliteIdentityRepository } from "../persistence/identityRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
+import { SqliteLegalBodyTreasuryRepository } from "../persistence/legalBodyTreasuryRepository";
 import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
 import { SqliteOaAnchorRepository } from "../persistence/oaAnchorRepository";
 import { SqlitePasskeyStore } from "../persistence/passkeyStore";
@@ -109,6 +113,8 @@ import { SqliteWorldStore } from "../persistence/worldStore";
 import { SqlitePilotCaseRepository } from "../pilot/casesRepository";
 import { pilotExplorerBase, pilotLookupBase } from "../pilot/views";
 import { usdToUnits } from "../policy/units";
+import { buildScheduledJobs } from "../scheduler/jobs";
+import { Scheduler } from "../scheduler/scheduler";
 import { externalRecordDeps } from "../trackRecord/sources";
 import type { Address } from "../types";
 import { TaskTracker } from "../util/taskTracker";
@@ -437,6 +443,19 @@ async function main() {
     console.warn(
       `⚠ Identity attestation step-up ENABLED (action ${worldId.cfg.attestAction}, min age ${worldId.attestMinAge})`,
     );
+  // The guardian identity record: World ID proves one real person; the identity check says who.
+  // Built wherever the PII key is set, since the names of record are encrypted under it. The
+  // testnet box has no PII key, because its doola block is in sandbox and a sandbox block refuses
+  // one (`config/env.ts`): it has no identity record, its `/world-id/me` answers the block with
+  // state `none`, and its doors are sandbox, where the check is skipped.
+  const identity: IdentityDeps | undefined = cfg.pii
+    ? {
+        repo: new SqliteIdentityRepository(db),
+        pii: cfg.pii,
+        reverifyYears: cfg.identity.reverifyYears,
+        blockedCountries: cfg.identity.blockedCountries,
+      }
+    : undefined;
   // A customer company door needs a verified human behind the guardian. On testnet nothing else
   // stops the doors being mounted with no World block, and then every one of them refuses.
   if (cfg.legalBodyFactory && !cfg.world && legalBodyEnvironment(cfg) === "sandbox")
@@ -612,7 +631,13 @@ async function main() {
           companies,
           declarations: companyDeclarations,
           checks: companyChecks,
+          // The steps the attestation reads too: a formed company is eligible once its filing is
+          // confirmed.
+          formationSteps: (companyId: string) => formationRequests.stepsOf(companyId),
           world: worldId,
+          // The guardian identity record built above: on production an order requires a verified
+          // one, as the declared door does; a sandbox never reads it.
+          identity,
           chain: legalBodyChain,
           // The agreements, in the file store every other document is in.
           docStore,
@@ -659,6 +684,17 @@ async function main() {
     : undefined;
 
   /**
+   * THE TREASURY OF RECORD's dependencies, wherever the order doors' are: the record, over the db
+   * handle the legal-body store writes through (a declaration and its event are one transaction of
+   * that store), and the registry a declaration is checked against, read through this process's
+   * `ArcAdapter`: `getAgentWallet` on `cfg.identityRegistry`, the registry the statements read. The
+   * public lookups read the same record for the block they serve beside a statement.
+   */
+  const legalBodyTreasury: LegalBodyTreasuryDeps | undefined = legalBodyOrders
+    ? { repo: new SqliteLegalBodyTreasuryRepository(db), registry: arc }
+    : undefined;
+
+  /**
    * The CUSTOMER COMPANY doors' dependencies (declare an existing Wyoming LLC, abandon it, upload
    * its evidence), built ONCE and only where `customerDoorsEnabled`: the legal-body factory is set
    * and, on a production deployment, the deployment charges, so a body could never read `active`
@@ -682,6 +718,9 @@ async function main() {
           // deployment is worth nothing on another.
           factory: cfg.legalBodyFactory,
           environment: legalBodyEnvironment(cfg),
+          // The guardian identity record built above: on production the doors require a verified
+          // one and write the declarant's name from it; a sandbox never reads it.
+          identity,
           text: STATEMENT_OF_AUTHORITY,
           maxOpenPerTenant: cfg.formation?.byoMaxOpenPerTenant ?? DEFAULT_BYO_MAX_OPEN_PER_TENANT,
           // The switch of the payment config built above: charging, a new company lands `draft`.
@@ -876,6 +915,16 @@ async function main() {
       })
     : undefined;
 
+  /**
+   * THE IN-PROCESS SCHEDULER (src/scheduler): named periodic jobs, run inside this process so the
+   * box needs no cron line. Built only when the deployment registers at least one job; the
+   * identity sweep is registered only where the PII key is set, so the testnet box, which cannot
+   * hold the key, starts none.
+   */
+  const scheduledJobs = buildScheduledJobs(db, cfg);
+  const scheduler = scheduledJobs.length > 0 ? new Scheduler({}) : undefined;
+  for (const job of scheduledJobs) scheduler?.register(job);
+
   const jobDeps = buildJobDeps(cfg, db, repo, docStore, circleApi);
   // Credential-less boot: a deployment with no JOB_CLIENT_PRIVATE_KEY still starts, and jobs are
   // simply unavailable. Said out loud here because there is no jobs enable flag to hang a boot
@@ -1058,7 +1107,12 @@ async function main() {
           companies,
           checks: companyChecks,
           declarations: companyDeclarations,
+          // The order doors' reader: whether the State filed a company Novi formed, and its EIN.
+          formationSteps: (companyId: string) => formationRequests.stepsOf(companyId),
           world: worldId,
+          // The guardian identity record built above: on production the lookup by agent states,
+          // unsigned, whether it is verified; a sandbox never reads it.
+          identity,
           chain: legalBodyChain,
           // The order doors' deployment: this chain id and the factory the chain reads.
           deployment: { chainId: cfg.chainId, factory: legalBodyChain.factory },
@@ -1147,6 +1201,8 @@ async function main() {
             // The submitter. Present only where the box CHARGES, so a deployment that has
             // stopped can still read its payments while having no settle path wired at all.
             paymentExecutor: formationPayment.required ? formationExecutor : undefined,
+            // What the formed door's waiting screen says a filing usually takes.
+            filingWorkingDays: formationCfg.filingWorkingDays,
           }
         : undefined,
     // The view dependencies, as ONE object shared with the MCP surface below (C8).
@@ -1159,6 +1215,8 @@ async function main() {
     legalBodyGasSeed,
     // The public statement, where the feature is on and the attestation key is set.
     legalBodyStatements,
+    // The treasury of record: its door beside the order doors, its record read by the lookups.
+    legalBodyTreasury,
     // The inbound receiver (design §6). Present only with credentials: a box that cannot verify a
     // signature has no business owning the URL.
     doola:
@@ -1210,6 +1268,7 @@ async function main() {
     x402Demo,
     ens,
     worldId,
+    identity,
     agentBook,
     /**
      * The public legal-body lookup, `GET /legal-bodies/:address` (design 2026-09-10 D3).
@@ -1284,6 +1343,14 @@ async function main() {
     legalBodySweeper.start();
     console.log(`Legal-body sweeper started (every ${legalBodySweepMs}ms)`);
   }
+  // The scheduler after them: each job's first run starts 30 seconds after this, never on the
+  // boot path.
+  if (scheduler) {
+    scheduler.start();
+    console.log(
+      `Scheduler started: ${scheduledJobs.map((j) => `${j.name} every ${j.everyMs}ms`).join(", ")}`,
+    );
+  }
 
   // ── Unresolved TREASURY TRANSFERS at boot (gate N2), after the socket for the reason C4 gives.
   //
@@ -1324,7 +1391,10 @@ async function main() {
   if (shouldInstallSignalHandlers())
     installShutdownHandlers({
       sweeper: formationSweeper,
-      sweepers: legalBodySweeper ? [legalBodySweeper] : [],
+      sweepers: [
+        ...(legalBodySweeper ? [legalBodySweeper] : []),
+        ...(scheduler ? [scheduler] : []),
+      ],
       tasks: doolaTasks,
       server,
     });

@@ -43,6 +43,7 @@ import {
 } from "../pilot/composition";
 import { type PilotContext, openPilotContext } from "../pilot/context";
 import {
+  FILING_IN_PROGRESS_SECONDS,
   type FileDisputeDeps,
   type FileOutcome,
   type Preflight,
@@ -69,6 +70,8 @@ import {
 import { formatUnitsUsd } from "../policy/units";
 import { withDeadline } from "../util/deadline";
 import { publicErrorMessage } from "../workflow/publicError";
+import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
+import { registerPilotSettlementCommands } from "./pilotSettlement";
 
 /**
  * THE PILOT'S OPERATOR COMMANDS (Kleros pilot, test data on Arc testnet).
@@ -105,10 +108,6 @@ const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]{0,77})$/;
 const UINT256_MAX = (1n << 256n) - 1n;
 /** At least one whole byte of hex. */
 const WHOLE_BYTES_HEX = /^0x(?:[0-9a-fA-F]{2})+$/;
-
-function refuse(message: string): never {
-  throw new Error(`refusing: ${message}`);
-}
 
 function print(output: Record<string, unknown>): void {
   console.log(JSON.stringify(output, null, 2));
@@ -424,7 +423,6 @@ const MAX_LABEL_BYTES = 64;
 const USDC_DECIMALS = 6;
 const DAY_SECONDS = 86_400;
 const DEFAULT_EXPIRY_DAYS = 7;
-const CASE_ID = /^pc_[0-9a-f]{12}$/;
 /** A USDC amount in decimal: whole units, then at most six fraction digits. */
 const USDC_DECIMAL = /^(0|[1-9][0-9]{0,11})(?:\.([0-9]{1,6}))?$/;
 
@@ -464,18 +462,6 @@ function formatCharacterOf(text: string): string | undefined {
 const FILED_OR_LATER: ReadonlySet<PilotStatus> = new Set(PILOT_FILED_OR_LATER_STATUSES);
 /** The statuses a mode's cap counts: the dispute exists or may exist on Kleros. */
 const FILED: ReadonlySet<PilotStatus> = new Set(PILOT_FILED_STATUSES);
-
-/** A transaction hash: 0x and 64 hex digits. */
-function parseTxHash(option: string, value: string): Hex {
-  if (!/^0x[0-9a-fA-F]{64}$/.test(value))
-    refuse(`${option} must be a transaction hash (0x and 64 hex digits)`);
-  return value.toLowerCase() as Hex;
-}
-
-function parseCaseId(option: string, value: string): string {
-  if (!CASE_ID.test(value)) refuse(`${option} must be a pilot case id (pc_ and 12 hex digits)`);
-  return value;
-}
 
 /** A free text: not blank, at most 4096 bytes, no control character (newline and tab allowed
  *  unless `singleLine`, and CRLF read as a newline). Returns the text with CRLF made LF. */
@@ -920,9 +906,9 @@ function failCase(
       reason,
       next: "nothing was changed: run the same command with --yes to mark the case failed",
     };
-  // A funded job keeps its budget whatever the row says: no pilot command reclaims it.
+  // A funded job keeps its budget whatever the row says, until the expiry refund takes it back.
   const escrow = ESCROWED.has(row.status)
-    ? `${row.jobId === null ? "the job" : `job ${row.jobId}`} still holds the budget in escrow on chain until a claimRefund after its expiry at ${isoOf(row.expiredAt)}`
+    ? `${row.jobId === null ? "the job" : `job ${row.jobId}`} still holds the budget in escrow on chain until pilot:settle --case ${caseId} --claim-refund takes it back after its expiry at ${isoOf(row.expiredAt)}`
     : null;
   // A forced fail leaves a trace: the event says the guard was overridden and what it cost.
   const stated = escrow === null ? reason : `${reason}; ${escrow}`;
@@ -946,6 +932,99 @@ function failCase(
     ...(escrow === null ? {} : { escrow }),
     note: guarded ? `${detail}. ${PILOT_NOTE}` : PILOT_NOTE,
   };
+}
+
+/** A dispute id in decimal, as Kleros numbers it. */
+function parseDisputeId(option: string, value: string): string {
+  if (!CANONICAL_DECIMAL.test(value)) refuse(`${option} must be a dispute id in decimal`);
+  // Id 0 is never a pilot dispute, and an id is a 256-bit number.
+  if (BigInt(value) === 0n || BigInt(value) >= 2n ** 256n)
+    refuse(`${option} must be between 1 and 2^256 - 1`);
+  return value;
+}
+
+const minuteWord = (n: number) => (n === 1 ? "minute" : "minutes");
+
+/**
+ * Records the dispute ids a person read in the Kleros Court interface for a case whose filing
+ * ended in doubt, and moves it from filing or filing_unknown to filed. The evidence may or may not
+ * have reached the dispute, so it is recorded as unknown. The Kleros chain was written when the
+ * case entered filing and is never changed: a row without one never got there and is refused.
+ * The row's mode must be the box's. A filing younger than `FILING_IN_PROGRESS_SECONDS` may still
+ * be landing and is refused. A real Kleros chain gives each dispute id to one case only; the
+ * rehearsal's fake numbers the first dispute of every process 1000, so its rows share ids. An id
+ * the row already holds is kept, and the time it was filed at is written only when it has none.
+ */
+function setIds(
+  ctx: PilotContext,
+  deps: PilotCommandDeps,
+  caseId: string,
+  ids: { core: string; local: string | undefined },
+  by: string,
+  yes: boolean,
+): Record<string, unknown> {
+  return ctx.cases.transaction(() => {
+    const row = findCase(ctx, caseId);
+    if (row.mode !== ctx.cfg.pilot?.mode)
+      refuse(`case ${caseId} is a ${row.mode} case and this stage is ${ctx.cfg.pilot?.mode}`);
+    if (row.status !== "filing" && row.status !== "filing_unknown")
+      refuse(`pilot case ${caseId} is at ${row.status}; ids are set at filing or filing_unknown`);
+    if (row.klerosChain === null)
+      refuse(`pilot case ${caseId} has no Kleros chain, so it was never at filing`);
+    if (row.coreDisputeId !== null && row.coreDisputeId !== ids.core)
+      refuse(`pilot case ${caseId} already holds dispute ${row.coreDisputeId}`);
+    if (ids.local !== undefined && row.localDisputeId !== null && row.localDisputeId !== ids.local)
+      refuse(`pilot case ${caseId} already holds local dispute ${row.localDisputeId}`);
+    if (row.filingStartedAt !== null) {
+      const age = deps.now() - row.filingStartedAt;
+      if (age < FILING_IN_PROGRESS_SECONDS) {
+        const left = Math.ceil((FILING_IN_PROGRESS_SECONDS - age) / 60);
+        const ago = Math.floor(Math.max(age, 0) / 60);
+        refuse(
+          `pilot case ${caseId}'s filing started ${ago} ${minuteWord(ago)} ago and may still be landing; wait ${left} more ${minuteWord(left)}, then read the Court again`,
+        );
+      }
+    }
+    // The rehearsal's fake gives every process's first dispute the same id, so only a real
+    // Kleros chain can tell two cases apart by the id.
+    const holder =
+      row.klerosChain === "fake"
+        ? undefined
+        : ctx.cases
+            .findByDisputeId(row.klerosChain, ids.core)
+            .find((other) => other.caseId !== caseId);
+    if (holder)
+      refuse(
+        `dispute ${ids.core} on ${row.klerosChain} is already held by case ${holder.caseId} (at ${holder.status}); correct that case by hand before recording the id here`,
+      );
+    const detail = `by ${by}`;
+    if (!yes)
+      return {
+        dryRun: true,
+        caseId,
+        from: row.status,
+        to: "filed",
+        klerosChain: row.klerosChain,
+        coreDisputeId: ids.core,
+        localDisputeId: ids.local ?? row.localDisputeId,
+        filingStartedAt:
+          row.filingStartedAt === null ? null : new Date(row.filingStartedAt * 1000).toISOString(),
+        courtUrl: courtUrlOf({ ...row, coreDisputeId: ids.core }),
+        buyerAddress: row.buyerAddress,
+        sellerAddress: row.sellerAddress,
+        detail,
+        next: "nothing was changed: open the Court URL and check that its two alias addresses are this case's buyer and seller, printed here; then run the same command with --yes",
+      };
+    const moved = ctx.cases.advance(caseId, row.status, "filed", {
+      coreDisputeId: ids.core,
+      ...(ids.local === undefined ? {} : { localDisputeId: ids.local }),
+      evidenceStatus: "unknown",
+      ...(row.filedAt === null ? { filedAt: deps.now() } : {}),
+    });
+    if (!moved) refuse(`pilot case ${caseId} moved from ${row.status} while this command ran`);
+    ctx.cases.recordEvent(caseId, "set_ids", "ok", ids.core, detail);
+    return { case: moved, courtUrl: courtUrlOf(moved), note: PILOT_NOTE };
+  });
 }
 
 /** The statuses of a funded job before any dispute: the budget sits in the job's escrow. */
@@ -1324,7 +1403,9 @@ export function registerPilotCommands(
 
   const cases = program
     .command("pilot:case")
-    .description("the pilot's cases (test data): show, list, record a Court view, mark failed");
+    .description(
+      "the pilot's cases (test data): show, list, record a Court view, set the dispute ids, mark failed",
+    );
 
   cases
     .command("show <caseId>")
@@ -1356,6 +1437,27 @@ export function registerPilotCommands(
         opts.by === undefined ? undefined : checkText("--by", opts.by, { singleLine: true });
       await withPilot(open, async (ctx) => print(seenInCourt(ctx, id, by, !!opts.yes)));
     });
+
+  cases
+    .command("set-ids <caseId>")
+    .description(
+      "record the dispute ids read in the Kleros Court for a case whose filing ended in doubt; it moves to filed with the evidence unknown",
+    )
+    .requiredOption("--core <n>", "the core dispute id, in decimal")
+    .option("--local <n>", "the local dispute id, in decimal")
+    .requiredOption("--by <name>", "who read the ids")
+    .option("--yes", "confirm: record the ids")
+    .action(
+      async (caseId: string, opts: { core: string; local?: string; by: string; yes?: boolean }) => {
+        const id = parseCaseId("the case id", caseId);
+        const core = parseDisputeId("--core", opts.core);
+        const local = opts.local === undefined ? undefined : parseDisputeId("--local", opts.local);
+        const by = checkText("--by", opts.by, { singleLine: true });
+        await withPilot(open, async (ctx) =>
+          print(setIds(ctx, deps, id, { core, local }, by, !!opts.yes)),
+        );
+      },
+    );
 
   cases
     .command("fail <caseId>")
@@ -1441,4 +1543,6 @@ export function registerPilotCommands(
           `the Kleros check found ${result.problems.length} problem${result.problems.length === 1 ? "" : "s"}: ${result.problems.join("; ")}`,
         );
     });
+
+  registerPilotSettlementCommands(program, { open });
 }

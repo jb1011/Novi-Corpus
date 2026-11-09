@@ -21,6 +21,10 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
     "This deployment does not take legal-body orders yet: the wording of the operating agreement is not approved for use with a real company.",
   company_not_eligible:
     "This company cannot stand behind a legal body: it must be a company you declared, not abandoned, whose latest check by the operator passed.",
+  // A formed company whose filed name or filing number the agreement cannot print as the row holds
+  // it: refused, never cleaned.
+  company_name_unusable:
+    "The filed company name or filing number cannot be printed in the agreement as it stands: an operator must set it.",
   legal_body_cap:
     "You already hold as many open legal-body orders as you may at once: finish or abandon one before you order another.",
   legal_body_orders:
@@ -87,6 +91,23 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
     "The identity's owner already holds at least the amount of a gas seed, so none is sent: it can pay for its own pointer transaction.",
   gas_seed_unconfirmed:
     "Your gas seed request was recorded, but its transfer could not be confirmed, and it counts as your one seed: check the owner's balance before you write the pointer.",
+  // `POST /companies` with `for: "legal_body"` on a production deployment, until the gates of the
+  // formed door are wired (F-A-2).
+  formed_door_not_offered: "This deployment does not create a company for a legal body yet.",
+  // MCP `create_company` with a `for` argument: the tool creates companies for agents only.
+  create_company_agents_only:
+    "This tool creates companies for agents only: a company to stand behind a legal body is created from the legal-body page of the web app.",
+  // `POST /legal-body-orders/:id/treasury`: a declaration of the treasury of record the door
+  // cannot take as it was sent.
+  treasury_invalid:
+    "A treasury declaration takes a wallet address and a provider, a name only for another provider, and optionally an https link of at most 300 characters and a 32-byte transaction hash.",
+  // …and an address the registry does not show as the agent's wallet when the door reads it.
+  treasury_wallet_mismatch:
+    "The registry does not show this address as the agent's wallet: finish the attach first.",
+  // …and a linked body the operator revoked: its own sentence, which speaks of the body, where
+  // `order_revoked` speaks of linking an order.
+  legal_body_revoked:
+    "This legal body was revoked by the operator: nothing more can be declared on it.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */

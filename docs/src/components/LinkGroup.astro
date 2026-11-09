@@ -1,0 +1,44 @@
+---
+// Link card: a section heading with its icon, then a short list of links (design 4.4).
+// The landing uses three, one per product section.
+//   <LinkGroup section="minimal-novi" links={[{ label: 'Bring your own company', href: '/live/bring-your-own-company/' }]} />
+import Icon from './Icon.astro';
+import { SECTIONS } from '../sections.mjs';
+import type { ICONS } from './icons.mjs';
+
+type SectionId = keyof typeof SECTIONS;
+
+interface Props {
+	section: SectionId;
+	links: { label: string; href: string }[];
+	/** Defaults to the section's label, link and icon. */
+	title?: string;
+	href?: string;
+	icon?: keyof typeof ICONS;
+}
+
+const { section, links } = Astro.props;
+const s = SECTIONS[section];
+const title = Astro.props.title ?? s.label;
+const href = Astro.props.href ?? s.link;
+const icon = Astro.props.icon ?? (s.icon as keyof typeof ICONS);
+---
+
+<div class="nc-linkgroup" data-section={section}>
+	<a class="nc-linkgroup-head" href={href}>
+		<span class="nc-card-tile"><Icon name={icon} /></span>
+		<span>{title}</span>
+	</a>
+	<ul>
+		{
+			links.map((l) => (
+				<li>
+					<a href={l.href}>
+						<span>{l.label}</span>
+						<Icon name="arrow" size={16} />
+					</a>
+				</li>
+			))
+		}
+	</ul>
+</div>

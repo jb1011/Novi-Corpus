@@ -99,6 +99,7 @@ function newCompany(partyId: string, tenantId = TENANT): string {
     businessPurpose: "p",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   parties.bindToCompany(partyId, companyId, tenantId);
   return companyId;
@@ -231,6 +232,7 @@ test("a company with NO bound party is refused rather than answered with somebod
     businessPurpose: "p",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   expect(updateCompanyParty(deps(), TENANT, companyId, CORRECTED)).toEqual({
     error: formationPartyUnavailableMessage(),

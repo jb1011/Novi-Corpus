@@ -148,8 +148,9 @@ export interface UsdcJobNodeOptions {
   /**
    * Accept the first `approve` (or `fund`) and then never produce its receipt — the transaction is
    * on the chain and we cannot read what it did. Withheld ONCE, so a later job still gets answers.
+   * The three settlements (`complete`, `reject`, `claimRefund`) can be held the same way.
    */
-  withholdReceipt?: "approve" | "fund" | "submit";
+  withholdReceipt?: "approve" | "fund" | "submit" | "complete" | "reject" | "claimRefund";
   /**
    * The chain's clock, in SECONDS — what the node answers as the block timestamp and what
    * `claimRefund` measures `expiredAt` against. A function, so a test can warp past an expiry
@@ -393,11 +394,12 @@ export function usdcJobNode(opts: UsdcJobNodeOptions) {
       if (opts.revertComplete) return { call: "complete", from, status: "reverted" };
       const [jobId] = decoded.args as [bigint, Hex, Hex];
       const j = jobOf(jobId);
-      if (j) {
-        j.status = 3; // Completed
-        escrow.set(j.id.toString(), (escrow.get(j.id.toString()) ?? 0n) - j.budget);
-        credit(j.provider, j.budget);
-      }
+      // The contract's rule: only the job's evaluator completes it, and only once Submitted.
+      if (!j || j.status !== 2 || from.toLowerCase() !== j.evaluator.toLowerCase())
+        return { call: "complete", from, status: "reverted" };
+      j.status = 3; // Completed
+      escrow.set(j.id.toString(), (escrow.get(j.id.toString()) ?? 0n) - j.budget);
+      credit(j.provider, j.budget);
       return { call: "complete", from, status: "success" };
     }
     if (opts.runSubmit && decoded?.functionName === "submit") {

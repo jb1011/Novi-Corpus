@@ -325,7 +325,10 @@ function deploy(opts: { charging?: boolean; gasSeedUsdc?: string } = {}): Deploy
     companies,
     declarations,
     checks,
+    formationSteps: (companyId) => requests.stepsOf(companyId),
     world,
+    // A sandbox: the guardian identity record is never read, and the testnet box holds none.
+    identity: undefined,
     chain: lb,
     docStore,
     deployment,

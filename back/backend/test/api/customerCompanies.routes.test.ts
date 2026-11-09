@@ -6,10 +6,10 @@
  * body of at most 8 KiB. Asking for the statement runs the human, wording, synthetic and field
  * checks before anything is rendered, and writes nothing.
  *
- * The view of a customer's company carries three keys more than a formation company's: `provider`,
- * `declared` (what was declared, without the declarant) and `verification` (the operator's latest
- * verdict). A formation company's view keeps exactly the keys it has always had, and the two
- * surfaces, REST and MCP, render the same body.
+ * Every company view says what the company is for (`purpose`), where it came from (`provider`) and
+ * its DAO supplement (`daoSupplement`). The view of a customer's company carries two keys more than
+ * a formation company's: `declared` (what was declared, without the declarant) and `verification`
+ * (the operator's latest verdict). The two surfaces, REST and MCP, render the same body.
  *
  * Every name, company and filing number here is an invention, and the keys are anvil's published
  * test accounts.
@@ -44,6 +44,7 @@ import {
   ANVIL_ACCOUNT_4,
   APPROVED,
   CHAIN_ID,
+  DECLARANT_OF_RECORD,
   FACTORY,
   FORMATION_PROVIDER,
   SANDBOX_TYPED,
@@ -68,9 +69,9 @@ const STATEMENT_MESSAGE = "/companies/customer/statement-message";
 const CREATE = "/companies/customer";
 const abandonPath = (companyId: string) => `/companies/${companyId}/abandon`;
 
-/** A declaration as a production caller types it. */
+/** A declaration as a production caller types it: the declarant's title, never the name, which the
+ *  door writes from the guardian's identity record. */
 const TYPED = {
-  declarantName: "Ada Example",
   declarantTitle: "Authorised Signatory",
   companyName: "Example Holdings LLC",
   filingNumber: "TEST-0001",
@@ -82,12 +83,15 @@ const LIST_KEYS = [
   "businessPurpose",
   "companyId",
   "createdAt",
+  "daoSupplement",
   "environment",
   "filedAt",
   "filingNumber",
   "industryLabel",
   "legalNameFiled",
   "nameOptions",
+  "provider",
+  "purpose",
   "state",
 ];
 /** A formation company's detail view, key for key. */
@@ -105,8 +109,8 @@ const DETAIL_KEYS = [
   "providerRef",
   "requiredActions",
 ].sort();
-/** The three keys a customer's company carries besides. */
-const CUSTOMER_KEYS = ["declared", "provider", "verification"];
+/** The two keys a customer's company carries besides. */
+const CUSTOMER_KEYS = ["declared", "verification"];
 
 let db: Database.Database;
 let repo: SqliteEntityRepository;
@@ -357,7 +361,12 @@ describe("asking for the statement, signing it and creating the company", () => 
     expect(served.wordingVersion).toBe(APPROVED.version);
     expect(served.textStatus).toBe("approved");
     // Exactly what the wallet is asked to sign, written out here on its own.
-    const fields: StatementFields = { ...TYPED, jurisdiction: "WY", guardian: owner.address };
+    const fields: StatementFields = {
+      ...TYPED,
+      declarantName: DECLARANT_OF_RECORD,
+      jurisdiction: "WY",
+      guardian: owner.address,
+    };
     expect(served.typedData).toEqual({
       domain: {
         name: "Novi Corpus Statement of Authority",
@@ -577,6 +586,9 @@ describe("the company view", () => {
     const view = await res.json();
     expect(Object.keys(view).sort()).toEqual([...DETAIL_KEYS, ...CUSTOMER_KEYS].sort());
     expect(view.provider).toBe("customer");
+    // A customer's own company stands behind a legal body, and takes no agents.
+    expect(view.purpose).toBe("legal_body");
+    expect(view.daoSupplement).toBeNull();
     expect(view.declared).toEqual({
       companyName: "Example Holdings LLC",
       filingNumber: "TEST-0001",
@@ -588,10 +600,10 @@ describe("the company view", () => {
       reasonCode: null,
     });
     const printed = JSON.stringify(view);
-    for (const personal of [TYPED.declarantName, TYPED.declarantTitle, "declarant"])
+    for (const personal of [DECLARANT_OF_RECORD, TYPED.declarantTitle, "declarant"])
       expect(printed).not.toContain(personal);
 
-    // The list row carries the same three keys.
+    // The list row carries the same two keys, and the same provider.
     const list = await (await get(app, "/companies", token)).json();
     expect(list.companies).toHaveLength(1);
     expect(Object.keys(list.companies[0]).sort()).toEqual([...LIST_KEYS, ...CUSTOMER_KEYS].sort());
@@ -661,15 +673,64 @@ describe("the company view", () => {
       businessPurpose: "Operating autonomous software agents.",
       industryLabel: "Software development",
       intakeSynthesized: false,
+      purposeKind: "agent",
     });
 
     const view = await (await get(app, `/companies/${companyId}`, token)).json();
     expect(Object.keys(view).sort()).toEqual(DETAIL_KEYS);
+    expect(view).toMatchObject({ purpose: "agent", provider: FORMATION_PROVIDER });
     const list = await (await get(app, "/companies", token)).json();
     expect(Object.keys(list.companies[0]).sort()).toEqual(LIST_KEYS);
   });
 
-  test("the three keys follow the company's provider: facts never add them, and their absence reads as null", async () => {
+  test("a formed legal-body company with its DAO supplement recorded: the same purpose, provider and supplement over REST and MCP", async () => {
+    const app = makeApp(doors());
+    const token = await sessionOf(owner);
+    const companyId = companies.create({
+      tenantId: owner.address,
+      status: "ready",
+      provider: "doola",
+      environment: "sandbox",
+      synthetic: false,
+      nameOptions: [{ name: "Example Robotics", entityTypeEnding: "LLC", position: 1 }],
+      businessPurpose: "Example purpose.",
+      industryLabel: "Software development",
+      intakeSynthesized: false,
+      purposeKind: "legal_body",
+    });
+    // Written as the operator's command records the amended articles: source `operator`.
+    const sha256 = `0x${"5".repeat(64)}`;
+    db.prepare(
+      `INSERT INTO documents (id, company_id, doc_type, sha256, content_type, size,
+                              provider_doc_id, path, source, created_at)
+       VALUES ('dao-1', ?, 'dao_supplement', ?, 'application/pdf', 2048, ?, 'doc-dao-1.pdf',
+               'operator', '2026-11-20 10:00:00')`,
+    ).run(companyId, sha256, `operator:dao_supplement:${sha256}`);
+    const daoSupplement = { recordedAt: Date.UTC(2026, 10, 20, 10) / 1000, sha256 };
+
+    const view = await (await get(app, `/companies/${companyId}`, token)).json();
+    expect(Object.keys(view).sort()).toEqual(DETAIL_KEYS);
+    expect(view).toMatchObject({ purpose: "legal_body", provider: "doola", daoSupplement });
+    const list = await (await get(app, "/companies", token)).json();
+    expect(list.companies[0]).toMatchObject({
+      purpose: "legal_body",
+      provider: "doola",
+      daoSupplement,
+    });
+
+    const { key } = apiKeys.mint(owner.address, { capability: "read" });
+    const { client, close } = await startMcpTestClient(app, key);
+    try {
+      const overMcp = await client.callTool({ name: "get_company", arguments: { companyId } });
+      expect(JSON.parse(textOf(overMcp))).toEqual(view);
+      const listed = await client.callTool({ name: "list_companies", arguments: {} });
+      expect(JSON.parse(textOf(listed))).toEqual(list);
+    } finally {
+      await close();
+    }
+  });
+
+  test("the two customer keys follow the company's provider: facts never add them, and their absence reads as null", async () => {
     const companyId = await declared(makeApp(doors()), await sessionOf(owner));
     const customer = companies.find(companyId)!;
     const formation = { ...customer, provider: FORMATION_PROVIDER };

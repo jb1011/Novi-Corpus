@@ -19,6 +19,7 @@ import { ApiError } from "../../src/api/errors";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
 import { createCompany } from "../../src/formation/company";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -87,12 +88,17 @@ beforeEach(() => {
 afterEach(() => db.close());
 
 function makeApp(
-  formation?: { required?: boolean; syntheticPii?: boolean; maxPerTenant?: number },
+  formation?: {
+    required?: boolean;
+    syntheticPii?: boolean;
+    maxPerTenant?: number;
+    environment?: "sandbox" | "production";
+  },
   custody: { circle?: boolean } = {},
 ) {
   const companies = new SqliteCompanyRepository(db);
   const requests = new SqliteFormationRepository(db);
-  const pin = { provider: "doola" as const, environment: "sandbox" as const };
+  const pin = { provider: "doola" as const, environment: formation?.environment ?? "sandbox" };
   // ONE dependency set for all three doors, exactly as the composition root builds it — only the
   // transaction differs per call site.
   const companyDeps = {
@@ -125,7 +131,7 @@ function makeApp(
     turnkeyCustodyAvailable: true,
     formation: formation
       ? {
-          environment: "sandbox" as const,
+          environment: pin.environment,
           required: formation.required ?? true,
           sandboxSyntheticPii: formation.syntheticPii ?? false,
           maxPerTenant: formation.maxPerTenant ?? 3,
@@ -520,12 +526,15 @@ test("POST /companies mints a company through the ONE domain function, and lists
     "businessPurpose",
     "companyId",
     "createdAt",
+    "daoSupplement",
     "environment",
     "filedAt",
     "filingNumber",
     "industryLabel",
     "legalNameFiled",
     "nameOptions",
+    "provider",
+    "purpose",
     "state",
   ]);
   // …and NOT the four the list has no reader for. `state` is the row's status, its live payment
@@ -553,6 +562,62 @@ test("POST /companies mints a company through the ONE domain function, and lists
   const printed = JSON.stringify(list);
   for (const forbidden of ["Ada", "Lovelace", "ada@example.com", "82001"])
     expect(printed).not.toContain(forbidden);
+});
+
+test("POST /companies with `for: legal_body` mints a legal-body company; without it, one for agents", async () => {
+  const app = makeApp({ required: true });
+  const token = await login(app);
+  const companies = new SqliteCompanyRepository(db);
+  const create = async (extra: Record<string, unknown>) => {
+    const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();
+    return post(app, "/companies", token, { partyId, ...COMPANY_INTAKE, ...extra });
+  };
+
+  const lb = await create({ for: "legal_body" });
+  expect(lb.status).toBe(201);
+  const { companyId: lbId } = await lb.json();
+  expect(companies.find(lbId)!.purposeKind).toBe("legal_body");
+
+  const agent = await create({ names: ["Beta Works", "Beta Systems", "Beta Foundry"] });
+  expect(agent.status).toBe(201);
+  const { companyId: agentId } = await agent.json();
+  expect(companies.find(agentId)!.purposeKind).toBe("agent");
+
+  // `legal_body` is the one value: "agent" is said by leaving the field out.
+  for (const value of ["agent", "LEGAL_BODY", true]) {
+    const res = await create({
+      names: ["Gamma Works", "Gamma Systems", "Gamma Foundry"],
+      for: value,
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()).error.message).toMatch(/^for: /);
+  }
+  expect(companies.listByTenant(account.address)).toHaveLength(2);
+});
+
+test("PRODUCTION: POST /companies with `for: legal_body` is refused, 403 formed_door_not_offered, and nothing is written", async () => {
+  const app = makeApp({ required: true, environment: "production" });
+  const token = await login(app);
+  const companies = new SqliteCompanyRepository(db);
+  const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();
+
+  const res = await post(app, "/companies", token, {
+    partyId,
+    ...COMPANY_INTAKE,
+    for: "legal_body",
+  });
+  expect(res.status).toBe(403);
+  expect((await res.json()).error).toMatchObject({
+    code: "formed_door_not_offered",
+    message: LEGAL_BODY_SENTENCES.formed_door_not_offered,
+  });
+  expect(companies.listByTenant(account.address)).toHaveLength(0);
+  expect(parties.findOwned(account.address, partyId)!.companyId).toBeNull();
+
+  // Without `for`, the same production deployment creates a company for agents as before.
+  const agent = await post(app, "/companies", token, { partyId, ...COMPANY_INTAKE });
+  expect(agent.status).toBe(201);
+  expect(companies.find((await agent.json()).companyId)!.purposeKind).toBe("agent");
 });
 
 test("POST /companies requires a session and the FULL intake, naming what is missing", async () => {

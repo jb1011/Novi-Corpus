@@ -1,0 +1,23 @@
+---
+// Footer: Starlight's footer (pagination), then the page foot line of design 4.4:
+// "Last reviewed on ... · Report an error", and "Not legal advice" on the landing,
+// the legal texts and the policies (design 2.5 rule 15).
+import Default from '@astrojs/starlight/components/Footer.astro';
+import { DOCS_SOURCE, SITE_LINKS } from '../../site.mjs';
+import { formatDate } from '../../format.mjs';
+
+const { entry, id } = Astro.locals.starlightRoute;
+const data = entry.data as { title: string; reviewed?: Date };
+const legal = id === '' || id === 'index' || id === 'live/legal-texts' || id.startsWith('policies/');
+const report = `${SITE_LINKS.issues}?${new URLSearchParams({
+	title: `Docs: ${data.title}`,
+	body: `Page: ${Astro.url.pathname}\nSource: ${DOCS_SOURCE}/${entry.filePath?.replace(/^src\/content\/docs\//, '') ?? ''}\n\nWhat is wrong:\n`,
+})}`;
+---
+
+<Default />
+<div class="nc-pagefoot">
+	{data.reviewed && <span>Last reviewed on {formatDate(data.reviewed)}</span>}
+	{legal && <span>Not legal advice. Novi Corpus is not a law firm.</span>}
+	<a href={report}>Report an error</a>
+</div>

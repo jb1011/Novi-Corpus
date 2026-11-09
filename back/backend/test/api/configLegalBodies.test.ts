@@ -207,15 +207,20 @@ describe("/config.legalBodies", () => {
       factory: ORDERS_FACTORY,
       gasSeedOffered: false,
       paymentRequired: false,
+      identityRequired: false,
+      // No doola on this deployment: no formed door, and the waiting screen's default.
+      formedDoor: "hidden",
+      filingWorkingDays: 5,
       linkTtl: { min: 600, max: 85_800, default: 3_600 },
     });
   });
 
-  test("the environment is the order deps' own", async () => {
+  test("the environment is the order deps' own, and production requires the identity check", async () => {
     const { body } = await configOf({
       legalBodyOrders: orderDeps({ environment: "production" }),
     });
     expect(body.legalBodies.environment).toBe("production");
+    expect(body.legalBodies.identityRequired).toBe(true);
   });
 
   test("with customer doors that charge: declarations and paymentRequired", async () => {
@@ -260,7 +265,7 @@ describe("/config.legalBodies", () => {
     );
   });
 
-  test("the offered answer has exactly the ten keys of its type, and the link window exactly three", async () => {
+  test("the offered answer has exactly the thirteen keys of its type, and the link window exactly three", async () => {
     const orders = orderDeps();
     const { body } = await configOf({
       legalBodyOrders: orders,
@@ -280,10 +285,13 @@ describe("/config.legalBodies", () => {
         factory: true,
         gasSeedOffered: true,
         paymentRequired: true,
+        identityRequired: true,
+        formedDoor: true,
+        filingWorkingDays: true,
         linkTtl: true,
       }),
     );
-    expect(keys).toHaveLength(10);
+    expect(keys).toHaveLength(13);
     expect(Object.keys(body.legalBodies.linkTtl).sort()).toEqual(
       keysOf<OfferedConfig["linkTtl"]>({ min: true, max: true, default: true }),
     );
@@ -382,8 +390,11 @@ describe("each named answer carries exactly the keys of its type", () => {
       chain = new FakeStatementChain();
     });
 
-    const byAgent = async (agentId: string) => {
-      const app = makeApp({ legalBodyStatements: statementDeps(s, chain), now: () => CLOCK_MS });
+    const byAgent = async (agentId: string, over: Partial<LegalBodyStatementDeps> = {}) => {
+      const app = makeApp({
+        legalBodyStatements: statementDeps(s, chain, over),
+        now: () => CLOCK_MS,
+      });
       const res = await answerOf(await app.request(`/legal-bodies/by-agent/${agentId}`, {}));
       expect(res.status).toBe(200);
       return res.body;
@@ -426,26 +437,33 @@ describe("each named answer carries exactly the keys of its type", () => {
           links: true,
           checkedAt: true,
           statement: true,
+          treasury: true,
         }),
       );
     });
 
-    test("a signed statement", async () => {
+    test("a signed statement: every key on production; on a sandbox all but the unsigned guardianIdentityVerified", async () => {
       linkedBody();
-      const body = await byAgent("42");
-      expect(body.statement).not.toBeNull();
-      expect(Object.keys(body).sort()).toEqual(
-        keysOf<Extract<ByAgentAnswer, { publicId: string }>>({
-          agentId: true,
-          legalBody: true,
-          standing: true,
-          publicId: true,
-          network: true,
-          links: true,
-          checkedAt: true,
-          statement: true,
-        }),
+      const every = keysOf<Extract<ByAgentAnswer, { publicId: string }>>({
+        agentId: true,
+        legalBody: true,
+        standing: true,
+        publicId: true,
+        network: true,
+        links: true,
+        checkedAt: true,
+        guardianIdentityVerified: true,
+        statement: true,
+        treasury: true,
+      });
+      const sandbox = await byAgent("42");
+      expect(sandbox.statement).not.toBeNull();
+      expect(Object.keys(sandbox).sort()).toEqual(
+        every.filter((key) => key !== "guardianIdentityVerified"),
       );
+      const production = await byAgent("42", { environment: "production" });
+      expect(production.statement).not.toBeNull();
+      expect(Object.keys(production).sort()).toEqual(every);
     });
   });
 });

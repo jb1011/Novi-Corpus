@@ -44,6 +44,13 @@ export interface FakeDisputeServiceOptions {
   now?: () => number;
   /** The preset's alias slot keys; default the pilot preset's `client` and `provider`. */
   aliasSlots?: readonly string[];
+  /**
+   * Default false: a read of an id this instance never created throws, as the real client does
+   * for an empty `items`. When true, such a read opens the case at Evidence as of that read and
+   * walks the script from there, so a rehearsal can read, from a fresh process, a dispute that
+   * another process's fake filed.
+   */
+  answerUnknownDisputes?: boolean;
 }
 
 type Period = DisputeRead["status"];
@@ -68,6 +75,10 @@ const SCRIPTS: Readonly<Record<FakeScript, true>> = {
   "insufficient-balance": true,
   simulated: true,
 };
+/** Every script name, for a command line that takes one. */
+export const FAKE_SCRIPTS: readonly FakeScript[] = Object.freeze(
+  Object.keys(SCRIPTS) as FakeScript[],
+);
 const TOOLS: readonly string[] = [
   "dispute_create",
   "evidence_pin",
@@ -147,6 +158,7 @@ export class FakeDisputeService implements KlerosDisputeService {
   readonly #court: Partial<CourtClock>;
   readonly #now: () => number;
   readonly #slots: readonly string[];
+  readonly #answerUnknown: boolean;
   readonly #cases = new Map<string, FakeCase>();
   #nextId: number;
   #writes = 0;
@@ -172,6 +184,7 @@ export class FakeDisputeService implements KlerosDisputeService {
     this.#court = o.court ?? {};
     this.#now = o.now ?? Date.now;
     this.#slots = o.aliasSlots ?? ["client", "provider"];
+    this.#answerUnknown = o.answerUnknownDisputes ?? false;
   }
 
   async listTools(): Promise<string[]> {
@@ -315,7 +328,11 @@ export class FakeDisputeService implements KlerosDisputeService {
    */
   async getDispute(p: { chain: KlerosReadChain; coreDisputeId: string }): Promise<DisputeRead> {
     const at = this.#record("dispute_get", p);
-    const c = this.#cases.get(p.coreDisputeId);
+    let c = this.#cases.get(p.coreDisputeId);
+    if (c === undefined && this.#answerUnknown) {
+      c = { reads: 0, status: "Evidence", since: at };
+      this.#cases.set(p.coreDisputeId, c);
+    }
     if (c === undefined) {
       throw new KlerosTransportError(`Kleros dispute_get: dispute not found on ${p.chain}`);
     }

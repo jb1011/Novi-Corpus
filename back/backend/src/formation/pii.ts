@@ -1,4 +1,11 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createHmac,
+  hkdfSync,
+  randomBytes,
+} from "node:crypto";
 import { inspect } from "node:util";
 
 /**
@@ -186,13 +193,7 @@ export function encryptSsn(
   ssn: string,
   bind: { partyId: string; companyId: string },
 ): EncryptedSsn {
-  const iv = randomBytes(IV_BYTES);
-  const cipher = createCipheriv("aes-256-gcm", keyring.current.key, iv);
-  cipher.setAAD(aad(bind.partyId, bind.companyId));
-  const body = Buffer.concat([cipher.update(ssn, "utf8"), cipher.final()]);
-  // Tag APPENDED, so the row keeps three columns rather than four and a partial write cannot
-  // separate a ciphertext from the tag that authenticates it.
-  return { ciphertext: Buffer.concat([body, cipher.getAuthTag()]), iv, keyId: keyring.current.id };
+  return seal(keyring, ssn, aad(bind.partyId, bind.companyId));
 }
 
 /**
@@ -215,21 +216,113 @@ export function decryptSsn(
   stored: EncryptedSsn,
   bind: { partyId: string; companyId: string },
 ): Secret {
+  return toSecret(open(keyring, stored, aad(bind.partyId, bind.companyId), "SSN"));
+}
+
+// ── the cipher, shared by the SSN and by every other encrypted text field ──────────────────
+
+/**
+ * AES-256-GCM under `keyring.current`, a fresh IV, the AAD bound, and the tag APPENDED, so a row
+ * keeps three columns rather than four and a partial write cannot separate a ciphertext from the
+ * tag that authenticates it.
+ */
+function seal(keyring: PiiKeyring, plaintext: string, aadBytes: Buffer): EncryptedText {
+  const iv = randomBytes(IV_BYTES);
+  const cipher = createCipheriv("aes-256-gcm", keyring.current.key, iv);
+  cipher.setAAD(aadBytes);
+  const body = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  return { ciphertext: Buffer.concat([body, cipher.getAuthTag()]), iv, keyId: keyring.current.id };
+}
+
+/**
+ * The reverse of `seal`, SELECTING the key by the stored id (never a trial decrypt). Throws on any
+ * failure; `what` names the field in the message, which never holds plaintext, ciphertext or key
+ * material.
+ */
+function open(keyring: PiiKeyring, stored: EncryptedText, aadBytes: Buffer, what: string): string {
   const key = selectKey(keyring, stored.keyId);
   if (!key)
     throw new Error(
       `no PII key with id ${stored.keyId} is configured on this deployment (FORMATION_PII_KEY / FORMATION_PII_KEY_PREVIOUS)`,
     );
-  if (stored.iv.length !== IV_BYTES) throw new Error("stored SSN has a malformed IV");
-  if (stored.ciphertext.length < TAG_BYTES) throw new Error("stored SSN is truncated");
+  if (stored.iv.length !== IV_BYTES) throw new Error(`stored ${what} has a malformed IV`);
+  if (stored.ciphertext.length < TAG_BYTES) throw new Error(`stored ${what} is truncated`);
   const body = stored.ciphertext.subarray(0, stored.ciphertext.length - TAG_BYTES);
   const tag = stored.ciphertext.subarray(stored.ciphertext.length - TAG_BYTES);
   const decipher = createDecipheriv("aes-256-gcm", key.key, stored.iv);
-  decipher.setAAD(aad(bind.partyId, bind.companyId));
+  decipher.setAAD(aadBytes);
   decipher.setAuthTag(tag);
   // `final()` is what verifies the tag; a wrong key, a moved row or a tampered blob all throw
   // here rather than returning bytes.
-  return toSecret(Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8"));
+  return Buffer.concat([decipher.update(body), decipher.final()]).toString("utf8");
+}
+
+// ── encrypted text fields: the guardian identity record's names ────────────────────────────
+
+/** What a row stores for one encrypted text field. */
+export interface EncryptedText {
+  ciphertext: Buffer;
+  iv: Buffer;
+  keyId: string;
+}
+
+/**
+ * ENCRYPT one text field under the current key, bound to `aad`. The caller names the AAD (for the
+ * identity record, `IDENTITY_AAD(tenantId, field)`), so a ciphertext moved to another row or
+ * another field fails to decrypt.
+ */
+export function encryptText(keyring: PiiKeyring, plaintext: string, aad: string): EncryptedText {
+  return seal(keyring, plaintext, Buffer.from(aad, "utf8"));
+}
+
+/** Decrypt one text field, selecting the key by `enc.keyId` (current or previous). Throws on any
+ *  failure, as `decryptSsn` does. */
+export function decryptText(keyring: PiiKeyring, enc: EncryptedText, aad: string): string {
+  return open(keyring, enc, Buffer.from(aad, "utf8"), "text");
+}
+
+/** The HKDF info string for the name HMAC key. Bump the version if the input form ever changes. */
+const NAME_HMAC_INFO = "novi:identity:name-hmac:v1";
+/** HMAC-SHA256's natural key length, and the fingerprint secret's. */
+const NAME_HMAC_KEY_BYTES = 32;
+/** The fingerprint secret as the env holds it: 32 bytes written as 64 hex characters. */
+const NAME_HMAC_KEY_HEX = /^[0-9a-fA-F]{64}$/;
+
+/**
+ * Parse `IDENTITY_NAME_HMAC_KEY`, the name fingerprint's own secret: exactly 32 bytes written as 64
+ * hex characters, and nothing else (one form, so a key cannot be read two ways). Throws with the
+ * variable named; the message never holds the value.
+ */
+export function parseNameHmacKey(raw: string, varName: string): Buffer {
+  const trimmed = raw.trim();
+  if (!NAME_HMAC_KEY_HEX.test(trimmed))
+    throw new Error(
+      `Invalid config: ${varName} must be ${NAME_HMAC_KEY_BYTES} bytes written as ${2 * NAME_HMAC_KEY_BYTES} hex characters (generate one with: openssl rand -hex ${NAME_HMAC_KEY_BYTES})`,
+    );
+  return Buffer.from(trimmed, "hex");
+}
+
+/** One name, in the form the HMAC reads: lower case, NFKC, whitespace collapsed. */
+function hmacForm(name: string): string {
+  return name.toLowerCase().normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The name's fingerprint, so two identity records for the same person can be found without
+ * decrypting either: HMAC-SHA256, hex, over the lower-cased NFKC first and last names joined by a
+ * newline. It is the digest a row stores and the one the duplicate lookup compares.
+ *
+ * Keyed by HKDF-SHA256 of the fingerprint's own secret (`IDENTITY_NAME_HMAC_KEY`), which never
+ * rotates; the PII key takes no part in it. So a name has one digest for the life of the record,
+ * and a rotation of `FORMATION_PII_KEY` changes no fingerprint and hides no duplicate.
+ */
+export function nameHmac(secret: Buffer, first: string, last: string): string {
+  const key = Buffer.from(
+    hkdfSync("sha256", secret, Buffer.alloc(0), NAME_HMAC_INFO, NAME_HMAC_KEY_BYTES),
+  );
+  return createHmac("sha256", key)
+    .update(`${hmacForm(first)}\n${hmacForm(last)}`, "utf8")
+    .digest("hex");
 }
 
 /**

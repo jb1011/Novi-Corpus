@@ -256,6 +256,10 @@ deletes it in the transaction that records the doola company id. This is the key
 deployment refuses to start WITH it — a sandbox box refuses the SSN field outright, so a key there
 is at best dead weight and at worst a production key pasted into the wrong `.env`.
 
+The guardian identity record seals names under this key too, and a box with it also needs
+`IDENTITY_NAME_HMAC_KEY` (`openssl rand -hex 32`), the record's name fingerprint secret, or it
+refuses to boot. That key never rotates: see `docs/runbooks/guardian-identity.md`, section 6.
+
 ### Generating one
 
 ```
@@ -280,8 +284,9 @@ names the key it was written with, so the previous key is *selected* for the row
    one. In practice the window is short: an SSN's whole life is from the create-company request to
    the moment doola returns a company id, and any that outlive 7 days without a filing are erased
    by the sweeper;
-4. once `SELECT COUNT(*) FROM formation_parties WHERE ssn_key_id = '<old id>'` is zero, drop
-   `FORMATION_PII_KEY_PREVIOUS` and restart again. Two distinct key ids in the ops trail is how
+4. once `SELECT COUNT(*) FROM formation_parties WHERE ssn_key_id = '<old id>'` is zero, and the
+   identity records sealed under the old key no longer need it (`guardian-identity.md`, section 6),
+   drop `FORMATION_PII_KEY_PREVIOUS` and restart again. Two distinct key ids in the ops trail is how
    you can see the rotation actually happening.
 
 ### If the key is LOST

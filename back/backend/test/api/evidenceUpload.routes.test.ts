@@ -130,6 +130,7 @@ function customerCompany(companyId: string, tenantId: Address = owner): string {
     businessPurpose: "not applicable: an existing company",
     industryLabel: "not applicable: an existing company",
     intakeSynthesized: false,
+    purposeKind: "legal_body",
   });
 }
 
@@ -146,6 +147,7 @@ function formationCompany(companyId: string, tenantId: Address = owner): string 
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 

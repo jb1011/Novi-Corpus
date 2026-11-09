@@ -296,7 +296,10 @@ function deploy(opts: DeployOptions = {}): Deployment {
     companies,
     declarations,
     checks,
+    formationSteps: (companyId) => requests.stepsOf(companyId),
     world,
+    // A sandbox: the guardian identity record is never read, and the testnet box holds none.
+    identity: undefined,
     chain,
     docStore,
     deployment,
@@ -350,7 +353,10 @@ function deploy(opts: DeployOptions = {}): Deployment {
     companies,
     checks,
     declarations,
+    formationSteps: (companyId) => requests.stepsOf(companyId),
     world,
+    // A sandbox: the guardian identity record is never read, and the testnet box holds none.
+    identity: undefined,
     chain,
     deployment,
     identityRegistry: stack.registry,
@@ -964,6 +970,9 @@ test("a node that answers 429: unknown, unsigned and not stored, with no memo en
     links: { transparency: TRANSPARENCY },
     checkedAt: expect.any(String),
     statement: null,
+    // The unsigned treasury block sits beside the statement on every answer that has one; with
+    // no statement it is null.
+    treasury: null,
   });
   expect(logRows()).toBe(0);
   expect(opsLines("legal_body_statement_unavailable")).toEqual([

@@ -69,9 +69,9 @@ const second = ANVIL_ACCOUNT_3;
 /** Two sandbox declarations, each with its own test number. */
 const SANDBOX_A: CustomerStatementInput = { ...SANDBOX_TYPED, filingNumber: "TEST-0101" };
 const SANDBOX_C: CustomerStatementInput = { ...SANDBOX_TYPED, filingNumber: "TEST-0303" };
-/** A declaration as a production caller sends it: its declarant typed, and no synthetic flag. */
+/** A declaration as a production caller sends it: its declarant's title typed, the name left to
+ *  the identity record, and no synthetic flag. */
 const PRODUCTION_TYPED: CustomerStatementInput = {
-  declarantName: "Ada Example",
   declarantTitle: "Manager",
   companyName: "Example Holdings LLC",
   filingNumber: "TEST-0202",
@@ -177,6 +177,7 @@ function sandboxFormationCompany(): string {
     businessPurpose: "Operating autonomous software agents.",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
 }
 
@@ -578,6 +579,7 @@ describe("company:reinstate on a sandbox deployment", () => {
       WORLD_REQUIRE_GUARDIAN: "true",
       WORLD_MAX_COMPANIES_PER_HUMAN: "3",
       FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+      IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
     });
 
     const dry = await run<NotRecorded>(

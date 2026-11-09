@@ -6,6 +6,7 @@ import { describe, expect, test } from "vitest";
 import {
   WYOMING_TIME_ZONE,
   addDays,
+  calendarDateOfUtcMidnight,
   isCalendarDate,
   wyomingDate,
   yearOf,
@@ -56,6 +57,34 @@ describe("wyomingDate", () => {
 
   test("throws on a time in milliseconds: its year has more than four digits", () => {
     expect(() => wyomingDate(Date.parse("2026-10-07T12:00:00Z"))).toThrow();
+  });
+});
+
+describe("calendarDateOfUtcMidnight", () => {
+  test("reads a stored calendar date back as the date it stores, where Wyoming's clock reads the evening before", () => {
+    // A date the registry or doola reports is stored as the unix seconds of its UTC midnight.
+    expect(calendarDateOfUtcMidnight(seconds("2026-10-01T00:00:00Z"))).toBe("2026-10-01");
+    expect(wyomingDate(seconds("2026-10-01T00:00:00Z"))).toBe("2026-09-30");
+    expect(calendarDateOfUtcMidnight(seconds("2026-01-15T00:00:00Z"))).toBe("2026-01-15");
+    expect(calendarDateOfUtcMidnight(seconds("2028-02-29T00:00:00Z"))).toBe("2028-02-29");
+    expect(calendarDateOfUtcMidnight(seconds("9999-12-31T00:00:00Z"))).toBe("9999-12-31");
+    expect(calendarDateOfUtcMidnight(0)).toBe("1970-01-01");
+  });
+
+  test("null for anything that is not a UTC midnight of the years 1970 to 9999: never a guessed day", () => {
+    for (const bad of [
+      seconds("2026-10-01T00:00:01Z"),
+      seconds("2026-10-01T06:00:00Z"),
+      seconds("2026-09-30T23:59:59Z"),
+      seconds("+010000-01-01T00:00:00Z"),
+      -86_400,
+      1.5,
+      Number.NaN,
+      Number.POSITIVE_INFINITY,
+      Number.MAX_SAFE_INTEGER + 1,
+      Date.parse("2026-10-01T00:00:00Z"),
+    ])
+      expect(calendarDateOfUtcMidnight(bad), String(bad)).toBeNull();
   });
 });
 

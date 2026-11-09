@@ -75,6 +75,7 @@ export function seedCompany(
     businessPurpose: "An autonomous software agent.",
     industryLabel: "Software development",
     intakeSynthesized: true,
+    purposeKind: "agent",
     ...over,
   });
 }

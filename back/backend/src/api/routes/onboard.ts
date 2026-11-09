@@ -154,6 +154,7 @@ export function mountProtectedRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
         industryLabel: body.data.industryLabel,
         ssn: body.data.ssn,
         synthetic: body.data.synthetic === true ? true : undefined,
+        for: body.data.for,
       },
     );
     if ("error" in result) throw new ApiError("validation_error", 400, result.error);

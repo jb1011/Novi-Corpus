@@ -119,6 +119,9 @@ export interface McpToolDeps extends EntityViewDeps {
    *  the SAME objects ApiDeps carries, so MCP and REST cannot describe a company differently. */
   companies?: import("../api/app").ApiDeps["companies"];
   formationSteps?: import("../api/app").ApiDeps["formationSteps"];
+  /** The FULL document index, as ApiDeps declares it and the SAME object: the company views read
+   *  the latest DAO supplement off it, beside the two reads the entity views make. */
+  documents?: import("../api/app").ApiDeps["documents"];
   /** A customer company's declaration and checks, for `list_companies` and `get_company`: the
    *  SAME object ApiDeps carries, so a customer's company reads the same on both surfaces. */
   customerFacts?: import("../api/app").ApiDeps["customerFacts"];
@@ -378,16 +381,19 @@ function onceOnNetwork(insert: () => number): number | null {
 }
 
 /**
- * THE REAL-HUMAN CHECK'S CODES, a closed list: the codes `assertRealHuman` throws, each with a
- * fixed message written beside it there, which the doors answer as it is. The legal-body tools
- * answer those messages too, for these three codes and for no other code outside the flow's table.
- * A code the check gains later is answered `internal_error` by the tools until it is listed here;
- * a test holds this list to the codes the check throws.
+ * THE REAL-HUMAN AND IDENTITY CHECKS' CODES, a closed list: the codes `assertRealHuman` and
+ * `assertIdentityVerified` throw, each with a fixed message written beside it there, which the
+ * doors answer as it is. The legal-body tools answer those messages too, for these codes and for
+ * no other code outside the flow's table. A code a check gains later is answered `internal_error`
+ * by the tools until it is listed here; a test holds this list to the codes the checks throw.
  */
 export const REAL_HUMAN_CHECK_CODES: ReadonlySet<string> = new Set([
   "unavailable",
   "guardian_not_verified",
   "waiver_not_accepted",
+  // The identity gate's: they pass through with their own message, like the three World codes.
+  "guardian_identity_not_verified",
+  "identity_unavailable",
 ]);
 
 /** A legal-body tool's refusal: its code and its fixed sentence, as one JSON object. */
@@ -400,7 +406,8 @@ const codeRefusal = (code: string, message: string): ToolRefusal =>
  * can carry the node's URL. So:
  *  - a code of the flow's table answers the table's sentence, built from the code, never read off
  *    the error;
- *  - a code of the real-human check answers that check's own fixed message, as the doors do;
+ *  - a code of the real-human or identity check answers that check's own fixed message, as the
+ *    doors do;
  *  - anything else answers `internal_error`, after one line that names the tool and the error's
  *    NAME, never its message.
  */
@@ -1092,6 +1099,14 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
    * ⚠ It takes NO `ssn`, deliberately and permanently (§4.1). An SSN in an MCP tool argument
    * would sit in an LLM client's context window and in its logs; the web form is the only place
    * one is ever collected.
+   *
+   * It always creates a company for agents (`purpose_kind = agent`). A company for a legal body is
+   * asked for on `POST /companies` alone (`for: "legal_body"`), where its gates run. So `for` is
+   * DECLARED IN ORDER TO BE REFUSED, exactly as `ssn` is: left undeclared it would be stripped
+   * like any argument the tool does not know, and a caller that passed it would get back a company
+   * for agents it did not ask for. Declared, it is refused by name, with the sentence that says
+   * what this tool makes. Every other undeclared argument is still stripped and the call goes on,
+   * as before, so an agent client that sends extra arguments keeps working.
    */
   if (deps.formation) {
     server.registerTool(
@@ -1124,13 +1139,22 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
            * field DOES belong.
            */
           ssn: z.string().optional(),
+          /**
+           * ⚠ DECLARED IN ORDER TO BE REFUSED, for the reason `ssn` is (see the block comment
+           * above): this tool creates companies for agents only. Any value is refused, so the
+           * refusal does not depend on the caller having spelled `legal_body` right.
+           */
+          for: z.unknown().optional(),
         },
       },
-      async ({ partyId, names, businessPurpose, industryLabel, synthetic, ssn }) => {
-        // The rung, then the ssn — the latter BEFORE anything is created and before any other
-        // validation, so the refusal is the whole answer and nothing exists afterwards for the
-        // caller to have to clean up.
-        const denied = requireProvisionTenantWide(scope) ?? refuseSsn({ ssn });
+      async ({ partyId, names, businessPurpose, industryLabel, synthetic, ssn, for: purpose }) => {
+        // The rung, then the ssn and the purpose — BEFORE anything is created and before any
+        // other validation, so the refusal is the whole answer and nothing exists afterwards for
+        // the caller to have to clean up.
+        const denied =
+          requireProvisionTenantWide(scope) ??
+          refuseSsn({ ssn }) ??
+          (purpose !== undefined ? refuse(sentenceFor("create_company_agents_only")) : null);
         if (denied) return denied;
         try {
           const result = createCompany(

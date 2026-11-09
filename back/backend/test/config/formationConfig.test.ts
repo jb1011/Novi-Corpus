@@ -44,7 +44,11 @@ const WORLD = {
  * SSN, and it refuses to boot without a key to encrypt one with. Its own fixture, beside WORLD,
  * for the same reason: the tests below prove both halves.
  */
-const PII = { FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64") };
+const PII = {
+  FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+  // Required with the PII key: the identity record's duplicate check uses it.
+  IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
+};
 
 /** A production doola environment, with the identity and PII floors satisfied. */
 const DOOLA_PROD = { ...DOOLA, ...WORLD, ...PII, DOOLA_ENVIRONMENT: "production" };
@@ -387,11 +391,16 @@ test("a SANDBOX deployment must not carry a PII key — it has nothing to encryp
   // §4.1: the door refuses the SSN field outright on a sandbox box. A key there is at best dead
   // weight and at worst a production key pasted into a sandbox `.env`.
   expect(() =>
-    loadConfig({ ...BASE, ...DOOLA, FORMATION_PII_KEY: Buffer.alloc(32, 5).toString("base64") }),
+    loadConfig({
+      ...BASE,
+      ...DOOLA,
+      ...PII,
+      FORMATION_PII_KEY: Buffer.alloc(32, 5).toString("base64"),
+    }),
   ).toThrow(/FORMATION_PII_KEY is set with DOOLA_ENVIRONMENT=sandbox/);
   // …and a box with NO doola block at all is unaffected: it forms nothing either way.
   expect(() =>
-    loadConfig({ ...BASE, FORMATION_PII_KEY: Buffer.alloc(32, 5).toString("base64") }),
+    loadConfig({ ...BASE, ...PII, FORMATION_PII_KEY: Buffer.alloc(32, 5).toString("base64") }),
   ).not.toThrow();
 });
 

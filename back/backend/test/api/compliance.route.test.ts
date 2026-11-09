@@ -98,6 +98,7 @@ function newCompany(providerRef?: string): string {
     businessPurpose: "p",
     industryLabel: "Software development",
     intakeSynthesized: false,
+    purposeKind: "agent",
   });
   if (providerRef) {
     requests.claimStep(id, "create_provider");
