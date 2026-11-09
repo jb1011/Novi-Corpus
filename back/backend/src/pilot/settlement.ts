@@ -37,7 +37,7 @@ import type { PilotCaseRecord, PilotStatus } from "./types";
  * before the transaction and to `settled` after it. Acting once is a property of the chain:
  * `complete` and `reject` revert on a job that is no longer Submitted, and the decision never
  * sends on a job the chain says is settled, so a repeated run reads the chain and stops.
- * `refundUnfiledCase` takes back, once its job's expiry and the clock margin have passed, the
+ * `refundExpiredCase` takes back, once its job's expiry and the clock margin have passed, the
  * escrow of a case no ruling's settle reaches: one funded, submitted or contested, or failed.
  */
 export type EscrowState = Awaited<ReturnType<JobAdapter["escrowState"]>>;
@@ -217,22 +217,22 @@ const SETTLEABLE: ReadonlySet<PilotStatus> = new Set([
 
 /**
  * The statuses whose escrow no ruling's settle takes back, refunded by claimRefund once the job
- * expired (`refundUnfiledCase`): a case funded but never filed, one whose filing went back to
+ * expired (`refundExpiredCase`): a case funded but never filed, one whose filing went back to
  * contested with nothing filed, and a failed one. Past the expiry and its margin the settle sends
  * nothing but the refund, whatever a dispute says: the pilot's rule (the settlement's decision
  * table), so a filing that started changes nothing there.
  */
-export const UNFILED_REFUND_STATUSES: ReadonlySet<PilotStatus> = new Set([
+export const EXPIRY_REFUND_STATUSES: ReadonlySet<PilotStatus> = new Set([
   "funded",
   "submitted",
   "contested",
   "failed",
 ]);
 
-/** The statuses `pilot:settle --claim-refund` hands to `refundUnfiledCase`: the four it refunds,
+/** The statuses `pilot:settle --claim-refund` hands to `refundExpiredCase`: the four it refunds,
  *  and the two filings in doubt it refuses, each naming the command that resolves it first. */
-export const CLAIM_REFUND_UNFILED_ROUTE: ReadonlySet<PilotStatus> = new Set([
-  ...UNFILED_REFUND_STATUSES,
+export const CLAIM_REFUND_EXPIRY_ROUTE: ReadonlySet<PilotStatus> = new Set([
+  ...EXPIRY_REFUND_STATUSES,
   "filing",
   "filing_unknown",
 ]);
@@ -457,7 +457,7 @@ export async function settleCase(
     refuse(`case ${caseId} is a ${row.mode} case and this stage is ${d.stage.mode}`);
   if (!SETTLEABLE.has(row.status))
     refuse(
-      `case ${caseId} is ${row.status}; a settlement starts at filed, evidence_unknown, ruled, settling or settled${UNFILED_REFUND_STATUSES.has(row.status) ? `; after its expiry, pilot:settle --case ${caseId} --claim-refund takes its escrow back` : ""}`,
+      `case ${caseId} is ${row.status}; a settlement starts at filed, evidence_unknown, ruled, settling or settled${EXPIRY_REFUND_STATUSES.has(row.status) ? `; after its expiry, pilot:settle --case ${caseId} --claim-refund takes its escrow back` : ""}`,
     );
   if (row.jobId === null) refuse(`case ${caseId} has no job id`);
   const jobId = BigInt(row.jobId);
@@ -1200,7 +1200,7 @@ async function transactionKnown(d: SettleDeps, hash: Hex): Promise<boolean> {
  */
 function dropTakes(row: PilotCaseRecord): boolean {
   if (row.status === "settling") return true;
-  if (!UNFILED_REFUND_STATUSES.has(row.status)) return false;
+  if (!EXPIRY_REFUND_STATUSES.has(row.status)) return false;
   if (row.settleAction === "claimRefund") return true;
   return (
     row.status === "failed" && (row.settleAction === "complete" || row.settleAction === "reject")
@@ -1255,7 +1255,7 @@ export async function clearDroppedSettleTx(
   // failed row may hold the settle sent before it was failed.
   if (!dropTakes(row)) {
     const actions = row.status === "failed" ? "claimRefund, complete or reject" : "claimRefund";
-    const action = UNFILED_REFUND_STATUSES.has(row.status)
+    const action = EXPIRY_REFUND_STATUSES.has(row.status)
       ? ` and its action is ${row.settleAction ?? "not recorded"}, not ${actions}`
       : "";
     refuse(
@@ -1361,7 +1361,7 @@ const REFUNDED_BY_CLAIM = "expired; escrow refunded by claimRefund";
 const REFUNDED_ELSEWHERE = "expired; escrow refunded elsewhere";
 
 /** The escrow the refund read, as its dry run prints it. */
-export interface UnfiledEscrowRead {
+export interface ExpiryRefundEscrowRead {
   /** The chain's status, by name. */
   status: string;
   budgetAtomic: string;
@@ -1373,7 +1373,7 @@ export interface UnfiledEscrowRead {
 
 /** What the refund writes for an escrow the chain already settled, or would write in a dry run,
  *  and the event it records: refunded, or released for a failed case whose own complete landed. */
-export interface UnfiledRecord {
+export interface ExpiryRefundRecord {
   status: "failed";
   settleAction: PilotCaseRecord["settleAction"];
   settleTxHash: Hex | null;
@@ -1384,15 +1384,15 @@ export interface UnfiledRecord {
   event: { step: "settle"; status: "chain"; ref: Hex | null; detail: string };
 }
 
-export interface UnfiledRefund {
+export interface ExpiryRefund {
   settlement: Settlement;
-  escrow: UnfiledEscrowRead;
+  escrow: ExpiryRefundEscrowRead;
   /** The transaction sent, or the one a dry run would send; absent when nothing is to be sent. */
   send?: { action: "claimRefund"; jobId: string; from: string; to: string };
   txHash?: Hex;
   /** For an escrow the chain already settled: what is written, or would be with `send`; null
    *  when the row already records it. */
-  record?: UnfiledRecord | null;
+  record?: ExpiryRefundRecord | null;
   /** Whether `record` was written. */
   written?: boolean;
 }
@@ -1442,18 +1442,18 @@ function filingInDoubt(row: PilotCaseRecord): string {
  * `settle/ok`. A row already failed keeps the reason it failed for. With `send` false nothing is
  * written and nothing is sent: the result says what would be.
  */
-export async function refundUnfiledCase(
+export async function refundExpiredCase(
   d: SettleDeps,
   caseId: string,
   opts: { send: boolean },
-): Promise<UnfiledRefund> {
+): Promise<ExpiryRefund> {
   const nowSec = () => Math.floor((d.now ?? Date.now)() / 1000);
   const row = d.cases.find(caseId);
   if (!row) refuse(`no pilot case ${caseId}`);
   if (row.mode !== d.stage.mode)
     refuse(`case ${caseId} is a ${row.mode} case and this stage is ${d.stage.mode}`);
   if (row.status === "filing" || row.status === "filing_unknown") refuse(filingInDoubt(row));
-  if (!UNFILED_REFUND_STATUSES.has(row.status))
+  if (!EXPIRY_REFUND_STATUSES.has(row.status))
     refuse(
       `case ${caseId} is ${row.status}; its escrow is not refunded this way, which acts at funded, submitted, contested or failed`,
     );
@@ -1479,7 +1479,7 @@ export async function refundUnfiledCase(
   const now = nowSec();
   // The expiry first: before it the case is still alive, whatever the chain shows.
   if (!refundTimeReached(escrow.expiredAt, now)) throw notYetExpired(escrow.expiredAt);
-  const read: UnfiledEscrowRead = {
+  const read: ExpiryRefundEscrowRead = {
     status: statusName(escrow.status),
     budgetAtomic: escrow.budget.toString(),
     expiredAt: Number(escrow.expiredAt),
@@ -1504,8 +1504,8 @@ export async function refundUnfiledCase(
     escrow.status === JobStatusOnChain.expired
   ) {
     const settlement = decideSettlement({ kind: "pending" }, escrow, now) as NoAction;
-    const record = unfiledRecordOf(row, escrow, now, landed);
-    if (opts.send && record !== null) writeUnfiledRecord(d, row, record);
+    const record = expiryRefundRecordOf(row, escrow, now, landed);
+    if (opts.send && record !== null) writeExpiryRefundRecord(d, row, record);
     return { settlement, escrow: read, record, written: opts.send && record !== null };
   }
   if (escrow.status !== JobStatusOnChain.funded && escrow.status !== JobStatusOnChain.submitted)
@@ -1562,12 +1562,12 @@ export async function refundUnfiledCase(
  * a Completed job, refunded otherwise) and the failure reason; a row already failed keeps its
  * reason. Null for a row that already records that outcome.
  */
-function unfiledRecordOf(
+function expiryRefundRecordOf(
   row: PilotCaseRecord,
   escrow: EscrowState,
   at: number,
   hash: Hex | null,
-): UnfiledRecord | null {
+): ExpiryRefundRecord | null {
   const outcome = escrow.status === JobStatusOnChain.completed ? "released" : "refunded";
   if (row.status === "failed" && row.escrowOutcome === outcome) return null;
   return {
@@ -1589,7 +1589,11 @@ function unfiledRecordOf(
 }
 
 /** The record written in one transaction, while the row is still as this run read it. */
-function writeUnfiledRecord(d: SettleDeps, row: PilotCaseRecord, record: UnfiledRecord): void {
+function writeExpiryRefundRecord(
+  d: SettleDeps,
+  row: PilotCaseRecord,
+  record: ExpiryRefundRecord,
+): void {
   const { event, status, ...patch } = record;
   d.cases.transaction(() => {
     const current = d.cases.find(row.caseId);

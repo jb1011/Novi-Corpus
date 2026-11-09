@@ -437,7 +437,7 @@ const REFUND_TIME = EXPIRES + 61;
 const seedUnfiled = (f: Fake, status: PilotStatus, patch: Partial<PilotCaseRecord> = {}) =>
   seed(f, { status, patch: { klerosChain: null, coreDisputeId: null, ...patch } });
 
-describe("pilot:settle --claim-refund on a case funded but never filed", () => {
+describe("pilot:settle --claim-refund: the expiry refund of a case no ruling settles", () => {
   test("without --yes it prints the escrow it read and what it would send, and sends nothing", async () => {
     const f = makeFake({ chainStatus: 1, nowSec: REFUND_TIME });
     const caseId = seedUnfiled(f, "funded");

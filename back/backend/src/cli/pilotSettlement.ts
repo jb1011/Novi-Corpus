@@ -25,18 +25,18 @@ import {
   recordReadFailed,
 } from "../pilot/ruling";
 import {
-  CLAIM_REFUND_UNFILED_ROUTE,
+  CLAIM_REFUND_EXPIRY_ROUTE,
+  type ExpiryRefundEscrowRead,
   REFUND_CLOCK_MARGIN_SECONDS,
   type SettleDeps,
   SettleRefusal,
   type Settlement,
-  type UnfiledEscrowRead,
   adoptSettleTx,
   checkEscrowIsOwn,
   checkOwnConfig,
   clearDroppedSettleTx,
   decideSettlement,
-  refundUnfiledCase,
+  refundExpiredCase,
   settleCase,
 } from "../pilot/settlement";
 import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
@@ -315,8 +315,8 @@ async function settle(
   const row = ctx.cases.find(caseId);
   // A case no ruling settles: only the expiry gives its escrow back. A filing in doubt is
   // refused there, naming the command that resolves it.
-  if (o.claimRefundOnly && row !== undefined && CLAIM_REFUND_UNFILED_ROUTE.has(row.status))
-    return refundUnfiled(ctx, deps, caseId, o);
+  if (o.claimRefundOnly && row !== undefined && CLAIM_REFUND_EXPIRY_ROUTE.has(row.status))
+    return refundExpired(ctx, deps, caseId, o);
   // A rehearsal case that holds a read is settled from it. One with none yet is read once, from
   // a fresh fake that answers its script's verdict at once, so the script must be the filing's.
   if (
@@ -361,7 +361,7 @@ async function settle(
 const isoOf = (unixSeconds: number) => new Date(unixSeconds * 1000).toISOString();
 
 /** The escrow a refund read, as it prints: the expiry also as a date. */
-const escrowView = (e: UnfiledEscrowRead) => ({
+const escrowView = (e: ExpiryRefundEscrowRead) => ({
   status: e.status,
   budgetAtomic: e.budgetAtomic,
   expiredAt: e.expiredAt,
@@ -372,13 +372,13 @@ const escrowView = (e: UnfiledEscrowRead) => ({
 /** `pilot:settle --claim-refund` on a case no ruling settles: the escrow read and the claimRefund
  *  it leads to, sent with `--yes`; or, for an escrow the chain already refunded, what the case
  *  records of it, written with `--yes`. */
-async function refundUnfiled(
+async function refundExpired(
   ctx: PilotContext,
   deps: PilotSettlementDeps,
   caseId: string,
   o: SettleOptions,
 ): Promise<void> {
-  const r = await refundUnfiledCase(settleDepsOf(ctx, deps, o.script), caseId, { send: o.yes });
+  const r = await refundExpiredCase(settleDepsOf(ctx, deps, o.script), caseId, { send: o.yes });
   const after = ctx.cases.find(caseId);
   const base = {
     caseId,

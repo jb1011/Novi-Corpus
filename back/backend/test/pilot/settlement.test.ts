@@ -43,7 +43,7 @@ import {
   decideSettlement,
   decisionTurnsOnRuling,
   reasonFor,
-  refundUnfiledCase,
+  refundExpiredCase,
   refuseWhileSendMayRun,
   settleCase,
 } from "../../src/pilot/settlement";
@@ -3550,7 +3550,7 @@ describe("the in-flight hold: a dropped hash ends a send", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The escrow of a case funded but never filed, refunded after its expiry
+// The expiry refund: the escrow of a case no ruling settles, refunded after its expiry
 // ---------------------------------------------------------------------------
 
 /** The four statuses of a case that holds an escrow and was never filed, and the chain status
@@ -3595,7 +3595,7 @@ const chainReads = (s: Setup) => [
   vi.spyOn(s.deps.chain.job, "escrowState"),
 ];
 
-describe("refundUnfiledCase: past the expiry and the margin, claimRefund from the referee", () => {
+describe("refundExpiredCase: past the expiry and the margin, claimRefund from the referee", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -3607,7 +3607,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
       const caseId = seedUnfiled(s, status);
       s.clock.sec = REFUND_TIME;
       const before = s.node.balanceOf(BUYER);
-      const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const r = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(r.settlement).toEqual({ action: "claimRefund", reason: null, outcome: "refunded" });
       expect(await decodedSends(s)).toEqual([
         expect.objectContaining({
@@ -3654,7 +3654,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
       atWait.push(s.cases.find(caseId));
       return wait(args);
     });
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(atBroadcast).toEqual([
       expect.objectContaining({
         status: "funded",
@@ -3669,7 +3669,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
     const s = setup({ chainStatus: 1 });
     const caseId = seedUnfiled(s, "funded");
     s.clock.sec = REFUND_TIME;
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(console.log).toHaveBeenCalledWith(
       expect.stringMatching(
         new RegExp(
@@ -3691,7 +3691,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
       s.clock.sec = at;
       const before = snapshot(s, caseId);
       for (const send of [true, false])
-        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+        await expect(refundExpiredCase(s.deps, caseId, { send })).rejects.toThrow(
           /^refusing: the job expires at 2027-.*; no claimRefund until 60 seconds after that, a margin for the difference between this box's clock and chain time, and nothing was sent$/,
         );
       expect(s.node.sends).toEqual([]);
@@ -3704,7 +3704,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
     const caseId = seedUnfiled(s, "submitted");
     s.clock.sec = REFUND_TIME;
     const before = snapshot(s, caseId);
-    const r = await refundUnfiledCase(s.deps, caseId, { send: false });
+    const r = await refundExpiredCase(s.deps, caseId, { send: false });
     expect(r).toEqual({
       settlement: { action: "claimRefund", reason: null, outcome: "refunded" },
       escrow: {
@@ -3720,7 +3720,7 @@ describe("refundUnfiledCase: past the expiry and the margin, claimRefund from th
   });
 });
 
-describe("refundUnfiledCase: the rows it acts on", () => {
+describe("refundExpiredCase: the rows it acts on", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -3740,7 +3740,7 @@ describe("refundUnfiledCase: the rows it acts on", () => {
       s.clock.sec = REFUND_TIME;
       const reads = chainReads(s);
       const before = snapshot(s, caseId);
-      await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
         new RegExp(
           `^refusing: case ${caseId} is ${status}; its escrow is not refunded this way, which acts at funded, submitted, contested or failed; nothing was sent$`,
         ),
@@ -3764,13 +3764,13 @@ describe("refundUnfiledCase: the rows it acts on", () => {
     const caseId = seedUnfiled(s, "funded", o ?? {});
     s.clock.sec = REFUND_TIME;
     const reads = chainReads(s);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(message);
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(message);
     for (const spy of reads) expect(spy).not.toHaveBeenCalled();
     expect(s.node.sends).toEqual([]);
   });
 });
 
-describe("refundUnfiledCase: the checks before the send", () => {
+describe("refundExpiredCase: the checks before the send", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -3781,7 +3781,7 @@ describe("refundUnfiledCase: the checks before the send", () => {
     s.clock.sec = REFUND_TIME;
     vi.spyOn(s.node.publicClient, "getChainId").mockResolvedValue(1);
     const escrowRead = vi.spyOn(s.deps.chain.job, "escrowState");
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(
         `^refusing: case ${caseId} is on chain id 31337 and the connected chain is 1; nothing was sent$`,
       ),
@@ -3813,7 +3813,7 @@ describe("refundUnfiledCase: the checks before the send", () => {
       const caseId = seedUnfiled(s, "funded", { insert });
       s.clock.sec = REFUND_TIME + 10;
       const before = snapshot(s, caseId);
-      await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(message);
+      await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(message);
       expect(s.node.sends).toEqual([]);
       expect(snapshot(s, caseId)).toEqual(before);
     },
@@ -3825,7 +3825,7 @@ describe("refundUnfiledCase: the checks before the send", () => {
     const caseId = seedUnfiled(s, "funded", { insert: { refereeAddress: SELLER } });
     s.clock.sec = REFUND_TIME;
     const before = snapshot(s, caseId);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(
         `^refusing: job 7's evaluator is ${SELLER} and the referee is ${REFEREE}; nothing was sent$`,
         "i",
@@ -3854,7 +3854,7 @@ describe("refundUnfiledCase: the checks before the send", () => {
     const caseId = seedUnfiled(s, "funded");
     s.clock.sec = REFUND_TIME;
     const before = snapshot(s, caseId);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(message);
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(message);
     expect(s.node.sends).toEqual([]);
     expect(snapshot(s, caseId)).toEqual(before);
   });
@@ -3866,7 +3866,7 @@ describe("refundUnfiledCase: the checks before the send", () => {
     vi.spyOn(s.node.publicClient, "getBalance").mockRejectedValue(
       new Error("socket hang up at https://rpc.example.com/v2/SENTINELKEY"),
     );
-    const err = await refundUnfiledCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
+    const err = await refundExpiredCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
     expect(String(err)).toBe(
       "Error: refusing: the referee's gas balance could not be read: socket hang up at https://rpc.example.com; nothing was sent",
     );
@@ -3877,12 +3877,12 @@ describe("refundUnfiledCase: the checks before the send", () => {
     const s = setup({ chainStatus: 1, refereeGas: MIN_GAS_WEI });
     const caseId = seedUnfiled(s, "funded");
     s.clock.sec = REFUND_TIME;
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
   });
 });
 
-describe("refundUnfiledCase: an escrow the chain already settled", () => {
+describe("refundExpiredCase: an escrow the chain already settled", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -3914,7 +3914,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
           detail: `the chain shows the job ${name}, moved by a transaction this case never sent`,
         },
       };
-      const dry = await refundUnfiledCase(s.deps, caseId, { send: false });
+      const dry = await refundExpiredCase(s.deps, caseId, { send: false });
       expect(dry).toEqual({
         settlement: { action: "none", why: "refunded_elsewhere", outcome: "refunded" },
         escrow: {
@@ -3927,7 +3927,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
         written: false,
       });
       expect(snapshot(s, caseId)).toEqual(before);
-      const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const r = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(r).toEqual({ ...dry, written: true });
       expect(s.node.sends).toEqual([]);
       expect(s.cases.find(caseId)).toMatchObject({
@@ -3949,7 +3949,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
     const s = setup({ chainStatus: 5 });
     const caseId = seedUnfiled(s, "failed");
     s.clock.sec = REFUND_TIME;
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.sends).toEqual([]);
     expect(s.cases.find(caseId)).toMatchObject({
       status: "failed",
@@ -3964,7 +3964,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
     const s = setup({ chainStatus: 5 });
     const caseId = seedUnfiled(s, "funded", { patch: { settleAction: "claimRefund" } });
     s.clock.sec = REFUND_TIME;
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.cases.find(caseId)).toMatchObject({
       status: "failed",
       settleAction: "claimRefund",
@@ -3991,7 +3991,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
         s.cases.patch(caseId, written);
         return real(...a);
       };
-      await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
         new RegExp(
           `^refusing: pilot case ${caseId} moved while this command ran; nothing was sent$`,
         ),
@@ -4011,7 +4011,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
       s.cases.advance(caseId, "funded", "submitted");
       return real(...a);
     };
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(
         `^refusing: pilot case ${caseId} moved from funded while this command ran; nothing was sent$`,
       ),
@@ -4025,9 +4025,9 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
     const s = setup({ chainStatus: 1 });
     const caseId = seedUnfiled(s, "funded");
     s.clock.sec = REFUND_TIME;
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     const before = snapshot(s, caseId);
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(r.settlement).toEqual({
       action: "none",
       why: "refunded_elsewhere",
@@ -4051,7 +4051,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
     s.clock.sec = REFUND_TIME;
     const before = snapshot(s, caseId);
     for (const send of [true, false])
-      await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send })).rejects.toThrow(
         new RegExp(
           `^refusing: the chain shows job 7 ${words}; read the chain before acting; nothing was sent$`,
         ),
@@ -4064,7 +4064,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
     const s = setup({ chainStatus: 4 });
     const caseId = seedUnfiled(s, "funded");
     const before = snapshot(s, caseId);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       /the job expires at .*no claimRefund until 60 seconds after that/,
     );
     expect(snapshot(s, caseId)).toEqual(before);
@@ -4081,7 +4081,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
       s.clock.sec = EXPIRES + 30;
       const before = snapshot(s, caseId);
       for (const send of [true, false])
-        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+        await expect(refundExpiredCase(s.deps, caseId, { send })).rejects.toThrow(
           /^refusing: the job expires at 2027-.*; no claimRefund until 60 seconds after that, a margin for the difference between this box's clock and chain time, and nothing was sent$/,
         );
       expect(snapshot(s, caseId)).toEqual(before);
@@ -4089,7 +4089,7 @@ describe("refundUnfiledCase: an escrow the chain already settled", () => {
   );
 });
 
-describe("refundUnfiledCase: a send that may still be running, and two runs at once", () => {
+describe("refundExpiredCase: a send that may still be running, and two runs at once", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -4101,7 +4101,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
     sendingEvent(s, caseId, 30);
     const reads = chainReads(s);
     for (const send of [true, false])
-      await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send })).rejects.toThrow(
         new RegExp(
           `^refusing: a settle may still be running on case ${caseId}: its send started 30 s ago, and a send is treated as running for 180 s; wait, then run again; nothing was sent$`,
         ),
@@ -4116,7 +4116,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
     s.clock.sec = REFUND_TIME;
     sendingEvent(s, caseId, 30);
     s.cases.recordEvent(caseId, "settle", "failed", null, "the node refused the request");
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       /a settle may still be running on case .*: its send started 30 s ago/,
     );
     expect(s.node.sends).toEqual([]);
@@ -4131,10 +4131,10 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
     s.deps.now = () => wall * 1000;
     const caseId = seedUnfiled(s, "funded");
     const reverted = await failedSendHash(
-      refundUnfiledCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
+      refundExpiredCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
     );
     s.clock.sec = wall;
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toEqual([reverted, r.txHash]);
     expect(s.cases.find(caseId)).toMatchObject({ status: "failed", settleTxHash: r.txHash });
   });
@@ -4144,12 +4144,12 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
     const caseId = seedUnfiled(s, "funded", { patch: { settleAction: "claimRefund" } });
     s.clock.sec = REFUND_TIME;
     sendingEvent(s, caseId, SEND_IN_FLIGHT_SECONDS - 1);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       /its send started 179 s ago/,
     );
     expect(s.node.sends).toEqual([]);
     s.clock.sec += 1;
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(r.txHash).toBe(s.node.hashesOf("claimRefund")[0]);
     expect(s.cases.find(caseId)).toMatchObject({ status: "failed", settleTxHash: r.txHash });
   });
@@ -4163,8 +4163,8 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
     s.clock.sec = wall + 3600;
     const caseId = seedUnfiled(s, "funded");
     const results = await Promise.allSettled([
-      refundUnfiledCase(s.deps, caseId, { send: true }),
-      refundUnfiledCase(s.deps, caseId, { send: true }),
+      refundExpiredCase(s.deps, caseId, { send: true }),
+      refundExpiredCase(s.deps, caseId, { send: true }),
     ]);
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
@@ -4186,8 +4186,8 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
     const caseId = seedUnfiled(s, "funded", { patch: { settleAction: "claimRefund" } });
     sendingEvent(s, caseId, 3600);
     const results = await Promise.allSettled([
-      refundUnfiledCase(s.deps, caseId, { send: true }),
-      refundUnfiledCase(s.deps, caseId, { send: true }),
+      refundExpiredCase(s.deps, caseId, { send: true }),
+      refundExpiredCase(s.deps, caseId, { send: true }),
     ]);
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
@@ -4208,7 +4208,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
       s.cases.recordEvent(caseId, "settle", "sending", null, "claimRefund");
       return real(...a);
     };
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(`a settle may still be running on case ${caseId}`),
     );
     expect(s.node.sends).toEqual([]);
@@ -4225,7 +4225,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
       s.cases.patch(caseId, { settleTxHash: OTHER_RUNS_HASH });
       return real(...a);
     };
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(`^refusing: pilot case ${caseId} moved while this command ran; nothing was sent$`),
     );
     expect(s.node.sends).toEqual([]);
@@ -4242,7 +4242,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
       s.cases.advance(caseId, "funded", "submitted");
       return real(...a);
     };
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(
         `^refusing: pilot case ${caseId} moved from funded while this command ran; nothing was sent$`,
       ),
@@ -4264,7 +4264,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
       s.cases.advance(caseId, "funded", "failed", { error: OPERATORS_REASON });
       return real(...a);
     };
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       /left funded while claimRefund 0x[0-9a-f]{64} was sent; read the chain before acting$/,
     );
     const hash = s.node.hashesOf("claimRefund")[0]!;
@@ -4281,7 +4281,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
     // Once the window of the send has passed, the next run reads the chain and records the
     // refund on the failed row, sending nothing.
     s.clock.sec += SEND_IN_FLIGHT_SECONDS;
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(s.cases.find(caseId)).toMatchObject({
       status: "failed",
@@ -4292,7 +4292,7 @@ describe("refundUnfiledCase: a send that may still be running, and two runs at o
   });
 });
 
-describe("refundUnfiledCase: a hash the row holds", () => {
+describe("refundExpiredCase: a hash the row holds", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -4304,7 +4304,7 @@ describe("refundUnfiledCase: a hash the row holds", () => {
     vi.spyOn(s.node.publicClient, "waitForTransactionReceipt").mockRejectedValueOnce(
       new Error("socket hang up"),
     );
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       "socket hang up",
     );
     const hash = s.node.hashesOf("claimRefund")[0]!;
@@ -4318,7 +4318,7 @@ describe("refundUnfiledCase: a hash the row holds", () => {
       ["sent", hash, "claimRefund"],
       ["failed", hash, "socket hang up"],
     ]);
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(r.settlement).toEqual({
       action: "none",
       why: "refunded_elsewhere",
@@ -4344,13 +4344,13 @@ describe("refundUnfiledCase: a hash the row holds", () => {
     const caseId = seedUnfiled(s, "funded");
     s.clock.sec = REFUND_TIME;
     const hash = await failedSendHash(
-      refundUnfiledCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
+      refundExpiredCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
     );
     expect(s.cases.find(caseId)).toMatchObject({ status: "funded", settleTxHash: hash });
     s.clock.sec += SEND_IN_FLIGHT_SECONDS;
     const before = snapshot(s, caseId);
     for (const send of [true, false])
-      await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send })).rejects.toThrow(
         new RegExp(
           `^refusing: case ${caseId}'s claimRefund ${hash} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again; nothing was sent$`,
         ),
@@ -4366,7 +4366,7 @@ describe("refundUnfiledCase: a hash the row holds", () => {
     s.clock.sec = EXPIRES - 10;
     s.deps.now = () => REFUND_TIME * 1000;
     const reverted = await failedSendHash(
-      refundUnfiledCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
+      refundExpiredCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
     );
     expect(s.cases.find(caseId)).toMatchObject({
       status: "funded",
@@ -4375,7 +4375,7 @@ describe("refundUnfiledCase: a hash the row holds", () => {
     });
     expect(settleTrail(s, caseId).at(-1)).toEqual(["reverted", reverted, expect.any(String)]);
     s.clock.sec = REFUND_TIME;
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toEqual([reverted, r.txHash]);
     expect(s.cases.find(caseId)).toMatchObject({
       status: "failed",
@@ -4391,12 +4391,12 @@ describe("refundUnfiledCase: a hash the row holds", () => {
     s.clock.sec = EXPIRES - 10;
     s.deps.now = () => REFUND_TIME * 1000;
     const reverted = await failedSendHash(
-      refundUnfiledCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
+      refundExpiredCase(s.deps, caseId, { send: true }) as unknown as Promise<Hex>,
     );
     // The buyer's own claimRefund takes the escrow back once the chain is past the expiry.
     s.clock.sec = REFUND_TIME;
     await s.deps.chain.job.claimRefund(7n, s.deps.chain.wallets.buyer);
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(r.settlement).toEqual({
       action: "none",
       why: "refunded_elsewhere",
@@ -4423,13 +4423,13 @@ describe("refundUnfiledCase: a hash the row holds", () => {
     vi.spyOn(s.node.publicClient, "waitForTransactionReceipt").mockRejectedValueOnce(
       new Error("socket hang up"),
     );
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       "socket hang up",
     );
     const hash = s.node.hashesOf("claimRefund")[0]!;
     vi.spyOn(s.deps.chain.job, "escrowState").mockResolvedValue(escrow(4));
     const before = snapshot(s, caseId);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(
         `^refusing: case ${caseId}'s claimRefund ${hash} succeeded but the chain shows job 7 Rejected; read the chain before acting; nothing was sent$`,
       ),
@@ -4438,14 +4438,14 @@ describe("refundUnfiledCase: a hash the row holds", () => {
   });
 });
 
-describe("refundUnfiledCase: the cap", () => {
+describe("refundExpiredCase: the cap", () => {
   test("a case it moves to failed stays out of the mode's cap count, whose rule is unchanged", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     const s = setup({ chainStatus: 1, stageMode: "testnet", deployment: deploymentFor("testnet") });
     const caseId = seedUnfiled(s, "funded", { mode: "testnet" });
     s.clock.sec = REFUND_TIME;
     expect(s.cases.countFiled("testnet")).toBe(0);
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.cases.find(caseId)).toMatchObject({ status: "failed", filingStartedAt: null });
     expect(s.cases.countFiled("testnet")).toBe(0);
     // The same row with a filing time is one the cap counts: the rule itself is as it was.
@@ -4454,7 +4454,7 @@ describe("refundUnfiledCase: the cap", () => {
   });
 });
 
-describe("refundUnfiledCase: a case whose filing started", () => {
+describe("refundExpiredCase: a case whose filing started", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -4468,7 +4468,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       });
       s.clock.sec = REFUND_TIME;
       const before = s.node.balanceOf(BUYER);
-      const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const r = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(r.settlement.action).toBe("claimRefund");
       expect(s.node.sendsFrom(REFEREE)).toHaveLength(1);
       expect(s.node.balanceOf(BUYER)).toBe(before + BUDGET);
@@ -4491,7 +4491,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
     s.cases.recordEvent(caseId, "filing", "started", "arbitrum-sepolia-testnet", null);
     s.clock.sec = REFUND_TIME;
     expect(s.cases.countFiled("testnet")).toBe(0);
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(s.cases.find(caseId)).toMatchObject({
       status: "failed",
@@ -4513,7 +4513,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
     });
     s.clock.sec = REFUND_TIME;
     expect(s.cases.countFiled("testnet")).toBe(1);
-    await refundUnfiledCase(s.deps, caseId, { send: true });
+    await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(s.cases.find(caseId)).toMatchObject({
       status: "failed",
@@ -4552,7 +4552,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       const reads = chainReads(s);
       const before = snapshot(s, caseId);
       for (const send of [true, false]) {
-        const err = await refundUnfiledCase(s.deps, caseId, { send }).catch((e: unknown) => e);
+        const err = await refundExpiredCase(s.deps, caseId, { send }).catch((e: unknown) => e);
         expect((err as Error).message).toBe(
           `refusing: ${inDoubt(status, caseId, mode)}; nothing was sent`,
         );
@@ -4576,7 +4576,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       },
     });
     s.clock.sec = REFUND_TIME;
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(r.settlement).toEqual({
       action: "none",
       why: "refunded_elsewhere",
@@ -4619,7 +4619,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       },
     };
     const before = snapshot(s, caseId);
-    const dry = await refundUnfiledCase(s.deps, caseId, { send: false });
+    const dry = await refundExpiredCase(s.deps, caseId, { send: false });
     expect(dry).toEqual({
       settlement: { action: "none", why: "released_elsewhere", outcome: "released" },
       escrow: expect.objectContaining({ status: "Completed" }),
@@ -4627,7 +4627,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       written: false,
     });
     expect(snapshot(s, caseId)).toEqual(before);
-    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const r = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(r).toEqual({ ...dry, written: true });
     expect(s.node.sends).toHaveLength(1);
     expect(s.cases.find(caseId)).toMatchObject({
@@ -4647,7 +4647,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       ),
     );
     // Once recorded, a run finds nothing to send or to write.
-    const again = await refundUnfiledCase(s.deps, caseId, { send: true });
+    const again = await refundExpiredCase(s.deps, caseId, { send: true });
     expect(again).toMatchObject({ record: null, written: false });
     expect(s.node.sends).toHaveLength(1);
   });
@@ -4672,7 +4672,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       s.clock.sec = REFUND_TIME;
       const before = snapshot(s, caseId);
       for (const send of [true, false])
-        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+        await expect(refundExpiredCase(s.deps, caseId, { send })).rejects.toThrow(
           /^refusing: the chain shows job 7 Completed, its escrow released to the provider, so there is nothing to refund; read the chain before acting; nothing was sent$/,
         );
       expect(snapshot(s, caseId)).toEqual(before);
@@ -4693,7 +4693,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
       },
     });
     s.clock.sec = REFUND_TIME;
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(
         `^refusing: case ${caseId}'s complete ${hash} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again; nothing was sent$`,
       ),
@@ -4702,7 +4702,7 @@ describe("refundUnfiledCase: a case whose filing started", () => {
   });
 });
 
-describe("refundUnfiledCase: a claimRefund hash the network dropped", () => {
+describe("refundExpiredCase: a claimRefund hash the network dropped", () => {
   beforeEach(() => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
   });
@@ -4726,7 +4726,7 @@ describe("refundUnfiledCase: a claimRefund hash the network dropped", () => {
         .run(sqliteUtcTimestamp((s.clock.sec - DROP_GRACE_SECONDS) * 1000), caseId);
       s.cases.recordEvent(caseId, "settle", "sent", DROPPED_HASH, "claimRefund");
       // The refund waits on the hash while it may be mined, and names the way out.
-      await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
         new RegExp(`pilot:settle --case ${caseId} --dropped clears it`),
       );
       const r = await clearDroppedSettleTx(s.deps, caseId, { write: true });
@@ -4745,7 +4745,7 @@ describe("refundUnfiledCase: a claimRefund hash the network dropped", () => {
         settleTxHash: null,
         settleAction: "claimRefund",
       });
-      const refund = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const refund = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(s.node.hashesOf("claimRefund")).toEqual([refund.txHash]);
       expect(s.cases.find(caseId)).toMatchObject({
         status: "failed",
@@ -4831,7 +4831,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
       await elsewhere(s);
       const others = s.node.sends.length;
       // The refund waits on the hash while it may be mined, and names the way out.
-      await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
         new RegExp(`pilot:settle --case ${caseId} --dropped clears it`),
       );
       const expected = {
@@ -4857,7 +4857,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
         settleTxHash: null,
         settleAction: "claimRefund",
       });
-      const refund = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const refund = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(refund.settlement).toEqual({
         action: "none",
         why: "refunded_elsewhere",
@@ -4907,7 +4907,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
       written: true,
     });
     const before = snapshot(s, caseId);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       /^refusing: the chain shows job 7 Completed, its escrow released to the provider, so there is nothing to refund; read the chain before acting; nothing was sent$/,
     );
     expect(snapshot(s, caseId)).toEqual(before);
@@ -4936,7 +4936,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
       );
       expect(snapshot(s, caseId)).toEqual(before);
       // The command it names reads the receipt and records what the chain shows.
-      const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const r = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(r.settlement).toMatchObject({ why: "refunded_elsewhere" });
       expect(s.cases.find(caseId)).toMatchObject({
         status: "failed",
@@ -4953,7 +4953,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
       const s = setup({ chainStatus: 2 });
       const caseId = seedHeldSend(s, "failed", action, DROPPED_HASH, FILED_ONCE);
       // The refund waits on the hash while it may be mined, and names the way out.
-      await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
         new RegExp(
           `^refusing: case ${caseId}'s ${action} ${DROPPED_HASH} has no receipt yet; wait until it is mined or dropped: once the network dropped it, pilot:settle --case ${caseId} --dropped clears it; then run again; nothing was sent$`,
         ),
@@ -4978,7 +4978,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
         error: OPERATORS_REASON,
       });
       expect(s.node.sends).toEqual([]);
-      const refund = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const refund = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(refund.settlement.action).toBe("claimRefund");
       expect(s.node.hashesOf("claimRefund")).toEqual([refund.txHash]);
       expect(s.node.sends).toHaveLength(1);
@@ -5032,7 +5032,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
         },
         written: true,
       });
-      const refund = await refundUnfiledCase(s.deps, caseId, { send: true });
+      const refund = await refundExpiredCase(s.deps, caseId, { send: true });
       expect(refund.settlement).toEqual({
         action: "none",
         why: `${outcome}_elsewhere`,
@@ -5063,7 +5063,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
     await clearDroppedSettleTx(s.deps, caseId, { write: true });
     expect(s.cases.find(caseId)).toMatchObject({ status: "failed", settleTxHash: null });
     const before = snapshot(s, caseId);
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       /^refusing: the chain shows job 7 Completed, its escrow released to the provider, so there is nothing to refund; read the chain before acting; nothing was sent$/,
     );
     expect(snapshot(s, caseId)).toEqual(before);
@@ -5086,7 +5086,7 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
   );
 });
 
-describe("refundUnfiledCase: a send that failed before its broadcast", () => {
+describe("refundExpiredCase: a send that failed before its broadcast", () => {
   test("another run's send that failed before its broadcast while this one reads still holds the move", async () => {
     vi.spyOn(console, "log").mockImplementation(() => undefined);
     // On the database's clock: the other run's events are stamped by the database.
@@ -5102,7 +5102,7 @@ describe("refundUnfiledCase: a send that failed before its broadcast", () => {
       s.cases.recordEvent(caseId, "settle", "failed", null, "the node refused the request");
       return real(...a);
     };
-    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+    await expect(refundExpiredCase(s.deps, caseId, { send: true })).rejects.toThrow(
       new RegExp(`a settle may still be running on case ${caseId}: its send started -?\\d+ s ago`),
     );
     expect(s.node.sends).toEqual([]);
