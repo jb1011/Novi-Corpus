@@ -4,7 +4,10 @@
  * never an address. Excluded: the accounts of FUNNEL_EXCLUDE_TENANTS and --exclude-tenants, and
  * every synthetic or sandbox row unless --include-sandbox. A stage whose source this build does
  * not have prints null with the source `not_available`, never 0 (the invite stage, the split of a
- * payment by settlement kind, and the statement reads on a deployment without FUNNEL_SALT).
+ * payment by settlement kind, and the statement reads on a deployment without FUNNEL_SALT). Two
+ * stages were not recorded before their table, or their first row, existed: a week wholly before
+ * that date prints null too, and the stage's label says "recorded since" the date. The command
+ * opens the database read-only, and refuses a database that is not there rather than make one.
  *
  * The command opens the database through the configuration, so every test works in a temporary
  * data directory and seeds its rows through its own connection over the same file. With
@@ -14,7 +17,7 @@
  * Every key is one of anvil's published test accounts, every other address a placeholder, and no
  * fixture holds a readable name.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type Database from "better-sqlite3";
@@ -71,8 +74,8 @@ beforeEach(() => {
   process.env.ARC_TESTNET_RPC_URL = "https://rpc.example";
   process.env.PLATFORM_PRIVATE_KEY = `0x${"a".repeat(64)}`;
   process.env.FUNNEL_SALT = SALT;
-  // The founder in lower case: the list is read in any spelling.
-  process.env.FUNNEL_EXCLUDE_TENANTS = F.toLowerCase();
+  // The founder, checksummed: the list takes no other spelling.
+  process.env.FUNNEL_EXCLUDE_TENANTS = F;
   Reflect.deleteProperty(process.env, "ARC_NETWORK");
   db = openDatabase(join(dir, "legalbody.db"));
   migrate(db);
@@ -259,6 +262,14 @@ function reads(
 }
 
 /** The seed every export test reads; the expected counts are in the tests. */
+/** The day a stage has been recorded since, as `migrate` and the first read row write it. */
+function recordedSince(
+  key: "funnel_first_seen_since" | "funnel_statement_reads_since",
+  day: string,
+) {
+  db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, String(at(day)));
+}
+
 function seed(): void {
   const firstSeen = new SqliteTenantFirstSeenRepository(db);
   firstSeen.recordFirstSeen(A, at("2026-10-06"));
@@ -323,6 +334,11 @@ function seed(): void {
   reads(bodyA, "2026-10-26", ["192.0.2.1"]);
   reads(bodyB, "2026-10-23", ["192.0.2.4"]);
   reads(bodyF, "2026-10-23", ["192.0.2.5"]);
+
+  // Both stages recorded since before the window (`migrate` and the first read wrote today's and
+  // the first seeded read's dates): every week of it counts.
+  recordedSince("funnel_first_seen_since", "2026-09-01");
+  recordedSince("funnel_statement_reads_since", "2026-09-01");
 }
 
 // ── Running the command ───────────────────────────────────────────────────────────────────────
@@ -523,6 +539,39 @@ describe("the counts", () => {
     expect(out.weeks[2]).toMatchObject({ body_linked: 1, filed: 1 });
   });
 
+  test("a stage recorded since mid-window: null for the weeks wholly before, counted from the week it began; the label says since when", async () => {
+    seed();
+    recordedSince("funnel_first_seen_since", "2026-10-14");
+    recordedSince("funnel_statement_reads_since", "2026-10-20");
+    const out = await exported([...WINDOW, "--include-sandbox"]);
+
+    expect(out.weeks.map((w) => w.signed_in)).toEqual([null, 2, 0]);
+    expect(out.weeks.map((w) => w.statement_reads)).toEqual([null, null, 4]);
+    expect(out.sources.signed_in).toBe(
+      "tenant_first_seen.first_seen_at; first sign-in per account; any deployment; recorded since 2026-10-14",
+    );
+    expect(out.sources.statement_reads).toMatch(/; recorded since 2026-10-20$/);
+    // The other stages had their tables all along.
+    expect(out.weeks.map((w) => w.world_verified)).toEqual([1, 1, 0]);
+    for (const column of ["world_verified", "company_requested", "paid", "filed", "body_linked"])
+      expect(out.sources[column], column).not.toContain("recorded since");
+
+    const header = (await run([...WINDOW, "--include-sandbox", "--format", "csv"]))
+      .join("\n")
+      .split("\n")[0] as string;
+    expect(header).toContain(`signed_in [${out.sources.signed_in}]`);
+    expect(header).toContain(`statement_reads [${out.sources.statement_reads}]`);
+  });
+
+  test("with no date recorded the stage is counted in every week, its label unchanged", async () => {
+    seed();
+    db.prepare("DELETE FROM meta WHERE key LIKE 'funnel_%'").run();
+    const out = await exported([...WINDOW, "--include-sandbox"]);
+    expect(out.weeks.map((w) => w.signed_in)).toEqual([1, 2, 0]);
+    expect(out.weeks.map((w) => w.statement_reads)).toEqual([0, 1, 4]);
+    expect(JSON.stringify(out.sources)).not.toContain("recorded since");
+  });
+
   test("--until defaults to today, and a window inside one week prints that week, cut to the window", async () => {
     seed();
     const out = await exported(["--since", "2026-10-21", "--until", "2026-10-23"]);
@@ -602,11 +651,11 @@ describe("refusals", () => {
     );
   });
 
-  test("--exclude-tenants must be addresses, and the refusal repeats none of them", async () => {
+  test("--exclude-tenants must be checksummed addresses, and the refusal repeats none of them", async () => {
     const typo = `${A.slice(0, 40)}`;
     const message = await refusal(["--since", "2026-10-05", "--exclude-tenants", `${B},${typo}`]);
     expect(message).toBe(
-      "refusing: --exclude-tenants must be wallet addresses, comma-separated (entry 2 is not one)",
+      "refusing: --exclude-tenants must be EIP-55 checksummed wallet addresses, comma-separated (entry 2 is not one)",
     );
     expect(message.toLowerCase()).not.toContain(typo.toLowerCase());
     // A mixed-case address whose checksum is wrong is a typo too: one letter's case flipped.
@@ -615,6 +664,37 @@ describe("refusals", () => {
     expect(await refusal(["--since", "2026-10-05", "--exclude-tenants", badChecksum])).toMatch(
       /entry 1 is not one/,
     );
+    // An address in lower case is a valid address, but not the checksummed spelling.
+    const lower = await refusal([
+      "--since",
+      "2026-10-05",
+      "--exclude-tenants",
+      `${B},${A.toLowerCase()}`,
+    ]);
+    expect(lower).toBe(
+      "refusing: --exclude-tenants must be EIP-55 checksummed wallet addresses, comma-separated (entry 2 is not one)",
+    );
+    expect(lower.toLowerCase()).not.toContain(A.toLowerCase());
+  });
+
+  test("a database that is not there is refused, and no file or directory is made", async () => {
+    const missing = join(dir, "not-the-data-dir");
+    process.env.DATA_DIR = missing;
+    const message = await refusal(["--since", "2026-10-05"]);
+    expect(message).toBe(
+      `refusing: there is no database at ${missing}/legalbody.db: check DATA_DIR`,
+    );
+    expect(existsSync(missing)).toBe(false);
+  });
+
+  test("the read-only open reads a database no other connection holds open", async () => {
+    seed();
+    // The test's own connection closed (its WAL files go with it), so the command alone opens the
+    // file, read-only: it is read all the same.
+    db.close();
+    const out = await exported(WINDOW);
+    expect(out.weeks).toHaveLength(3);
+    db = openDatabase(join(dir, "legalbody.db"));
   });
 });
 
@@ -624,23 +704,28 @@ describe("the settings", () => {
     PLATFORM_PRIVATE_KEY: `0x${"a".repeat(64)}`,
   };
 
-  test("FUNNEL_EXCLUDE_TENANTS: addresses, comma-separated, kept checksummed; a bad entry refuses boot without repeating it", () => {
+  test("FUNNEL_EXCLUDE_TENANTS: EIP-55 checksummed addresses, comma-separated; any other entry refuses boot without repeating it", () => {
     expect(loadConfig(BASE).funnel).toEqual({ excludeTenants: [], salt: undefined });
     expect(loadConfig({ ...BASE, FUNNEL_EXCLUDE_TENANTS: "" }).funnel?.excludeTenants).toEqual([]);
     expect(
-      loadConfig({ ...BASE, FUNNEL_EXCLUDE_TENANTS: ` ${A.toLowerCase()} , ${B} ` }).funnel
-        ?.excludeTenants,
+      loadConfig({ ...BASE, FUNNEL_EXCLUDE_TENANTS: ` ${A} , ${B} ` }).funnel?.excludeTenants,
     ).toEqual([A, B]);
-    let message = "";
-    try {
-      loadConfig({ ...BASE, FUNNEL_EXCLUDE_TENANTS: `${A},0x1234` });
-    } catch (e) {
-      message = (e as Error).message;
-    }
-    expect(message).toBe(
-      "Invalid config: FUNNEL_EXCLUDE_TENANTS must be wallet addresses, comma-separated (entry 2 is not one)",
-    );
-    expect(() => loadConfig({ ...BASE, FUNNEL_EXCLUDE_TENANTS: `${A},` })).toThrow(/entry 2/);
+    const MESSAGE = (entry: number) =>
+      `Invalid config: FUNNEL_EXCLUDE_TENANTS must be EIP-55 checksummed wallet addresses, comma-separated (entry ${entry} is not one)`;
+    const messageOf = (value: string) => {
+      try {
+        loadConfig({ ...BASE, FUNNEL_EXCLUDE_TENANTS: value });
+      } catch (e) {
+        return (e as Error).message;
+      }
+      return "";
+    };
+    expect(messageOf(`${A},0x1234`)).toBe(MESSAGE(2));
+    expect(messageOf(`${A},`)).toBe(MESSAGE(2));
+    // A valid address in lower case, or with one letter's case flipped, is not checksummed.
+    expect(messageOf(`${A},${B.toLowerCase()}`)).toBe(MESSAGE(2));
+    expect(messageOf(A.replace(/[A-F]/, (ch) => ch.toLowerCase()))).toBe(MESSAGE(1));
+    expect(messageOf(`${A},${B.toLowerCase()}`).toLowerCase()).not.toContain(B.toLowerCase());
   });
 
   test("FUNNEL_SALT: 32 bytes of hex, kept in lower case; anything else refuses boot without repeating it", () => {

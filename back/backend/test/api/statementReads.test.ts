@@ -8,6 +8,12 @@
  * changes nothing but the caller kind. Without FUNNEL_SALT no read is recorded at all. What the
  * route answers is the same, byte for byte, for every caller.
  *
+ * The row is written AFTER the answer is handed back (the caller kind decided before), so a busy
+ * database never delays the read; a repeat of a recent (body, day, kind, caller) never reaches the
+ * database; and the writes draw on a budget of their own (60 at once, then 1 a second), so a
+ * caller who changes its key on every request cannot write without bound: a write the budget
+ * refuses is dropped and counted, the answer unchanged.
+ *
  * The statement service over a real in-memory database and a fake chain, on a fixed clock. Every
  * key is one of anvil's published test accounts, every other address a placeholder, and every
  * client address a documentation address (RFC 5737).
@@ -56,6 +62,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   s.db.close();
 });
@@ -77,13 +84,52 @@ function makeApp(o: AppOptions = {}) {
 }
 type App = ReturnType<typeof makeApp>;
 
-/** A read of agent 42's statement from `client`, with an Authorization header when given. */
-const read = (app: App, o: { client?: string; authorization?: string; agentId?: string } = {}) => {
+type ReadOptions = { client?: string; authorization?: string; agentId?: string };
+
+/** A read of agent 42's statement from `client`, with an Authorization header when given: the
+ *  answer as it is handed back, before the deferred write has run. */
+const request = (app: App, o: ReadOptions = {}) => {
   const headers: Record<string, string> = {};
   if (o.client !== undefined) headers["x-forwarded-for"] = o.client;
   if (o.authorization !== undefined) headers.authorization = o.authorization;
   return app.request(`/legal-bodies/by-agent/${o.agentId ?? "42"}`, { headers });
 };
+
+/** Every write deferred so far has run: they are queued with setImmediate before the answer. */
+const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+/** `request`, then the deferred write. */
+async function read(app: App, o: ReadOptions = {}): Promise<Response> {
+  const res = await request(app, o);
+  await settle();
+  return res;
+}
+
+/** A store over the test database that counts the rows handed to it. */
+function countingStore() {
+  const real = new SqliteStatementReadRepository(s.db);
+  const store = {
+    calls: 0,
+    record: (r: Parameters<StatementReadRepository["record"]>[0]) => {
+      store.calls += 1;
+      return real.record(r);
+    },
+  };
+  return store;
+}
+
+/** The parsed ops lines for `event`, each without its `opslog` and `at` fields. */
+const opsLines = (event: string) =>
+  printed
+    .map((line) => {
+      try {
+        return JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return {};
+      }
+    })
+    .filter((line) => line.opslog === event)
+    .map(({ opslog: _o, at: _a, ...rest }) => rest);
 
 /** A linked body of agent 42 on chain, of the shared tenant. */
 function linkedBody(): LegalBodyRecord {
@@ -268,18 +314,25 @@ describe("what is recorded", () => {
 });
 
 describe("what the route answers", () => {
-  test("byte for byte the same, with its headers, for an anonymous caller, the owner and a bad bearer", async () => {
+  test("byte for byte the same, with its headers, for an anonymous caller, the owner, another account and a bad bearer", async () => {
     linkedBody();
     const owner = await bearerOf(TENANT);
+    const another = await bearerOf(ANVIL_ACCOUNT_3.address);
     // A fresh app for each caller, so each answer is made, not replayed from another's memo.
     const answers: { text: string; headers: [string, string][] }[] = [];
-    for (const authorization of [undefined, owner, "Bearer not-a-jwt"]) {
+    for (const authorization of [undefined, owner, another, "Bearer not-a-jwt"]) {
       const res = await read(makeApp(), { client: CLIENT_A, authorization });
       expect(res.status).toBe(200);
       answers.push({ text: await res.text(), headers: headersOf(res) });
     }
-    expect(answers[1]).toEqual(answers[0]);
-    expect(answers[2]).toEqual(answers[0]);
+    expect(answers).toHaveLength(4);
+    for (const answer of answers.slice(1)) expect(answer).toEqual(answers[0]);
+    // Each caller was recorded: the owner as owner, the rest as anonymous.
+    expect(
+      rows()
+        .map((r) => r.caller_kind)
+        .sort(),
+    ).toEqual(["anonymous", "owner"]);
     // And the same as a deployment that records nothing.
     const unrecorded = await read(makeApp({ reads: null }), { client: CLIENT_A });
     expect({ text: await unrecorded.text(), headers: headersOf(unrecorded) }).toEqual(answers[0]);
@@ -304,23 +357,12 @@ describe("what the route answers", () => {
       },
     };
     const app = makeApp({ reads: broken });
-    const failedLines = () =>
-      printed
-        .map((line) => {
-          try {
-            return JSON.parse(line) as Record<string, unknown>;
-          } catch {
-            return {};
-          }
-        })
-        .filter((line) => line.opslog === "legal_body_statement_read_failed");
+    const failedLines = () => opsLines("legal_body_statement_read_failed");
 
     const res = await read(app, { client: CLIENT_A });
     expect(res.status).toBe(200);
     expect((await res.json()).standing).toBe("active");
-    expect(failedLines().map(({ opslog: _o, at: _a, ...rest }) => rest)).toEqual([
-      { errorName: "SqliteError" },
-    ]);
+    expect(failedLines()).toEqual([{ errorName: "SqliteError", count: 1 }]);
 
     // Memo replays inside the minute: served, and no second line.
     for (let i = 0; i < 5; i += 1) {
@@ -328,10 +370,13 @@ describe("what the route answers", () => {
       expect((await read(app, { client: CLIENT_B })).status).toBe(200);
     }
     expect(failedLines()).toHaveLength(1);
-    // A minute after the first line: one more.
+    // A minute after the first line: one more, counting the five it held back and its own.
     clock = CLOCK_MS + 60_000;
     expect((await read(app, { client: CLIENT_A })).status).toBe(200);
-    expect(failedLines()).toHaveLength(2);
+    expect(failedLines()).toEqual([
+      { errorName: "SqliteError", count: 1 },
+      { errorName: "SqliteError", count: 6 },
+    ]);
     expect(printed.join("\n")).not.toContain(CLIENT_A);
   });
 
@@ -343,6 +388,84 @@ describe("what the route answers", () => {
     await read(app, { client: CLIENT_B, authorization: "Bearer not-a-jwt" });
     const all = printed.join("\n");
     for (const secret of [CLIENT_A, CLIENT_B, SALT]) expect(all).not.toContain(secret);
+  });
+});
+
+describe("the write: after the answer, once per caller, within a budget", () => {
+  test("the row is written after the answer is handed back, the owner decided before", async () => {
+    linkedBody();
+    const store = countingStore();
+    const app = makeApp({ reads: store });
+    const res = await request(app, { client: CLIENT_A, authorization: await bearerOf(TENANT) });
+    expect(res.status).toBe(200);
+    // Handed back: nothing has reached the store yet.
+    expect(store.calls).toBe(0);
+    expect(rows()).toEqual([]);
+    await settle();
+    expect(store.calls).toBe(1);
+    expect(rows().map((r) => r.caller_kind)).toEqual(["owner"]);
+  });
+
+  test("a repeated (body, day, caller) does not reach the database a second time, nor the budget", async () => {
+    linkedBody();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(CLOCK_MS);
+    const store = countingStore();
+    const app = makeApp({ reads: store });
+    await read(app, { client: CLIENT_A });
+    await read(app, { client: CLIENT_A });
+    clock += 60_000;
+    await read(app, { client: CLIENT_A });
+    expect(store.calls).toBe(1);
+    expect(rows()).toHaveLength(1);
+
+    // With the clock that refills the budget held still: 29 more callers, each twice, take 29 of
+    // the 59 writes left; 30 new callers then take the other 30. A repeat that spent a write would
+    // leave some of them dropped.
+    const callers = (from: number, n: number) =>
+      Array.from({ length: n }, (_, i) => `192.0.2.${from + i}`);
+    for (const client of callers(100, 29)) {
+      await read(app, { client });
+      await read(app, { client });
+    }
+    for (const client of callers(150, 30)) await read(app, { client });
+    expect(store.calls).toBe(60);
+    expect(rows()).toHaveLength(60);
+    expect(opsLines("legal_body_statement_read_dropped")).toEqual([]);
+  });
+
+  test("more callers at once than the budget: at most the budget's rows, every answer 200 and the same; the drops counted once a minute", async () => {
+    linkedBody();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(CLOCK_MS);
+    const app = makeApp();
+    const answers = new Set<string>();
+    const many = (from: number, n: number) => Array.from({ length: n }, (_, i) => from + i);
+
+    // 100 callers, each with a new key, inside one second: 60 rows, 40 dropped.
+    for (const i of many(0, 100)) {
+      const res = await read(app, { client: `10.0.${Math.floor(i / 250)}.${i % 250}` });
+      expect(res.status).toBe(200);
+      answers.add(await res.text());
+    }
+    expect(answers.size).toBe(1);
+    expect(rows()).toHaveLength(60);
+    // The first drop writes a line at once; the next 39 wait for the window.
+    expect(opsLines("legal_body_statement_read_dropped")).toEqual([{ count: 1 }]);
+
+    // A minute later, still no refill: 5 more dropped. The first of them writes one line counting
+    // the 39 held back and itself; the other 4 wait for the next window.
+    clock += 60_000;
+    for (const i of many(100, 5)) await read(app, { client: `10.0.1.${i}` });
+    expect(rows()).toHaveLength(60);
+    expect(opsLines("legal_body_statement_read_dropped")).toEqual([{ count: 1 }, { count: 40 }]);
+
+    // Ten seconds of refill: ten more rows, whatever the number of callers.
+    vi.setSystemTime(CLOCK_MS + 10_000);
+    for (const i of many(110, 15)) await read(app, { client: `10.0.2.${i}` });
+    expect(rows()).toHaveLength(70);
+    const all = printed.join("\n");
+    expect(all).not.toContain("10.0.");
   });
 });
 
@@ -365,6 +488,38 @@ describe("the store", () => {
     expect(() => repo.record({ ...good, callerDayHash: CLIENT_A as never })).toThrow(/hash/);
     expect(() => repo.record({ ...good, firstReadAt: 0 })).toThrow(/milliseconds/);
     expect(rows()).toHaveLength(1);
+  });
+
+  test("the first row it records writes when reads are recorded since; a later row changes nothing", () => {
+    const row = linkedBody();
+    const repo = new SqliteStatementReadRepository(s.db);
+    const since = () =>
+      s.db.prepare("SELECT value FROM meta WHERE key = 'funnel_statement_reads_since'").get() as
+        | { value: string }
+        | undefined;
+    expect(since()).toBeUndefined();
+    const read = (client: string, at: number) =>
+      repo.record({
+        legalBodyId: row.legalBodyId,
+        day: "2026-10-07",
+        callerKind: "anonymous",
+        callerDayHash: callerDayHash(client, "2026-10-07", SALT),
+        firstReadAt: at,
+      });
+    expect(read(CLIENT_A, CLOCK_MS)).toBe(true);
+    expect(since()).toEqual({ value: String(CLOCK_MS) });
+    expect(read(CLIENT_B, CLOCK_MS + 1_000)).toBe(true);
+    // A new store over the same database: the date stands.
+    expect(
+      new SqliteStatementReadRepository(s.db).record({
+        legalBodyId: row.legalBodyId,
+        day: "2026-10-08",
+        callerKind: "anonymous",
+        callerDayHash: callerDayHash(CLIENT_A, "2026-10-08", SALT),
+        firstReadAt: CLOCK_MS + DAY,
+      }),
+    ).toBe(true);
+    expect(since()).toEqual({ value: String(CLOCK_MS) });
   });
 
   test("the hash is lower-case hex of 32 bytes, and moves with the key, the day and the salt", () => {

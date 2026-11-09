@@ -1,17 +1,20 @@
-import type Database from "better-sqlite3";
+import { existsSync } from "node:fs";
+import Database from "better-sqlite3";
 import type { Command } from "commander";
 import { getAddress, isAddress } from "viem";
 import { ACCEPTED_CREDENTIALS } from "../adapters/worldid/guardianGate";
 import { type Config, legalBodyEnvironment } from "../config/env";
 import { CUSTOMER_PROVIDER } from "../legalBody/provider";
+import { STATEMENT_READS_SINCE_KEY } from "../persistence/statementReadRepository";
 import type { FormationPin } from "../types";
-import { print, refuse, withDatabase } from "./operator";
+import { operatorConfig, print, refuse } from "./operator";
 
 /**
  * `funnel:export`: THE FORMED DOOR'S FUNNEL (design §6.14), per ISO week, each stage labelled by
  * the source it counts. A READ-ONLY operator command: no --yes, no --operator, no ops line, and the
- * connection is opened query-only, so it cannot write. It prints counts only: never an address, a
- * name, a hash or a caller.
+ * database the configuration names is opened read-only and must exist, so the command can neither
+ * write nor make an empty database for a wrong DATA_DIR. It prints counts only: never an address,
+ * a name, a hash or a caller.
  *
  * The nine stages and what each counts, in the window `--since` to `--until` (whole UTC days):
  *  - signed_in: accounts whose first sign-in (`tenant_first_seen`) falls in the week. The table
@@ -33,6 +36,12 @@ import { print, refuse, withDatabase } from "./operator";
  *  - statement_reads: the sum over the days of the week of the distinct anonymous callers of each
  *    legal body's statement (`statement_reads`); null, `not_available`, without FUNNEL_SALT, which
  *    is when no read is recorded.
+ *
+ * NO ZERO FOR A WEEK NOTHING WAS RECORDED IN. Two stages began to be recorded on a date of their
+ * own, kept in `meta`: the sign-ins when `migrate` created their table (`funnel_first_seen_since`),
+ * the statement reads with the first one recorded (`funnel_statement_reads_since`). A week wholly
+ * before that date prints null for the stage, and its label ends "recorded since <YYYY-MM-DD>".
+ * With no date kept (a database older than the key), the stage is counted in every week.
  *
  * Excluded everywhere: the accounts of FUNNEL_EXCLUDE_TENANTS and --exclude-tenants (the founders),
  * by the account a row belongs to (a company's, payment's, body's or read's by its company's or
@@ -113,16 +122,32 @@ function parseDay(flag: string, value: string): number {
   return ms;
 }
 
-/** The accounts --exclude-tenants names. The refusal names an entry by its place, never its value. */
+/** The accounts --exclude-tenants names, each in its EIP-55 checksummed spelling. The refusal
+ *  names an entry by its place, never its value. */
 function parseTenants(value: string): string[] {
   return value.split(",").map((entry, i) => {
     const s = entry.trim();
-    if (!isAddress(s, { strict: true }))
+    if (!isAddress(s, { strict: false }) || getAddress(s) !== s)
       refuse(
-        `--exclude-tenants must be wallet addresses, comma-separated (entry ${i + 1} is not one)`,
+        `--exclude-tenants must be EIP-55 checksummed wallet addresses, comma-separated (entry ${i + 1} is not one)`,
       );
-    return getAddress(s);
+    return s;
   });
+}
+
+/** The `meta` key of the time the sign-ins began to be recorded, written by `migrate`. */
+const FIRST_SEEN_SINCE_KEY = "funnel_first_seen_since";
+
+/** The UTC day a stage began to be recorded, from `meta`; undefined when no date was kept. A value
+ *  that is not a time refuses: a wrong date would print false nulls or false zeros. */
+function recordedSince(db: Database.Database, key: string): string | undefined {
+  const row = db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as
+    | { value: string }
+    | undefined;
+  if (row === undefined) return undefined;
+  const at = Number(row.value);
+  if (!Number.isSafeInteger(at) || at <= 0) refuse(`meta ${key} is not a time in milliseconds`);
+  return dayOf(at);
 }
 
 /** The ISO 8601 week of a time in milliseconds, `YYYY-Www`: weeks start on Monday, and week 1 is
@@ -141,7 +166,9 @@ function isoWeekOf(ms: number): string {
 function sourcesOf(o: {
   includeSandbox: boolean;
   salted: boolean;
+  since: { signed_in: string | undefined; statement_reads: string | undefined };
 }): Record<FunnelColumn, string> {
+  const since = (day: string | undefined) => (day === undefined ? "" : `; recorded since ${day}`);
   const rows = o.includeSandbox
     ? "sandbox and synthetic rows included"
     : "production rows only; not synthetic";
@@ -150,7 +177,7 @@ function sourcesOf(o: {
   return {
     signed_in: `tenant_first_seen.first_seen_at; first sign-in per account; ${
       o.includeSandbox ? "any deployment" : "a production deployment only"
-    }`,
+    }${since(o.since.signed_in)}`,
     world_verified: `guardian_verifications.verified_at; first accepted credential per account; ${
       o.includeSandbox ? "any environment" : "production rows only"
     }`,
@@ -165,7 +192,9 @@ function sourcesOf(o: {
     filed: `companies.filed_at; purpose_kind legal_body; ${rows}`,
     body_linked: `legal_body_events.created_at; first kind linked per legal body; ${rows}`,
     statement_reads: o.salted
-      ? `statement_reads.day; distinct anonymous callers per legal body per day summed; ${rows}`
+      ? `statement_reads.day; distinct anonymous callers per legal body per day summed; ${rows}${since(
+          o.since.statement_reads,
+        )}`
       : NOT_AVAILABLE,
   };
 }
@@ -214,6 +243,10 @@ export function funnelExport(
     (db.prepare(sql).all(params) as { t: number }[]).map((r) => r.t);
 
   const read = () => ({
+    since: {
+      signed_in: recordedSince(db, FIRST_SEEN_SINCE_KEY),
+      statement_reads: salted ? recordedSince(db, STATEMENT_READS_SINCE_KEY) : undefined,
+    },
     signed_in: signInsCounted
       ? times(
           `SELECT first_seen_at AS t FROM tenant_first_seen
@@ -331,6 +364,12 @@ export function funnelExport(
     if (provider === CUSTOMER_PROVIDER) add("company_requested_customer", t);
   }
   for (const t of rows.statement_reads ?? []) add("statement_reads", t);
+  // A week wholly before a stage began to be recorded has no count for it, not a zero.
+  for (const column of ["signed_in", "statement_reads"] as const) {
+    const since = rows.since[column];
+    if (since === undefined) continue;
+    for (const week of weeks) if (week.to < since) week[column] = null;
+  }
 
   return {
     since: opts.since,
@@ -338,7 +377,7 @@ export function funnelExport(
     includeSandbox,
     excludedTenants: excluded.length,
     stages: FUNNEL_STAGES,
-    sources: sourcesOf({ includeSandbox, salted }),
+    sources: sourcesOf({ includeSandbox, salted, since: rows.since }),
     weeks,
   };
 }
@@ -383,12 +422,17 @@ export function registerFunnelCommands(program: Command): void {
     .option("--format <format>", "json or csv", "json")
     .action((opts: FunnelOptions & { format: string }) => {
       if (opts.format !== "json" && opts.format !== "csv") refuse("--format must be json or csv");
-      withDatabase((db, _docStoreDir, cfg) => {
-        // Read-only by construction: this connection cannot write.
-        db.pragma("query_only = ON");
+      const cfg = operatorConfig();
+      // The database the configuration names, read-only, and only if it is there: an open that
+      // could write would make an empty database for a wrong DATA_DIR, and print zeros from it.
+      if (!existsSync(cfg.dbPath)) refuse(`there is no database at ${cfg.dbPath}: check DATA_DIR`);
+      const db = new Database(cfg.dbPath, { readonly: true, fileMustExist: true });
+      try {
         const out = funnelExport(db, cfg, opts);
         if (opts.format === "csv") console.log(funnelCsv(out));
         else print(out as unknown as Record<string, unknown>);
-      });
+      } finally {
+        db.close();
+      }
     });
 }

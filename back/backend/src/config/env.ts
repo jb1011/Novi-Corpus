@@ -1136,20 +1136,21 @@ function parseAddressList(raw: string | undefined, varName: string): Address[] {
 }
 
 /**
- * FUNNEL_EXCLUDE_TENANTS -> the accounts the funnel never counts, checksummed. Blank is none. A
- * mixed-case entry must carry a valid checksum, so a typo in a founder's address refuses boot
- * rather than silently counting the founder. The refusal names the entry by its place, never its
- * value: a near-miss of an address is still an address, and boot errors reach the journal.
+ * FUNNEL_EXCLUDE_TENANTS -> the accounts the funnel never counts. Blank is none. Every entry must be
+ * an address in its EIP-55 checksummed spelling (`getAddress(entry) === entry`), so a typo in a
+ * founder's address refuses boot rather than silently counting the founder. The refusal names the
+ * entry by its place, never its value: a near-miss of an address is still an address, and boot
+ * errors reach the journal.
  */
 function parseFunnelTenants(raw: string | undefined): Address[] {
   if (!raw?.trim()) return [];
   return raw.split(",").map((entry, i) => {
     const s = entry.trim();
-    if (!isAddress(s, { strict: true }))
+    if (!isAddress(s, { strict: false }) || getAddress(s) !== s)
       throw new Error(
-        `Invalid config: FUNNEL_EXCLUDE_TENANTS must be wallet addresses, comma-separated (entry ${i + 1} is not one)`,
+        `Invalid config: FUNNEL_EXCLUDE_TENANTS must be EIP-55 checksummed wallet addresses, comma-separated (entry ${i + 1} is not one)`,
       );
-    return getAddress(s);
+    return s as Address;
   });
 }
 

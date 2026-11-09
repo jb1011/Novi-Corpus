@@ -1500,6 +1500,11 @@ const sqlIsMillis = (column: string) =>
  * an erasure must be able to delete an account's row. The times are unix MILLISECONDS, the day
  * `YYYY-MM-DD` (a real day: `date(day)` gives it back unchanged) and the hash `0x` and 64
  * lower-case hex digits.
+ *
+ * WHEN EACH BEGAN, in `meta`, so the export prints no zero for a week nothing was recorded in:
+ * `funnel_first_seen_since` is written by `migrate` when it creates `tenant_first_seen` (unix
+ * milliseconds, as text); `funnel_statement_reads_since` by the first read row recorded
+ * (`statementReadRepository.ts`), since reads are recorded only where FUNNEL_SALT is set.
  */
 const FUNNEL_DDL = `
   CREATE TABLE IF NOT EXISTS tenant_first_seen (
@@ -2348,8 +2353,19 @@ export function migrate(db: Database.Database): void {
   db.exec(STATEMENT_LOG_DDL);
   // The agreement adoptions reference `legal_bodies` too, and stand outside that step alike.
   db.exec(AGREEMENT_ADOPTIONS_DDL);
-  // The funnel's tables: the statement reads reference `legal_bodies` as well.
-  db.exec(FUNNEL_DDL);
+  // The funnel's tables: the statement reads reference `legal_bodies` as well. The sign-ins are
+  // recorded from the moment their table is created, and that moment is kept with it.
+  db.transaction(() => {
+    const created =
+      db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tenant_first_seen'")
+        .get() === undefined;
+    db.exec(FUNNEL_DDL);
+    if (created)
+      db.prepare(
+        "INSERT OR IGNORE INTO meta (key, value) VALUES ('funnel_first_seen_since', ?)",
+      ).run(String(Date.now()));
+  })();
 }
 
 /** Marker for the one-shot 2026-08-26 re-key (design §2 steps 1-5). */

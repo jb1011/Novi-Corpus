@@ -10,11 +10,13 @@ import {
 } from "../../legalBody/statements";
 import { opsLog } from "../../observability/opsLog";
 import {
+  type StatementRead,
   type StatementReadCaller,
   callerDayHash,
   utcDay,
 } from "../../persistence/statementReadRepository";
 import type { ApiDeps } from "../app";
+import { TokenBucket } from "./agentBook";
 import {
   AnswerMemo,
   FRESH_CACHE_CONTROL,
@@ -57,7 +59,65 @@ import {
  * expired or signed with another secret is no session, so the caller reads as anonymous and
  * nothing else changes. The record changes nothing in the answer, for any caller, and a record
  * that fails is an ops line naming the error, never the answer's failure.
+ *
+ * THE ROW IS WRITTEN AFTER THE ANSWER IS HANDED BACK (`setImmediate`), so a busy database never
+ * delays a public read; the caller kind and the hash are decided before, while the request is in
+ * hand. A memo replay takes no token, so the writes are bounded on their own:
+ *  - a repeat of a recent (body, day, kind, caller) is skipped before the database and the budget
+ *    (the last 4096 keys, least recently seen evicted first);
+ *  - every other write takes one token from the route's own budget, 60 at once and 1 a second for
+ *    all callers together, so a caller who changes its key on every request (a new last
+ *    X-Forwarded-For entry) cannot write without bound. A write the budget refuses is dropped and
+ *    counted; the answer is the same either way.
+ * A failed write and a dropped one each have one ops line per minute at most, counting how many
+ * since the last: `legal_body_statement_read_failed` (with the error's name) and
+ * `legal_body_statement_read_dropped`. Neither names a caller.
  */
+
+/** The read rows the route may write, for all callers together: 60 at once, then 1 a second. */
+const READ_ROW_BURST = 60;
+const READ_ROW_REFILL_PER_SECOND = 1;
+/** How many recent read keys are remembered, so a repeat never reaches the database. */
+const RECENT_READ_KEYS = 4096;
+
+/** A bounded set of keys, the least recently seen evicted first. */
+class RecentKeys {
+  private readonly keys = new Set<string>();
+
+  constructor(private readonly max: number) {}
+
+  /** Whether `key` was seen; a key seen again becomes the most recent. */
+  has(key: string): boolean {
+    if (!this.keys.has(key)) return false;
+    this.keys.delete(key);
+    this.keys.add(key);
+    return true;
+  }
+
+  add(key: string): void {
+    this.keys.delete(key);
+    this.keys.add(key);
+    while (this.keys.size > this.max) {
+      const oldest = this.keys.values().next().value;
+      if (oldest === undefined) break;
+      this.keys.delete(oldest);
+    }
+  }
+}
+
+/** At most one `event` ops line per window, carrying how many happened since the last line. */
+function windowedLine(event: string, now: () => number) {
+  let loggedAt: number | undefined;
+  let count = 0;
+  return (fields: Record<string, unknown> = {}): void => {
+    count += 1;
+    const at = now();
+    if (loggedAt !== undefined && at - loggedAt < THROTTLE_LOG_WINDOW_MS) return;
+    loggedAt = at;
+    opsLog(event, { ...fields, count });
+    count = 0;
+  };
+}
 
 /** The three answers. The agent id is the canonical decimal the caller supplied. */
 export type ByAgentAnswer =
@@ -122,14 +182,35 @@ export function mountLegalBodyStatementRoutes(
   /** Keyed by the canonical agent id. */
   const memo = new AnswerMemo<Memoised>(MEMO_TTL_MS, MEMO_MAX_ENTRIES, now);
   const reads = deps.statementReads;
-  /** When the last failed-record line was written: a memo replay costs no token, so a failing
-   *  store under a scanner would otherwise write one line per request. One per window. */
-  let readFailLoggedAt: number | undefined;
+  const readBudget = new TokenBucket(READ_ROW_BURST, READ_ROW_REFILL_PER_SECOND);
+  const recentReads = new RecentKeys(RECENT_READ_KEYS);
+  const readFailed = windowedLine("legal_body_statement_read_failed", now);
+  const readDropped = windowedLine("legal_body_statement_read_dropped", now);
 
-  /** Records a read of the body's statement where FUNNEL_SALT is set. Never throws: the answer is
-   *  served whatever happens here, and the ops line names the error only, never the caller. */
+  /** Writes one read row, after the answer: a recent repeat is skipped, then the budget decides.
+   *  Never throws. */
+  const writeRead = (read: StatementRead): void => {
+    if (reads === undefined) return;
+    const key = `${read.legalBodyId}|${read.day}|${read.callerKind}|${read.callerDayHash}`;
+    if (recentReads.has(key)) return;
+    if (!readBudget.take()) {
+      readDropped();
+      return;
+    }
+    try {
+      reads.repo.record(read);
+      recentReads.add(key);
+    } catch (e) {
+      readFailed({ errorName: errorNameOf(e) });
+    }
+  };
+
+  /** Decides the read of the body's statement where FUNNEL_SALT is set (the caller kind and the
+   *  caller's hash, while the request is in hand) and defers its write past the answer. Never
+   *  throws: the answer is served whatever happens here. */
   const recordRead = async (c: Context, legalBodyId: string): Promise<void> => {
     if (reads === undefined) return;
+    let read: StatementRead;
     try {
       const at = now();
       const day = utcDay(at);
@@ -138,20 +219,18 @@ export function mountLegalBodyStatementRoutes(
         tenant !== undefined && st.repo.findOwned(tenant, legalBodyId) !== undefined
           ? "owner"
           : "anonymous";
-      reads.repo.record({
+      read = {
         legalBodyId,
         day,
         callerKind,
         callerDayHash: callerDayHash(clientKeyOf(c), day, reads.salt),
         firstReadAt: at,
-      });
+      };
     } catch (e) {
-      const at = now();
-      if (readFailLoggedAt === undefined || at - readFailLoggedAt >= THROTTLE_LOG_WINDOW_MS) {
-        readFailLoggedAt = at;
-        opsLog("legal_body_statement_read_failed", { errorName: errorNameOf(e) });
-      }
+      readFailed({ errorName: errorNameOf(e) });
+      return;
     }
+    setImmediate(() => writeRead(read));
   };
   const clientBucket = createClientLimiter(deps);
   /** When the last throttle line was written, so a sustained drain costs one line per minute. */

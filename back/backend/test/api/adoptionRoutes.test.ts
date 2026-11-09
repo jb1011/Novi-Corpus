@@ -482,7 +482,10 @@ describe("the adoption doors accept no draft the link would refuse", () => {
   test("a draft placed more than 24 hours ago is a 409 order_expired on both doors", async () => {
     const app = makeApp();
     const id = (await ordered(app)).legalBodyId;
-    nowMs += DAY_MS + 1_000;
+    // A day and a second after the draft was placed, read from the real clock AFTER placing it:
+    // its createdAt is stamped by the real clock at the insert, so a clock read in beforeEach can
+    // trail it by the setup's time, which under load passes a second.
+    nowMs = Date.now() + DAY_MS + 1_000;
     await refusedOnBoth(app, id, "order_expired", 409);
   });
 

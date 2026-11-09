@@ -142,3 +142,24 @@ test("a malformed account or time is refused before any write", () => {
   expect(() => repo.recordFirstSeen(account.address, 1.5)).toThrow(/milliseconds/);
   expect(rows()).toEqual([]);
 });
+
+test("migrate records when the sign-ins began to be recorded, once: when it creates the table", () => {
+  const fresh = openDatabase(":memory:");
+  try {
+    const before = Date.now();
+    migrate(fresh);
+    const after = Date.now();
+    const since = () =>
+      fresh.prepare("SELECT value FROM meta WHERE key = 'funnel_first_seen_since'").get() as
+        | { value: string }
+        | undefined;
+    const first = Number(since()?.value);
+    expect(first).toBeGreaterThanOrEqual(before);
+    expect(first).toBeLessThanOrEqual(after);
+    // A later migrate finds the table and leaves the date alone.
+    migrate(fresh);
+    expect(Number(since()?.value)).toBe(first);
+  } finally {
+    fresh.close();
+  }
+});

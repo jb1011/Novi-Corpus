@@ -16,6 +16,10 @@ import type { Hex } from "viem";
  *
  * Not `statement_log`, which skips a statement whose claims did not change and would count a
  * second read as nothing. The table is `statement_reads` in db.ts; nothing but the funnel reads it.
+ *
+ * The first row recorded also writes `funnel_statement_reads_since` in `meta` (its time, unix
+ * milliseconds as text; INSERT OR IGNORE, so the first one stands): the export prints no zero for
+ * a week before reads were recorded.
  */
 
 /** `owner`: the request carried a valid session of the body's own tenant. */
@@ -59,8 +63,14 @@ function refuse(field: string, rule: string): never {
   throw new Error(`statement_reads: ${field} ${rule}`);
 }
 
+/** The `meta` key of the time the first read was recorded. */
+export const STATEMENT_READS_SINCE_KEY = "funnel_statement_reads_since";
+
 export class SqliteStatementReadRepository implements StatementReadRepository {
   private readonly stmts;
+  private readonly insertRead: (read: StatementRead) => boolean;
+  /** This store has seen the since-key written (or found): no second write of it per process. */
+  private sinceWritten = false;
 
   constructor(db: Database.Database) {
     this.stmts = {
@@ -69,7 +79,22 @@ export class SqliteStatementReadRepository implements StatementReadRepository {
            (legal_body_id, day, caller_kind, caller_day_hash, first_read_at)
          VALUES (@legal_body_id, @day, @caller_kind, @caller_day_hash, @first_read_at)`,
       ),
+      since: db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)"),
     };
+    // The row and, with the first one, the date reads are recorded since: one transaction.
+    this.insertRead = db.transaction((read: StatementRead): boolean => {
+      const inserted =
+        this.stmts.insert.run({
+          legal_body_id: read.legalBodyId,
+          day: read.day,
+          caller_kind: read.callerKind,
+          caller_day_hash: read.callerDayHash,
+          first_read_at: read.firstReadAt,
+        }).changes === 1;
+      if (inserted && !this.sinceWritten)
+        this.stmts.since.run(STATEMENT_READS_SINCE_KEY, String(read.firstReadAt));
+      return inserted;
+    });
   }
 
   record(read: StatementRead): boolean {
@@ -88,14 +113,8 @@ export class SqliteStatementReadRepository implements StatementReadRepository {
       refuse("callerDayHash", "must be a sha256 hash, 0x and 64 lower-case hex digits");
     if (!Number.isSafeInteger(read.firstReadAt) || read.firstReadAt < MIN_MILLIS)
       refuse("firstReadAt", "must be whole unix milliseconds");
-    return (
-      this.stmts.insert.run({
-        legal_body_id: read.legalBodyId,
-        day: read.day,
-        caller_kind: read.callerKind,
-        caller_day_hash: read.callerDayHash,
-        first_read_at: read.firstReadAt,
-      }).changes === 1
-    );
+    const inserted = this.insertRead(read);
+    if (inserted) this.sinceWritten = true;
+    return inserted;
   }
 }
