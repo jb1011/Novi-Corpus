@@ -157,13 +157,16 @@ export function assertOpenDraft(
 /**
  * Rule 1, shared by both functions, on the tenant's order: the draft rule every door shares
  * (`assertOpenDraft`), and then the guardian's adoption of that agreement (`adoption.ts`), on
- * every deployment alike.
+ * every deployment alike: an adoption stored for the order, over the order's own frozen manifest
+ * hash. A row over any other hash adopts nothing this order links.
  */
 function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, nowMs: number): Hex {
   const { hash } = assertOpenDraft(deps, row, nowMs);
   // The link binds the agreement too, but it is the identity owner's signature, who need not be
-  // the member: the agreement is adopted by the guardian's own.
-  if (deps.adoptions.find(row.legalBodyId) === undefined)
+  // the member: the agreement is adopted by the guardian's own. Both hashes are stored lower-case;
+  // compared so anyway, as a hash's letter case is not information.
+  const adoption = deps.adoptions.find(row.legalBodyId);
+  if (adoption === undefined || adoption.manifestHash.toLowerCase() !== hash.toLowerCase())
     throw refusal("agreement_not_adopted", 409);
   return hash;
 }

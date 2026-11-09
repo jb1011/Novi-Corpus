@@ -39,9 +39,11 @@ import {
 } from "../helpers/customerCompanyFixtures";
 import {
   type FakeLinkChainMembers,
+  H,
   JWT_SECRET,
   type Json,
   type LegalBodyStores,
+  PLACEHOLDER_ADOPTION_SIGNATURE,
   REGISTRY,
   adoptFor,
   answerOf,
@@ -211,6 +213,31 @@ describe("the link functions refuse an order whose agreement was not adopted", (
     expect(LEGAL_BODY_SENTENCES[CODE]).toBe(
       "The operating agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
     );
+  });
+});
+
+describe("the adoption must name the order's own agreement", () => {
+  test("an adoption row whose manifest hash is not the order's opens nothing: both functions answer 409 agreement_not_adopted, on both deployments", async () => {
+    const row = draft();
+    // Written by hand, as no door would: the right order, another agreement.
+    s.adoptions.insert({
+      legalBodyId: row.legalBodyId,
+      manifestHash: H("e"),
+      textId: LEGAL_BODY_OPERATING_AGREEMENT.id,
+      textVersion: LEGAL_BODY_OPERATING_AGREEMENT.version,
+      guardian: tenant,
+      issuedAt: Math.floor(Date.now() / 1000),
+      signature: PLACEHOLDER_ADOPTION_SIGNATURE,
+      digest: H("d"),
+      adoptedAt: Math.floor(Date.now() / 1000),
+    });
+    expect(H("e")).not.toBe(row.oaManifestHash);
+    const before = snapshot();
+    for (const environment of ["sandbox", "production"] as const)
+      for (const fn of bothFunctions(deps({ environment }), row))
+        await refusedWith(fn.run, CODE, 409, fn.name);
+    expect(snapshot()).toEqual(before);
+    expect(chainReads()).toBe(0);
   });
 });
 

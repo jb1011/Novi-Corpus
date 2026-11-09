@@ -303,6 +303,39 @@ describe("verifyAdoption", () => {
   });
 });
 
+describe("the message names the text the order was frozen with (Ruling 1)", () => {
+  /** A text version this deployment does not serve: what an order frozen earlier would state. */
+  const EARLIER = { textId: LEGAL_BODY_OPERATING_AGREEMENT.id, textVersion: "2026-09-draft-0" };
+  const CURRENT = {
+    textId: LEGAL_BODY_OPERATING_AGREEMENT.id,
+    textVersion: LEGAL_BODY_OPERATING_AGREEMENT.version,
+  };
+
+  test("buildAdoptionMessage puts the frozen text id and version in the message, not the current text's", () => {
+    const row = draft();
+    expect(EARLIER.textVersion).not.toBe(CURRENT.textVersion);
+    const m = buildAdoptionMessage(row, EARLIER, BigInt(NOW));
+    expect(m.textId).toBe(EARLIER.textId);
+    expect(m.textVersion).toBe("2026-09-draft-0");
+    expect(adoptionTypedDataWire(CHAIN_ID, FACTORY, m).message.textVersion).toBe("2026-09-draft-0");
+  });
+
+  test("verifyAdoption accepts a signature over that message given the same text, and refuses it given the current text", async () => {
+    const row = draft();
+    const m = buildAdoptionMessage(row, EARLIER, BigInt(NOW));
+    const signature = (await guardian.signTypedData(
+      asReceived(adoptionTypedDataWire(CHAIN_ID, FACTORY, m)),
+    )) as Hex;
+    await expect(verify(row, String(NOW), signature, { terms: EARLIER })).resolves.toEqual({
+      digest: adoptionDigest(CHAIN_ID, FACTORY, m),
+    });
+    await refused(
+      () => verify(row, String(NOW), signature, { terms: CURRENT }),
+      "adoption_not_valid",
+    );
+  });
+});
+
 describe("the adoption door's write", () => {
   test("a draft abandoned between the check of the signature and the write is refused order_closed by the read under the lock, and no row is written", async () => {
     const row = draft();
