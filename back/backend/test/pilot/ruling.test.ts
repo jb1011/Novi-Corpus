@@ -464,14 +464,20 @@ describe("pollOnce", () => {
   });
 
   // The time of the read: a read that kept the stored ruling must not renew the trust a settle
-  // puts in it, so a pending or tied read leaves the time the ruling was taken at, and a read that
-  // failed the options check clears it, so the next settle reads Kleros live.
-  test.each<[string, Partial<DisputeRead>, string, "kept" | "cleared"]>([
+  // puts in it. A pending read leaves the time the ruling was taken at; a read that failed the
+  // options check, or that contradicts the stored verdict (a tie in the appeal period, a value the
+  // settlement does not know), clears it, so the next settle reads Kleros live.
+  const MISMATCH_WORDS =
+    "a read of the ruled case failed the options check; the stored ruling is kept, and the next settle reads Kleros again before acting on it";
+  const CONTRADICTS_WORDS =
+    "a read of the ruled case contradicts the stored verdict; the stored ruling is kept, and the next settle reads Kleros again before acting on it";
+  test.each<[string, Partial<DisputeRead>, string, "kept" | "cleared", string]>([
     [
       "an options mismatch",
       { rulingOptions: [{ value: "1", title: "Something else" }] },
       "options_mismatch",
       "cleared",
+      MISMATCH_WORDS,
     ],
     [
       "an options mismatch at Executed",
@@ -485,12 +491,20 @@ describe("pollOnce", () => {
       },
       "options_mismatch",
       "cleared",
+      MISMATCH_WORDS,
     ],
-    ["a tie at Appeal", { ruling: "0", tied: true }, "tied", "kept"],
-    ["a read at Vote", { status: "Vote", ruling: "0", tied: true }, "pending", "kept"],
+    ["a tie at Appeal", { ruling: "0", tied: true }, "tied", "cleared", CONTRADICTS_WORDS],
+    ["an unexpected value", { ruling: "7" }, "unexpected", "cleared", CONTRADICTS_WORDS],
+    [
+      "a read at Vote",
+      { status: "Vote", ruling: "0", tied: true },
+      "pending",
+      "kept",
+      "a read of the ruled case was not final; the stored ruling is kept",
+    ],
   ])(
     "a re-read of a ruled row that is %s keeps the stored ruling and records the outcome",
-    async (_name, o, kind, readTime) => {
+    async (_name, o, kind, readTime, words) => {
       let next = read({ ruling: "2" });
       const service = stubService(() => next);
       const t = setup({ stage: testnetStage(service) });
@@ -522,6 +536,7 @@ describe("pollOnce", () => {
         step: "ruling",
         status: kind,
         ref: "186",
+        detail: words,
       });
     },
   );

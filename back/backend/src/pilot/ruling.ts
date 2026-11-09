@@ -201,9 +201,10 @@ export function stageChainProblem(stage: KlerosStage, row: PilotCaseRecord): str
  * outcome is final (pay, refund, refused, or a tie at Executed). On a row already ruled, a read
  * that is neither final nor an appeal keeps the stored ruling: only the period and the deadline
  * are written, with an event naming the outcome. A settle trusts a stored ruling for ten minutes
- * after the time of its read, so such a read never renews that time: a pending, tied or
- * unexpected read leaves it as it is, and a read that failed the options check clears it, so the
- * next settle reads Kleros live. An appeal is written in full. A rehearsal row at ruled is
+ * after the time of its read, so such a read never renews that time: a pending read leaves it as
+ * it is, and a read that contradicts the stored verdict (one that failed the options check, a tie
+ * in the appeal period, or an unexpected value) clears it, so the next settle reads Kleros live
+ * before acting on the verdict. An appeal is written in full. A rehearsal row at ruled is
  * refused. Refuses, before any request, a row of another mode than the stage's, a row without a
  * chain or a dispute id, a row at another status, and a row whose chain is not the one the
  * stage's service reads.
@@ -237,14 +238,17 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
   // settle sees the new round instead of acting on the first one.
   const appeal = read.roundCount > 1;
   const keepRuling = from === "ruled" && !final && !appeal;
-  // A read that failed the options check revokes the trust in the stored verdict: with no time
-  // of read, the next settle reads Kleros live instead of acting on it from the row.
-  const mismatch = outcome.kind === "options_mismatch";
+  // A kept read that is not merely pending revokes the trust in the stored verdict: one that
+  // failed the options check, a tie in the appeal period, or a value the settlement does not know
+  // contradicts the verdict read for the same round. With no time of read, the next settle reads
+  // Kleros live instead of acting on it from the row. A pending read (a Commit or a Vote) already
+  // reads as pending from the row, through the period it writes.
+  const revokes = outcome.kind !== "pending";
   const written: Partial<PilotCaseRecord> = keepRuling
     ? {
         rulingStatus: patch.rulingStatus,
         rulingDeadline: patch.rulingDeadline,
-        ...(mismatch ? { rulingReadAt: null } : {}),
+        ...(revokes ? { rulingReadAt: null } : {}),
       }
     : patch;
   d.cases.transaction(() => {
@@ -269,8 +273,8 @@ export async function pollOnce(d: PollDeps, caseId: string): Promise<PollResult>
         "ruling",
         outcome.kind,
         row.coreDisputeId,
-        mismatch
-          ? "a read of the ruled case failed the options check; the stored ruling is kept, and the next settle reads Kleros again before acting on it"
+        revokes
+          ? `a read of the ruled case ${outcome.kind === "options_mismatch" ? "failed the options check" : "contradicts the stored verdict"}; the stored ruling is kept, and the next settle reads Kleros again before acting on it`
           : "a read of the ruled case was not final; the stored ruling is kept",
       );
   });

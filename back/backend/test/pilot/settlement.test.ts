@@ -32,6 +32,7 @@ import {
   SEND_IN_FLIGHT_SECONDS,
   type SettleDeps,
   SettleRefusal,
+  type Settlement,
   adoptSettleTx,
   clearDroppedSettleTx,
   decideSettlement,
@@ -1966,6 +1967,44 @@ describe("settleCase: refusals and the ruling read", () => {
       s.clock.sec += 60;
       const r = await settleCase(s.deps, caseId, { send: true });
       expect(r.settlement).toEqual({ action: "none", why: "options_mismatch" });
+      expect(reads).toHaveLength(3);
+      expect(s.node.sends).toEqual([]);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "ruled",
+        rulingValue: "1",
+        rulingReadAt: null,
+      });
+    },
+  );
+
+  test.each<[string, DisputeRead, Settlement]>([
+    ["tied", { ...appealRead("0"), tied: true }, { action: "none", why: "tied" }],
+    ["unexpected", appealRead("7"), { action: "none", why: "unexpected_ruling" }],
+  ])(
+    "a verdict read a minute before a round-1 re-read that is %s is read again live by the next settle, and never sent on",
+    async (kind, contradicting, settlement) => {
+      let next = appealRead("1");
+      const { s, reads } = testnetStage(() => next);
+      const caseId = seed(s, {
+        mode: "testnet",
+        patch: { klerosChain: "arbitrum-sepolia-testnet" },
+      });
+      const poll = {
+        stage: s.stage,
+        cases: s.cases,
+        expected: EXPECTED,
+        now: () => s.clock.sec * 1000,
+      };
+      expect((await pollOnce(poll, caseId)).outcome.kind).toBe("pay");
+      expect(s.cases.find(caseId)).toMatchObject({ status: "ruled", rulingReadAt: NOW });
+      next = contradicting;
+      s.clock.sec += 60;
+      expect((await pollOnce(poll, caseId)).outcome.kind).toBe(kind);
+      // Two minutes after the verdict's read, inside the ten minutes a stored read is trusted
+      // for: a later read that contradicts the verdict sends the settle to Kleros all the same.
+      s.clock.sec += 60;
+      const r = await settleCase(s.deps, caseId, { send: true });
+      expect(r.settlement).toEqual(settlement);
       expect(reads).toHaveLength(3);
       expect(s.node.sends).toEqual([]);
       expect(s.cases.find(caseId)).toMatchObject({
