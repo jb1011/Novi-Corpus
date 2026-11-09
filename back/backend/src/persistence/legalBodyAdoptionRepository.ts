@@ -1,6 +1,12 @@
 import type Database from "better-sqlite3";
 import type { Address, Hex } from "viem";
-import { LegalBodyInputError, requireAddress, requireHash, requireSeconds } from "./legalBodyInput";
+import {
+  ECDSA_SIGNATURE,
+  LegalBodyInputError,
+  requireAddress,
+  requireHash,
+  requireSeconds,
+} from "./legalBodyInput";
 
 /**
  * THE ADOPTIONS OF AN ORDER'S OPERATING AGREEMENT: one row per order, written once, when its
@@ -73,9 +79,6 @@ function toAdoption(r: Row): AgreementAdoption {
     createdAt: r.created_at,
   };
 }
-
-/** r, s and v: the only signature the adoption accepts. */
-const ECDSA_SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 
 function requireText(field: string, value: unknown): string {
   if (typeof value !== "string" || value.length === 0)

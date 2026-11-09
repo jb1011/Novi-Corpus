@@ -12,9 +12,10 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { ADOPTION_DOMAIN_NAME, ADOPTION_PRIMARY_TYPE } from "../../src/legalBody/adoption";
-import { agreementDocNames } from "../../src/legalBody/agreement";
-import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
+import { agreementDocNames, buildAgreement, storeAgreement } from "../../src/legalBody/agreement";
+import { type LegalBodyOrderDeps, createOrder } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import { LEGAL_BODY_OPERATING_AGREEMENT } from "../../src/legalBody/texts/operatingAgreement";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
@@ -31,10 +32,14 @@ import {
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
 import {
+  DAY_MS,
   JWT_SECRET,
   type Json,
   type LegalBodyStores,
+  OTHER_FACTORY,
+  REGISTRY,
   answerOf,
+  appendCheck,
   call,
   customerCompany,
   legalBodyOrderDeps,
@@ -53,14 +58,15 @@ const messagePath = (id: string) => `/legal-body-orders/${id}/adoption-message`;
 const adoptionPath = (id: string) => `/legal-body-orders/${id}/adoption`;
 const orderPath = (id: string) => `/legal-body-orders/${id}`;
 
-/** The server's clock, in milliseconds: each test moves it. */
+/** The server's clock, in milliseconds: each test moves it. It starts at the real time, which is
+ *  the one a draft's `createdAt` is stamped with, so a draft is linkable until a test moves it. */
 let nowMs: number;
 let db: Database.Database;
 let s: LegalBodyStores;
 let lines: string[];
 
 beforeEach(() => {
-  nowMs = 1_800_000_000_000;
+  nowMs = Date.now();
   db = openDatabase(":memory:");
   migrate(db);
   s = openLegalBodyStores(db);
@@ -310,6 +316,42 @@ describe("POST /legal-body-orders/:id/adoption", () => {
   });
 });
 
+describe("the throttle", () => {
+  test("the adoption takes a token from the tenant's bucket and the doors' budget, as the link doors do: either empty is a 429 rate_limited, and nothing is stored", async () => {
+    const empty = { take: () => false };
+    for (const over of [{ tenantBucket: () => empty }, { doorBudget: empty }]) {
+      const app = makeApp(orderDeps(over));
+      const id = (await ordered(app)).legalBodyId;
+      // The message writes nothing, and is free, as the agreement's read is.
+      const signedNow = await servedAndSigned(app, id);
+      const before = snapshot();
+      expectRefusal(await adopt(app, id, signedNow), "rate_limited", 429);
+      expect(snapshot()).toEqual(before);
+      expect(s.adoptions.find(id)).toBeUndefined();
+    }
+  });
+
+  test("the bucket is asked only once the tenant is a real human", async () => {
+    let asked = 0;
+    const app = makeApp(
+      orderDeps({
+        tenantBucket: () => ({
+          take: () => {
+            asked += 1;
+            return true;
+          },
+        }),
+      }),
+    );
+    const id = (await ordered(app)).legalBodyId;
+    const waiver = await adopt(app, id, {}, waived);
+    expect(waiver.status).toBe(403);
+    expect(asked).toBe(0);
+    await adopt(app, id, await servedAndSigned(app, id));
+    expect(asked).toBe(1);
+  });
+});
+
 describe("the preconditions both doors share", () => {
   test("an order that is not the tenant's is the uniform 404 on both doors", async () => {
     const app = makeApp();
@@ -374,5 +416,100 @@ describe("the preconditions both doors share", () => {
     expect(written).not.toContain("Example Holdings");
     expect(written.toLowerCase()).not.toContain(guardian.address.toLowerCase());
     expect(written).not.toContain(own.signature.slice(2, 40));
+  });
+});
+
+describe("the adoption doors accept no draft the link would refuse", () => {
+  /** Both doors on the order, with a body of the right shape: each refusal comes before the
+   *  signature is read. */
+  async function bothDoors(app: App, id: string) {
+    const token = await sessionOf(guardian);
+    const body = { issuedAt: String(Math.floor(nowMs / 1000)), signature: `0x${"11".repeat(65)}` };
+    return [
+      await answerOf(await call(app, "POST", messagePath(id), token, {})),
+      await answerOf(await call(app, "POST", adoptionPath(id), token, body)),
+    ];
+  }
+
+  async function refusedOnBoth(app: App, id: string, code: string, status: number) {
+    const before = snapshot();
+    for (const res of await bothDoors(app, id)) expectRefusal(res, code, status);
+    expect(snapshot()).toEqual(before);
+    expect(s.adoptions.find(id)).toBeUndefined();
+  }
+
+  test("an order frozen on an older version of the wording is a 409 agreement_outdated on both doors, and no row is written", async () => {
+    const app = makeApp();
+    const companyId = customerCompany(s, guardian.address, { filingNumber: "TEST-0800" });
+    const created = s.repo.create({
+      tenantId: guardian.address,
+      companyId,
+      chainId: CHAIN_ID,
+      factory: FACTORY,
+      amendmentDelay: 172_800,
+    });
+    const built = buildAgreement(
+      {
+        companyName: "Example Holdings LLC",
+        filingNumber: "TEST-0800",
+        jurisdiction: "WY",
+        guardian: guardian.address,
+        amendmentDelaySeconds: 172_800,
+        chainId: CHAIN_ID,
+        factory: FACTORY,
+        identityRegistry: REGISTRY,
+      },
+      { ...LEGAL_BODY_OPERATING_AGREEMENT, version: "2026-09-draft-0" },
+      { source: "customer" },
+    );
+    storeAgreement(s.docStore, created.legalBodyId, built);
+    expect(
+      s.repo.freezeAgreement(created.legalBodyId, { hash: built.manifestHash, version: 1 }),
+    ).toBe(true);
+    await refusedOnBoth(app, created.legalBodyId, "agreement_outdated", 409);
+  });
+
+  test("a production deployment, which does not serve the draft wording, answers agreement_outdated on both doors", async () => {
+    const id = (await ordered(makeApp())).legalBodyId;
+    await refusedOnBoth(
+      makeApp(orderDeps({ environment: "production" })),
+      id,
+      "agreement_outdated",
+      409,
+    );
+  });
+
+  test("a draft placed more than 24 hours ago is a 409 order_expired on both doors", async () => {
+    const app = makeApp();
+    const id = (await ordered(app)).legalBodyId;
+    nowMs += DAY_MS + 1_000;
+    await refusedOnBoth(app, id, "order_expired", 409);
+  });
+
+  test("a draft the operator revoked is a 409 order_revoked on both doors", async () => {
+    const app = makeApp();
+    const id = (await ordered(app)).legalBodyId;
+    s.repo.recordEvent(id, "revoked", "operator:ops.example", null, {
+      reason: "Recorded for a test.",
+    });
+    await refusedOnBoth(app, id, "order_revoked", 409);
+  });
+
+  test("a draft whose company is no longer eligible is a 409 company_not_eligible on both doors", async () => {
+    const app = makeApp();
+    const row = await ordered(app);
+    appendCheck(s.checks, row.companyId, "revoked");
+    await refusedOnBoth(app, row.legalBodyId, "company_not_eligible", 409);
+  });
+
+  test("an order made under another factory or chain is a 409 other_deployment on both doors", async () => {
+    const companyId = customerCompany(s, guardian.address, { filingNumber: "TEST-0700" });
+    for (const deployment of [
+      { chainId: CHAIN_ID, factory: OTHER_FACTORY },
+      { chainId: CHAIN_ID + 1, factory: FACTORY },
+    ]) {
+      const elsewhere = createOrder(orderDeps({ deployment }), guardian.address, { companyId });
+      await refusedOnBoth(makeApp(), elsewhere.id, "other_deployment", 409);
+    }
   });
 });

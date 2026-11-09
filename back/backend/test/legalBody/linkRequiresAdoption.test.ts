@@ -16,6 +16,8 @@ import type Database from "better-sqlite3";
 import type { Address } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
+import { TokenBucket } from "../../src/api/routes/agentBook";
+import { bucketsByKey } from "../../src/api/routes/legalBodyOrders";
 import { ApiError } from "../../src/errors";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { agreementDocNames, buildAgreement, storeAgreement } from "../../src/legalBody/agreement";
@@ -264,7 +266,11 @@ describe("agreement_not_adopted comes after every other check of rule 1", () => 
 
 // ── The REST doors and the agent's tools ────────────────────────────────────────────────────
 
-function appOver(database: Database.Database, stores: LegalBodyStores) {
+function appOver(
+  database: Database.Database,
+  stores: LegalBodyStores,
+  over: Partial<LegalBodyOrderDeps> = {},
+) {
   const requests = new SqliteFormationRepository(database);
   const apiDeps: Partial<ApiDeps> = {
     webOrigin: "*",
@@ -279,7 +285,7 @@ function appOver(database: Database.Database, stores: LegalBodyStores) {
       checks: stores.checks,
       hasLinkedLegalBody: (companyId) => stores.repo.hasLinkedForCompany(companyId),
     },
-    legalBodyOrders: legalBodyOrderDeps(stores, { chain: asChainPort(chain) }),
+    legalBodyOrders: legalBodyOrderDeps(stores, { chain: asChainPort(chain), ...over }),
     apiKeys: new SqliteApiKeyStore(database),
     passkeys: new SqlitePasskeyStore(database),
     jobs: new SqliteJobRepository(database),
@@ -356,10 +362,56 @@ describe("the doors and the tools answer the same code and sentence", () => {
     // The adoption is the guardian's own signature, made in the web app: no tool makes one.
     const { client, close } = await startMcpTestClient(app, key);
     try {
-      const names = (await client.listTools()).tools.map((t) => t.name);
-      expect(names.filter((name) => /adopt/i.test(name))).toEqual([]);
+      const tools = (await client.listTools()).tools;
+      expect(tools.map((t) => t.name).filter((name) => /adopt/i.test(name))).toEqual([]);
+      // The agent learns of the step before it is refused: the guardian adopts in the web app.
+      const description = tools.find((t) => t.name === "get_link_message")?.description ?? "";
+      expect(description).toContain(
+        "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
+      );
     } finally {
       await close();
     }
+  });
+});
+
+describe("the guardian's whole path fits the doors' throttles", () => {
+  test("with the buckets the deployment wires, the adoption, the link message and the link all pass, and the tenant's bucket still has room", async () => {
+    // As the composition root builds them: 5 tokens per tenant, one back every 10 seconds; 20 for
+    // all the doors, one back every second.
+    const tenantBucket = bucketsByKey(5, 1 / 10);
+    const app = appOver(db, s, { tenantBucket, doorBudget: new TokenBucket(20, 1) });
+    const row = draft();
+    const id = row.legalBodyId;
+    const token = await sessionOf(guardian);
+
+    const served = await answerOf(
+      await call(app, "POST", `/legal-body-orders/${id}/adoption-message`, token, {}),
+    );
+    expect(served.status).toBe(200);
+    const adopted = await answerOf(
+      await call(app, "POST", `/legal-body-orders/${id}/adoption`, token, {
+        issuedAt: served.body.issuedAt,
+        signature: await guardian.signTypedData(served.body.typedData),
+      }),
+    );
+    expect(adopted.status).toBe(200);
+    const message = await answerOf(
+      await call(app, "POST", `/legal-body-orders/${id}/link-message`, token, { agentId: "42" }),
+    );
+    expect(message.status).toBe(200);
+    const link = await answerOf(
+      await call(
+        app,
+        "POST",
+        `/legal-body-orders/${id}/link`,
+        token,
+        await signedLink(linkFor(row)),
+      ),
+    );
+    expect(link.status).toBe(202);
+    expect(link.body).toMatchObject({ id, state: "reserved" });
+    // Three tokens of five: a retry or a refresh of the binding still finds one.
+    expect(tenantBucket(tenant).take()).toBe(true);
   });
 });

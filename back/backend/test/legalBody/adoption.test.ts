@@ -17,6 +17,7 @@ import {
   ADOPTION_FIELDS,
   ADOPTION_PRIMARY_TYPE,
   type AdoptionMessage,
+  adoptAgreement,
   adoptionDigest,
   adoptionDomain,
   adoptionMessage,
@@ -24,11 +25,7 @@ import {
   buildAdoptionMessage,
   verifyAdoption,
 } from "../../src/legalBody/adoption";
-import {
-  buildAgreement,
-  readVerifiedAgreement,
-  storeAgreement,
-} from "../../src/legalBody/agreement";
+import { readVerifiedAgreement } from "../../src/legalBody/agreement";
 import { createOrder } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { STATEMENT_DOMAIN_NAME } from "../../src/legalBody/statement";
@@ -49,7 +46,6 @@ import {
   type LegalBodyStores,
   OTHER_FACTORY,
   PLACEHOLDER_ADOPTION_SIGNATURE,
-  REGISTRY,
   adoptFor,
   customerCompany,
   legalBodyOrderDeps,
@@ -307,48 +303,54 @@ describe("verifyAdoption", () => {
   });
 });
 
-describe("the adoption message door reads the text from the order's frozen agreement", () => {
-  test("an order frozen on an earlier version of the wording is served that version, not the current one", () => {
-    const companyId = customerCompany(s, guardian.address, { filingNumber: "TEST-0800" });
-    const created = s.repo.create({
-      tenantId: guardian.address,
-      companyId,
-      chainId: CHAIN_ID,
-      factory: FACTORY,
-      amendmentDelay: 172_800,
-    });
-    const earlier = { ...LEGAL_BODY_OPERATING_AGREEMENT, version: "2026-09-draft-0" };
-    const built = buildAgreement(
-      {
-        companyName: "Example Holdings LLC",
-        filingNumber: "TEST-0800",
-        jurisdiction: "WY",
-        guardian: guardian.address,
-        amendmentDelaySeconds: 172_800,
-        chainId: CHAIN_ID,
-        factory: FACTORY,
-        identityRegistry: REGISTRY,
+describe("the adoption door's write", () => {
+  test("a draft abandoned between the check of the signature and the write is refused order_closed by the read under the lock, and no row is written", async () => {
+    const row = draft();
+    const served = adoptionMessage(legalBodyOrderDeps(s), guardian.address, row.legalBodyId);
+    const signature = (await guardian.signTypedData(asReceived(served.typedData))) as Hex;
+    // The adoption's one transaction is its write: the draft is abandoned just before it opens,
+    // after the signature was checked against the draft as it stood.
+    let abandoned = false;
+    const deps = legalBodyOrderDeps(s, {
+      transaction: (fn) => {
+        if (!abandoned) {
+          abandoned = true;
+          expect(s.repo.abandon(row.legalBodyId, "tenant_request", "tenant")).toBe(true);
+        }
+        return s.repo.transaction(fn);
       },
-      earlier,
-      { source: "customer" },
-    );
-    storeAgreement(s.docStore, created.legalBodyId, built);
-    expect(
-      s.repo.freezeAgreement(created.legalBodyId, { hash: built.manifestHash, version: 1 }),
-    ).toBe(true);
-
-    const served = adoptionMessage(
-      legalBodyOrderDeps(s, { now: () => NOW * 1000 }),
-      guardian.address,
-      created.legalBodyId,
-    );
-    expect(served.typedData.message).toMatchObject({
-      orderId: created.legalBodyId,
-      manifestHash: built.manifestHash,
-      textId: LEGAL_BODY_OPERATING_AGREEMENT.id,
-      textVersion: "2026-09-draft-0",
     });
-    expect(served.issuedAt).toBe(String(NOW));
+
+    let caught: unknown;
+    try {
+      await adoptAgreement(deps, guardian.address, row.legalBodyId, {
+        issuedAt: served.issuedAt,
+        signature,
+      });
+    } catch (err) {
+      caught = err;
+    }
+    expect(abandoned).toBe(true);
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).code).toBe("order_closed");
+    expect((caught as ApiError).status).toBe(409);
+    expect(s.adoptions.find(row.legalBodyId)).toBeUndefined();
+    expect(
+      s.repo.listEvents(row.legalBodyId).filter((e) => e.kind === "agreement_adopted"),
+    ).toEqual([]);
+  });
+
+  test("the same adoption, with nothing in between, is stored", async () => {
+    const row = draft();
+    const served = adoptionMessage(legalBodyOrderDeps(s), guardian.address, row.legalBodyId);
+    const signature = (await guardian.signTypedData(asReceived(served.typedData))) as Hex;
+    const { adoptedAt } = await adoptAgreement(
+      legalBodyOrderDeps(s),
+      guardian.address,
+      row.legalBodyId,
+      { issuedAt: served.issuedAt, signature },
+    );
+    expect(s.adoptions.find(row.legalBodyId)?.adoptedAt).toBe(adoptedAt);
   });
 });
 

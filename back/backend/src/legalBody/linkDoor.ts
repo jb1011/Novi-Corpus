@@ -120,12 +120,18 @@ const FACTORY_ERROR_NAMES: ReadonlySet<string> = new Set(
 );
 
 /**
- * Rule 1, shared by both functions, on the tenant's order: a frozen draft of this deployment,
- * created less than 24 hours ago, not revoked, for a company still eligible, whose stored agreement
- * re-verifies and was written on the current text, which this deployment serves, and whose
- * guardian has adopted that agreement (`adoption.ts`), on every deployment alike.
+ * The rule every door that acts on a draft shares, the link's rule 1 but for the adoption: a frozen
+ * draft of this deployment, created less than 24 hours ago, not revoked, for a company still
+ * eligible, whose stored agreement re-verifies and was written on the current text, which this
+ * deployment serves. In that order, each its own refusal. Answers the frozen hash, and the text id
+ * and version the stored manifest states, the ones the adoption signs (`adoption.ts`), so a draft
+ * the link would refuse is never adopted.
  */
-function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, nowMs: number): Hex {
+export function assertOpenDraft(
+  deps: LegalBodyOrderDeps,
+  row: LegalBodyRecord,
+  nowMs: number,
+): { hash: Hex; frozen: { textId: string; textVersion: string } } {
   const hash = row.oaManifestHash;
   if (row.bindingState !== "draft" || hash === null) throw refusal("order_closed", 409);
   assertThisDeployment(deps, row);
@@ -142,6 +148,19 @@ function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, now
     !servable(deps.environment)
   )
     throw refusal("agreement_outdated", 409);
+  return {
+    hash,
+    frozen: { textId: verified.terms.textId, textVersion: verified.terms.textVersion },
+  };
+}
+
+/**
+ * Rule 1, shared by both functions, on the tenant's order: the draft rule every door shares
+ * (`assertOpenDraft`), and then the guardian's adoption of that agreement (`adoption.ts`), on
+ * every deployment alike.
+ */
+function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, nowMs: number): Hex {
+  const { hash } = assertOpenDraft(deps, row, nowMs);
   // The link binds the agreement too, but it is the identity owner's signature, who need not be
   // the member: the agreement is adopted by the guardian's own.
   if (deps.adoptions.find(row.legalBodyId) === undefined)

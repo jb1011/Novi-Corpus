@@ -2,15 +2,12 @@ import { type Address, type Hex, getAddress, hashTypedData, recoverAddress } fro
 import { assertRealHuman } from "../api/routes/worldId";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { NewAgreementAdoption } from "../persistence/legalBodyAdoptionRepository";
+import { ECDSA_SIGNATURE } from "../persistence/legalBodyInput";
 import type { LegalBodyRecord } from "../persistence/legalBodyRepository";
-import { readVerifiedAgreement } from "./agreement";
-import {
-  type LegalBodyOrderDeps,
-  assertThisDeployment,
-  orderLockKey,
-  requireOwnedOrder,
-} from "./orders";
+import { assertOpenDraft } from "./linkDoor";
+import { type LegalBodyOrderDeps, orderLockKey, requireOwnedOrder, takeDoorTokens } from "./orders";
 import { refusal } from "./sentences";
+import { EIP712_DOMAIN_FIELDS } from "./statement";
 
 /**
  * THE ADOPTION OF AN ORDER'S OPERATING AGREEMENT: what a guardian signs to adopt, for its company,
@@ -48,13 +45,6 @@ export const ADOPTION_FIELDS = [
   { name: "textVersion", type: "string" },
   { name: "guardian", type: "address" },
   { name: "issuedAt", type: "uint256" },
-] as const;
-
-const EIP712_DOMAIN_FIELDS = [
-  { name: "name", type: "string" },
-  { name: "version", type: "string" },
-  { name: "chainId", type: "uint256" },
-  { name: "verifyingContract", type: "address" },
 ] as const;
 
 /** The wording an order's agreement was frozen with, by id and version, as its stored manifest
@@ -171,9 +161,6 @@ export function adoptionDigest(chainId: number, factory: Address, m: AdoptionMes
 
 /** A uint256 in canonical decimal: digits only, no leading zero but "0" itself, 78 at most. */
 const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]{0,77})$/;
-/** r, s and v, as hex: the only signature form accepted. Sign-in is ECDSA only, so the tenant is
- *  always an address a key controls, and a stored adoption is checked again from its row. */
-const ECDSA_SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
 
 /**
  * Checks a signed adoption. It never takes a message from the client: it builds the message from
@@ -184,8 +171,10 @@ const ECDSA_SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
  *    than the tenant; or `issuedAt` is not a whole number of seconds in canonical decimal;
  *  - `adoption_stale` (400): `issuedAt` is more than `maxAgeSec` seconds before `nowSec`, or more
  *    than 60 after it;
- *  - `adoption_not_valid` (400): the signature is not 65 bytes of hex, does not recover, or
- *    recovers, over the digest, to another address than the tenant (compared in lower case).
+ *  - `adoption_not_valid` (400): the signature is not 65 bytes of hex (`ECDSA_SIGNATURE`: sign-in
+ *    is ECDSA only, so the tenant is always an address a key controls, and a stored adoption is
+ *    checked again from its row), does not recover, or recovers, over the digest, to another
+ *    address than the tenant (compared in lower case).
  * Answers the digest the signature covers.
  */
 export async function verifyAdoption(input: {
@@ -252,42 +241,35 @@ export function recordAdoption(
 }
 
 /**
- * The rule both adoption doors share, on the tenant's order: a real human (never a waiver); the
- * tenant's order (the uniform 404); a draft with a frozen agreement (409 `order_closed`); of this
- * deployment (409 `other_deployment`); whose stored agreement re-verifies (500
- * `agreement_unreadable`, after the error line `readVerifiedAgreement` writes). Answers the order
- * and the text its agreement was frozen with.
+ * The rule both adoption doors share, on the tenant's order, once the tenant passed the
+ * real-human check: the tenant's order (the uniform 404), then the draft rule the link applies
+ * (`assertOpenDraft`), so a draft the link would refuse is never adopted, with the same code.
+ * Answers the order and the text its agreement was frozen with.
  */
 function adoptableDraft(
   deps: LegalBodyOrderDeps,
   tenantId: Address,
   id: string,
+  nowMs: number,
 ): { row: LegalBodyRecord; frozen: FrozenAgreementText } {
-  assertRealHuman(deps.world, tenantId, deps.environment);
   const row = requireOwnedOrder(deps, tenantId, id);
-  const hash = row.oaManifestHash;
-  if (row.bindingState !== "draft" || hash === null) throw refusal("order_closed", 409);
-  assertThisDeployment(deps, row);
-  const verified = readVerifiedAgreement(deps.docStore, row.legalBodyId, hash);
-  if (verified === undefined) throw refusal("agreement_unreadable", 500);
-  return {
-    row,
-    frozen: { textId: verified.terms.textId, textVersion: verified.terms.textVersion },
-  };
+  return { row, frozen: assertOpenDraft(deps, row, nowMs).frozen };
 }
 
 /**
  * The typed data the guardian signs to adopt its order's agreement, issued now by the server's
- * clock, after the shared rule (`adoptableDraft`). Writes nothing.
+ * clock: a real human (never a waiver), then the shared rule (`adoptableDraft`). It writes
+ * nothing and takes no token, as the agreement's read takes none.
  */
 export function adoptionMessage(
   deps: LegalBodyOrderDeps,
   tenantId: Address,
   id: string,
 ): AdoptionMessageResult {
-  const nowSec = Math.floor((deps.now ?? Date.now)() / 1000);
-  const { row, frozen } = adoptableDraft(deps, tenantId, id);
-  const message = buildAdoptionMessage(row, frozen, BigInt(nowSec));
+  const nowMs = (deps.now ?? Date.now)();
+  assertRealHuman(deps.world, tenantId, deps.environment);
+  const { row, frozen } = adoptableDraft(deps, tenantId, id, nowMs);
+  const message = buildAdoptionMessage(row, frozen, BigInt(Math.floor(nowMs / 1000)));
   return {
     typedData: adoptionTypedDataWire(deps.deployment.chainId, deps.deployment.factory, message),
     issuedAt: message.issuedAt.toString(),
@@ -295,11 +277,13 @@ export function adoptionMessage(
 }
 
 /**
- * Stores the guardian's signed adoption of its order's agreement. In this order: the shared rule
- * (`adoptableDraft`); `verifyAdoption`, on this deployment's chain and factory and within its
- * `adoptionMaxAgeSeconds`; then, under the order's lock and in one transaction, the order read
- * again (one abandoned since is 409 `order_closed`) and `recordAdoption`. A second adoption of the
- * same order, checked as the first, answers the stored time and writes nothing.
+ * Stores the guardian's signed adoption of its order's agreement. In this order: a real human
+ * (never a waiver), then the tenant's bucket and the doors' budget, as the link doors take them
+ * (`takeDoorTokens`, 429 `rate_limited`); the shared rule (`adoptableDraft`); `verifyAdoption`, on
+ * this deployment's chain and factory and within its `adoptionMaxAgeSeconds`; then, under the
+ * order's lock and in one transaction, the order read again (one abandoned since is 409
+ * `order_closed`) and `recordAdoption`. A second adoption of the same order, checked as the
+ * first, answers the stored time and writes nothing.
  */
 export async function adoptAgreement(
   deps: LegalBodyOrderDeps,
@@ -307,8 +291,11 @@ export async function adoptAgreement(
   id: string,
   input: { issuedAt: unknown; signature: unknown },
 ): Promise<AdoptionResult> {
-  const nowSec = Math.floor((deps.now ?? Date.now)() / 1000);
-  const { row, frozen } = adoptableDraft(deps, tenantId, id);
+  const nowMs = (deps.now ?? Date.now)();
+  const nowSec = Math.floor(nowMs / 1000);
+  assertRealHuman(deps.world, tenantId, deps.environment);
+  takeDoorTokens(deps, tenantId);
+  const { row, frozen } = adoptableDraft(deps, tenantId, id, nowMs);
   const issuedAt = input?.issuedAt as string;
   const { digest } = await verifyAdoption({
     chainId: deps.deployment.chainId,

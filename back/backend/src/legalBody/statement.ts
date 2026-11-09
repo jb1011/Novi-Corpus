@@ -45,7 +45,8 @@ const STATEMENT_FIELDS = [
   { name: "issuedAt", type: "uint256" },
 ] as const;
 
-const EIP712_DOMAIN_FIELDS = [
+/** The fields of the EIP-712 domain every typed data here declares, in their order. */
+export const EIP712_DOMAIN_FIELDS = [
   { name: "name", type: "string" },
   { name: "version", type: "string" },
   { name: "chainId", type: "uint256" },

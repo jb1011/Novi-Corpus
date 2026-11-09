@@ -432,6 +432,7 @@ function legalBodyToolRefusal(tool: string, err: unknown): ToolRefusal {
 const GET_LINK_MESSAGE_DESCRIPTION = [
   "Get the message the owner of an agent's ERC-8004 identity signs to have a legal body created for an order and linked to that identity.",
   "orderId is an order your tenant placed in the browser: no tool places an order.",
+  "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
   "agentId is the identity's id, as a decimal string.",
   `ttlSeconds, if given, is how long the message stays signable: a whole number of seconds from ${MIN_SERVED_LINK_TTL_SECONDS} to ${MAX_SERVED_LINK_TTL_SECONDS} (${DEFAULT_LINK_TTL_SECONDS} if omitted).`,
   "The answer is typedData, the EIP-712 typed data to sign (the three uint256 fields of its message are decimal strings); identityOwner, the address that must sign it, which the identity registry names as the owner now; and deadline, in unix seconds of chain time.",
