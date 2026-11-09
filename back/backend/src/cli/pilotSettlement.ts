@@ -395,9 +395,11 @@ async function refundUnfiled(
       return;
     }
     if (!o.yes) {
+      // A release is recorded on a failed case only: its own complete landed.
+      const outcome = r.settlement.why === "released_elsewhere" ? "release" : "refund";
       const writes =
         after?.status === "failed"
-          ? "record the refund on the case"
+          ? `record the ${outcome} on the case`
           : "record the refund and fail the case";
       print({
         dryRun: true,
@@ -487,16 +489,27 @@ async function dropped(
     });
     return;
   }
-  // A settling case is decided again. Any other is the expiry refund's: it claims the refund,
-  // again for a dropped claimRefund, or records one the chain already shows.
-  const refundedElsewhere = r.read.escrowStatus === "Expired" || r.read.escrowStatus === "Rejected";
-  const again =
-    r.write.status === "settling"
-      ? `run pilot:settle --case ${caseId} to decide again from the chain`
-      : refundedElsewhere
-        ? `run pilot:settle --case ${caseId} --claim-refund to record the refund the chain shows`
-        : `run pilot:settle --case ${caseId} --claim-refund to refund it${r.read.action === "claimRefund" ? " again" : ""} from the chain`;
-  print({ ...base, read: r.read, wrote: r.write, next: again });
+  print({ ...base, read: r.read, wrote: r.write, next: afterDrop(caseId, r) });
+}
+
+/**
+ * What runs after a cleared drop. A settling case is decided again from the chain, which records
+ * an escrow already settled. Any other is the expiry refund's: it claims the refund, again for a
+ * dropped claimRefund, or records a refund the chain already shows, or the release of a failed
+ * case's own complete; on any other Completed escrow it refuses, and the words say so.
+ */
+function afterDrop(caseId: string, r: Awaited<ReturnType<typeof clearDroppedSettleTx>>): string {
+  const refund = `pilot:settle --case ${caseId} --claim-refund`;
+  if (r.write.status === "settling")
+    return `run pilot:settle --case ${caseId} to decide again from the chain`;
+  const status = r.read.escrowStatus;
+  if (status === "Expired" || status === "Rejected")
+    return `run ${refund} to record the refund the chain shows`;
+  if (status === "Completed")
+    return r.write.status === "failed" && r.read.action === "complete"
+      ? `run ${refund} to record the release the chain shows`
+      : `nothing is left to refund: the chain shows the job Completed, its escrow released to the provider, and ${refund} refuses the case; read the chain before acting`;
+  return `run ${refund} to refund it${r.read.action === "claimRefund" ? " again" : ""} from the chain`;
 }
 
 export function registerPilotSettlementCommands(

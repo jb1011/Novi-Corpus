@@ -684,6 +684,66 @@ describe("pilot:settle --claim-refund on a case funded but never filed", () => {
       error: "stuck",
     });
   });
+
+  test("--dropped on a failed case's complete whose escrow the chain shows released says the refund records the release, and it does, sending nothing", async () => {
+    const f = makeFake({ chainStatus: 3, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "failed", {
+      klerosChain: "fake",
+      coreDisputeId: "287",
+      filingStartedAt: NOW - 100,
+      settleAction: "complete",
+      settleReason: reasonFor("287"),
+      settleTxHash: TX,
+      error: "stuck",
+    });
+    agedSend(f, caseId, `complete ${reasonFor("287")}`);
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--dropped", "--yes"]);
+    expect(out).toMatchObject({
+      status: "failed",
+      read: { escrowStatus: "Completed" },
+      wrote: { status: "failed", settleTxHash: null, settleAction: "complete" },
+      next: `run pilot:settle --case ${caseId} --claim-refund to record the release the chain shows`,
+    });
+    const [dry] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund"]);
+    expect(dry).toMatchObject({
+      dryRun: true,
+      status: "failed",
+      settlement: { action: "none", why: "released_elsewhere", outcome: "released" },
+      write: { status: "failed", settleAction: "complete", escrowOutcome: "released" },
+      next: "nothing to send: the escrow is already released to the provider; nothing was written: run the same command with --yes to record the release on the case",
+    });
+    const [, refund] = await f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]);
+    expect(refund).toMatchObject({
+      status: "failed",
+      settlement: { why: "released_elsewhere" },
+      next: "nothing to send: the escrow is already released to the provider",
+    });
+    expect(f.sent).toEqual([]);
+    expect(f.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      settleAction: "complete",
+      escrowOutcome: "released",
+      error: "stuck",
+    });
+  });
+
+  test("--dropped on a claimRefund hash whose escrow the chain shows released says the refund refuses the case, and names the chain", async () => {
+    const f = makeFake({ chainStatus: 3, nowSec: REFUND_TIME });
+    const caseId = seedUnfiled(f, "funded", { settleAction: "claimRefund", settleTxHash: TX });
+    agedSend(f, caseId, "claimRefund");
+    const [out] = await f.run(["pilot:settle", "--case", caseId, "--dropped", "--yes"]);
+    expect(out).toMatchObject({
+      status: "funded",
+      read: { escrowStatus: "Completed" },
+      wrote: { status: "funded", settleTxHash: null, settleAction: "claimRefund" },
+      next: `nothing is left to refund: the chain shows the job Completed, its escrow released to the provider, and pilot:settle --case ${caseId} --claim-refund refuses the case; read the chain before acting`,
+    });
+    await expect(
+      f.run(["pilot:settle", "--case", caseId, "--claim-refund", "--yes"]),
+    ).rejects.toThrow(/the chain shows job 7 Completed, its escrow released to the provider/);
+    expect(f.sent).toEqual([]);
+    expect(f.cases.find(caseId)).toMatchObject({ status: "funded", escrowOutcome: null });
+  });
 });
 
 /** A settle/sending event on the case, stamped the drop's grace before the refund's time. */

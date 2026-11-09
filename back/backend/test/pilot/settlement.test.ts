@@ -3260,21 +3260,104 @@ describe("clearDroppedSettleTx: a settle hash the network dropped", () => {
 
   test.each<[number, string]>([
     [0, "Open"],
-    [3, "Completed"],
-    [4, "Rejected"],
-    [5, "Expired"],
+    [9, "9"],
   ])(
-    "an escrow at %i is refused: the hash is cleared only while the escrow waits",
+    "an escrow at %i is refused: the hash is cleared only while the escrow waits or once it is settled",
     async (chainStatus, name) => {
-      const s = setup({ script: "pay", chainStatus });
+      const s = setup({ script: "pay" });
       const caseId = seedSettlingWithHash(s);
+      vi.spyOn(s.deps.chain.job, "escrowState").mockResolvedValue(escrow(chainStatus));
       const before = snapshot(s, caseId);
-      await expect(clearDroppedSettleTx(s.deps, caseId, { write: true })).rejects.toThrow(
-        new RegExp(
-          `job 7 is ${name}, not Funded or Submitted, so ${DROPPED_HASH} is not cleared; run pilot:settle to read the chain; nothing was sent$`,
-        ),
-      );
+      for (const write of [true, false])
+        await expect(clearDroppedSettleTx(s.deps, caseId, { write })).rejects.toThrow(
+          new RegExp(
+            `^refusing: job 7 is ${name}, not Funded, Submitted, Completed, Rejected or Expired, so ${DROPPED_HASH} is not cleared, and pilot:settle refuses the case while it holds the hash; read the chain before acting; nothing was sent$`,
+          ),
+        );
       expect(snapshot(s, caseId)).toEqual(before);
+    },
+  );
+
+  test.each<["complete" | "reject" | "claimRefund", string, "released" | "refunded"]>([
+    ["complete", "Completed", "released"],
+    ["reject", "Rejected", "refunded"],
+    ["claimRefund", "Expired", "refunded"],
+  ])(
+    "a dropped %s on an escrow another transaction left %s is cleared, the next settle records what the chain shows with the action kept and sends nothing, and --tx attaches the hash found",
+    async (action, name, outcome) => {
+      const s = setup({ script: action === "reject" ? "refund" : "pay" });
+      if (action === "claimRefund") s.clock.sec = REFUND_TIME;
+      const caseId = seedSettlingNoHash(s, {
+        patch: {
+          settleAction: action,
+          settleReason: action === "claimRefund" ? null : reasonFor(DISPUTE),
+          settleTxHash: DROPPED_HASH,
+        },
+      });
+      sendingEvent(s, caseId, DROP_GRACE_SECONDS);
+      s.cases.recordEvent(caseId, "settle", "sent", DROPPED_HASH, action);
+      // The transaction that settled the escrow: a send of ours whose hash the row lost, or, for
+      // the expiry path, the buyer's own claimRefund, which anyone may send after the expiry.
+      const found =
+        action === "complete"
+          ? await refereeComplete(s)
+          : action === "reject"
+            ? await refereeReject(s)
+            : await s.deps.chain.job.claimRefund(7n, s.deps.chain.wallets.buyer);
+      const others = s.node.sends.length;
+      // The plain settle waits on the hash while it may be mined.
+      await expect(settleCase(s.deps, caseId, { send: true })).rejects.toThrow(
+        new RegExp(`case ${caseId}'s ${action} ${DROPPED_HASH} has no receipt yet`),
+      );
+      const before = snapshot(s, caseId);
+      const dry = await clearDroppedSettleTx(s.deps, caseId, { write: false });
+      expect(dry).toMatchObject({ read: { escrowStatus: name }, written: false });
+      expect(snapshot(s, caseId)).toEqual(before);
+      const r = await clearDroppedSettleTx(s.deps, caseId, { write: true });
+      expect(r).toMatchObject({
+        read: { hash: DROPPED_HASH, action, escrowStatus: name },
+        write: {
+          status: "settling",
+          settleTxHash: null,
+          settleAction: action,
+          event: {
+            status: "dropped",
+            ref: DROPPED_HASH,
+            detail: `${action} not mined and not pending ${DROP_GRACE_SECONDS} s after its send; the escrow is ${name}, ${outcome} by another transaction`,
+          },
+        },
+        written: true,
+      });
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "settling",
+        settleTxHash: null,
+        settleAction: action,
+      });
+      const settled = await settleCase(s.deps, caseId, { send: true });
+      expect(settled.settlement).toEqual({
+        action: "none",
+        why: `${outcome}_elsewhere`,
+        outcome,
+      });
+      expect(s.node.sends).toHaveLength(others);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "settled",
+        settleAction: action,
+        settleTxHash: null,
+        escrowOutcome: outcome,
+      });
+      // The hash of the transaction that settled it, once found, is attached through its proof:
+      // only a send of the referee's own is.
+      if (action === "claimRefund") return;
+      const adopted = await adoptSettleTx(s.deps, caseId, found, { write: true });
+      expect(adopted).toMatchObject({ unchanged: false, written: true });
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "settled",
+        settleAction: action,
+        settleTxHash: found,
+        escrowOutcome: outcome,
+      });
+      expect(s.node.sends).toHaveLength(others);
     },
   );
 
@@ -4445,6 +4528,93 @@ describe("refundUnfiledCase: a case whose filing started", () => {
     expect(settleTrail(s, caseId)).toEqual([["chain", hash, "the chain shows the job Rejected"]]);
   });
 
+  test("a failed case holding the complete that landed before it was failed is recorded released, keeping its status and its reason, sending nothing", async () => {
+    const s = setup({ script: "pay", chainStatus: 2 });
+    const hash = await refereeComplete(s);
+    const caseId = seedUnfiled(s, "failed", {
+      patch: {
+        ...FILED_ONCE,
+        settleAction: "complete",
+        settleReason: reasonFor(DISPUTE),
+        settleTxHash: hash,
+      },
+    });
+    s.clock.sec = REFUND_TIME;
+    const record = {
+      status: "failed",
+      settleAction: "complete",
+      settleTxHash: hash,
+      settledAt: REFUND_TIME,
+      escrowOutcome: "released",
+      event: {
+        step: "settle",
+        status: "chain",
+        ref: hash,
+        detail: "the chain shows the job Completed",
+      },
+    };
+    const before = snapshot(s, caseId);
+    const dry = await refundUnfiledCase(s.deps, caseId, { send: false });
+    expect(dry).toEqual({
+      settlement: { action: "none", why: "released_elsewhere", outcome: "released" },
+      escrow: expect.objectContaining({ status: "Completed" }),
+      record,
+      written: false,
+    });
+    expect(snapshot(s, caseId)).toEqual(before);
+    const r = await refundUnfiledCase(s.deps, caseId, { send: true });
+    expect(r).toEqual({ ...dry, written: true });
+    expect(s.node.sends).toHaveLength(1);
+    expect(s.cases.find(caseId)).toMatchObject({
+      status: "failed",
+      error: OPERATORS_REASON,
+      settleAction: "complete",
+      settleTxHash: hash,
+      settledAt: REFUND_TIME,
+      escrowOutcome: "released",
+    });
+    expect(settleTrail(s, caseId)).toEqual([["chain", hash, "the chain shows the job Completed"]]);
+    expect(console.log).toHaveBeenCalledWith(
+      expect.stringMatching(
+        new RegExp(
+          `"opslog":"pilot_case_settled".*"caseId":"${caseId}".*"action":"complete","txHash":"${hash}".*"endsAt":"failed"`,
+        ),
+      ),
+    );
+    // Once recorded, a run finds nothing to send or to write.
+    const again = await refundUnfiledCase(s.deps, caseId, { send: true });
+    expect(again).toMatchObject({ record: null, written: false });
+    expect(s.node.sends).toHaveLength(1);
+  });
+
+  test.each<[PilotStatus, Partial<PilotCaseRecord>]>([
+    ["submitted", { settleAction: "complete", settleReason: reasonFor(DISPUTE) }],
+    ["failed", { settleAction: "reject", settleReason: reasonFor(DISPUTE) }],
+    ["failed", { settleAction: null }],
+  ])(
+    "a case at %s that holds no complete of its own on a Completed escrow keeps the refusal",
+    async (status, patch) => {
+      const s = setup({ script: "pay", chainStatus: 2 });
+      const hash = await refereeComplete(s);
+      const caseId = seedUnfiled(s, status, {
+        patch: {
+          ...FILED_ONCE,
+          ...patch,
+          // The landed complete is the row's own only where its action is complete.
+          settleTxHash: patch.settleAction === "complete" ? hash : null,
+        },
+      });
+      s.clock.sec = REFUND_TIME;
+      const before = snapshot(s, caseId);
+      for (const send of [true, false])
+        await expect(refundUnfiledCase(s.deps, caseId, { send })).rejects.toThrow(
+          /^refusing: the chain shows job 7 Completed, its escrow released to the provider, so there is nothing to refund; read the chain before acting; nothing was sent$/,
+        );
+      expect(snapshot(s, caseId)).toEqual(before);
+      expect(s.node.sends).toHaveLength(1);
+    },
+  );
+
   test("a failed case holding a complete with no receipt yet waits for it, naming the complete", async () => {
     const s = setup({ script: "pay", chainStatus: 2, withholdReceipt: "complete" });
     const hash = await failedSendHash(refereeComplete(s));
@@ -4640,25 +4810,44 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
     },
   );
 
-  test.each<[number, string]>([
-    [3, "Completed"],
-    [0, "Open"],
-  ])(
-    "a dropped claimRefund on an escrow at %i is still refused, and the words say the refund refuses it too",
-    async (chainStatus, name) => {
-      const s = setup({ chainStatus: 1 });
-      const caseId = seedHeldSend(s, "submitted", "claimRefund");
-      vi.spyOn(s.deps.chain.job, "escrowState").mockResolvedValue(escrow(chainStatus));
-      const before = snapshot(s, caseId);
-      for (const write of [true, false])
-        await expect(clearDroppedSettleTx(s.deps, caseId, { write })).rejects.toThrow(
-          new RegExp(
-            `^refusing: job 7 is ${name}, not Funded, Submitted, Expired or Rejected, so ${DROPPED_HASH} is not cleared, and pilot:settle --case ${caseId} --claim-refund refuses the case while it holds the hash; read the chain before acting; nothing was sent$`,
-          ),
-        );
-      expect(snapshot(s, caseId)).toEqual(before);
-    },
-  );
+  test("a dropped claimRefund on an escrow at Open is still refused, and the words say the refund refuses it too", async () => {
+    const s = setup({ chainStatus: 1 });
+    const caseId = seedHeldSend(s, "submitted", "claimRefund");
+    vi.spyOn(s.deps.chain.job, "escrowState").mockResolvedValue(escrow(0));
+    const before = snapshot(s, caseId);
+    for (const write of [true, false])
+      await expect(clearDroppedSettleTx(s.deps, caseId, { write })).rejects.toThrow(
+        new RegExp(
+          `^refusing: job 7 is Open, not Funded, Submitted, Completed, Rejected or Expired, so ${DROPPED_HASH} is not cleared, and pilot:settle --case ${caseId} --claim-refund refuses the case while it holds the hash; read the chain before acting; nothing was sent$`,
+        ),
+      );
+    expect(snapshot(s, caseId)).toEqual(before);
+  });
+
+  test("a dropped claimRefund on an escrow the chain shows Completed is cleared, and the refund then refuses the case, sending and writing nothing", async () => {
+    const s = setup({ chainStatus: 1 });
+    const caseId = seedHeldSend(s, "submitted", "claimRefund");
+    vi.spyOn(s.deps.chain.job, "escrowState").mockResolvedValue(escrow(3));
+    const r = await clearDroppedSettleTx(s.deps, caseId, { write: true });
+    expect(r).toMatchObject({
+      read: { escrowStatus: "Completed" },
+      write: {
+        status: "submitted",
+        settleTxHash: null,
+        settleAction: "claimRefund",
+        event: {
+          detail: `claimRefund not mined and not pending ${DROP_GRACE_SECONDS} s after its send; the escrow is Completed, released by another transaction`,
+        },
+      },
+      written: true,
+    });
+    const before = snapshot(s, caseId);
+    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      /^refusing: the chain shows job 7 Completed, its escrow released to the provider, so there is nothing to refund; read the chain before acting; nothing was sent$/,
+    );
+    expect(snapshot(s, caseId)).toEqual(before);
+    expect(s.node.sends).toEqual([]);
+  });
 
   test.each<[PilotStatus, "reject" | "claimRefund"]>([
     ["funded", "claimRefund"],
@@ -4738,25 +4927,83 @@ describe("clearDroppedSettleTx: the expiry refund's rows, and a failed case's se
     },
   );
 
-  test.each<[number, string]>([
-    [5, "Expired"],
-    [4, "Rejected"],
-    [3, "Completed"],
+  /** How another transaction settled job 7: the referee's own complete or reject, sent with a
+   *  hash the row does not hold, or the buyer's claimRefund after the expiry. */
+  const settledBy: Record<"Completed" | "Rejected" | "Expired", (s: Setup) => Promise<Hex>> = {
+    Completed: (s) => refereeComplete(s),
+    Rejected: (s) => refereeReject(s),
+    Expired: (s) => s.deps.chain.job.claimRefund(7n, s.deps.chain.wallets.buyer),
+  };
+
+  test.each<
+    [
+      "complete" | "reject",
+      "Completed" | "Rejected" | "Expired",
+      PilotCaseRecord["settleAction"],
+      "released" | "refunded",
+    ]
+  >([
+    ["complete", "Completed", "complete", "released"],
+    ["reject", "Rejected", "reject", "refunded"],
+    ["reject", "Expired", "none", "refunded"],
+    ["complete", "Expired", "none", "refunded"],
   ])(
-    "a failed case's dropped reject on an escrow at %i is refused, as a settling case's is, and nothing is cleared",
-    async (chainStatus, name) => {
+    "a failed case's dropped %s on an escrow another transaction left %s is cleared, and the refund then records what the chain shows, keeping the reason and sending nothing",
+    async (action, name, recorded, outcome) => {
       const s = setup({ chainStatus: 2 });
-      const caseId = seedHeldSend(s, "failed", "reject", DROPPED_HASH, FILED_ONCE);
-      vi.spyOn(s.deps.chain.job, "escrowState").mockResolvedValue(escrow(chainStatus));
-      const before = snapshot(s, caseId);
-      await expect(clearDroppedSettleTx(s.deps, caseId, { write: true })).rejects.toThrow(
-        new RegExp(
-          `^refusing: job 7 is ${name}, not Funded or Submitted, so ${DROPPED_HASH} is not cleared, and pilot:settle --case ${caseId} --claim-refund refuses the case while it holds the hash; read the chain before acting; nothing was sent$`,
-        ),
-      );
-      expect(snapshot(s, caseId)).toEqual(before);
+      const caseId = seedHeldSend(s, "failed", action, DROPPED_HASH, FILED_ONCE);
+      await settledBy[name](s);
+      const others = s.node.sends.length;
+      const r = await clearDroppedSettleTx(s.deps, caseId, { write: true });
+      expect(r).toMatchObject({
+        read: { escrowStatus: name },
+        write: {
+          status: "failed",
+          settleTxHash: null,
+          settleAction: action,
+          event: {
+            detail: `${action} not mined and not pending ${DROP_GRACE_SECONDS} s after its send; the escrow is ${name}, ${outcome} by another transaction`,
+          },
+        },
+        written: true,
+      });
+      const refund = await refundUnfiledCase(s.deps, caseId, { send: true });
+      expect(refund.settlement).toEqual({
+        action: "none",
+        why: `${outcome}_elsewhere`,
+        outcome,
+      });
+      expect(refund.written).toBe(true);
+      expect(s.node.sends).toHaveLength(others);
+      expect(s.cases.find(caseId)).toMatchObject({
+        status: "failed",
+        settleAction: recorded,
+        settleTxHash: null,
+        settledAt: REFUND_TIME,
+        escrowOutcome: outcome,
+        error: OPERATORS_REASON,
+      });
+      expect(settleTrail(s, caseId).at(-1)).toEqual([
+        "chain",
+        null,
+        `the chain shows the job ${name}, moved by a transaction whose hash this row does not hold; the hash of our own send may be unknown`,
+      ]);
     },
   );
+
+  test("a failed case's dropped reject on an escrow the chain shows Completed is cleared, and the refund then refuses the case, sending and writing nothing", async () => {
+    const s = setup({ chainStatus: 2 });
+    const caseId = seedHeldSend(s, "failed", "reject", DROPPED_HASH, FILED_ONCE);
+    await settledBy.Completed(s);
+    await clearDroppedSettleTx(s.deps, caseId, { write: true });
+    expect(s.cases.find(caseId)).toMatchObject({ status: "failed", settleTxHash: null });
+    const before = snapshot(s, caseId);
+    await expect(refundUnfiledCase(s.deps, caseId, { send: true })).rejects.toThrow(
+      /^refusing: the chain shows job 7 Completed, its escrow released to the provider, so there is nothing to refund; read the chain before acting; nothing was sent$/,
+    );
+    expect(snapshot(s, caseId)).toEqual(before);
+    expect(s.node.sends).toHaveLength(1);
+  });
 
   test.each<[PilotStatus]>([["funded"], ["contested"]])(
     "a %s case's complete is refused before any read: only a failed case holds a settle",
