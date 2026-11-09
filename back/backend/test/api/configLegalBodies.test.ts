@@ -437,6 +437,7 @@ describe("each named answer carries exactly the keys of its type", () => {
           links: true,
           checkedAt: true,
           statement: true,
+          treasury: true,
         }),
       );
     });
@@ -453,6 +454,7 @@ describe("each named answer carries exactly the keys of its type", () => {
         checkedAt: true,
         guardianIdentityVerified: true,
         statement: true,
+        treasury: true,
       });
       const sandbox = await byAgent("42");
       expect(sandbox.statement).not.toBeNull();
