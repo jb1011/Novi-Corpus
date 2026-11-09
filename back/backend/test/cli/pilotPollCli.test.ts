@@ -8,7 +8,12 @@ import { Command } from "commander";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
-import { KlerosHttpError, KlerosTransportError } from "../../src/adapters/kleros/errors";
+import {
+  KlerosHttpError,
+  KlerosRefusal,
+  KlerosTransportError,
+  KlerosWrongDeploymentError,
+} from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import { registerPilotSettlementCommands } from "../../src/cli/pilotSettlement";
 import type { Config } from "../../src/config/env";
@@ -51,6 +56,8 @@ async function makeFake(
     chainId?: number;
     /** Fields of the escrow the chain answers that differ from the seeded rows' job. */
     escrow?: Partial<EscrowState>;
+    /** A failure the escrow read throws instead of answering. */
+    escrowError?: Error;
   } = {},
 ): Promise<Fake & { caseId: string }> {
   const clock = { now: T0 };
@@ -103,14 +110,17 @@ async function makeFake(
             jobContract: o.jobContract ?? JOB_CONTRACT,
             chainId: o.chainId ?? 5042002,
             job: {
-              escrowState: async () => ({
-                status: 2,
-                budget: 2_000_000n,
-                expiredAt: BigInt(Math.floor(T0 / 1000) + 7 * 86_400),
-                client: "0x0000000000000000000000000000000000000001",
-                evaluator: "0x0000000000000000000000000000000000000003",
-                ...o.escrow,
-              }),
+              escrowState: async () => {
+                if (o.escrowError) throw o.escrowError;
+                return {
+                  status: 2,
+                  budget: 2_000_000n,
+                  expiredAt: BigInt(Math.floor(T0 / 1000) + 7 * 86_400),
+                  client: "0x0000000000000000000000000000000000000001",
+                  evaluator: "0x0000000000000000000000000000000000000003",
+                  ...o.escrow,
+                };
+              },
             },
           }) as unknown as PilotChain,
         now: () => clock.now,
@@ -216,6 +226,21 @@ describe("pilot:poll: the settlement line checks the job is the case's own", () 
     expect(settlement.unavailable).toContain(other);
     expect(settlement.unavailable).toMatch(/job contract/);
     expect(f.cases.find(f.caseId)!.settleTxHash).toBeNull();
+  });
+
+  test("an escrow read that fails prints unavailable in public words, with no file path", async () => {
+    const f = await makeFake({
+      escrowError: new Error(
+        "ENOENT: no such file or directory, open /var/lib/arc/node/state.json",
+      ),
+    });
+    const [out] = await f.run(["pilot:poll", "--case", f.caseId, "--script", "pay"]);
+    expect(out).toMatchObject({
+      outcome: { kind: "pending" },
+      settlement: { unavailable: "ENOENT: no such file or directory, open state.json" },
+    });
+    expect(JSON.stringify(out)).not.toContain("/var/lib");
+    expect(f.closed()).toBe(1);
   });
 
   const OTHER = "0x00000000000000000000000000000000000000f1";
@@ -523,6 +548,43 @@ describe("pilot:poll: one read that fails at Kleros", () => {
     expect(f.cases.find(f.caseId)).toMatchObject({ status: "filed", rulingReadAt: null });
     expect(f.closed()).toBe(1);
   });
+
+  test.each<[string, () => Error, string]>([
+    [
+      "a refusal of the service",
+      () =>
+        new KlerosRefusal(
+          "dispute_get",
+          "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at /var/lib/kleros/fees.json",
+        ),
+      "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at fees.json",
+    ],
+    [
+      "a read of another deployment",
+      () => new KlerosWrongDeploymentError("arbitrum-sepolia-testnet", "arbitrum-one"),
+      'Kleros read names chain "arbitrum-one", but this service is bound to arbitrum-sepolia-testnet',
+    ],
+  ])(
+    "%s is reported in the service's words, never the platform's sentence, and leaves one read_failed event",
+    async (_name, failure, text) => {
+      const f = await testnetWith(() => {
+        throw failure();
+      });
+      const err = await f.run(["pilot:poll", "--case", f.caseId]).catch((e: Error) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).message).toBe(text);
+      expect((err as Error).message).not.toContain(PLATFORM_FUNDS_MESSAGE);
+      expect(f.cases.events(f.caseId)).toEqual([
+        expect.objectContaining({
+          step: "ruling",
+          status: "read_failed",
+          ref: "186",
+          detail: text,
+        }),
+      ]);
+      expect(f.closed()).toBe(1);
+    },
+  );
 
   test("an HTTP status leaves one read_failed event, in the service's words", async () => {
     const f = await testnetWith(() => {

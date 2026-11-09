@@ -4,7 +4,7 @@ import { normaliseRulingValue } from "../adapters/kleros/httpDisputeService";
 import { opsLog } from "../observability/opsLog";
 import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage } from "./composition";
-import { klerosTextOf } from "./klerosCheck";
+import { type KlerosError, isKlerosError, klerosTextOf } from "./klerosCheck";
 import type { PilotCaseRecord, PilotStatus } from "./types";
 
 /**
@@ -292,13 +292,14 @@ export function isKlerosReadFailure(e: unknown): e is KlerosTransportError | Kle
 
 /**
  * A failed Kleros read as the case's trail keeps it: one `ruling/read_failed` event, in the
- * service's own words, redacted (`klerosTextOf`), which it returns. A failed read is Kleros's
- * answer, not the platform's, so never `publicErrorMessage`'s fixed sentences.
+ * service's own words, redacted (`klerosTextOf`), which it returns. A failed read (an outage, an
+ * HTTP status, a refusal of the service, a read of another deployment) is Kleros's answer, not
+ * the platform's, so never `publicErrorMessage`'s fixed sentences.
  */
 export function recordReadFailed(
   cases: PilotCaseRepository,
   caseId: string,
-  e: KlerosTransportError | KlerosHttpError,
+  e: KlerosError,
 ): string {
   const text = klerosTextOf(e);
   cases.recordEvent(
@@ -331,7 +332,8 @@ const AUTH_REFUSED: ReadonlySet<number> = new Set([401, 403]);
  * injected clock, then stops with the last outcome. A transport or HTTP error is written as the
  * ops line `pilot_poll_read_failed` and a `read_failed` event on the case's trail, and the watch
  * goes on, up to `MAX_FAILED_READS_IN_A_ROW` in a row; any other error, a refusal included,
- * escapes. An HTTP 401 or 403 stops the watch at once with the reason `auth_refused`. A stop at
+ * escapes, and a refusal of the service or a read of another deployment leaves its `read_failed`
+ * event first. An HTTP 401 or 403 stops the watch at once with the reason `auth_refused`. A stop at
  * the cap, on failing reads or on a refused key writes the ops line `pilot_poll_capped` with its
  * reason. `reads` counts every request, failed ones included. `onRead` sees every read that
  * answered, as it is taken.
@@ -367,7 +369,12 @@ export async function pollUntilRuled(
     try {
       r = await pollOnce(d, caseId);
     } catch (e) {
-      if (!isKlerosReadFailure(e)) throw e;
+      if (!isKlerosReadFailure(e)) {
+        // A refusal of the service, or a read of another deployment, stops the watch: waiting
+        // does not change it. Its line is left on the trail first, as every failed read's is.
+        if (isKlerosError(e)) recordReadFailed(d.cases, caseId, e);
+        throw e;
+      }
       const text = recordReadFailed(d.cases, caseId, e);
       if (e instanceof KlerosHttpError && AUTH_REFUSED.has(e.status))
         return capped("auth_refused", text);

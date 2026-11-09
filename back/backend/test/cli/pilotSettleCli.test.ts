@@ -14,7 +14,7 @@ import {
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { iErc8183JobAbi } from "../../src/abis/generated";
 import { klerosCaseUrl } from "../../src/adapters/kleros/deployments";
-import { KlerosTransportError } from "../../src/adapters/kleros/errors";
+import { KlerosRefusal, KlerosTransportError } from "../../src/adapters/kleros/errors";
 import { FakeDisputeService } from "../../src/adapters/kleros/fakeDisputeService";
 import { registerPilotCommands } from "../../src/cli/pilot";
 import { registerPilotSettlementCommands } from "../../src/cli/pilotSettlement";
@@ -376,6 +376,31 @@ describe("pilot:settle", () => {
     ]);
     expect(f.sent).toEqual([]);
     expect(f.cases.find(caseId)).toMatchObject({ status: "filed", rulingReadAt: null });
+    expect(f.closed()).toBe(1);
+  });
+
+  test("a ruling read that Kleros refuses with insufficient funds in its words refuses in those words, never the platform's sentence, and leaves one read_failed event", async () => {
+    const f = makeFake();
+    const caseId = seed(f);
+    vi.spyOn(f.fake, "getDispute").mockRejectedValue(
+      new KlerosRefusal(
+        "dispute_get",
+        "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at /var/lib/kleros/fees.json",
+      ),
+    );
+    const text = "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at fees.json";
+    const err = await f
+      .run(["pilot:settle", "--case", caseId, "--script", "pay", "--yes"])
+      .catch((e: Error) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toBe(
+      `refusing: case ${caseId}'s ruling could not be read: ${text}; nothing was sent`,
+    );
+    expect((err as Error).message).not.toContain(PLATFORM_FUNDS_MESSAGE);
+    expect(f.cases.events(caseId)).toEqual([
+      expect.objectContaining({ step: "ruling", status: "read_failed", ref: "287", detail: text }),
+    ]);
+    expect(f.sent).toEqual([]);
     expect(f.closed()).toBe(1);
   });
 

@@ -14,7 +14,12 @@ import { RECEIPT_TIMEOUT_MS } from "../../src/adapters/arc/receipts";
 import { resetSenderNonces } from "../../src/adapters/arc/senderLock";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
-import { KlerosHttpError, KlerosTransportError } from "../../src/adapters/kleros/errors";
+import {
+  KlerosHttpError,
+  KlerosRefusal,
+  KlerosTransportError,
+  KlerosWrongDeploymentError,
+} from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import type { Config } from "../../src/config/env";
 import { ChainTxRevertedError, ChainTxUnconfirmedError } from "../../src/errors";
@@ -1442,6 +1447,26 @@ describe("settleCase: a re-send on a real deployment reads Kleros again", () => 
     expect(s.node.sends).toEqual([]);
   });
 
+  test("a read before a re-send that Kleros refuses leaves one read_failed event in the service's words, never the platform's", async () => {
+    const { s } = testnetStage(() => {
+      throw new KlerosRefusal(
+        "dispute_get",
+        "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at /var/lib/kleros/fees.json",
+      );
+    });
+    const caseId = seedSettlingNoHash(s, { mode: "testnet", patch: TESTNET_STALE });
+    const err = await settleCase(s.deps, caseId, { send: true }).catch((e: unknown) => e);
+    const text = "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at fees.json";
+    expect(err).toBeInstanceOf(SettleRefusal);
+    expect((err as Error).message).toBe(
+      `refusing: case ${caseId}'s ruling could not be read again before a new send: ${text}; nothing was sent`,
+    );
+    expect(s.cases.events(caseId).filter((e) => e.status === "read_failed")).toEqual([
+      expect.objectContaining({ step: "ruling", ref: DISPUTE, detail: text }),
+    ]);
+    expect(s.node.sends).toEqual([]);
+  });
+
   test("a stored claimRefund needs no read: the expiry path does not depend on the ruling", async () => {
     const { s, reads } = testnetStage(() => appealRead("1"));
     const caseId = seedSettlingNoHash(s, {
@@ -2051,6 +2076,20 @@ describe("settleCase: refusals and the ruling read", () => {
       "an HTTP status",
       () => new KlerosHttpError(503, "upstream unavailable"),
       "Kleros Dispute Service answered HTTP 503",
+    ],
+    [
+      "a refusal of the service",
+      () =>
+        new KlerosRefusal(
+          "dispute_get",
+          "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at /var/lib/kleros/fees.json",
+        ),
+      "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at fees.json",
+    ],
+    [
+      "a read of another deployment",
+      () => new KlerosWrongDeploymentError("arbitrum-sepolia-testnet", "arbitrum-one"),
+      'Kleros read names chain "arbitrum-one", but this service is bound to arbitrum-sepolia-testnet',
     ],
   ])(
     "a ruling read that fails with %s refuses in the service's redacted words, leaves one read_failed event per run, and sends nothing",

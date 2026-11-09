@@ -18,10 +18,9 @@ import type { PilotCaseRepository } from "./casesRepository";
 import type { KlerosStage, PilotChain } from "./composition";
 import { FILING_IN_PROGRESS_SECONDS } from "./dispute";
 import { jobCallOf, withoutEmDash } from "./job";
-import { klerosTextOf } from "./klerosCheck";
+import { isKlerosError, klerosTextOf } from "./klerosCheck";
 import {
   type RulingOutcome,
-  isKlerosReadFailure,
   pollOnce,
   readRuling,
   recordReadFailed,
@@ -337,7 +336,8 @@ function readsBeforeResend(
  * from the stage's Dispute Service once the stage is shown to read that chain, decided by
  * `readRuling` with the stage's expected options. Nothing is written to the row's status or
  * ruling columns; a `settle/reread` event names the outcome. A read that fails refuses, in the
- * service's redacted words, and a transport or HTTP failure leaves a `ruling/read_failed` event.
+ * service's redacted words, and a failure of the Kleros client (an outage, an HTTP status, a
+ * refusal of the service, a read of another deployment) leaves a `ruling/read_failed` event.
  */
 async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<RulingOutcome> {
   const { caseId, klerosChain, coreDisputeId } = row;
@@ -351,7 +351,7 @@ async function rereadRuling(d: SettleDeps, row: PilotCaseRecord): Promise<Ruling
   try {
     read = await d.stage.service.getDispute({ chain: klerosChain, coreDisputeId });
   } catch (e) {
-    const text = isKlerosReadFailure(e) ? recordReadFailed(d.cases, caseId, e) : klerosTextOf(e);
+    const text = isKlerosError(e) ? recordReadFailed(d.cases, caseId, e) : klerosTextOf(e);
     refuse(`case ${caseId}'s ruling could not be read again before a new send: ${text}`);
   }
   const outcome = readRuling(read, d.expected);
@@ -430,8 +430,10 @@ function settledLine(
  * none. A rehearsal row that holds a read is decided from it, whatever its age. A ruled row whose
  * stored read is younger than ten minutes is decided from it, unless an appealed round is
  * accepted, which is always read live. Any other row reads Kleros live, with the ROW's
- * kleros_chain, in the row's mode only; a read that fails refuses and leaves a
- * `ruling/read_failed` event. Then the connected chain, and the escrow read as the case's own job
+ * kleros_chain, in the row's mode only; a read that the Kleros client fails (an outage, an HTTP
+ * status, a refusal of the service, a read of another deployment) refuses in the service's
+ * redacted words and leaves a `ruling/read_failed` event, and any other error escapes as it is.
+ * Then the connected chain, and the escrow read as the case's own job
  * (`checkEscrowIsOwn`). A settling row about to be sent on again, on a real deployment whose
  * stored read is stale, reads the ruling again after the escrow, when the decision turns on it
  * (`readsBeforeResend`). Then the decision.
@@ -508,8 +510,8 @@ export async function settleCase(
         await pollOnce({ stage: d.stage, cases: d.cases, expected: d.expected, now: nowMs }, caseId)
       ).outcome;
     } catch (e) {
-      if (!isKlerosReadFailure(e)) throw e;
-      // As the poll's watch does: the failed read leaves its line on the case's trail.
+      if (!isKlerosError(e)) throw e;
+      // As the poll does: the failed read leaves its line on the case's trail, in Kleros's words.
       refuse(`case ${caseId}'s ruling could not be read: ${recordReadFailed(d.cases, caseId, e)}`);
     }
     row = d.cases.find(caseId) as PilotCaseRecord;

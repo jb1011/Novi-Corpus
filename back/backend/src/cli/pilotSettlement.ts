@@ -14,13 +14,12 @@ import {
 } from "../pilot/composition";
 import { type PilotContext, openPilotContext } from "../pilot/context";
 import { withoutEmDash } from "../pilot/job";
-import { klerosTextOf, withoutPaths } from "../pilot/klerosCheck";
+import { isKlerosError, klerosTextOf, withoutPaths } from "../pilot/klerosCheck";
 import {
   PERIOD_OVERDUE_GRACE_MS,
   type PollDeps,
   type PollResult,
   type RulingOutcome,
-  isKlerosReadFailure,
   pollOnce,
   pollUntilRuled,
   recordReadFailed,
@@ -40,7 +39,6 @@ import {
   refundUnfiledCase,
   settleCase,
 } from "../pilot/settlement";
-import { publicErrorMessage } from "../workflow/publicError";
 import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
 
 /**
@@ -113,16 +111,16 @@ function print(output: Record<string, unknown>): void {
 
 /**
  * The words a command fails with, never with an absolute file path. A settle's refusal is printed
- * whole: its words are already redacted, and it ends saying nothing was sent. A failed Kleros read
- * is in the service's own words, redacted (`klerosTextOf`): `publicErrorMessage`'s fixed
- * sentences would read a fee wallet's "insufficient funds" in Kleros's answer as the platform's
- * own wallet. Any other failure, a chain or an escrow read's included, goes through
- * `publicErrorMessage`.
+ * whole: its words are already redacted, and it ends saying nothing was sent. Any other failure
+ * goes through `klerosTextOf`: a failure of the Kleros client (an outage, an HTTP status, a
+ * refusal of the service, a read of another deployment) is in the service's own words, redacted,
+ * since `publicErrorMessage`'s fixed sentences would read a fee wallet's "insufficient funds" in
+ * Kleros's answer as the platform's own wallet; every other one, a chain or an escrow read's
+ * included, goes through `publicErrorMessage` with its paths cut, as `klerosTextOf` does it.
  */
 function failureText(e: unknown): string {
   if (e instanceof SettleRefusal) return withoutEmDash(withoutPaths(e.message));
-  if (isKlerosReadFailure(e)) return klerosTextOf(e);
-  return withoutEmDash(withoutPaths(publicErrorMessage(e)));
+  return klerosTextOf(e);
 }
 
 function parseMaxMinutes(value: string | undefined, watch: boolean): number {
@@ -170,7 +168,8 @@ async function settlementPreview(
       coreDisputeId: row.coreDisputeId ?? undefined,
     });
   } catch (e) {
-    return { unavailable: withoutEmDash(publicErrorMessage(e)) };
+    // In the words a command fails with: never a file path.
+    return { unavailable: failureText(e) };
   }
 }
 
@@ -230,7 +229,7 @@ async function poll(
       r = await pollOnce(d, caseId);
     } catch (e) {
       // As the watch does: a failed read leaves its line on the case's trail.
-      if (isKlerosReadFailure(e)) recordReadFailed(ctx.cases, caseId, e);
+      if (isKlerosError(e)) recordReadFailed(ctx.cases, caseId, e);
       throw e;
     }
     print({

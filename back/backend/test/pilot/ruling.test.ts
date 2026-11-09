@@ -6,7 +6,12 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { deploymentFor } from "../../src/adapters/kleros/deployments";
 import type { DisputeRead, KlerosDisputeService } from "../../src/adapters/kleros/disputeService";
-import { KlerosHttpError, KlerosTransportError } from "../../src/adapters/kleros/errors";
+import {
+  KlerosHttpError,
+  KlerosRefusal,
+  KlerosTransportError,
+  KlerosWrongDeploymentError,
+} from "../../src/adapters/kleros/errors";
 import { FakeDisputeService, type FakeScript } from "../../src/adapters/kleros/fakeDisputeService";
 import { migrate } from "../../src/persistence/db";
 import { SqlitePilotCaseRepository, newCaseId } from "../../src/pilot/casesRepository";
@@ -926,7 +931,41 @@ describe("pollUntilRuled when reads fail", () => {
     await expect(pollUntilRuled(f.deps, f.row.caseId, {})).rejects.toThrow(/a bug/);
     expect(f.service.reads).toHaveLength(1);
     expect(f.logs).toEqual([]);
+    expect(f.cases.events(f.row.caseId)).toEqual([]);
   });
+
+  test.each<[string, () => Error, string]>([
+    [
+      "a refusal of the service",
+      () =>
+        new KlerosRefusal(
+          "dispute_get",
+          "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at /var/lib/kleros/fees.json",
+        ),
+      "INSUFFICIENT_FUNDS: insufficient funds in the fee wallet at fees.json",
+    ],
+    [
+      "a read of another deployment",
+      () => new KlerosWrongDeploymentError("arbitrum-sepolia-testnet", "arbitrum-one"),
+      'Kleros read names chain "arbitrum-one", but this service is bound to arbitrum-sepolia-testnet',
+    ],
+  ])(
+    "%s escapes on the first read, and leaves one read_failed event in the service's words",
+    async (_name, failure, text) => {
+      const f = failing(failure);
+      await expect(pollUntilRuled(f.deps, f.row.caseId, {})).rejects.toThrow(failure().message);
+      expect(f.service.reads).toHaveLength(1);
+      expect(f.logs).toEqual([]);
+      expect(f.cases.events(f.row.caseId)).toEqual([
+        expect.objectContaining({
+          step: "ruling",
+          status: "read_failed",
+          ref: "186",
+          detail: text,
+        }),
+      ]);
+    },
+  );
 
   test("a refusal escapes without a read", async () => {
     const f = failing(() => ({}));
