@@ -62,19 +62,3 @@ export function honeypotFilled(body: Record<string, unknown>): boolean {
   if (typeof value === "string") return value.trim() !== "";
   return true;
 }
-
-export const reviewSchema = z.object({
-  useCase: z.number().int().min(1).max(5),
-  moneyFlow: z.number().int().min(1).max(5),
-  builder: z.number().int().min(1).max(5),
-  note: z
-    .string()
-    .trim()
-    .max(2000)
-    .optional()
-    .transform((value) => value || null),
-});
-
-export const statusSchema = z.object({
-  status: z.enum(["new", "shortlist", "winner", "rejected", "waitlist"]),
-});

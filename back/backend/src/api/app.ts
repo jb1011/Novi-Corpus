@@ -521,10 +521,9 @@ export function buildApiApp(deps: ApiDeps) {
   mountVerifyRoutes(app, deps);
   mountEnsGatewayRoutes(app, deps);
   if (deps.x402Demo) mountX402DemoRoutes(app, deps.x402Demo);
-  // Public apply form. The reviewer routes on the same prefix carry their own session check,
-  // so the prefix itself stays outside protect() — a blanket guard would close the form.
+  // Public apply form. It stays outside protect(): a blanket guard would close the form.
   if (deps.founding) {
-    mountFoundingRoutes(app, { jwtSecret: deps.jwtSecret, founding: deps.founding });
+    mountFoundingRoutes(app, { founding: deps.founding });
   }
   mountAuthRoutes(app, deps);
   mountPasskeyRoutes(app, deps);

@@ -80,12 +80,3 @@ export function shareOnX(pageUrl: string): string {
   url.searchParams.set("url", pageUrl);
   return url.toString();
 }
-
-export function formatFoundingWhen(ms: number | null): string | null {
-  if (ms == null) return null;
-  return new Intl.DateTimeFormat("en-US", {
-    dateStyle: "long",
-    timeStyle: "short",
-    timeZone: "UTC",
-  }).format(new Date(ms));
-}

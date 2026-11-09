@@ -1094,11 +1094,6 @@ async function main() {
       : undefined;
 
   const foundingEnv = foundingFromEnv(process.env);
-  if (!foundingEnv.ipSalt) {
-    console.warn(
-      "[boot] FOUNDING_IP_SALT is unset — founding applications will not store an IP hash.",
-    );
-  }
 
   const app = buildApiApp({
     webOrigin: cfg.webOrigin,
