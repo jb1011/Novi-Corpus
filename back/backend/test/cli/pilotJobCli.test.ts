@@ -1145,15 +1145,14 @@ describe("pilot:job --yes: a failure after the case exists names the case to res
 
 describe("pilot:case fail: a funded job keeps its escrow", () => {
   test.each([["funded"], ["submitted"], ["contested"]] as const)(
-    "failing a %s case prints and records that the escrow waits for a claimRefund after expiry",
+    "failing a %s case prints and records that the escrow waits for the expiry refund, naming its command",
     async (status) => {
       const fake = makeFake();
       const row = insertCase(fake.cases, { mode: "testnet", status, patch: { jobId: "7" } });
       const printed = JSON.parse(
         await run(fake, ["pilot:case", "fail", row.caseId, "--reason", "stuck", "--yes"]),
       );
-      const escrow =
-        "job 7 still holds the budget in escrow on chain until a claimRefund after its expiry at 2026-11-04T00:00:00.000Z";
+      const escrow = `job 7 still holds the budget in escrow on chain until pilot:settle --case ${row.caseId} --claim-refund takes it back after its expiry at 2026-11-04T00:00:00.000Z`;
       expect(printed.escrow).toBe(escrow);
       expect(fake.cases.events(row.caseId).at(-1)?.detail).toBe(`stuck; ${escrow}`);
       expect(fake.cases.find(row.caseId)?.error).toBe("stuck");

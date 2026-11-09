@@ -73,6 +73,25 @@ export function withoutPaths(text: string): string {
   return text.replace(ABSOLUTE_PATH, "$1");
 }
 
+/** One of the Kleros client's own failures: a refusal of the service, an HTTP status, an answer
+ *  it could not read or never got, or a read that names another deployment. */
+export type KlerosError =
+  | KlerosRefusal
+  | KlerosHttpError
+  | KlerosTransportError
+  | KlerosWrongDeploymentError;
+
+/** Whether `e` is one of the Kleros client's own failures ({KlerosError}): Kleros's answer, or
+ *  the lack of one, never the platform's. */
+export function isKlerosError(e: unknown): e is KlerosError {
+  return (
+    e instanceof KlerosRefusal ||
+    e instanceof KlerosHttpError ||
+    e instanceof KlerosTransportError ||
+    e instanceof KlerosWrongDeploymentError
+  );
+}
+
 /**
  * A Kleros text (a refusal, an HTTP status, an answer the client could not read, an `unknown`
  * result) as an event, a row or an outcome keeps it: the code and the service's own words, with
@@ -84,12 +103,7 @@ export function withoutPaths(text: string): string {
  * other error goes through `publicErrorMessage` as before.
  */
 export function klerosTextOf(e: unknown, max: number = KLEROS_TEXT_SHORT): string {
-  const kleros =
-    typeof e === "string" ||
-    e instanceof KlerosRefusal ||
-    e instanceof KlerosHttpError ||
-    e instanceof KlerosTransportError ||
-    e instanceof KlerosWrongDeploymentError;
+  const kleros = typeof e === "string" || isKlerosError(e);
   if (!kleros) return withoutEmDash(withoutPaths(publicErrorMessage(e)));
   const text = (typeof e === "string" ? e : e.message)
     .replace(URL_RUN, originOf)

@@ -70,7 +70,7 @@ import {
 import { formatUnitsUsd } from "../policy/units";
 import { withDeadline } from "../util/deadline";
 import { publicErrorMessage } from "../workflow/publicError";
-import { parseCaseId, refuse } from "./pilotArgs";
+import { parseCaseId, parseTxHash, refuse } from "./pilotArgs";
 import { registerPilotSettlementCommands } from "./pilotSettlement";
 
 /**
@@ -462,13 +462,6 @@ function formatCharacterOf(text: string): string | undefined {
 const FILED_OR_LATER: ReadonlySet<PilotStatus> = new Set(PILOT_FILED_OR_LATER_STATUSES);
 /** The statuses a mode's cap counts: the dispute exists or may exist on Kleros. */
 const FILED: ReadonlySet<PilotStatus> = new Set(PILOT_FILED_STATUSES);
-
-/** A transaction hash: 0x and 64 hex digits. */
-function parseTxHash(option: string, value: string): Hex {
-  if (!/^0x[0-9a-fA-F]{64}$/.test(value))
-    refuse(`${option} must be a transaction hash (0x and 64 hex digits)`);
-  return value.toLowerCase() as Hex;
-}
 
 /** A free text: not blank, at most 4096 bytes, no control character (newline and tab allowed
  *  unless `singleLine`, and CRLF read as a newline). Returns the text with CRLF made LF. */
@@ -913,9 +906,9 @@ function failCase(
       reason,
       next: "nothing was changed: run the same command with --yes to mark the case failed",
     };
-  // A funded job keeps its budget whatever the row says: no pilot command reclaims it.
+  // A funded job keeps its budget whatever the row says, until the expiry refund takes it back.
   const escrow = ESCROWED.has(row.status)
-    ? `${row.jobId === null ? "the job" : `job ${row.jobId}`} still holds the budget in escrow on chain until a claimRefund after its expiry at ${isoOf(row.expiredAt)}`
+    ? `${row.jobId === null ? "the job" : `job ${row.jobId}`} still holds the budget in escrow on chain until pilot:settle --case ${caseId} --claim-refund takes it back after its expiry at ${isoOf(row.expiredAt)}`
     : null;
   // A forced fail leaves a trace: the event says the guard was overridden and what it cost.
   const stated = escrow === null ? reason : `${reason}; ${escrow}`;
