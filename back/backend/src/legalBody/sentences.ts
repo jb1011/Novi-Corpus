@@ -97,6 +97,13 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // MCP `create_company` with a `for` argument: the tool creates companies for agents only.
   create_company_agents_only:
     "This tool creates companies for agents only: a company to stand behind a legal body is created from the legal-body page of the web app.",
+  // `POST /legal-body-orders/:id/treasury`: a declaration of the treasury of record the door
+  // cannot take as it was sent.
+  treasury_invalid:
+    "A treasury declaration takes a wallet address and a provider, a name only for another provider, and optionally an https link of at most 300 characters and a 32-byte transaction hash.",
+  // …and an address the registry does not show as the agent's wallet when the door reads it.
+  treasury_wallet_mismatch:
+    "The registry does not show this address as the agent's wallet: finish the attach first.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */

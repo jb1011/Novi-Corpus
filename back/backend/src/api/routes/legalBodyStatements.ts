@@ -7,6 +7,7 @@ import {
   isCanonicalAgentId,
   statementForAgent,
 } from "../../legalBody/statements";
+import { type TreasuryBlock, treasuryOfStatement } from "../../legalBody/treasury";
 import { opsLog } from "../../observability/opsLog";
 import type { ApiDeps } from "../app";
 import {
@@ -40,6 +41,11 @@ import {
  *
  * On production a body answer also carries `guardianIdentityVerified`, beside the statement and
  * outside it: the signed statement is untouched (statement v3 signs the fact).
+ *
+ * Every body answer carries `treasury` after the statement, outside it and unsigned, on both
+ * environments: the treasury of record its guardian declared (`legalBody/treasury.ts`), only while
+ * its address is the agent's wallet the statement signs (Ruling 3); null otherwise, and null on the
+ * unsigned `unknown`.
  */
 
 /** The three answers. The agent id is the canonical decimal the caller supplied. */
@@ -54,6 +60,9 @@ export type ByAgentAnswer =
       links: { transparency: string };
       checkedAt: string;
       statement: null;
+      /** Always served, null. Optional in the type only: an answer stored before this key existed
+       *  (the pilot's filed records) has none. */
+      treasury?: null;
     }
   | {
       agentId: string;
@@ -68,6 +77,10 @@ export type ByAgentAnswer =
        *  key; until then this is the fact. */
       guardianIdentityVerified?: boolean;
       statement: SignedStatementJson;
+      /** NOT SIGNED, both environments: the treasury of record while the registry shows its address
+       *  as the agent's wallet the statement signs, else null. Always served; optional in the type
+       *  only, for an answer stored before this key existed (the pilot's filed records). */
+      treasury?: TreasuryBlock | null;
     };
 
 /** Mounts nothing without `deps.legalBodyStatements`: the route is then a 404. */
@@ -121,8 +134,13 @@ export function mountLegalBodyStatementRoutes(
     if (!st.readBudget.take()) return throttled(c, "shared");
 
     let outcome: StatementOutcome;
+    let treasury: TreasuryBlock | null = null;
     try {
       outcome = await statementForAgent(st, agentId);
+      // The record, read only beside a statement, against the wallet that statement signs: no
+      // chain read of its own. A failed read is the database's, so the same 503.
+      if (outcome.kind === "statement")
+        treasury = treasuryOfStatement(deps.legalBodyTreasury?.repo, outcome);
     } catch (e) {
       // Only a DATABASE read throws out of the service: we cannot tell whether the agent has a
       // legal body at all, which no answer here has a value for.
@@ -143,6 +161,7 @@ export function mountLegalBodyStatementRoutes(
         links: { transparency: st.links.transparency },
         checkedAt,
         statement: null,
+        treasury: null,
       };
       c.header("Cache-Control", NO_STORE);
       return c.json(unknown);
@@ -166,6 +185,7 @@ export function mountLegalBodyStatementRoutes(
               ? { guardianIdentityVerified: outcome.guardianIdentityVerified }
               : {}),
             statement: outcome.statement,
+            treasury,
           };
     memo.set(agentId, answer);
     c.header("Cache-Control", FRESH_CACHE_CONTROL);

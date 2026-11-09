@@ -131,6 +131,7 @@ describe("on production the body answer states guardianIdentityVerified, unsigne
       "checkedAt",
       "guardianIdentityVerified",
       "statement",
+      "treasury",
     ]);
 
     // The signed statement: its 33 fields, none of them the new fact, under domain version "2".

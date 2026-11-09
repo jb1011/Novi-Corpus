@@ -5,6 +5,7 @@ import type { FormationSummary } from "../../formation/status";
 import type { SignedStatementJson } from "../../legalBody/publicStatement";
 import type { Standing } from "../../legalBody/standing";
 import { type StatementOutcome, statementForAddress } from "../../legalBody/statements";
+import { type TreasuryBlock, treasuryOfStatement } from "../../legalBody/treasury";
 import { opsLog } from "../../observability/opsLog";
 import type {
   LegalBodyChainReads,
@@ -42,6 +43,11 @@ import { TokenBucket } from "./agentBook";
  * `guardianHumanVerified`, a flag. It does not name the guardian: `identityOwnerAtCreation` is the
  * identity's owner as the chain records it, which may be the guardian's own wallet. It never
  * carries the EIN.
+ *
+ * Beside that statement, outside it and unsigned, a Minimal answer carries `treasury`: the
+ * treasury of record its guardian declared (`legalBody/treasury.ts`), only while its address is the
+ * agent's wallet the statement signs, so always the address asked about; null otherwise, and null
+ * whenever there is no statement.
  */
 
 /** The lookup's own dependencies. Optional on `ApiDeps` as a whole, so a deployment that never
@@ -202,6 +208,7 @@ type MinimalAnswer =
       formation: null;
       checkedAt: string;
       statement: null;
+      treasury: null;
     }
   | {
       address: string;
@@ -215,6 +222,8 @@ type MinimalAnswer =
       formation: null;
       checkedAt: string;
       statement: SignedStatementJson;
+      /** Not signed: the treasury of record, while the registry shows its address (Ruling 3). */
+      treasury: TreasuryBlock | null;
     };
 
 /**
@@ -360,7 +369,8 @@ export function formationOf(lb: LegalBodyLookupDeps, e: EntityRecord): Formation
 /**
  * The lookup's answer for a Minimal legal body, from what the statement service made of the
  * address. `network` and the transparency link are the lookup's, as on every answer of this
- * route; the statement link is the statement route's, for the agent stated.
+ * route; the statement link is the statement route's, for the agent stated. `treasury` is the
+ * block served beside a statement (null without one).
  */
 function minimalAnswer(
   lb: LegalBodyLookupDeps,
@@ -368,6 +378,7 @@ function minimalAnswer(
   address: string,
   outcome: Exclude<StatementOutcome, { kind: "none" }>,
   checkedAt: string,
+  treasury: TreasuryBlock | null,
 ): MinimalAnswer {
   if (outcome.kind === "unknown")
     return {
@@ -382,6 +393,7 @@ function minimalAnswer(
       formation: null,
       checkedAt,
       statement: null,
+      treasury: null,
     };
   return {
     address,
@@ -400,6 +412,7 @@ function minimalAnswer(
     formation: null,
     checkedAt,
     statement: outcome.statement,
+    treasury,
   };
 }
 
@@ -487,9 +500,14 @@ export function mountLegalBodyRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     // read throw, which is this route's 503 like the resolver's.
     const statements = deps.legalBodyStatements;
     let minimal: StatementOutcome = { kind: "none" };
+    let treasury: TreasuryBlock | null = null;
     if (resolved.kind === "none" && statements) {
       try {
         minimal = await statementForAddress(statements, address);
+        // The record, read only beside a statement, against the wallet that statement signs: no
+        // chain read of its own. A failed read is the database's, so this route's 503.
+        if (minimal.kind === "statement")
+          treasury = treasuryOfStatement(deps.legalBodyTreasury?.repo, minimal);
       } catch (e) {
         opsLog("legal_body_statement_db_failed", { errorName: errorNameOf(e) });
         return unavailable(c);
@@ -498,7 +516,7 @@ export function mountLegalBodyRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     const checkedAt = new Date(now()).toISOString();
     const answer: LookupAnswer =
       statements && minimal.kind !== "none"
-        ? minimalAnswer(lb, statements.links.statementBase, address, minimal, checkedAt)
+        ? minimalAnswer(lb, statements.links.statementBase, address, minimal, checkedAt, treasury)
         : resolved.kind === "none"
           ? { address, legalBody: false, standing: null, checkedAt }
           : {
