@@ -102,6 +102,7 @@ Two rules once the webhook is on:
 | `MONITOR_LOOKBACK_BLOCKS` | 5000 | Cold-start window only (never genesis). |
 | `MONITOR_WATCH_FACTORIES` | none | Extra factories. Configured `FACTORY_ADDRESS` is watched anyway. |
 | `MONITOR_WATCH_BEACONS` | none | Extra beacons. The configured factory's `beacon()` is read at startup. |
+| `MONITOR_WATCH_LEGAL_BODY_FACTORIES` | none | Extra legal-body factories. Configured `LEGAL_BODY_FACTORY_ADDRESS` is watched anyway. After a factory redeploy, the old factory goes here so the bodies it created stay watched. |
 
 ---
 
@@ -119,11 +120,11 @@ Severity: **INFO** = recorded, never paged · **WARN** = look today · **CRITICA
 | `controller_admin_delay_change_scheduled` | CRITICAL | `DefaultAdminDelayChangeScheduled` |
 | `controller_admin_delay_change_canceled` | CRITICAL | `DefaultAdminDelayChangeCanceled` |
 | `controller_default_admin_granted` | CRITICAL | `DEFAULT_ADMIN_ROLE` granted = handover COMPLETED |
-| `controller_bound_target_set` | CRITICAL | `BoundTargetSet` (an M5 registry pin changed/unpinned) |
+| `controller_bound_target_set` | CRITICAL | `BoundTargetSet` (a selector pin changed or unpinned; the detail names the selector when the executor holds it) |
 | `controller_relayed` | INFO | `Relayed` — audit trail only, never paged |
 | `beacon_upgraded` | CRITICAL | `Upgraded` on any watched beacon |
-| `factory_ownership_transfer_started` | CRITICAL | `OwnershipTransferStarted` on any watched factory |
-| `factory_ownership_transferred` | CRITICAL | `OwnershipTransferred` on any watched factory |
+| `factory_ownership_transfer_started` | CRITICAL | `OwnershipTransferStarted` on any watched factory, legal-body factories included |
+| `factory_ownership_transferred` | CRITICAL | `OwnershipTransferred` on any watched factory, legal-body factories included |
 | `registry_agent_wallet_set` | INFO on match, **CRITICAL** on rebind or clear | registry wallet bind for one of our agents |
 | `registry_identity_transfer` | INFO if it lands on the recorded manager, else **CRITICAL** | identity NFT moved (mints ignored) |
 | `treasury_policy_update_scheduled` | WARN, **CRITICAL** if the payout address changes | `PolicyUpdateScheduled` on any of our treasuries |
@@ -134,6 +135,11 @@ Severity: **INFO** = recorded, never paged · **WARN** = look today · **CRITICA
 | `legal_amendment_vetoed` | WARN | `AmendmentVetoed` — the guardian stopped an amendment |
 | `legal_veto_lifted` | INFO | `VetoLifted` — the guardian re-allowed a hash they had blocked |
 | `legal_amendment_executed` | INFO on match, **CRITICAL** if the executed hash is not the pending one | `OperatingAgreementUpdated` |
+| `legal_body_created` | INFO | `LegalBodyCreated` on a watched legal-body factory; the body joins the watch set (`legal_bodies_seen` in `monitor.db`) |
+| `legal_body_dissolution_initiated` | CRITICAL | `DissolutionInitiated` on a legal body: the guardian acted, or someone holds the guardian's key |
+| `legal_body_dissolution_cancelled` | WARN | `DissolutionVetoed` on a legal body: the body is Active again |
+| `legal_body_dissolved` | WARN | `Dissolved` on a legal body: final |
+| `legal_body_amendment_scheduled` | WARN if the hash is the factory's `pendingAmendment(body)`, else **CRITICAL** | `AmendmentScheduled` on a legal body; CRITICAL also when the pending slot cannot be read or the body's factory is unknown |
 
 ---
 
