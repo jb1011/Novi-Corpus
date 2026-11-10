@@ -877,6 +877,11 @@ async function main() {
             transaction: <T>(fn: () => T) => repo.transaction(fn),
           }
         : undefined,
+    // The refund-overdue leg (F-A-2a): FORMATION_REFUND_DAYS, and the payment repository wired
+    // whether or not this deployment charges now, since a refund is owed on a payment already
+    // taken.
+    refundDays: formationCfg.refundDays,
+    payments: formationPayments,
     intervalMs: cfg.formation?.sweepMs ?? 60_000,
     // The anchor sub-saga (design §7). The SAME `anchors` repo the saga writes the v1 row with
     // and the SAME `arc` adapter the saga mints through — a second adapter would be a second

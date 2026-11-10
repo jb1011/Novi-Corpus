@@ -31,6 +31,7 @@ import type {
   DoolaWebhookEventRecord,
 } from "../persistence/doolaEventRepository";
 import type { FormationPartyRepository } from "../persistence/formationPartyRepository";
+import type { FormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import {
   type FormationRequestRecord,
   type FormationStep,
@@ -86,6 +87,8 @@ import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./form
  *   (f0) erase an SSN that is no longer needed or has waited out its 7-day clock (§4.6a) — a
  *        SHORTER clock than (f), over a different fact, and it never manufactures `abandoned`;
  *   (f) erase PII whose filing provably never happened;
+ *   (f2) raise a CRITICAL line, once a day, for a refund owed on an abandoned company that nobody
+ *        has recorded `FORMATION_REFUND_DAYS` after the abandon;
  *   (g) warn about formations that have been in flight far too long;
  *   (h) drop webhook rows past their retention window.
  *
@@ -229,6 +232,18 @@ export interface FormationSweeperDeps extends FormationAdvanceDeps {
    * place and re-broadcast in the other.
    */
   payment?: Omit<import("./formationPayment").FormationPaymentDeps, "companies" | "now">;
+  /**
+   * `FORMATION_REFUND_DAYS`: how many days after a paid company is abandoned its refund may wait
+   * before the refund-overdue leg writes its CRITICAL line. Absent: the leg does nothing.
+   */
+  refundDays?: number;
+  /**
+   * The payment rows the refund-overdue leg reads. Its own field rather than `payment.payments`
+   * because `payment` is wired only where this deployment charges, and a refund is owed on a
+   * payment already taken whatever the deployment does now: the composition root wires the
+   * payment repository everywhere (`formationPayment.payments`), as the abandon door reads it.
+   */
+  payments?: Pick<FormationPaymentRepository, "listSettledAwaitingRefund">;
   /** `FORMATION_SWEEP_MS`. */
   intervalMs: number;
 }
@@ -337,6 +352,9 @@ export class FormationSweeper {
       await this.completeSandboxFilings();
       await this.advanceAnchors();
       this.erasePii();
+      // Every tick, not amortised: a plain read of a set that is empty on a healthy deployment,
+      // and the line is de-duplicated per company per UTC day.
+      this.alertRefundsOverdue();
       if (amortised) {
         // AMORTISED, like the other backstops beside it. Both of its clauses are measured in
         // DAYS — a 7-day retention promise and a terminal-company backstop for an erase §4.4
@@ -1217,6 +1235,40 @@ export class FormationSweeper {
       // The party id and the reason, and nothing else — an erasure log that named the person
       // would be the one place their data outlived the erasure.
       opsLog("formation_party_erased", { partyId, reason });
+    }
+  }
+
+  // ── (f2) refunds owed and overdue (F-A-2a Task 14b) ───────────────────────────────────────
+
+  /**
+   * A CRITICAL line, once per company per UTC day, for each settled payment of an abandoned
+   * company whose refund `formation:refund` has not recorded `refundDays` days after the abandon.
+   *
+   * The refund is a transfer a human signs from the revenue wallet; nothing in the software makes
+   * it, so nothing else would notice it was never made. The age counts from the abandon's stamp
+   * (`companies.updated_at`), in whole days; `daysOverdue` is how many whole days past
+   * `refundDays` it is, so the first line reads 0. De-duplicated as `warnStale` is, in `warned`,
+   * keyed by the company and the day, and pruned with it: a restart re-warns. The line carries
+   * the two ids and the count only: no amount, no address, no person.
+   */
+  private alertRefundsOverdue(): void {
+    const refundDays = this.d.refundDays;
+    if (refundDays === undefined || this.d.payments === undefined) return;
+    const now = this.now();
+    const day = new Date(now).toISOString().slice(0, 10);
+    for (const row of this.d.payments.listSettledAwaitingRefund()) {
+      const ageDays = Math.floor((now - parseSqliteUtc(row.abandonedAt)) / (24 * 60 * 60 * 1000));
+      if (ageDays < refundDays) continue;
+      const key = `${row.companyId}:refund:${day}`;
+      if (this.warned.has(key)) continue;
+      this.warned.add(key);
+      opsLog("formation_refund_overdue", {
+        level: "error",
+        severity: "CRITICAL",
+        companyId: row.companyId,
+        paymentId: row.paymentId,
+        daysOverdue: ageDays - refundDays,
+      });
     }
   }
 

@@ -545,6 +545,16 @@ There is **no fund-moving refund path in the software, by design.** To refund a 
 6. The company stays `ready` and its filing is untouched. Refunding does not un-file a Wyoming
    LLC, and pretending otherwise in the data would be the dishonest part.
 
+**A refund owed and overdue.** A paid company that is `abandoned` (by its tenant before anything
+reached doola, by the sweeper when its create gave up, or by `formation:abandon`) keeps its payment
+`settled`: only the procedure above refunds it. `FORMATION_REFUND_DAYS` (default 14, a whole number
+from 1 to 60) is the delay the terms promise. When a settled payment of an `abandoned` company has
+no refund recorded that many days after the abandon (counted from the company's `updated_at`, which
+the abandon stamps), the sweeper writes a CRITICAL `formation_refund_overdue` line `{ companyId,
+paymentId, daysOverdue }`, once per company per UTC day (again after a restart) until
+`formation:refund` records the transfer. `daysOverdue` is 0 on the first day. The line carries no
+amount and no address: read them from the payment as in step 2.
+
 ### Reconciling ONE payment against the chain
 
 ```
