@@ -53,7 +53,7 @@ import type {
   PilotMode,
   PilotStatus,
 } from "../../src/pilot/types";
-import { sqliteUtcTimestamp } from "../../src/util/sqliteTime";
+import { parseSqliteUtc, sqliteUtcTimestamp } from "../../src/util/sqliteTime";
 import {
   JOB_CONTRACT,
   USDC,
@@ -4279,8 +4279,16 @@ describe("refundExpiredCase: a send that may still be running, and two runs at o
       ["sent", hash, "claimRefund succeeded after the row left funded"],
     ]);
     // Once the window of the send has passed, the next run reads the chain and records the
-    // refund on the failed row, sending nothing.
-    s.clock.sec += SEND_IN_FLIGHT_SECONDS;
+    // refund on the failed row, sending nothing. The window counts from the sending event's
+    // stamp, which the database writes on the wall clock to the second, and which can fall a
+    // second after `wall`: the settle's clock is moved from that stamp, so a second boundary
+    // between the two never leaves the window a second short.
+    const sending = s.cases
+      .events(caseId)
+      .filter((e) => e.step === "settle" && e.status === "sending")
+      .at(-1);
+    expect(sending).toBeDefined();
+    s.clock.sec = Math.floor(parseSqliteUtc(sending!.createdAt) / 1000) + SEND_IN_FLIGHT_SECONDS;
     await refundExpiredCase(s.deps, caseId, { send: true });
     expect(s.node.hashesOf("claimRefund")).toHaveLength(1);
     expect(s.cases.find(caseId)).toMatchObject({
