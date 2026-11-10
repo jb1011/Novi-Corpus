@@ -575,6 +575,9 @@ async function main() {
         sandboxSyntheticPii: formationCfg.sandboxSyntheticPii,
         maxPerTenant: formationCfg.maxPerTenant,
         dailyCeiling: formationCfg.dailyCeiling,
+        // FORMATION_MAX_TOTAL, the formed door's total cap on production; the same setting the
+        // `formation` block below hands `/config.legalBodies.formedDoor`.
+        maxTotal: formationCfg.maxTotal,
         // The SSN keyring (§4.2). Absent everywhere except production doola, where it is a boot
         // invariant — and its absence makes the door REFUSE the field, never store it in clear.
         pii: formationCfg.pii,
@@ -1208,6 +1211,8 @@ async function main() {
             paymentExecutor: formationPayment.required ? formationExecutor : undefined,
             // What the formed door's waiting screen says a filing usually takes.
             filingWorkingDays: formationCfg.filingWorkingDays,
+            // …and the formed door's total cap, the one `companyDeps` carries.
+            maxTotal: formationCfg.maxTotal,
           }
         : undefined,
     // The view dependencies, as ONE object shared with the MCP surface below (C8).

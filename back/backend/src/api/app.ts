@@ -5,7 +5,7 @@ import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
 import { DEFAULT_FORMATION_FILING_WORKING_DAYS } from "../config/env";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
-import { formedDoorEnvironment } from "../formation/formedDoor";
+import { formedCapReached, formedDoorEnvironment } from "../formation/formedDoor";
 import type { FoundingDeps } from "../founding/config";
 import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
@@ -267,8 +267,10 @@ export interface ApiDeps extends EntityViewDeps {
     filingWorkingDays?: number;
     /**
      * FORMATION_MAX_TOTAL: how many formed legal-body companies this deployment takes in all
-     * (`countChargeableFormedLegalBodies`). The setting is not built yet; absent, nothing caps the
-     * formed door, and `/config.legalBodies.formedDoor` never reads `cap_reached`.
+     * (`countChargeableFormedLegalBodies`), on production only. `/config.legalBodies.formedDoor`
+     * reads it through `formedCapReached`, the rule the create door applies with
+     * `companyDeps.maxTotal`; the composition root passes the one setting to both. Absent, nothing
+     * caps the formed door, and `formedDoor` never reads `cap_reached`.
      */
     maxTotal?: number;
   };
@@ -439,7 +441,8 @@ type FormedDoorDeps = Pick<ApiDeps, "formation" | "identity" | "invites">;
  * texts approved, the guardian identity record wired, invite codes required, and the formed
  * legal-body companies below the total cap (World is a boot invariant of production formation).
  * It reads `cap_reached` when the cap is the only gate that fails, and `hidden` otherwise. The
- * count is read last, and only under production.
+ * cap is `formedCapReached`, the rule `createCompany` refuses by, read last and only under
+ * production: a sandbox is never capped.
  */
 function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production"): FormedDoor {
   const formation = deps.formation;
@@ -454,8 +457,9 @@ function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production
     deps.identity !== undefined &&
     deps.invites?.required === true;
   if (!gated) return "hidden";
-  const cap = formation.maxTotal ?? Number.POSITIVE_INFINITY;
-  return formation.companies.countChargeableFormedLegalBodies() < cap ? "offered" : "cap_reached";
+  return formedCapReached(formation.companies, formation.maxTotal, door)
+    ? "cap_reached"
+    : "offered";
 }
 
 /** The `/config.legalBodies` answer of these deps. */

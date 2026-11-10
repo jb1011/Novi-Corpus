@@ -94,6 +94,11 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // `POST /companies` with `for: "legal_body"` on a production deployment, until the gates of the
   // formed door are wired (F-A-2).
   formed_door_not_offered: "This deployment does not create a company for a legal body yet.",
+  // `POST /companies` with `for: "legal_body"` on production once the formed door has taken every
+  // company it takes (FORMATION_MAX_TOTAL): answered before anything is written, or by the re-check
+  // inside the mint, which rolls back.
+  formation_cap_reached:
+    "The early-access formations are all taken: join the waitlist and we will write to you when a place opens.",
   // MCP `create_company` with a `for` argument: the tool creates companies for agents only.
   create_company_agents_only:
     "This tool creates companies for agents only: a company to stand behind a legal body is created from the legal-body page of the web app.",

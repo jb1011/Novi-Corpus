@@ -8,9 +8,10 @@
  * so without World every create would answer 503. On a production deployment it is `offered` only
  * when every gate holds: doola pinned to production, a deployment that charges, both legal texts
  * approved, the guardian identity record wired, invite codes required, and the formed legal bodies
- * below the total cap. When the cap is the only gate that fails it reads `cap_reached`; otherwise
- * `hidden`. Invite codes are not wired yet (trust-and-access PR 2b), so on production the door
- * stays hidden for now.
+ * below the total cap (FORMATION_MAX_TOTAL, read by `formedCapReached`, the rule the create door
+ * applies). When the cap is the only gate that fails it reads `cap_reached`; otherwise `hidden`.
+ * The cap is a production rule: a sandbox is never capped. Invite codes are not wired yet
+ * (trust-and-access PR 2b), so on production the door stays hidden for now.
  *
  * Both legal texts are drafts today, so a production deployment that offers the door can only be
  * shown with them approved: the two text modules are replaced here by copies whose status each test
@@ -102,7 +103,8 @@ interface FormationOptions {
   pin: DoolaEnvironment;
   /** Whether the deployment charges. Absent: no payment config at all. */
   paymentRequired?: boolean;
-  /** FORMATION_MAX_TOTAL. Absent: the setting does not exist yet, and nothing caps the door. */
+  /** FORMATION_MAX_TOTAL, on the formation block and the create door's deps alike, as the
+   *  composition root passes it. Absent: nothing caps the door. */
   maxTotal?: number;
   /** FORMATION_FILING_WORKING_DAYS. */
   filingWorkingDays?: number;
@@ -139,6 +141,7 @@ function formationDeps(o: FormationOptions): NonNullable<ApiDeps["formation"]> {
       ...limits,
       payment,
       world: o.world,
+      ...(o.maxTotal === undefined ? {} : { maxTotal: o.maxTotal }),
     },
     payment,
     feeUsdc: 399,
@@ -276,6 +279,14 @@ describe("formedDoor on a sandbox deployment", () => {
     expect(await doorOf(BOX)).toBe("hidden");
   });
 
+  test("a sandbox past its maxTotal still reads offered: the cap is a production rule", async () => {
+    const world = worldFor(new SqliteWorldStore(db));
+    const formation = formationDeps({ pin: "sandbox", maxTotal: 1, world });
+    for (let i = 0; i < 3; i++) formedLegalBody(s.companies);
+    expect(s.companies.countChargeableFormedLegalBodies()).toBe(3);
+    expect(await formedDoorOf({ environment: "sandbox", formation })).toBe("offered");
+  });
+
   test("a sandbox serves draft texts, takes no identity record nor invite, and reads no count", async () => {
     texts.agreement = "draft";
     texts.statement = "draft";
@@ -369,10 +380,28 @@ describe("formedDoor on a production deployment", () => {
     expect(count).toHaveBeenCalledTimes(1);
   });
 
-  test("until FORMATION_MAX_TOTAL is set, nothing caps the door", async () => {
+  test("with no maxTotal in the deps, nothing caps the door", async () => {
     for (let i = 0; i < 3; i++) formedLegalBody(s.companies);
     const uncapped = formationDeps({ pin: "production", paymentRequired: true });
     expect(await formedDoorOf(productionWithEveryGate({ formation: uncapped }))).toBe("offered");
+  });
+
+  test("past the cap, as when FORMATION_MAX_TOTAL is lowered under what is formed: cap_reached", async () => {
+    for (let i = 0; i < 3; i++) formedLegalBody(s.companies);
+    expect(await formedDoorOf(productionWithEveryGate())).toBe("cap_reached");
+  });
+
+  test("FORMATION_MAX_TOTAL's default, ten: offered with nine formed, cap_reached at ten", async () => {
+    const maxTotal = loadConfig({
+      ARC_TESTNET_RPC_URL: "https://rpc.example",
+      PLATFORM_PRIVATE_KEY: `0x${"a".repeat(64)}`,
+    }).formation?.maxTotal;
+    expect(maxTotal).toBe(10);
+    const formation = formationDeps({ pin: "production", paymentRequired: true, maxTotal });
+    for (let i = 0; i < 9; i++) formedLegalBody(s.companies, i % 2 === 0 ? TENANT : OTHER_TENANT);
+    expect(await formedDoorOf(productionWithEveryGate({ formation }))).toBe("offered");
+    formedLegalBody(s.companies, OTHER_TENANT);
+    expect(await formedDoorOf(productionWithEveryGate({ formation }))).toBe("cap_reached");
   });
 
   test("legalBodyConfigOf is what /config serves", async () => {

@@ -44,7 +44,7 @@ import type {
   FormationPartyRepository,
 } from "../persistence/formationPartyRepository";
 import { parseDetail } from "../persistence/formationRepository";
-import { formedDoorEnvironment } from "./formedDoor";
+import { formedCapReached, formedDoorEnvironment } from "./formedDoor";
 import { partyEditAllowed } from "./freeze";
 import type { CompanyIntake, CompanyPin } from "./intake";
 import {
@@ -109,6 +109,12 @@ export interface CreateCompanyDeps {
   sandboxSyntheticPii: boolean;
   maxPerTenant: number;
   dailyCeiling: number;
+  /**
+   * FORMATION_MAX_TOTAL: how many formed legal-body companies the formed door takes in all, on
+   * production only (`formedCapReached`, the rule `/config.legalBodies.formedDoor` reads too).
+   * Absent = no cap. A company for agents is never counted and never refused.
+   */
+  maxTotal?: number;
   /**
    * The SSN encryption keyring (§4.2). Absent on every deployment that does not collect one —
    * which is every deployment except production doola, where it is a BOOT invariant.
@@ -219,6 +225,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 class PartyBindLost extends Error {}
 
+/**
+ * The total cap reached inside the mint: another create took the last place between step 4b and
+ * the mint. Thrown so the transaction rolls back, before anything in it was written; private to
+ * this module and converted back into the same refusal step 4b answers.
+ */
+class CapReached extends Error {}
+
 export function createCompany(
   deps: CreateCompanyDeps,
   tenantId: string,
@@ -236,12 +249,14 @@ export function createCompany(
   //     c. The guardian identity record (production only: a sandbox returns at once).
   //     d. The operating agreement approved (production only: a sandbox serves a draft).
   //     e. The invite gate, last, so every gate above runs and is tested in its final order.
-  //    A company for agents keeps step 1, the agent door's own gate, unchanged.
-  if (intake.for === "legal_body") {
-    const door = formedDoorEnvironment(
-      deps.pin.environment,
-      deps.legalBodyEnvironment ?? deps.pin.environment,
-    );
+  //    A company for agents keeps step 1, the agent door's own gate, unchanged. The formed door's
+  //    total cap is step 4b, after the per-tenant quota.
+  const formed = intake.for === "legal_body";
+  const door = formedDoorEnvironment(
+    deps.pin.environment,
+    deps.legalBodyEnvironment ?? deps.pin.environment,
+  );
+  if (formed) {
     const verification = assertRealHuman(deps.world, tenantId, door);
     assertHumanCompanyCap(deps.world, verification);
     assertIdentityVerified(deps.identity, deps.world, tenantId, door);
@@ -298,6 +313,13 @@ export function createCompany(
     return { error: formationQuotaExhaustedMessage(deps.maxPerTenant) };
   }
 
+  // 4b. THE TOTAL CAP (FORMATION_MAX_TOTAL), for a legal-body company on production only: the
+  //     early-access beta takes so many formed companies in all, over every tenant. A sandbox
+  //     forms demo companies without number, and a company for agents is never counted or capped.
+  //     Asked again inside the mint (step 8), where two people creating at once meet.
+  if (formed && formedCapReached(deps.companies, deps.maxTotal, door))
+    throw refusal("formation_cap_reached", 409);
+
   // 5. The platform daily ceiling, still on `create_provider` rows.
   const inWindow = deps.requests.createRequestsSince(sqliteUtcTimestamp(now() - DAY_MS));
   if (inWindow >= deps.dailyCeiling) {
@@ -318,7 +340,7 @@ export function createCompany(
   const sealed = gated.sealed;
 
   // 7. Intake validation (§5), with the formed door's own name rule for a legal-body company.
-  const validated = validateIntake(intake, { forLegalBody: intake.for === "legal_body" });
+  const validated = validateIntake(intake, { forLegalBody: formed });
   if ("error" in validated) return validated;
   const built = validated.intake;
 
@@ -342,6 +364,10 @@ export function createCompany(
   let paymentId: string | undefined;
   try {
     companyId = deps.transaction(() => {
+      // Step 4b again, first and inside: a create that passed the count above while another
+      // person's create minted the last place in between is refused here, before any write, and
+      // the sentinel rolls the transaction back (the `PartyBindLost` rule below).
+      if (formed && formedCapReached(deps.companies, deps.maxTotal, door)) throw new CapReached();
       const id = deps.companies.create({
         tenantId,
         status,
@@ -353,7 +379,7 @@ export function createCompany(
         businessPurpose: built.businessPurpose,
         industryLabel: built.industryLabel,
         intakeSynthesized: built.synthesized,
-        purposeKind: intake.for === "legal_body" ? "legal_body" : "agent",
+        purposeKind: formed ? "legal_body" : "agent",
       });
       // THROWN, not returned. better-sqlite3 rolls a transaction back on an EXCEPTION and on
       // nothing else: a callback that returns `false` COMMITS, and the company row it just
@@ -383,6 +409,7 @@ export function createCompany(
     });
   } catch (e) {
     if (e instanceof PartyBindLost) return { error: formationPartyUnavailableMessage() };
+    if (e instanceof CapReached) throw refusal("formation_cap_reached", 409);
     throw e;
   }
 
