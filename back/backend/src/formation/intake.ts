@@ -99,9 +99,11 @@ export function normalizeCompanyName(raw: string): string {
 const LLC_ENDING = /[\s,](l\.?l\.?c\.?|(limited|ltd\.?)\s+liability\s+(company|co\.?))$/i;
 
 /**
- * Whether a full legal name ends in a limited-liability ending, as the State's record of an LLC
- * does. Advice only (`company:filed-name` warns on a name without one): it never decides a match,
- * which is `normalizeCompanyName`'s, so it may admit the abbreviated spellings that one keeps.
+ * Whether a name ends in a limited-liability ending, as the State's record of an LLC does. Two
+ * readers: advice to an operator (`company:filed-name` warns on a full legal name without one),
+ * and a refusal at the formed door (`validateIntake` refuses a name option of a legal-body company
+ * that carries one, since the filing adds the ending itself). It never decides a match, which is
+ * `normalizeCompanyName`'s, so it may admit the abbreviated spellings that one keeps.
  */
 export function hasEntityEnding(name: string): boolean {
   return LLC_ENDING.test(name.normalize("NFC").trim());

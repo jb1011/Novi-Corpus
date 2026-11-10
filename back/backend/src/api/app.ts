@@ -5,6 +5,7 @@ import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
 import { DEFAULT_FORMATION_FILING_WORKING_DAYS } from "../config/env";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
+import { formedDoorEnvironment } from "../formation/formedDoor";
 import type { FoundingDeps } from "../founding/config";
 import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
@@ -425,15 +426,18 @@ type FormedDoorDeps = Pick<ApiDeps, "formation" | "identity" | "invites">;
 /**
  * Whether the formed door is offered on a deployment of this legal-body environment.
  *
- * On a sandbox deployment it is offered wherever doola is configured. On a production deployment
- * it is offered only when every gate holds: doola pinned to production, a deployment that charges,
- * both legal texts approved, the guardian identity record wired, invite codes required, and the
- * formed legal-body companies below the total cap. It reads `cap_reached` when the cap is the only
- * gate that fails, and `hidden` otherwise. The count is read last, and only on production.
+ * The door's environment is `formedDoorEnvironment` of doola's pin and this one, the rule
+ * `createCompany` applies: production when either is. Under sandbox it is offered wherever doola is
+ * configured. Under production it is offered only when every gate holds: doola pinned to
+ * production, a deployment that charges, both legal texts approved, the guardian identity record
+ * wired, invite codes required, and the formed legal-body companies below the total cap. It reads
+ * `cap_reached` when the cap is the only gate that fails, and `hidden` otherwise. The count is read
+ * last, and only under production.
  */
 function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production"): FormedDoor {
   const formation = deps.formation;
-  if (environment === "sandbox") return formation ? "offered" : "hidden";
+  const door = formedDoorEnvironment(formation?.pin.environment ?? environment, environment);
+  if (door === "sandbox") return formation ? "offered" : "hidden";
   const gated =
     formation !== undefined &&
     formation.pin.environment === "production" &&

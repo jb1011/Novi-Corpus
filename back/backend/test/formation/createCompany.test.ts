@@ -41,11 +41,38 @@ import { DEFAULT_INDUSTRY, NAME_MAX_LENGTH, PURPOSE_MAX_LENGTH } from "../../src
 import { decryptSsn, parsePiiKey } from "../../src/formation/pii";
 import { hasLivePayment } from "../../src/formation/status";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import type { LegalTextStatus } from "../../src/legalBody/texts/index";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
+import {
+  identityOver,
+  recordHuman,
+  recordIdentity,
+  worldFor,
+} from "../helpers/customerCompanyFixtures";
+
+/**
+ * The operating agreement is a draft today, and production refuses a draft before the formed
+ * door's last gate: a test that reaches that gate reads it as `texts.agreement` says. Unset, the
+ * real text.
+ */
+const texts = vi.hoisted(() => ({ agreement: undefined as LegalTextStatus | undefined }));
+
+vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
+  return {
+    ...actual,
+    get LEGAL_BODY_OPERATING_AGREEMENT() {
+      const text = actual.LEGAL_BODY_OPERATING_AGREEMENT;
+      return texts.agreement === undefined ? text : { ...text, status: texts.agreement };
+    },
+  };
+});
 
 const TENANT = "0x000000000000000000000000000000000000000A";
 const OTHER = "0x000000000000000000000000000000000000000B";
@@ -63,7 +90,10 @@ beforeEach(() => {
   parties = new SqliteFormationPartyRepository(db);
   requests = new SqliteFormationRepository(db);
 });
-afterEach(() => db.close());
+afterEach(() => {
+  texts.agreement = undefined;
+  db.close();
+});
 
 function deps(over: Partial<CreateCompanyDeps> = {}): CreateCompanyDeps {
   return {
@@ -177,19 +207,49 @@ test("A3: an intake a HUMAN typed is never marked synthesized", () => {
 
 // ── what the company is for ────────────────────────────────────────────────────────────────
 
+/** Three candidates without an entity ending: the formed door refuses a candidate typed with one. */
+const BARE_NAMES = ["Acme Robotics", "Acme Automata", "Acme Mechanicals"];
+
+/** The formed door's World gate met: a real human's row for TENANT. */
+function realHuman(): WorldIdDeps {
+  const store = new SqliteWorldStore(db);
+  recordHuman(store, TENANT, "1001", NOW);
+  return worldFor(store);
+}
+
 test("`for: legal_body` mints a legal-body company; without `for`, a company for agents", () => {
-  const lb = createCompany(deps(), TENANT, intake(newParty(), { for: "legal_body" }));
+  const lb = createCompany(
+    deps({ world: realHuman() }),
+    TENANT,
+    intake(newParty(), { for: "legal_body", names: BARE_NAMES }),
+  );
   expect(companies.find((lb as { companyId: string }).companyId)!.purposeKind).toBe("legal_body");
 
   const agent = createCompany(deps(), TENANT, intake(newParty(), { names: SECOND_NAMES }));
   expect(companies.find((agent as { companyId: string }).companyId)!.purposeKind).toBe("agent");
 });
 
-test("PRODUCTION refuses `for: legal_body` until the formed door's gates exist, and writes nothing", () => {
+test("PRODUCTION refuses `for: legal_body` at the formed door's last gate until the invite codes exist, and writes nothing", () => {
+  // Every earlier gate met (test/formation/formedDoorGates.test.ts walks them in order): a real
+  // human, the guardian identity record, and the operating agreement read as approved.
+  texts.agreement = "approved";
+  const world = realHuman();
+  const identityRepo = new SqliteIdentityRepository(db);
+  recordIdentity(identityRepo, TENANT, {
+    at: NOW - 24 * 60 * 60 * 1000,
+    expiresAt: NOW + 365 * 24 * 60 * 60 * 1000,
+    nullifier: "1001",
+  });
+  const gates = { world, identity: identityOver(identityRepo, () => NOW) };
+
   const partyId = newParty();
   let refused: unknown;
   try {
-    createCompany(prodDeps(), TENANT, intake(partyId, { for: "legal_body" }));
+    createCompany(
+      prodDeps(gates),
+      TENANT,
+      intake(partyId, { for: "legal_body", names: BARE_NAMES }),
+    );
   } catch (err) {
     refused = err;
   }
@@ -203,9 +263,9 @@ test("PRODUCTION refuses `for: legal_body` until the formed door's gates exist, 
   expect(parties.findOwned(TENANT, partyId)!.companyId).toBeNull();
 
   // The same deployment still creates a company for agents, and a sandbox one a legal-body one.
-  const agent = createCompany(prodDeps(), TENANT, intake(partyId));
+  const agent = createCompany(prodDeps(gates), TENANT, intake(partyId));
   expect(companies.find((agent as { companyId: string }).companyId)!.purposeKind).toBe("agent");
-  const sandbox = createCompany(deps(), TENANT, {
+  const sandbox = createCompany(deps({ world }), TENANT, {
     ...intake(newParty(), { for: "legal_body" }),
     names: SECOND_NAMES,
   });

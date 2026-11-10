@@ -21,8 +21,11 @@ door and the resolver take it (`companyEligible`, `src/legalBody/orders.ts`) onc
 - its latest company check is not a revocation;
 - the company is not `abandoned`.
 
-Production refuses to create one (`formed_door_not_offered`, 403) until the formed door's gates
-ship.
+Creating one (`POST /companies` with `for: "legal_body"`) runs the formed door's gates first, in
+this order: a real human (a waiver is refused), the per-human company cap, the guardian identity
+record and the approved operating agreement (these two on production only). Production then
+refuses (`formed_door_not_offered`, 403) until the invite codes ship. The door runs under
+production when doola's pin or the network is production.
 
 ## 2. company:filed-name
 

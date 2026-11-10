@@ -579,6 +579,11 @@ async function main() {
         // invariant — and its absence makes the door REFUSE the field, never store it in clear.
         pii: formationCfg.pii,
         world: worldId,
+        // The formed door's gates (`createCompany` step 0): the guardian identity record built
+        // above, and the network's environment, which with doola's pin decides the door's own
+        // (`formedDoorEnvironment`). No `invites` until PR 2b: a production formed door refuses.
+        identity,
+        legalBodyEnvironment: legalBodyEnvironment(cfg),
         // With payment on, `createCompany` lands the company `draft` and writes its quote in the
         // same transaction. Absent = the beta shape, where every company lands `ready`.
         payment: formationPayment,

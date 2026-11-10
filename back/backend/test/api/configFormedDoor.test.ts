@@ -238,6 +238,18 @@ describe("formedDoor on a sandbox deployment", () => {
     expect(await formedDoorOf({ environment: "sandbox", formation })).toBe("offered");
     expect(count).not.toHaveBeenCalled();
   });
+
+  test("doola pinned to production on a sandbox network is held to the production rule (formedDoorEnvironment)", async () => {
+    const productionPin = formationDeps({ pin: "production" });
+    expect(await formedDoorOf({ environment: "sandbox", formation: productionPin })).toBe("hidden");
+    // …the production rule, not a sandbox that hides: with every production gate met it is offered.
+    expect(
+      await formedDoorOf({
+        ...productionWithEveryGate(),
+        environment: "sandbox",
+      }),
+    ).toBe("offered");
+  });
 });
 
 describe("formedDoor on a production deployment", () => {

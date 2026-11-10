@@ -13,22 +13,52 @@
 import type Database from "better-sqlite3";
 import { privateKeyToAccount } from "viem/accounts";
 import { createSiweMessage } from "viem/siwe";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { ApiError } from "../../src/api/errors";
+import type { WorldIdDeps } from "../../src/api/routes/worldId";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
 import { createCompany } from "../../src/formation/company";
+import type { IdentityDeps } from "../../src/identity/state";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import type { LegalTextStatus } from "../../src/legalBody/texts/index";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
+import { SqliteWorldStore } from "../../src/persistence/worldStore";
 import { OnboardingRunner } from "../../src/workflow/runner";
+import {
+  identityOver,
+  recordHuman,
+  recordIdentity,
+  worldFor,
+} from "../helpers/customerCompanyFixtures";
 import { TEST_FUND_CAPS } from "../helpers/fundCaps";
+
+/**
+ * The operating agreement is a draft today, and production refuses a draft before the formed
+ * door's last gate: a test that reaches that gate reads it as `texts.agreement` says. Unset, the
+ * real text.
+ */
+const texts = vi.hoisted(() => ({ agreement: undefined as LegalTextStatus | undefined }));
+
+vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
+  return {
+    ...actual,
+    get LEGAL_BODY_OPERATING_AGREEMENT() {
+      const text = actual.LEGAL_BODY_OPERATING_AGREEMENT;
+      return texts.agreement === undefined ? text : { ...text, status: texts.agreement };
+    },
+  };
+});
 
 const account = privateKeyToAccount(
   "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
@@ -85,7 +115,17 @@ beforeEach(() => {
   repo = new SqliteEntityRepository(db);
   parties = new SqliteFormationPartyRepository(db);
 });
-afterEach(() => db.close());
+afterEach(() => {
+  texts.agreement = undefined;
+  db.close();
+});
+
+/** The guardian as a real human, with a World row: the formed door's World gate met. */
+function realHuman(): WorldIdDeps {
+  const store = new SqliteWorldStore(db);
+  recordHuman(store, account.address, "1001", Date.now());
+  return worldFor(store);
+}
 
 function makeApp(
   formation?: {
@@ -93,6 +133,10 @@ function makeApp(
     syntheticPii?: boolean;
     maxPerTenant?: number;
     environment?: "sandbox" | "production";
+    /** World ID, for the formed door's gate. */
+    world?: WorldIdDeps;
+    /** The guardian identity record, which the formed door reads on production. */
+    identity?: IdentityDeps;
   },
   custody: { circle?: boolean } = {},
 ) {
@@ -109,6 +153,8 @@ function makeApp(
     sandboxSyntheticPii: formation?.syntheticPii ?? false,
     maxPerTenant: formation?.maxPerTenant ?? 3,
     dailyCeiling: 10,
+    world: formation?.world,
+    identity: formation?.identity,
   };
   const runner = new OnboardingRunner({
     repo,
@@ -565,7 +611,7 @@ test("POST /companies mints a company through the ONE domain function, and lists
 });
 
 test("POST /companies with `for: legal_body` mints a legal-body company; without it, one for agents", async () => {
-  const app = makeApp({ required: true });
+  const app = makeApp({ required: true, world: realHuman() });
   const token = await login(app);
   const companies = new SqliteCompanyRepository(db);
   const create = async (extra: Record<string, unknown>) => {
@@ -573,7 +619,11 @@ test("POST /companies with `for: legal_body` mints a legal-body company; without
     return post(app, "/companies", token, { partyId, ...COMPANY_INTAKE, ...extra });
   };
 
-  const lb = await create({ for: "legal_body" });
+  // The formed door refuses a name option typed with its entity ending.
+  const lb = await create({
+    for: "legal_body",
+    names: ["Acme Robotics", "Acme Automata", "Acme Mechanicals"],
+  });
   expect(lb.status).toBe(201);
   const { companyId: lbId } = await lb.json();
   expect(companies.find(lbId)!.purposeKind).toBe("legal_body");
@@ -596,7 +646,21 @@ test("POST /companies with `for: legal_body` mints a legal-body company; without
 });
 
 test("PRODUCTION: POST /companies with `for: legal_body` is refused, 403 formed_door_not_offered, and nothing is written", async () => {
-  const app = makeApp({ required: true, environment: "production" });
+  // Every earlier gate of the formed door met, so the refusal is its last: a real human, the
+  // guardian identity record, and the operating agreement read as approved.
+  texts.agreement = "approved";
+  const identityRepo = new SqliteIdentityRepository(db);
+  recordIdentity(identityRepo, account.address, {
+    at: Date.now() - 24 * 60 * 60 * 1000,
+    expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    nullifier: "1001",
+  });
+  const app = makeApp({
+    required: true,
+    environment: "production",
+    world: realHuman(),
+    identity: identityOver(identityRepo, Date.now),
+  });
   const token = await login(app);
   const companies = new SqliteCompanyRepository(db);
   const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();

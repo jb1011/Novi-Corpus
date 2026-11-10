@@ -184,6 +184,15 @@ export function companyNameEndingOnlyMessage(position: number): string {
   return `names[${position - 1}] must contain something other than an entity ending`;
 }
 
+/**
+ * The formed door's refusal of a name option typed with its entity ending: the filing adds the
+ * one ending itself, so an option that carries one would be filed with it twice, or as a name
+ * the guardian did not mean. Position is 1-based, as the form numbers the options.
+ */
+export function companyNameEndingRefusedMessage(position: number): string {
+  return `company name option ${position}: leave out the entity ending (LLC, L.L.C., Limited Liability Company): it is added when the company is filed`;
+}
+
 /** Wyoming reserves this word to licensed or chartered entities (see wyRestrictedWords.ts). */
 export function companyNameRestrictedMessage(position: number, word: string): string {
   return `names[${position - 1}] contains the restricted word "${word}" — Wyoming will not file it without a licence or charter we cannot supply on your behalf, so it would come back rejected after the fee was paid`;

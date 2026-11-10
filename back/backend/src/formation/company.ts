@@ -1,4 +1,8 @@
-import { assertGuardianAllowed } from "../api/routes/worldId";
+import {
+  assertGuardianAllowed,
+  assertHumanCompanyCap,
+  assertRealHuman,
+} from "../api/routes/worldId";
 import {
   businessPurposeRequiredMessage,
   businessPurposeTooLongMessage,
@@ -7,6 +11,7 @@ import {
   companyNameCharsetMessage,
   companyNameDuplicateMessage,
   companyNameEndingOnlyMessage,
+  companyNameEndingRefusedMessage,
   companyNameRestrictedMessage,
   companyNameTooLongMessage,
   companyNamesRequiredMessage,
@@ -27,7 +32,10 @@ import {
   truncateTenant,
   warnIfNearLimit,
 } from "../formation";
+import { assertIdentityVerified } from "../identity/state";
 import { refusal } from "../legalBody/sentences";
+import { LegalTextNotApprovedError, assertTextsServable } from "../legalBody/texts/index";
+import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
 import { opsLog } from "../observability/opsLog";
 import type { TransferAuthorizationDomain } from "../payments/transferAuthorization";
 import type { CompanyRepository, CompanyStatus } from "../persistence/companyRepository";
@@ -36,6 +44,7 @@ import type {
   FormationPartyRepository,
 } from "../persistence/formationPartyRepository";
 import { parseDetail } from "../persistence/formationRepository";
+import { formedDoorEnvironment } from "./formedDoor";
 import { partyEditAllowed } from "./freeze";
 import type { CompanyIntake, CompanyPin } from "./intake";
 import {
@@ -46,6 +55,7 @@ import {
   companyNameOptions,
   duplicateKey,
   firstIllegalNameChar,
+  hasEntityEnding,
   stripEntityEnding,
 } from "./intake";
 import { isKnownIndustryLabel } from "./naicsLabels";
@@ -68,10 +78,11 @@ import { findRestrictedWord } from "./wyRestrictedWords";
  * transaction: a party that loses the CAS rolls the company back with it, so a person's identity
  * can never end up spent on two companies.
  *
- * ⚠ It deliberately imports `assertGuardianAllowed` from the API layer. The rule the design gives
- * is "the gate is on the doors that spend the money", and the gate's implementation is a request
- * refusal (an `ApiError`). Re-implementing it here would be a second personhood check, which is
- * exactly the drift this module exists to prevent. The layering test forbids `src/workflow` →
+ * ⚠ It deliberately imports the World gates from the API layer: `assertGuardianAllowed` for a
+ * company for agents, `assertRealHuman` and `assertHumanCompanyCap` for the formed door. The rule
+ * the design gives is "the gate is on the doors that spend the money", and the gate's
+ * implementation is a request refusal (an `ApiError`). Re-implementing it here would be a second
+ * personhood check, which is exactly the drift this module exists to prevent. The layering test forbids `src/workflow` →
  * `src/api`; this is `src/formation`, which is the door layer's own domain module.
  */
 
@@ -106,9 +117,20 @@ export interface CreateCompanyDeps {
   pii?: PiiKeyring;
   /** The company INSERT, the party bind CAS and the SSN write commit together, or not at all. */
   transaction: <T>(fn: () => T) => T;
-  /** The World gate. Absent (or unwired) = no personhood check, exactly as on every other door —
-   *  which is why production formation has a BOOT invariant that this is constructed. */
+  /** The World gate. Absent (or unwired) = no personhood check at the agent door, exactly as on
+   *  every other door — which is why production formation has a BOOT invariant that this is
+   *  constructed. The formed door refuses without it (503 `unavailable`). */
   world?: import("../api/routes/worldId").WorldIdDeps;
+  /** The guardian identity record; the formed door's identity gate reads it on production. */
+  identity?: import("../identity/state").IdentityDeps;
+  /** `legalBodyEnvironment(cfg)`: the network's environment. Absent reads as the pin's. */
+  legalBodyEnvironment?: "sandbox" | "production";
+  /**
+   * PLACEHOLDER, the shape of `ApiDeps.invites`: PR 2b replaces it with its InviteDeps and
+   * `assertInvited`. The composition root passes nothing until then, so a production formed door
+   * refuses with `formed_door_not_offered` after every other gate.
+   */
+  invites?: { required: boolean };
   /**
    * FORMATION PAYMENTS (§6.1). Present on every deployment that can quote; `required` inside it
    * is the switch.
@@ -199,21 +221,40 @@ export function createCompany(
 ): CreateCompanyResult {
   const now = deps.now ?? Date.now;
 
-  // 0. A company for a legal body is not offered on PRODUCTION yet: the formed door's gates
-  //    (strict World, the identity record, the approved texts, the invite, the total cap) are not
-  //    wired, and without them this door would file real companies for anyone World lets through.
-  //    The deployment's pin decides: a mainnet box always pins doola production (a boot
-  //    invariant), so this covers `legalBodyEnvironment(cfg) === "production"`, and it refuses on
-  //    any box that would file a real company. Before anything else, so nothing is written.
-  //    ⚠ F-A-2 REPLACES this check with those gates.
-  if (intake.for === "legal_body" && deps.pin.environment === "production")
-    throw refusal("formed_door_not_offered", 403);
-
-  // 1. PERSONHOOD, first, and on this door specifically (§6.7): `POST /companies` is where the
-  //    money is spent, and an anonymous caller with a wallet must not be able to buy real
-  //    Wyoming LLCs. Throws (403) rather than returning a message — it is the same refusal
-  //    onboard makes, and both surfaces already render it.
-  assertGuardianAllowed(deps.world, tenantId, { scope: "company" });
+  // 0. THE FORMED DOOR's gates, for a company that will stand behind a legal body, in this order
+  //    and before anything is written. It runs under production when the doola pin OR the network
+  //    is production (`formedDoorEnvironment`, the rule `/config.legalBodies.formedDoor` reads too).
+  //     a. A REAL human, whatever the enforcement switch says: a waiver is refused on both
+  //        environments, and a box with no World block answers 503 rather than filing.
+  //     b. The per-human company cap, counted as the agent door counts it.
+  //     c. The guardian identity record (production only: a sandbox returns at once).
+  //     d. The operating agreement approved (production only: a sandbox serves a draft).
+  //     e. The invite gate, last, so every gate above runs and is tested in its final order.
+  //    A company for agents keeps step 1, the agent door's own gate, unchanged.
+  if (intake.for === "legal_body") {
+    const door = formedDoorEnvironment(
+      deps.pin.environment,
+      deps.legalBodyEnvironment ?? deps.pin.environment,
+    );
+    const verification = assertRealHuman(deps.world, tenantId, door);
+    assertHumanCompanyCap(deps.world, verification);
+    assertIdentityVerified(deps.identity, deps.world, tenantId, door);
+    try {
+      assertTextsServable(door, [LEGAL_BODY_OPERATING_AGREEMENT]);
+    } catch (err) {
+      if (err instanceof LegalTextNotApprovedError) throw refusal("legal_text_not_approved", 503);
+      throw err;
+    }
+    // PR 2b replaces this line with assertInvited.
+    if (door === "production" && deps.invites?.required !== true)
+      throw refusal("formed_door_not_offered", 403);
+  } else {
+    // 1. PERSONHOOD, first, and on this door specifically (§6.7): `POST /companies` is where the
+    //    money is spent, and an anonymous caller with a wallet must not be able to buy real
+    //    Wyoming LLCs. Throws (403) rather than returning a message — it is the same refusal
+    //    onboard makes, and both surfaces already render it.
+    assertGuardianAllowed(deps.world, tenantId, { scope: "company" });
+  }
 
   // 2. The synthetic-PII refusals, in BOTH directions and never as a substitution (§3, audit H7).
   //    Keyed on the DEPLOYMENT: quietly swapping in a fixture would leave the caller believing
@@ -270,8 +311,8 @@ export function createCompany(
   if ("error" in gated) return gated;
   const sealed = gated.sealed;
 
-  // 7. Intake validation, in whichever of the two shapes this caller sent (§5).
-  const validated = validateIntake(intake);
+  // 7. Intake validation (§5), with the formed door's own name rule for a legal-body company.
+  const validated = validateIntake(intake, { forLegalBody: intake.for === "legal_body" });
   if ("error" in validated) return validated;
   const built = validated.intake;
 
@@ -446,7 +487,8 @@ export function updateCompanyIntake(
   if ("error" in gated) return gated;
   const sealed = gated.sealed;
 
-  const validated = validateIntake(intake);
+  // The rules the company was created under: a legal-body company keeps the formed door's.
+  const validated = validateIntake(intake, { forLegalBody: company.purposeKind === "legal_body" });
   if ("error" in validated) return validated;
   const built = validated.intake;
   // A re-opened intake is typed by a human, so the synthesized path has no business here: it
@@ -737,9 +779,14 @@ export function rearmAfterPartyEdit(
  * Order matters and is deliberate: the SHAPE first (three candidates, present), then each
  * candidate in position order, then the cross-candidate rule (duplicates), then purpose, then
  * industry. A caller fixing a form gets the first thing wrong with it, in the order they typed.
+ *
+ * `forLegalBody`: the company is (or will be) one for a legal body, formed at the formed door.
+ * There a candidate typed with its entity ending is refused, right after the blank check: the
+ * filing adds the one ending itself. The agent door keeps stripping a single LLC ending.
  */
 export function validateIntake(
   intake: Pick<CompanyIntakeInput, "names" | "businessPurpose" | "industryLabel">,
+  opts: { forLegalBody: boolean },
 ): { intake: CompanyIntake } | { error: string } {
   const raw = intake.names;
   if (!Array.isArray(raw) || raw.length !== NAME_OPTION_COUNT)
@@ -752,6 +799,8 @@ export function validateIntake(
     if (typeof candidate !== "string") return { error: companyNameBlankMessage(position) };
     const name = canonicalizeIntakeText(candidate);
     if (!name) return { error: companyNameBlankMessage(position) };
+    if (opts.forLegalBody && hasEntityEnding(name))
+      return { error: companyNameEndingRefusedMessage(position) };
     if (name.length > NAME_MAX_LENGTH)
       return { error: companyNameTooLongMessage(position, NAME_MAX_LENGTH) };
     const illegal = firstIllegalNameChar(name);
