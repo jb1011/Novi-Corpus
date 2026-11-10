@@ -15,14 +15,18 @@ import {
 import { custodyUnavailableMessage } from "../custody";
 import { ApiError } from "../errors";
 import {
-  createFormationParty,
   formationDoorRefusal,
   formationUnavailableMessage,
   ssnNotOnThisDoorMessage,
   truncateTenant,
 } from "../formation";
 import { partyFieldsOf } from "../formation";
-import { createCompany, updateCompanyParty } from "../formation/company";
+import {
+  createCompany,
+  createFormationParty,
+  typedPartyNamesRefused,
+  updateCompanyParty,
+} from "../formation/company";
 import { describeIndustryLabels } from "../formation/naicsLabels";
 import { FORMATION_PRODUCT, guardianOf, paymentView } from "../formation/payment";
 import { deriveFormationStatus, hasLivePayment } from "../formation/status";
@@ -48,7 +52,11 @@ import { evaluatePolicy } from "../payments/policyGate";
 import type { VerifiedKey } from "../persistence/apiKeyStore";
 import type { EntityRepository } from "../persistence/entityRepository";
 import type { PasskeyStore } from "../persistence/passkeyStore";
-import { AgentSpecSchema, FormationPartySchema } from "../policy/agentSpec";
+import {
+  AgentSpecSchema,
+  FormationPartyEditSchema,
+  FormationPartySchema,
+} from "../policy/agentSpec";
 import { usdToUnits } from "../policy/units";
 import {
   cancelFormationPayment,
@@ -423,6 +431,22 @@ function legalBodyToolRefusal(tool: string, err: unknown): ToolRefusal {
     errorName: err instanceof Error ? err.name : "not_an_error",
   });
   return codeRefusal("internal_error", sentenceFor("internal_error"));
+}
+
+/**
+ * What a party tool (`create_formation_party`, `update_company_party`) answers for anything
+ * thrown. The party doors' gates on production, the real-human and identity checks, and a code of
+ * the legal-body table answer their code and fixed sentence as one JSON object, as the legal-body
+ * tools do (`legalBodyToolRefusal`), so they read as REST's `error.code` and `error.message`.
+ * Anything else, a schema's refusal first, keeps the message these tools have always answered.
+ */
+function partyToolError(tool: string, err: unknown): ToolRefusal {
+  if (
+    err instanceof ApiError &&
+    (Object.hasOwn(LEGAL_BODY_SENTENCES, err.code) || REAL_HUMAN_CHECK_CODES.has(err.code))
+  )
+    return legalBodyToolRefusal(tool, err);
+  return refuse((err as Error).message);
 }
 
 /**
@@ -937,6 +961,17 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
   );
 
   /**
+   * On a production door, a party tool's call that names the person (`legalFirstName` or
+   * `legalLastName`, whatever its value): the names are written from the guardian's identity
+   * record. Answered with the table's code and sentence, at the ssn refusal's place, before the
+   * gates and the schema, exactly where the REST doors refuse it.
+   */
+  const refuseTypedNames = (args: unknown): ToolRefusal | null =>
+    deps.formation && typedPartyNamesRefused(deps.formation.companyDeps, args)
+      ? codeRefusal("party_name_is_written_by_novi", sentenceFor("party_name_is_written_by_novi"))
+      : null;
+
+  /**
    * PII intake, the MCP twin of POST /formation-party (design §5).
    *
    * Registered ONLY when the deployment forms entities: a tool that exists but always refuses
@@ -964,7 +999,7 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       "create_formation_party",
       {
         title: "Create formation party",
-        description: `Register the legal identity of the natural person your agent's legal entity will be filed under, and get back an opaque partyId to pass to create_company. ${formationCapabilityNote(deps)} Personal data belongs ONLY in this call — never in create_company's arguments and never in onboard_agent's spec. A real party requires legalFirstName, legalLastName, email, PHONE and address (doola will not file a responsible party without a phone number). ⚠ It NEVER takes an SSN, and never will — an SSN in a tool argument would sit in this client's context window and its logs; the field is declared only so that passing one is REFUSED rather than silently dropped. An SSN is collected only by the web form (POST /companies), which mints the (party, company) pair it is sealed under. The response contains the handle and nothing else.`,
+        description: `Register the legal identity of the natural person your agent's legal entity will be filed under, and get back an opaque partyId to pass to create_company. ${formationCapabilityNote(deps)} Personal data belongs ONLY in this call — never in create_company's arguments and never in onboard_agent's spec. A real party requires email, PHONE and address (doola will not file a responsible party without a phone number). On production its names are written from the guardian's verified identity record, and a call carrying legalFirstName or legalLastName is refused; on a sandbox that takes test parties both names are required. marketingConsent, if true, records that the guardian agreed to marketing email; nothing is sent for it. ⚠ It NEVER takes an SSN, and never will — an SSN in a tool argument would sit in this client's context window and its logs; the field is declared only so that passing one is REFUSED rather than silently dropped. An SSN is collected only by the web form (POST /companies), which mints the (party, company) pair it is sealed under. The response contains the handle and nothing else.`,
         inputSchema: {
           /** The sandbox shortcut: no personal data at all. */
           synthetic: z.boolean().optional(),
@@ -976,6 +1011,8 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
            *  a responsible party with no phone. */
           phone: z.string().optional(),
           address: z.record(z.unknown()).optional(),
+          /** The guardian's consent to marketing email, as REST takes it: stored on production. */
+          marketingConsent: z.boolean().optional(),
           /** ⚠ DECLARED IN ORDER TO BE REFUSED (§4.1) — see the block comment above. */
           ssn: z.string().optional(),
         },
@@ -985,8 +1022,10 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         // is a step of provisioning a legal body, and it commits the tenant to a real filing. Then
         // the ssn, BEFORE anything is created, so the refusal is the whole answer and nothing
         // exists afterwards for the caller to clean up. Same order, same sentence, as the other
-        // two PII doors.
-        const denied = requireProvisionTenantWide(scope) ?? refuseSsn(args);
+        // two PII doors. Then, on a production door, a name: written from the identity record.
+        const companyDeps = deps.formation!.companyDeps;
+        const denied =
+          requireProvisionTenantWide(scope) ?? refuseSsn(args) ?? refuseTypedNames(args);
         if (denied) return denied;
         try {
           // `ssn` is destructured OUT as well as refused above: `FormationPartySchema` is
@@ -995,14 +1034,8 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
           const { synthetic, ssn: _ssn, ...body } = args as Record<string, unknown>;
           // The synthetic shortcut carries no PII, so it is never parsed as a party body.
           const parsed = synthetic === true ? undefined : FormationPartySchema.parse(body);
-          const result = createFormationParty(
-            {
-              parties: deps.formation!.parties,
-              sandboxSyntheticPii: deps.formation!.sandboxSyntheticPii,
-            },
-            tenantId,
-            { synthetic, parsed },
-          );
+          // The composition root's one dependency set, as REST passes it.
+          const result = createFormationParty(companyDeps, tenantId, { synthetic, parsed });
           if ("error" in result)
             return { content: [{ type: "text", text: result.error }], isError: true };
           opsLog("formation_party_created", {
@@ -1011,7 +1044,7 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
           });
           return { content: [{ type: "text", text: JSON.stringify({ partyId: result.partyId }) }] };
         } catch (e) {
-          return { content: [{ type: "text", text: (e as Error).message }], isError: true };
+          return partyToolError("create_formation_party", e);
         }
       },
     );
@@ -1045,11 +1078,17 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       "update_company_party",
       {
         title: "Update the company's responsible party",
-        description: `Correct the legal identity of the responsible person on a filing the provider REFUSED — the one exit from a company parked on awaitingPartyEdit (see get_company). It is addressed by companyId: the party is the one this company was filed with, so no other company's person can be touched. Editable only until the filing has been sent: once the provider has the person, it is never asked for them again, and an edit here would change our copy and nothing else. Takes the same identity fields as create_formation_party and NEVER an ssn — an SSN is collected only by the web form, which is also the only place it can be re-captured. ${formationCapabilityNote(deps)} The response contains the handle and nothing else.`,
+        description: `Correct the contact and address of the responsible person on a filing the provider REFUSED — the one exit from a company parked on awaitingPartyEdit (see get_company). It is addressed by companyId: the party is the one this company was filed with, so no other company's person can be touched. Editable only until the filing has been sent: once the provider has the person, it is never asked for them again, and an edit here would change our copy and nothing else. Takes create_formation_party's email, phone and address; NEVER the names (on production they are written from the guardian's verified identity record, and a call carrying legalFirstName or legalLastName is refused) and NEVER an ssn — an SSN is collected only by the web form, which is also the only place it can be re-captured. ${formationCapabilityNote(deps)} The response contains the handle and nothing else.`,
         inputSchema: {
           companyId: z.string(),
-          legalFirstName: z.string(),
-          legalLastName: z.string(),
+          /**
+           * ⚠ DECLARED IN ORDER TO BE REFUSED, as `ssn` is: the names are never edited here. On
+           * production they are written from the guardian's identity record, and a call carrying
+           * either one answers `party_name_is_written_by_novi`; elsewhere the edit schema refuses
+           * it by name.
+           */
+          legalFirstName: z.string().optional(),
+          legalLastName: z.string().optional(),
           email: z.string(),
           /** REQUIRED, exactly as at intake (C6): doola will not file a party with no phone. */
           phone: z.string(),
@@ -1061,15 +1100,17 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       async (args) => {
         // The same rung `create_formation_party` sits on: this call decides whose identity a real
         // Wyoming filing names. And the ssn refusal BEFORE anything else, so it is the whole
-        // answer — same order, same sentence, as `create_company`.
-        const denied = requireProvisionTenantWide(scope) ?? refuseSsn(args);
+        // answer — same order, same sentence, as `create_company`; then, on a production door, a
+        // name, at the same place as REST refuses it.
+        const denied =
+          requireProvisionTenantWide(scope) ?? refuseSsn(args) ?? refuseTypedNames(args);
         if (denied) return denied;
         try {
           const { companyId, ssn: _ssn, ...rest } = args as Record<string, unknown>;
-          // The SAME `.strict()` schema the create parses, so a field one door refuses cannot be
+          // The SAME `.strict()` edit schema REST parses, so a field one door refuses cannot be
           // quietly accepted by the other — and an `ssn` key is refused BY that strictness rather
-          // than by a check somebody has to remember to write.
-          const body = FormationPartySchema.parse(rest);
+          // than by a check somebody has to remember to write. A name is refused by it too.
+          const body = FormationPartyEditSchema.parse(rest);
           const result = updateCompanyParty(
             {
               ...deps.formation!.companyDeps,
@@ -1084,7 +1125,7 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
             return { content: [{ type: "text", text: result.error }], isError: true };
           return { content: [{ type: "text", text: JSON.stringify({ partyId: result.partyId }) }] };
         } catch (e) {
-          return { content: [{ type: "text", text: (e as Error).message }], isError: true };
+          return partyToolError("update_company_party", e);
         }
       },
     );

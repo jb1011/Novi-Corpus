@@ -50,17 +50,19 @@ beforeEach(() => {
 });
 afterEach(() => db.close());
 
+/** A sandbox door (doola's sandbox pin, the network read as the pin's): the edit door runs no
+ *  World or identity gate there. Production's gates are tested in partyNamesFromRecord.test.ts. */
 const deps = (sandboxSyntheticPii = false) => ({
   companies,
   parties,
   requests,
   sandboxSyntheticPii,
+  pin: { provider: "doola", environment: "sandbox" } as const,
   transaction: <T>(fn: () => T) => fn(),
 });
 
+/** The correction: the contact and the address. The names are never rewritten by this door. */
 const CORRECTED = {
-  legalFirstName: "Grace",
-  legalLastName: "Hopper",
   email: "grace@example.com",
   phone: "+12125550199",
   line1: "2 Compiler Way",
@@ -137,7 +139,7 @@ test("a SANDBOX deployment refuses a real identity at the edit door, in the crea
     error: syntheticPiiRequiredMessage(),
   });
   // Nothing was written: the refusal is the whole answer, as it is on every other door.
-  expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(TENANT, partyId)!.email).toBe("ada@example.com");
 });
 
 test("a PRODUCTION deployment refuses to edit a SYNTHETIC party, in the create's words", () => {
@@ -164,7 +166,7 @@ test("a PRODUCTION deployment refuses to edit a SYNTHETIC party, in the create's
   expect(updateCompanyParty(deps(false), TENANT, companyId, CORRECTED)).toEqual({
     error: syntheticPiiRefusedMessage(),
   });
-  expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Sandbox");
+  expect(parties.findOwned(TENANT, partyId)!.email).toBe("sandbox@novicorpus.com");
 });
 
 // ── ownership ───────────────────────────────────────────────────────────────────────────────
@@ -176,7 +178,7 @@ test("unknown and FOREIGN companies get the SAME message every other company doo
       error: companyUnavailableMessage(),
     });
   // …and the other tenant's identity is untouched.
-  expect(parties.findByCompanyId(foreign)!.legalFirstName).toBe("Ada");
+  expect(parties.findByCompanyId(foreign)!.email).toBe("ada@example.com");
 });
 
 /**
@@ -211,8 +213,8 @@ test("two parked companies, one tenant: fixing one cannot touch the other's pers
   expect(updateCompanyParty(deps(), TENANT, companyA, CORRECTED)).toEqual({ partyId: partyA });
 
   // A got the correction; B is untouched, identity and park alike.
-  expect(parties.findOwned(TENANT, partyA)!.legalFirstName).toBe("Grace");
-  expect(parties.findOwned(TENANT, partyB)!.legalFirstName).toBe("Alan");
+  expect(parties.findOwned(TENANT, partyA)!.email).toBe("grace@example.com");
+  expect(parties.findOwned(TENANT, partyB)!.email).toBe("alan@example.com");
   expect(JSON.parse(requests.find(companyB, "create_provider")!.detail!).awaitingPartyEdit).toBe(
     true,
   );
@@ -248,11 +250,12 @@ test("a PARKED party is edited, and the edit buys exactly one retry with the new
 
   expect(updateCompanyParty(deps(), TENANT, companyId, CORRECTED)).toEqual({ partyId });
 
-  // 1. The identity is the NEW one — which is the body the next `createCustomer` will send.
+  // 1. The contact and address are the NEW ones — which is the body the next `createCustomer`
+  //    will send. The names stay: this door never rewrites them.
   const after = parties.findOwned(TENANT, partyId)!;
   expect(after).toMatchObject({
-    legalFirstName: "Grace",
-    legalLastName: "Hopper",
+    legalFirstName: "Ada",
+    legalLastName: "Lovelace",
     email: "grace@example.com",
     city: "Sheridan",
   });
@@ -293,8 +296,6 @@ test("an UNCHANGED resubmission does not clear the park and does not burn an att
 
   // The identity exactly as `newParty` wrote it, re-sent field for field.
   const same = {
-    legalFirstName: "Ada",
-    legalLastName: "Lovelace",
     email: "ada@example.com",
     phone: "+12125550100",
     line1: "1 Analytical Way",
@@ -320,8 +321,6 @@ test("ONE field different is a change — and it re-arms exactly once", () => {
   parkAwaitingPartyEdit(companyId);
 
   const oneFieldDifferent = {
-    legalFirstName: "Ada",
-    legalLastName: "Lovelace",
     email: "ada@example.com",
     phone: "+12125550100",
     line1: "1 Analytical Way",
@@ -365,7 +364,7 @@ test("parties.update refuses a frozen row by itself, with no domain function abo
   });
 
   expect(parties.update(partyId, TENANT, companyId, CORRECTED)).toBe(false);
-  expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(TENANT, partyId)!.email).toBe("ada@example.com");
 
   // …and the statement is bound to the (party, company) PAIR: naming another company does not
   // move this row either.
@@ -385,7 +384,7 @@ test("parties.update refuses a frozen row by itself, with no domain function abo
   });
   const otherCompany = newCompany(otherParty);
   expect(parties.update(partyId, TENANT, otherCompany, CORRECTED)).toBe(false);
-  expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(TENANT, partyId)!.email).toBe("ada@example.com");
 });
 
 test("it clears its OWN flag only — an intake park is NOT re-armed by a party edit", () => {
@@ -416,7 +415,7 @@ test("a party whose filing has a CUSTOMER at doola is frozen — the edit would 
   expect(updateCompanyParty(deps(), TENANT, companyId, CORRECTED)).toEqual({
     error: partyFrozenMessage(),
   });
-  expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(TENANT, partyId)!.email).toBe("ada@example.com");
 });
 
 test("a SENT, SUBMITTED or FILED company's party is frozen; an unopened one's is not", () => {
@@ -456,7 +455,7 @@ test("a SENT, SUBMITTED or FILED company's party is frozen; an unopened one's is
   const partyId = newParty();
   const companyId = newCompany(partyId);
   expect(updateCompanyParty(deps(), TENANT, companyId, CORRECTED)).toEqual({ partyId });
-  expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Grace");
+  expect(parties.findOwned(TENANT, partyId)!.email).toBe("grace@example.com");
 });
 
 // ── what it must NOT touch ──────────────────────────────────────────────────────────────────

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   assertGuardianAllowed,
   assertHumanCompanyCap,
@@ -21,18 +22,22 @@ import {
   formationQuotaExhaustedMessage,
   industryLabelRequiredMessage,
   industryLabelUnknownMessage,
+  partyBodyNamesThePerson,
+  partyFieldsOf,
   partyFrozenMessage,
+  partyNamesRequiredMessage,
   partyUnchangedMessage,
   sqliteUtcTimestamp,
   ssnFormatMessage,
   ssnRefusedHereMessage,
   ssnUnavailableMessage,
+  syntheticFormationParty,
   syntheticPiiRefusedMessage,
   syntheticPiiRequiredMessage,
   truncateTenant,
   warnIfNearLimit,
 } from "../formation";
-import { assertIdentityVerified } from "../identity/state";
+import { type IdentityDeps, assertIdentityVerified, namesOfRecordAtDoor } from "../identity/state";
 import { refusal } from "../legalBody/sentences";
 import { LegalTextNotApprovedError, assertTextsServable } from "../legalBody/texts/index";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
@@ -44,6 +49,8 @@ import type {
   FormationPartyRepository,
 } from "../persistence/formationPartyRepository";
 import { parseDetail } from "../persistence/formationRepository";
+import type { GuardianIdentityCheck } from "../persistence/identityRepository";
+import type { FormationPartyInput } from "../policy/agentSpec";
 import { formedCapReached, formedDoorEnvironmentOf, logFormedCapReached } from "./formedDoor";
 import { partyEditAllowed } from "./freeze";
 import type { CompanyIntake, CompanyPin } from "./intake";
@@ -97,11 +104,13 @@ export interface CreateCompanyDeps {
    *    rows because that is where the fee is actually incurred (with payment on, a company can
    *    sit in draft for days before its create fires);
    *  - `find` + `transition` so a successful edit-and-retry can RE-ARM the filing step it just
-   *    unblocked, in the same transaction as the edit (§4.7 — see `updateCompanyIntake`).
+   *    unblocked, in the same transaction as the edit (§4.7 — see `updateCompanyIntake`);
+   *  - `stepsOf` + `transition` for the tenant's abandon of a formed company
+   *    (`abandonFormedCompany`), which reads every row and closes each one.
    */
   requests: Pick<
     import("../persistence/formationRepository").FormationRepository,
-    "createRequestsSince" | "find" | "transition"
+    "createRequestsSince" | "find" | "transition" | "stepsOf"
   >;
   /** What this deployment pins a company to. Never caller input. */
   pin: CompanyPin;
@@ -584,6 +593,149 @@ export function updateCompanyIntake(
   return { companyId };
 }
 
+// ── THE PARTY DOORS: the intake and the edit of the responsible person (design §3/§5/§7) ────
+
+/**
+ * What the intake reads: the party store, the synthetic rule, and the formed door's environment
+ * and its two gates. The composition root's `companyDeps` is one, so both doors pass it as it is.
+ */
+export type FormationPartyIntakeDeps = Pick<
+  CreateCompanyDeps,
+  "parties" | "sandboxSyntheticPii" | "world" | "identity" | "pin" | "legalBodyEnvironment" | "now"
+>;
+
+/** Either the handle, or the single-sourced refusal both surfaces render. */
+export type FormationPartyIntakeResult = { partyId: string } | { error: string };
+
+/**
+ * THE PARTY DOORS' GATES on a production door: a real human (strict World: a waiver is refused,
+ * an unwired World is 503), then the guardian's identity record (`assertIdentityVerified`). Returns
+ * the record and the identity deps it was read with, so the intake can write its names; on a
+ * sandbox door reads nothing and returns undefined. Each gate throws its own `ApiError`, which
+ * both surfaces answer as it is.
+ */
+function partyDoorGates(
+  deps: Pick<CreateCompanyDeps, "world" | "identity" | "pin" | "legalBodyEnvironment">,
+  tenantId: string,
+): { identity: IdentityDeps; record: GuardianIdentityCheck } | undefined {
+  const door = formedDoorEnvironmentOf(deps);
+  if (door === "sandbox") return undefined;
+  assertRealHuman(deps.world, tenantId, door);
+  const record = assertIdentityVerified(deps.identity, deps.world, tenantId, door);
+  // `assertIdentityVerified` answers 503 without the identity deps and returns the record on
+  // production; this states it for the compiler, and refuses rather than writes if it ever fails.
+  if (deps.identity === undefined || record === undefined)
+    throw new Error("the identity gate passed without a record");
+  return { identity: deps.identity, record };
+}
+
+/**
+ * Whether a party door must refuse this body because it names the person: on a production door, a
+ * `legalFirstName` or a `legalLastName` key, whatever its value (`partyBodyNamesThePerson`). Asked
+ * of the body as the caller sent it, before anything else, by both party doors on both surfaces,
+ * so REST and MCP refuse it at the same point; the MCP tools answer it with the table's sentence.
+ */
+export function typedPartyNamesRefused(
+  deps: Pick<CreateCompanyDeps, "pin" | "legalBodyEnvironment">,
+  body: unknown,
+): boolean {
+  return formedDoorEnvironmentOf(deps) === "production" && partyBodyNamesThePerson(body);
+}
+
+/** `typedPartyNamesRefused`, as the REST doors answer it: 400 `party_name_is_written_by_novi`. */
+export function refuseTypedPartyNames(
+  deps: Pick<CreateCompanyDeps, "pin" | "legalBodyEnvironment">,
+  body: unknown,
+): void {
+  if (typedPartyNamesRefused(deps, body)) throw refusal("party_name_is_written_by_novi", 400);
+}
+
+/**
+ * Create a formation party from a validated body, or from the sandbox shortcut.
+ *
+ * Shared by `POST /formation-party` and the `create_formation_party` MCP tool so the two intake
+ * surfaces cannot accept different things — the same reason the door gate is one function.
+ *
+ * ON A PRODUCTION DOOR (`formedDoorEnvironment`: doola's pin or the network production), before
+ * anything is read of the body: the strict World gate, then the identity record (`partyDoorGates`).
+ * The NAMES are then the record's (`namesOfRecordAtDoor`; a record whose names cannot be read is
+ * 503 `identity_unavailable`), never typed: a body that carries `legalFirstName` or
+ * `legalLastName`, whatever its value, is refused 400 `party_name_is_written_by_novi`. The two
+ * doors refuse such a body before calling here too, so both surfaces answer it first; this check
+ * holds for any other caller. The mainnet box runs the legal-body product only (decided 9
+ * November), so every production party is a legal-body party and the rule is unconditional there.
+ * `marketingConsent: true` stores `marketing_consent_at` (now); false or absent stores null.
+ * Nothing is sent or queued for it: the email outbox that adds the address to the campaign
+ * contacts is not on this branch.
+ *
+ * ON A SANDBOX DOOR, as before: no World gate (the full product's pilots use this door with
+ * waivers), the record never read, the names typed (both required on a box that takes test
+ * bodies), no consent stored.
+ *
+ * The synthetic rule is a REFUSAL in both directions, never a substitution (§3, audit H7):
+ *  - on a sandbox deployment, real names and addresses are refused outright and never reach
+ *    doola's development environment. Quietly swapping in a fixture would leave the caller
+ *    believing their data had been filed, and would still have accepted (and stored) it;
+ *  - on a production deployment, the synthetic shortcut is refused because it would file a real
+ *    Wyoming LLC naming a person who does not exist.
+ */
+export function createFormationParty(
+  deps: FormationPartyIntakeDeps,
+  tenantId: string,
+  body: { synthetic?: unknown; parsed?: FormationPartyInput },
+): FormationPartyIntakeResult {
+  // The gates first, before the body is read: a production intake is a legal identity, and only
+  // a verified guardian may give one.
+  const ofRecord = partyDoorGates(deps, tenantId);
+  if (body.synthetic === true) {
+    if (!deps.sandboxSyntheticPii) return { error: syntheticPiiRefusedMessage() };
+    // The id is minted HERE rather than by the repository because the fixture's email embeds it
+    // (`sandbox+<partyId>@novicorpus.com`) — which is what keeps each sandbox filing
+    // distinguishable in doola's portal, and unmistakably ours.
+    const partyId = randomUUID();
+    deps.parties.create({
+      tenantId,
+      ...syntheticFormationParty(partyId),
+      synthetic: true,
+      partyId,
+    });
+    return { partyId };
+  }
+  if (deps.sandboxSyntheticPii) return { error: syntheticPiiRequiredMessage() };
+  const parsed = body.parsed;
+  if (!parsed) return { error: "a formation party body is required" };
+
+  // The SAME mapping the edit doors use — see `partyFieldsOf`. `synthetic` is the deployment's,
+  // never the caller's, which is why it is added here rather than being part of the shape.
+  if (ofRecord !== undefined) {
+    if (partyBodyNamesThePerson(parsed)) throw refusal("party_name_is_written_by_novi", 400);
+    const names = namesOfRecordAtDoor(ofRecord.identity, ofRecord.record);
+    return {
+      partyId: deps.parties.create({
+        tenantId,
+        legalFirstName: names.first,
+        legalLastName: names.last,
+        ...partyFieldsOf(parsed),
+        synthetic: false,
+        marketingConsentAt: parsed.marketingConsent === true ? (deps.now ?? Date.now)() : null,
+      }),
+    };
+  }
+  if (parsed.legalFirstName === undefined || parsed.legalLastName === undefined)
+    return { error: partyNamesRequiredMessage() };
+  return {
+    partyId: deps.parties.create({
+      tenantId,
+      legalFirstName: parsed.legalFirstName,
+      legalLastName: parsed.legalLastName,
+      ...partyFieldsOf(parsed),
+      synthetic: false,
+      // A sandbox stores no consent: nobody there is a contact of ours.
+      marketingConsentAt: null,
+    }),
+  };
+}
+
 /**
  * THE PARTY-EDIT DOOR (design §7, A3) — correct the responsible person doola refused, ADDRESSED
  * BY COMPANY.
@@ -624,11 +776,24 @@ export function updateCompanyIntake(
  * identity columns with neither check: on a sandbox box a real name, email, phone and home
  * address could be written over a labeled fixture and then filed to doola's DEVELOPMENT
  * environment as the responsible person — the precise harm the sandbox refusal exists to prevent.
+ *
+ * ⚠ ON A PRODUCTION DOOR it runs the intake's two gates, the strict World gate and then the
+ * identity record, right after the ownership check (`partyDoorGates`). The NAMES are never edited
+ * here: `fields` cannot carry them, by type, and the two doors refuse a body that does, with
+ * `party_name_is_written_by_novi` on production. The repository's UPDATE does not name them.
  */
 export function updateCompanyParty(
   deps: Pick<
     CreateCompanyDeps,
-    "companies" | "parties" | "requests" | "transaction" | "sandboxSyntheticPii"
+    | "companies"
+    | "parties"
+    | "requests"
+    | "transaction"
+    | "sandboxSyntheticPii"
+    | "world"
+    | "identity"
+    | "pin"
+    | "legalBodyEnvironment"
   >,
   tenantId: string,
   companyId: string,
@@ -644,6 +809,8 @@ export function updateCompanyParty(
   // not-an-oracle rule: an unknown id and somebody else's get ONE answer.
   const company = deps.companies.findOwned(tenantId, companyId);
   if (!company) return { error: companyUnavailableMessage() };
+  // The intake's gates, on a production door: the person behind this edit is the verified guardian.
+  partyDoorGates(deps, tenantId);
   // The party is RESOLVED from the company, never named by the caller — `company_id` is UNIQUE on
   // `formation_parties`, so this is the one identity that filing was opened with.
   const party = deps.parties.findByCompanyId(companyId);
@@ -665,7 +832,7 @@ export function updateCompanyParty(
     // RE-READ inside the transaction and compare, because SQLite's `changes` counts rows MATCHED
     // rather than rows whose values differ: an UPDATE setting every column to the value it already
     // held reports 1, and the re-arm below would then hand a parked filing a retry of the exact
-    // body doola refused. The comparison is over the ten editable columns and nothing else.
+    // body doola refused. The comparison is over the eight editable columns and nothing else.
     const current = deps.parties.findByCompanyId(companyId);
     if (!current) return;
     if (samePartyFields(current, fields)) {
@@ -699,7 +866,7 @@ export function updateCompanyParty(
 }
 
 /**
- * IS THIS EDIT A NO-OP? — the ten editable columns, compared field for field.
+ * IS THIS EDIT A NO-OP? — the eight editable columns, compared field for field.
  *
  * Its own function rather than an inline `every`, because the LIST is the thing that has to stay
  * right: `EditablePartyFields` is a positive list somebody wrote down, and a comparison that

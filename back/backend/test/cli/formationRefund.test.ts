@@ -19,10 +19,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { buildCli } from "../../src/cli/index";
+import { abandonFormedCompany } from "../../src/formation/abandonFormed";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
+import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../../src/persistence/formationPaymentRepository";
+import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import type { Address, Hex } from "../../src/types";
+import { paymentCfg } from "../helpers/formationPayment";
 
 const LEDGER_TX = `0x${"fe".repeat(32)}`;
 const TX = `0x${"cc".repeat(32)}` as Hex;
@@ -166,4 +170,75 @@ test("an unknown payment is refused rather than silently doing nothing", async (
   await expect(
     run(["formation:refund", "--payment-id", "does-not-exist", "--tx", LEDGER_TX, "--yes"]),
   ).rejects.toThrow(/no payment does-not-exist/);
+});
+
+test("an ABANDONED formed company's settled payment is refunded: the command reads the payment, not the company", async () => {
+  // A paid customer who gives up before doola abandons the company (`abandonFormedCompany`); the
+  // payment stays `settled`, and this command records the refund the Ledger then makes.
+  const db = openDatabase(dbPath);
+  migrate(db);
+  const companies = new SqliteCompanyRepository(db);
+  const parties = new SqliteFormationPartyRepository(db);
+  const payments = new SqliteFormationPaymentRepository(db);
+  const tenantId = "0x000000000000000000000000000000000000000A";
+  const partyId = parties.create({
+    tenantId,
+    legalFirstName: "Ada",
+    legalLastName: "Example",
+    email: "person@example.com",
+    phone: "+12125550100",
+    line1: "1 Example Way",
+    line2: null,
+    city: "Cheyenne",
+    region: "WY",
+    postalCode: "82001",
+    country: "USA",
+    synthetic: false,
+  });
+  const companyId = companies.create({
+    tenantId,
+    status: "ready",
+    provider: "doola",
+    environment: "production",
+    synthetic: false,
+    nameOptions: [{ name: "Example Works", entityTypeEnding: "LLC", position: 1 }],
+    businessPurpose: "software",
+    industryLabel: "Software development",
+    intakeSynthesized: false,
+    purposeKind: "legal_body",
+  });
+  parties.bindToCompany(partyId, companyId, tenantId);
+  const paymentId = payments.create({
+    companyId,
+    product: "formation",
+    amountUsdc: 399_000_000n,
+    nonce: `0x${"b2".repeat(32)}` as Hex,
+    validBefore: 2_000_000_000,
+    payTo: REVENUE,
+  });
+  payments.markSettling(paymentId, { payerAddress: tenantId, signature: `0x${"11".repeat(65)}` });
+  payments.markSettled(paymentId, TX);
+  abandonFormedCompany(
+    {
+      companies,
+      parties,
+      requests: new SqliteFormationRepository(db),
+      payment: paymentCfg(payments),
+      transaction: (fn) => db.transaction(fn)(),
+    },
+    tenantId,
+    companyId,
+  );
+  expect(companies.find(companyId)?.status).toBe("abandoned");
+  expect(payments.find(paymentId)?.status).toBe("settled");
+  db.close();
+
+  await run(["formation:refund", "--payment-id", paymentId, "--tx", LEDGER_TX, "--yes"]);
+  const after = reopen();
+  expect(after.payments.find(paymentId)).toMatchObject({
+    status: "refunded",
+    refundTxHash: LEDGER_TX,
+    txHash: TX,
+  });
+  after.db.close();
 });

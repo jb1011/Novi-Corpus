@@ -100,6 +100,11 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // quote is written.
   formation_cap_reached:
     "The early-access formations are all taken: join the waitlist and we will write to you when a place opens.",
+  // The two party doors on production (`POST /formation-party`, `PATCH /companies/:id/party` and
+  // their MCP tools), for a body that carries `legalFirstName` or `legalLastName`, whatever its
+  // value: the names of the responsible person are written from the guardian's identity record.
+  party_name_is_written_by_novi:
+    "The responsible party's names are written from the verified identity record: leave out legalFirstName and legalLastName.",
   // MCP `create_company` with a `for` argument: the tool creates companies for agents only.
   create_company_agents_only:
     "This tool creates companies for agents only: a company to stand behind a legal body is created from the legal-body page of the web app.",
