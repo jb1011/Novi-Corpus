@@ -33,11 +33,13 @@ import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import type { LegalTextStatus } from "../../src/legalBody/texts/index";
 import type { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
+import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../../src/persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import type { Address } from "../../src/types";
+import { formationPaymentDeps, requoteFormationPayment } from "../../src/workflow/formationPayment";
 import {
   TEST_PII_RING,
   identityOver,
@@ -45,7 +47,7 @@ import {
   recordIdentity,
   worldFor,
 } from "../helpers/customerCompanyFixtures";
-import { paymentCfg } from "../helpers/formationPayment";
+import { fakeChain, paymentCfg } from "../helpers/formationPayment";
 import {
   type LegalBodyStores,
   legalBodyOrderDeps,
@@ -284,12 +286,13 @@ function refusedCreate(fn: () => unknown): {
 
 /**
  * The refusal printed exactly one `formation_cap_reached` line: a warning that says which check
- * refused (`count`, after the quota; `mint`, inside the transaction), with the cap and the count
+ * refused (`count`, after the quota; `mint`, inside the transaction; `requote`, at a re-quote),
+ * with the cap and the count
  * and nothing else. No tenant, no name, no address, and the line's own timestamp intact.
  */
 function oneCapLine(
   refused: ReturnType<typeof refusedCreate>,
-  check: "count" | "mint",
+  check: "count" | "mint" | "requote",
   counted: number,
   g: Guardian,
 ): void {
@@ -593,5 +596,97 @@ describe("the create door and /config.formedDoor read one rule", () => {
     expect(served()).toBe("offered");
     idOf(createCompany(deps, CAL.tenant, intake(partyId)));
     expect(served()).toBe("cap_reached");
+  });
+});
+
+// ── a re-quote ───────────────────────────────────────────────────────────────────────────────
+
+describe("a re-quote respects the cap", () => {
+  /** The payment doors' deps of a deployment whose create door runs on `companyDeps`, built by
+   *  the one builder both doors use (`formationPaymentDeps`): the cap and the door's environment
+   *  come from those deps, as the create reads them. */
+  function paymentDoors(companyDeps: CreateCompanyDeps) {
+    const { transaction: _transaction, ...rest } = companyDeps;
+    const built = formationPaymentDeps({
+      companies,
+      repo: new SqliteEntityRepository(db),
+      formation: {
+        payment: companyDeps.payment,
+        paymentExecutor: fakeChain().executor,
+        companyDeps: rest,
+      },
+      now: () => NOW,
+    });
+    if (!built) throw new Error("this deployment does not take payments");
+    return built;
+  }
+
+  /** The company's live quote expires: it leaves the count until it is quoted again. */
+  function expireQuote(companyId: string): void {
+    const quote = payments.findLive(companyId, "formation")!;
+    expect(payments.markExpired(quote.paymentId, "quoted")).toBe(true);
+  }
+
+  const requote = (companyDeps: CreateCompanyDeps, companyId: string) =>
+    requoteFormationPayment(paymentDoors(companyDeps), companies.find(companyId)!);
+
+  test("at a cap of two: Ada's quote expires, Cal takes the place, and Ada's re-quote answers formation_cap_reached 409 with no quote written", () => {
+    for (const g of [ADA, BEA, CAL]) verified(g);
+    const deps = prodDeps({ payment: paymentCfg(payments) });
+    const ada = idOf(formLegalBody(deps, ADA));
+    idOf(formLegalBody(deps, BEA));
+    expireQuote(ada);
+    idOf(formLegalBody(deps, CAL));
+    expect(companies.countChargeableFormedLegalBodies()).toBe(2);
+
+    const refused = refusedCreate(() => requote(deps, ada));
+    expect(refused.err).toMatchObject(CAP_REFUSAL);
+    expect(payments.findLive(ada, "formation")).toBeUndefined();
+    expect(paymentRows()).toBe(refused.paymentsBefore);
+    expect(companies.countChargeableFormedLegalBodies()).toBe(2);
+    oneCapLine(refused, "requote", 2, ADA);
+  });
+
+  test("with room, a re-quote works as before, and the company takes its place again", () => {
+    verified(ADA);
+    const deps = prodDeps({ payment: paymentCfg(payments) });
+    const ada = idOf(formLegalBody(deps, ADA));
+    expireQuote(ada);
+    expect(companies.countChargeableFormedLegalBodies()).toBe(0);
+
+    const result = requote(deps, ada);
+    expect(result).toMatchObject({ ok: true });
+    expect(payments.findLive(ada, "formation")?.status).toBe("quoted");
+    expect(companies.countChargeableFormedLegalBodies()).toBe(1);
+    expect(capLines()).toHaveLength(0);
+  });
+
+  test("a company for agents is never capped at a re-quote, and never reads the count", () => {
+    for (const g of [ADA, BEA, CAL]) verified(g);
+    const deps = prodDeps({ payment: paymentCfg(payments) });
+    const agent = idOf(formForAgents(deps, CAL));
+    for (const g of [ADA, BEA]) idOf(formLegalBody(deps, g));
+    expireQuote(agent);
+    expect(companies.countChargeableFormedLegalBodies()).toBe(2);
+
+    const count = vi.spyOn(companies, "countChargeableFormedLegalBodies");
+    expect(requote(deps, agent)).toMatchObject({ ok: true });
+    expect(count).not.toHaveBeenCalled();
+    expect(payments.findLive(agent, "formation")?.status).toBe("quoted");
+    expect(capLines()).toHaveLength(0);
+  });
+
+  test("a sandbox is never capped at a re-quote, and never reads the count", () => {
+    for (const g of [ADA, BEA]) recordHuman(s.store, g.tenant, g.nullifier, NOW - DAY_MS);
+    const deps = sandboxDeps({ payment: paymentCfg(payments), maxTotal: 1 });
+    const ada = idOf(formLegalBody(deps, ADA));
+    idOf(formLegalBody(deps, BEA));
+    expireQuote(ada);
+
+    const count = vi.spyOn(companies, "countChargeableFormedLegalBodies");
+    expect(requote(deps, ada)).toMatchObject({ ok: true });
+    expect(count).not.toHaveBeenCalled();
+    expect(payments.findLive(ada, "formation")?.status).toBe("quoted");
+    expect(capLines()).toHaveLength(0);
   });
 });

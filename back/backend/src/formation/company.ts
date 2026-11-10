@@ -44,7 +44,7 @@ import type {
   FormationPartyRepository,
 } from "../persistence/formationPartyRepository";
 import { parseDetail } from "../persistence/formationRepository";
-import { formedCapReached, formedDoorEnvironment } from "./formedDoor";
+import { formedCapReached, formedDoorEnvironmentOf, logFormedCapReached } from "./formedDoor";
 import { partyEditAllowed } from "./freeze";
 import type { CompanyIntake, CompanyPin } from "./intake";
 import {
@@ -233,24 +233,6 @@ class PartyBindLost extends Error {}
  */
 class CapReached extends Error {}
 
-/**
- * The ops line of a create the total cap refused, one per refusal: `check` says which check
- * refused it (`count`, step 4b after the quota; `mint`, the re-check inside the transaction). The
- * cap and the count only: no tenant, no name. Named `check` rather than `at`, which is the line's
- * own timestamp (`opsLog`).
- */
-function logCapReached(
-  deps: Pick<CreateCompanyDeps, "companies" | "maxTotal">,
-  check: "count" | "mint",
-): void {
-  opsLog("formation_cap_reached", {
-    level: "warn",
-    check,
-    maxTotal: deps.maxTotal,
-    counted: deps.companies.countChargeableFormedLegalBodies(),
-  });
-}
-
 export function createCompany(
   deps: CreateCompanyDeps,
   tenantId: string,
@@ -271,10 +253,7 @@ export function createCompany(
   //    A company for agents keeps step 1, the agent door's own gate, unchanged. The formed door's
   //    total cap is step 4b, after the per-tenant quota.
   const formed = intake.for === "legal_body";
-  const door = formedDoorEnvironment(
-    deps.pin.environment,
-    deps.legalBodyEnvironment ?? deps.pin.environment,
-  );
+  const door = formedDoorEnvironmentOf(deps);
   if (formed) {
     const verification = assertRealHuman(deps.world, tenantId, door);
     assertHumanCompanyCap(deps.world, verification);
@@ -337,7 +316,7 @@ export function createCompany(
   //     forms demo companies without number, and a company for agents is never counted or capped.
   //     Asked again inside the mint (step 8), where two people creating at once meet.
   if (formed && formedCapReached(deps.companies, deps.maxTotal, door)) {
-    logCapReached(deps, "count");
+    logFormedCapReached(deps.companies, deps.maxTotal, "count");
     throw refusal("formation_cap_reached", 409);
   }
 
@@ -431,7 +410,7 @@ export function createCompany(
   } catch (e) {
     if (e instanceof PartyBindLost) return { error: formationPartyUnavailableMessage() };
     if (e instanceof CapReached) {
-      logCapReached(deps, "mint");
+      logFormedCapReached(deps.companies, deps.maxTotal, "mint");
       throw refusal("formation_cap_reached", 409);
     }
     throw e;

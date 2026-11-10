@@ -1158,10 +1158,11 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         if (denied) return denied;
         try {
           const result = createCompany(
-            // The composition root's ONE dependency set; this door supplies only its transaction.
+            // The composition root's ONE dependency set; this door supplies only its transaction,
+            // an IMMEDIATE one, as `POST /companies` does.
             {
               ...deps.formation!.companyDeps,
-              transaction: (fn) => deps.repo.transaction(fn),
+              transaction: (fn) => deps.repo.immediateTransaction(fn),
             },
             tenantId,
             {
@@ -1303,9 +1304,18 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         if (!runner) return refuse("this deployment does not take formation payments");
         // The keyed lock, as on the other two: a re-quote races a settle for the same company,
         // and the live-rows index is the backstop rather than the first line.
-        const result = await withKeyedLock(`payment:${company.companyId}`, async () =>
-          requoteFormationPayment(runner, company),
-        );
+        let result: ReturnType<typeof requoteFormationPayment>;
+        try {
+          result = await withKeyedLock(`payment:${company.companyId}`, async () =>
+            requoteFormationPayment(runner, company),
+          );
+        } catch (err) {
+          // The total cap (`formation_cap_reached`): the code's fixed sentence, built from the
+          // code and never read off the error, as REST answers it. Anything else is rethrown.
+          if (err instanceof ApiError && Object.hasOwn(LEGAL_BODY_SENTENCES, err.code))
+            return refuse(sentenceFor(err.code));
+          throw err;
+        }
         if (!result.ok) return refuse(result.reason);
         return { content: [{ type: "text", text: JSON.stringify(result.quote) }] };
       },

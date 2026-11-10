@@ -144,8 +144,10 @@ export function mountProtectedRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     if (!body.success) throw new ApiError("validation_error", 400, firstIssueMessage(body.error));
 
     const result = createCompany(
-      // The composition root's ONE dependency set; this door supplies only its transaction.
-      { ...deps.formation.companyDeps, transaction: (fn) => deps.repo.transaction(fn) },
+      // The composition root's ONE dependency set; this door supplies only its transaction, an
+      // IMMEDIATE one: the mint reads (the total cap's re-check) before it writes, and a deferred
+      // transaction that reads first cannot wait for another connection's write lock.
+      { ...deps.formation.companyDeps, transaction: (fn) => deps.repo.immediateTransaction(fn) },
       tenantId,
       {
         partyId: body.data.partyId,

@@ -1,5 +1,11 @@
 import { getAddress } from "viem";
 import { CANCEL_AUTHORIZATION_TYPES, resolveAuthorizationOutcome } from "../adapters/arc/usdcToken";
+import type { CreateCompanyDeps } from "../formation/company";
+import {
+  formedCapReached,
+  formedDoorEnvironmentOf,
+  logFormedCapReached,
+} from "../formation/formedDoor";
 import {
   FORMATION_PRODUCT,
   type FormationPaymentConfig,
@@ -10,6 +16,7 @@ import {
   quoteOf,
 } from "../formation/payment";
 import { CUSTOMER_PROVIDER } from "../legalBody/provider";
+import { refusal } from "../legalBody/sentences";
 import { opsLog } from "../observability/opsLog";
 import {
   type BroadcastOutcome,
@@ -71,6 +78,20 @@ export interface FormationPaymentDeps {
   hasLinkedLegalBody?: (companyId: string) => boolean;
   /** The company status move and the payment status move commit together. */
   transaction: <T>(fn: () => T) => T;
+  /**
+   * An IMMEDIATE transaction (`EntityRepository.immediateTransaction`), for a write that reads
+   * first: a re-quote's total-cap check and its quote insert. Absent: `transaction`. The doors'
+   * builder (`formationPaymentDeps`) always passes it; the sweeper, which never re-quotes, does
+   * not.
+   */
+  immediateTransaction?: <T>(fn: () => T) => T;
+  /**
+   * The create door's deps (`ApiDeps.formation.companyDeps`): doola's pin, the network's
+   * environment and FORMATION_MAX_TOTAL. A re-quote of a formed legal-body company reads the
+   * formed door's environment and its cap from them, as `createCompany` reads them. Absent: no
+   * re-quote is capped.
+   */
+  companyDeps?: Pick<CreateCompanyDeps, "pin" | "legalBodyEnvironment" | "maxTotal">;
   now?: () => number;
 }
 
@@ -105,6 +126,8 @@ export function formationPaymentDeps(deps: {
   formation?: {
     payment?: FormationPaymentConfig;
     paymentExecutor?: FormationExecutorDeps;
+    /** The create door's deps, from which a re-quote reads the formed door's cap. */
+    companyDeps?: Pick<CreateCompanyDeps, "pin" | "legalBodyEnvironment" | "maxTotal">;
   };
   customerFacts?: {
     checks: Pick<CompanyCheckRepository, "latest">;
@@ -130,6 +153,10 @@ export function formationPaymentDeps(deps: {
     // …and whether one of its legal bodies is linked, so it is quoted and settled only after that.
     hasLinkedLegalBody: deps.customerFacts?.hasLinkedLegalBody,
     transaction: <T>(fn: () => T) => deps.repo.transaction(fn),
+    // …and the IMMEDIATE one, for the re-quote's cap check and its insert.
+    immediateTransaction: <T>(fn: () => T) => deps.repo.immediateTransaction(fn),
+    // The formed door's cap, read from the create door's own deps.
+    companyDeps: deps.formation?.companyDeps,
     now: deps.now,
   };
 }
@@ -773,6 +800,14 @@ export async function cancelFormationPayment(
  * A customer's own company is quoted only once its check has passed and one of its legal bodies
  * is linked (`checkRefusal`, first), and at its own fee: the amount is the fee of the company's provider (`feeAtomicFor`). Where no
  * customer fee is configured, it is refused rather than quoted.
+ *
+ * A formed legal-body company (provider doola, purpose `legal_body`) left the total cap's count
+ * when its quote ended, and a new quote brings it back. So on production the re-quote is refused
+ * with `formation_cap_reached` (409, thrown) when the cap is reached, exactly as the create is:
+ * the same rule (`formedCapReached`), the same environment and the same FORMATION_MAX_TOTAL, read
+ * from the create door's deps. The check and the quote insert are one IMMEDIATE transaction, so a
+ * create on another connection cannot take the place in between. A company for agents, a
+ * customer's own company and every sandbox are never capped.
  */
 export function requoteFormationPayment(
   deps: FormationPaymentDeps,
@@ -802,12 +837,25 @@ export function requoteFormationPayment(
   if (company.provider === CUSTOMER_PROVIDER && deps.payment.byoFeeAtomic === undefined)
     return { ok: false, reason: "this deployment has no price for a customer's own company" };
 
-  const paymentId = insertQuote(
-    deps.payment,
-    company.companyId,
-    nowMs(deps),
-    feeAtomicFor(deps.payment, company.provider),
-  );
+  // 'doola' is the formation provider, as `countChargeableFormedLegalBodies` counts it.
+  const formed = current.provider === "doola" && current.purposeKind === "legal_body";
+  const cap = deps.companyDeps;
+  const paymentId = (deps.immediateTransaction ?? deps.transaction)(() => {
+    if (
+      formed &&
+      cap !== undefined &&
+      formedCapReached(deps.companies, cap.maxTotal, formedDoorEnvironmentOf(cap))
+    ) {
+      logFormedCapReached(deps.companies, cap.maxTotal, "requote");
+      throw refusal("formation_cap_reached", 409);
+    }
+    return insertQuote(
+      deps.payment,
+      company.companyId,
+      nowMs(deps),
+      feeAtomicFor(deps.payment, company.provider),
+    );
+  });
   const row = deps.payment.payments.find(paymentId);
   if (!row) return { ok: false, reason: "could not create a quote" };
   opsLog("formation_payment_quoted", {
