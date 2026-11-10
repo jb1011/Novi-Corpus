@@ -139,8 +139,10 @@ RPC: `https://rpc.testnet.arc.io`.
                         LegalBodyFactory, BreakGlassOneShot, ens/ (offchain resolver), interfaces,
                         libraries (ControllerSelectors)
   test/                 Foundry tests (unit, fuzz, invariant, fork, security)
-  script/               deploy scripts (Deploy, DeployController, DeployLegalBodyFactory)
+  script/               deploy scripts (Deploy, DeployController, DeployLegalBodyFactory,
+                        DeployMinimal)
   addresses.arc-testnet.json   deployed addresses (machine-readable)
+  addresses.arc-mainnet.json   the mainnet template the deploy ceremony fills
 backend/                TypeScript backend
   src/                  workflow (onboarding saga), legalBody (bring-your-own flow, statements),
                         formation (doola), policy (law to code), oa (operating agreement),

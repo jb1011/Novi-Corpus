@@ -1,0 +1,17 @@
+{
+  "network": "arc-mainnet",
+  "chainId": 5042,
+  "rpc": "",
+  "explorer": "",
+  "updatedAt": "",
+  "note": "Template. The Minimal Novi deploy ceremony fills it from the block script/DeployMinimal.s.sol prints (see docs/runbooks/minimal-mainnet-deploy.md); controllerDeployBlock comes from the controller's broadcast receipt. noviController owns legalBodyFactory from construction. Legal bodies (EIP-1167 clones of legalManagerImpl) are created at runtime by legalBodyFactory; none is listed here.",
+  "ours": {
+    "legalManagerImpl": "",
+    "legalBodyFactory": "",
+    "noviController": "",
+    "controllerDeployBlock": ""
+  },
+  "reused": {
+    "identityRegistry": "0x8004A169FB4a3325136EB29fA0ceB6D2e539a432"
+  }
+}
