@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { sqliteUtcTimestamp } from "../../src/formation";
-import { deriveFormationStatus } from "../../src/formation/status";
+import { deriveFormationStatus, isManualRef } from "../../src/formation/status";
 import { withKeyedLock } from "../../src/payments/keyedMutex";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -878,13 +878,23 @@ test("a manual: company is never in the poll due-set, whichever of its rows is d
   const later = now + POLL_BASE_MS + 1000;
   const due = () =>
     requests.listPollDueCompanyIds(later, sqliteUtcTimestamp(later - POLL_BASE_MS), 100);
+  const setCreateRef = (ref: string) =>
+    db
+      .prepare(
+        "UPDATE formation_requests SET provider_ref = ? WHERE company_id = ? AND step = 'create_provider'",
+      )
+      .run(ref, COMPANY_KEY);
   // Due by age as an API filing...
+  expect(due()).toEqual([COMPANY_KEY]);
+  // ...and still due under a ref that only LOOKS manual: the SQL spells the prefix exactly as
+  // `isManualRef` does, case included...
+  setCreateRef("Manual:ops-a");
+  expect(isManualRef("Manual:ops-a")).toBe(false);
   expect(due()).toEqual([COMPANY_KEY]);
   // ...and out of the set once any step of the company carries a manual ref, though the due rows
   // themselves carry none.
-  db.prepare(
-    "UPDATE formation_requests SET provider_ref = ? WHERE company_id = ? AND step = 'create_provider'",
-  ).run(MANUAL_REF, COMPANY_KEY);
+  setCreateRef(MANUAL_REF);
+  expect(isManualRef(MANUAL_REF)).toBe(true);
   expect(due()).toEqual([]);
 });
 

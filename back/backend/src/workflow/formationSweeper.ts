@@ -77,7 +77,8 @@ import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./form
  *       an operator recorded by hand (a `manual:` ref names nothing at doola, so the retry pass
  *       in (c) skips it too);
  *   (d2) on a SANDBOX deployment only, complete a legal-body company's filing, then its EIN,
- *        through doola's playground five minutes after each opened, and advance it at once;
+ *        through doola's playground five minutes after each opened, and advance it at once,
+ *        reading it again for half an hour until the step shows as done;
  *   (e) drive the ON-CHAIN anchor sub-saga — open the cycle a confirmed fact justifies, adopt a
  *       broadcast a crash orphaned, and execute what the timelock has released. This is the leg
  *       that makes anchoring GUARANTEED rather than merely fast: the webhook path opens a version
@@ -170,6 +171,11 @@ export const SUBMITTED_STALL_MS = DOOLA_DEFAULT_TIMEOUT_MS + SUBMITTED_STALL_SLA
  */
 export const SANDBOX_AUTOCOMPLETE_DELAY_MS = 5 * 60_000;
 
+/** SANDBOX ONLY: how long after a playground call the leg keeps reading the company again while
+ *  its step does not show as done, at most once per `SANDBOX_AUTOCOMPLETE_DELAY_MS`. After it, the
+ *  ordinary poll is the backstop. */
+export const SANDBOX_READVANCE_WINDOW_MS = 30 * 60_000;
+
 /** What the sandbox leg writes on the `create_provider` row's `detail` (unix ms): the playground
  *  call has been made, so it is never made twice. */
 interface SandboxAutocompleteMarks {
@@ -254,6 +260,15 @@ export class FormationSweeper {
   /** Written-off payments already reported as duplicate CANDIDATES (R1c) — de-duplication of a
    *  CRITICAL line, in memory, exactly like `warned`. */
   private readonly flaggedWriteOffs = new Set<string>();
+
+  /**
+   * The sandbox leg's two spacings (d2), keyed by company: when it last read a company after a
+   * playground call, and when a playground call last threw. In memory and deliberately so, like
+   * `warned`: they pace calls to a sandbox, nothing depends on them, and the database marker is
+   * what stops a second call. A restart reads or calls one tick early, which is harmless.
+   */
+  private readonly sandboxReadAt = new Map<string, number>();
+  private readonly sandboxFailedAt = new Map<string, number>();
 
   /**
    * Where the last anchor batch stopped (2026-08-26 §3) — PERSISTED in `meta.anchor_cursor`.
@@ -920,10 +935,20 @@ export class FormationSweeper {
    * Scoped to `legal_body` companies (the plan's §0 call): the full product's testnet behaviour
    * does not change. A filing an operator recorded by hand is never touched.
    *
-   * THE CALL COMES BEFORE THE MARKER. A throwing call writes nothing, so the next tick tries
-   * again; a crash between the call and the marker repeats a call doola's sandbox takes
-   * harmlessly. The marker, once written, is what stops a second call when doola has not shown
-   * the filing yet: the poll catches that company up.
+   * THE CALL COMES BEFORE THE MARKER. A throwing call writes nothing to the database, so a later
+   * tick tries again; it backs off for `SANDBOX_AUTOCOMPLETE_DELAY_MS` in memory rather than
+   * calling doola every tick. A crash between the call and the marker repeats a call doola's
+   * sandbox takes harmlessly.
+   *
+   * THE MARKER STOPS A SECOND CALL, NOT A SECOND READ. A read right after the call can learn
+   * nothing (it failed, doola does not show the filing yet, or the advance threw), and the next
+   * poll is then a day away on a box with no webhook. So while the call is under
+   * `SANDBOX_READVANCE_WINDOW_MS` old and its step is still not done, the leg reads again, at most
+   * once per `SANDBOX_AUTOCOMPLETE_DELAY_MS` per company: every failed read doubles the waiting
+   * row's poll interval. After the window the poll is the backstop.
+   *
+   * A target step already `failed` or `abandoned` is never completed: the retry path or the
+   * verdict owns it, and a playground call must not bring a failed formation back.
    *
    * Production returns at once. The client's `assertSandbox` refuses the call on a production
    * client as well, and is the second guard.
@@ -931,6 +956,10 @@ export class FormationSweeper {
   private async completeSandboxFilings(): Promise<void> {
     if (this.d.environment !== "sandbox") return;
     const now = this.now();
+    // Both memories are only ever read inside the delay, so an older entry is dead weight.
+    for (const memory of [this.sandboxReadAt, this.sandboxFailedAt])
+      for (const [companyId, at] of memory)
+        if (now - at >= SANDBOX_AUTOCOMPLETE_DELAY_MS) memory.delete(companyId);
     for (const companyId of this.d.requests.listOpenCompanyIds()) {
       const company = this.d.companies.find(companyId);
       if (
@@ -946,14 +975,27 @@ export class FormationSweeper {
 
       const step = !companyFiled(steps) ? "await_filing" : !einIssued(steps) ? "await_ein" : null;
       if (!step) continue;
+      const target = steps.find((s) => s.step === step);
+      if (!target || target.state === "failed" || target.state === "abandoned") continue;
       const leg = SANDBOX_PLAYGROUND[step];
-      if (parseDetail<SandboxAutocompleteMarks>(create.detail)[leg.mark] !== undefined) continue;
+
+      const calledAt = parseDetail<SandboxAutocompleteMarks>(create.detail)[leg.mark];
+      if (calledAt !== undefined) {
+        // Called already: read again, never call again.
+        if (now - calledAt >= SANDBOX_READVANCE_WINDOW_MS) continue;
+        if (this.sandboxReadAt.has(companyId)) continue;
+        this.sandboxReadAt.set(companyId, now);
+        await this.advanceAfterPlayground(companyId, step);
+        continue;
+      }
       const since = steps.find((s) => s.step === leg.after)?.factsUpdatedAt;
       if (!since || now - parseSqliteUtc(since) < SANDBOX_AUTOCOMPLETE_DELAY_MS) continue;
+      if (this.sandboxFailedAt.has(companyId)) continue;
 
       try {
         await this.d.doola[leg.call](create.providerRef);
       } catch (err) {
+        this.sandboxFailedAt.set(companyId, now);
         opsLog("sandbox_autocomplete_failed", {
           level: "warn",
           companyId,
@@ -962,6 +1004,7 @@ export class FormationSweeper {
         });
         continue;
       }
+      this.sandboxFailedAt.delete(companyId);
       // Merged into the row as it is NOW, not as the loop read it: the marker adds one field and
       // must not put back an older detail.
       const current = this.d.requests.find(companyId, "create_provider");
@@ -974,12 +1017,28 @@ export class FormationSweeper {
         touchFacts: false,
       });
       opsLog(leg.event, { companyId, providerRef: create.providerRef });
-      try {
-        await this.advance(companyId);
-      } catch (err) {
-        // The marker stands and the poll is the backstop, as for any advance that throws.
-        opsLog("formation_poll_failed", { level: "warn", companyId, ...describeDoolaError(err) });
-      }
+      // The read right after the call opens the spacing, so the first read again is five minutes
+      // later, not one tick later.
+      this.sandboxReadAt.set(companyId, now);
+      await this.advanceAfterPlayground(companyId, step);
+    }
+  }
+
+  /** The fetch-and-advance after a playground call. Never throws: the marker stands, and the
+   *  next read is the leg's again (inside its window) or the poll's. */
+  private async advanceAfterPlayground(
+    companyId: string,
+    step: keyof typeof SANDBOX_PLAYGROUND,
+  ): Promise<void> {
+    try {
+      await this.advance(companyId);
+    } catch (err) {
+      opsLog("sandbox_autocomplete_advance_failed", {
+        level: "warn",
+        companyId,
+        step,
+        ...describeDoolaError(err),
+      });
     }
   }
 

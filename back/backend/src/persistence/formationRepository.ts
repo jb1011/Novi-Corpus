@@ -260,7 +260,8 @@ export class SqliteFormationRepository implements FormationRepository {
       // `manual:<operator>` ref (`MANUAL_REF_PREFIX`, `formation/status.ts`), which names no
       // company at doola: a poll of it could only fail. Excluded by COMPANY, not by row, because
       // the ref sits on `create_provider` and `await_ein` while the due rows may be any polled
-      // step beside them. The sweeper keeps an in-memory twin of this (`manuallyRecorded`).
+      // step beside them. The sweeper keeps an in-memory twin of this (`manuallyRecorded`). GLOB,
+      // not LIKE: it is case-sensitive, so the SQL and `isManualRef` agree on every string.
       listPollDue: db.prepare(
         `SELECT company_id AS k, MIN(COALESCE(next_poll_at, 0)) AS due
            FROM formation_requests
@@ -269,7 +270,7 @@ export class SqliteFormationRepository implements FormationRepository {
             AND ((next_poll_at IS NOT NULL AND next_poll_at <= @now)
                  OR (next_poll_at IS NULL AND updated_at <= @cutoff))
             AND company_id NOT IN (
-                  SELECT company_id FROM formation_requests WHERE provider_ref LIKE 'manual:%')
+                  SELECT company_id FROM formation_requests WHERE provider_ref GLOB 'manual:*')
           GROUP BY company_id
           ORDER BY due, company_id
           LIMIT @limit`,

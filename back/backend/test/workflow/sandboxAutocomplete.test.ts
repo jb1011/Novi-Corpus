@@ -181,22 +181,131 @@ test("a second tick makes no second playground call", async () => {
   expect(callsOf("playgroundCompleteEin")).toEqual([]);
 });
 
-test("the marker holds when doola has not shown the filing yet: the call is not repeated", async () => {
+// ── after the call: read again until the filing shows (fix round 1) ──────────────────────────
+//
+// The marker stops a second playground call, so a completion whose first read learned nothing
+// would otherwise wait for the day-long poll. While the call is under thirty minutes old the leg
+// reads again, never calling the playground twice, at most once per five minutes per company:
+// every failed read doubles the waiting row's poll interval. One sweeper instance per test here,
+// because the spacing is the process's own memory.
+
+test("doola shows the filing late: no second playground call, and a read after the spacing files it", async () => {
   await openFiling();
+  const real = doola.api.playgroundCompleteFormation;
+  let requested = 0;
   // The playground answers, and doola's company still reads unfiled (an eventually consistent
-  // sandbox). The poll catches it up; the sweeper does not call the playground again.
-  doola.api.playgroundCompleteFormation = async (id) => {
-    doola.calls.push(`playgroundCompleteFormation:${id}`);
+  // sandbox).
+  doola.api.playgroundCompleteFormation = async () => {
+    requested++;
     return { triggeredEvents: [] };
   };
+  const s = sweeper();
   now += 6 * MINUTE;
-  await sweeper().tick();
+  await s.tick();
+  expect(requested).toBe(1);
   expect(companyFiled(steps())).toBe(false);
   expect(marks().autocompletedAt).toBe(now);
+  expect(callsOf("getCompany")).toHaveLength(1);
 
-  now += 10 * MINUTE;
-  await sweeper().tick();
+  // A minute later, inside the spacing: nothing is read again.
+  now += MINUTE;
+  await s.tick();
+  expect(callsOf("getCompany")).toHaveLength(1);
+
+  // doola catches up. Five minutes after the first read, the leg reads again and files.
+  await real(COMPANY_ID);
+  now += 4 * MINUTE;
+  await s.tick();
+  expect(callsOf("getCompany")).toHaveLength(2);
+  expect(companyFiled(steps())).toBe(true);
+  expect(documentsFetched(steps())).toBe(true);
+  expect(requested).toBe(1);
+});
+
+test("the read right after the call fails: one playground call, and the read five minutes later files it", async () => {
+  await openFiling();
+  doola.state.failNext = { getCompany: true };
+  const s = sweeper();
+  now += 6 * MINUTE;
+  await s.tick();
   expect(callsOf("playgroundCompleteFormation")).toHaveLength(1);
+  expect(callsOf("getCompany")).toHaveLength(1);
+  expect(companyFiled(steps())).toBe(false);
+
+  // Inside the spacing: nothing re-advances.
+  now += MINUTE;
+  await s.tick();
+  now += MINUTE;
+  await s.tick();
+  expect(callsOf("getCompany")).toHaveLength(1);
+
+  now += 3 * MINUTE;
+  await s.tick();
+  expect(callsOf("getCompany")).toHaveLength(2);
+  expect(companyFiled(steps())).toBe(true);
+  expect(documentsFetched(steps())).toBe(true);
+  expect(callsOf("playgroundCompleteFormation")).toHaveLength(1);
+});
+
+test("the reads after a call stop once the call is thirty minutes old", async () => {
+  await openFiling();
+  // doola never shows the filing.
+  doola.api.playgroundCompleteFormation = async () => ({ triggeredEvents: [] });
+  const s = sweeper();
+  now += 6 * MINUTE;
+  await s.tick();
+  for (let i = 0; i < 9; i++) {
+    now += 5 * MINUTE;
+    await s.tick();
+  }
+  // The read right after the call, then one at +5, +10, +15, +20 and +25 minutes; none from +30
+  // to +45. The poll is the backstop after that.
+  expect(callsOf("getCompany")).toHaveLength(6);
+  expect(companyFiled(steps())).toBe(false);
+});
+
+test("an advance that throws after the call logs its own line, and the marker stands", async () => {
+  await openFiling();
+  vi.spyOn(documents, "storedTypes").mockImplementationOnce(() => {
+    throw new Error("index unavailable");
+  });
+  now += 6 * MINUTE;
+  const lines = await tickLogged(sweeper());
+  expect(marks().autocompletedAt).toBe(now);
+  expect(lines.find((l) => l.opslog === "sandbox_autocomplete_advance_failed")).toMatchObject({
+    level: "warn",
+    companyId: COMPANY_KEY,
+    step: "await_filing",
+    message: "index unavailable",
+  });
+  expect(lines.find((l) => l.opslog === "formation_poll_failed")).toBeUndefined();
+});
+
+// ── a finished target step is never brought back (fix round 1) ───────────────────────────────
+
+test.each([
+  ["await_filing", "failed"],
+  ["await_filing", "abandoned"],
+  ["await_ein", "failed"],
+  ["await_ein", "abandoned"],
+] as const)("an %s row that is %s is never completed by the playground", async (step, state) => {
+  await openFiling();
+  if (step === "await_ein") {
+    now += 6 * MINUTE;
+    await sweeper().tick();
+    expect(companyFiled(steps())).toBe(true);
+    stampRows(now);
+  }
+  // Parked with a retry 32 minutes away (attempt 5), so in this tick only the sandbox leg could
+  // touch the row.
+  db.prepare(
+    "UPDATE formation_requests SET state = ?, attempt = 5, updated_at = ? WHERE company_id = ? AND step = ?",
+  ).run(state, sqliteUtcTimestamp(now), COMPANY_KEY, step);
+  now += 6 * MINUTE;
+  await sweeper().tick();
+  const method = step === "await_filing" ? "playgroundCompleteFormation" : "playgroundCompleteEin";
+  expect(callsOf(method)).toEqual([]);
+  expect(rowOf(step)?.state).toBe(state);
 });
 
 test("six minutes after the filing, one EIN playground call, and the EIN is issued in the same tick", async () => {
@@ -264,7 +373,7 @@ test("a company pinned to production is never completed, even on a sandbox deplo
   expect(marks().autocompletedAt).toBeUndefined();
 });
 
-test("a throwing playground call writes no marker, and is made again on the next tick", async () => {
+test("a throwing playground call writes no marker, and is made again once the delay has passed, not every tick", async () => {
   await openFiling();
   const real = doola.api.playgroundCompleteFormation;
   let attempts = 0;
@@ -274,8 +383,9 @@ test("a throwing playground call writes no marker, and is made again on the next
     return real(id);
   };
 
+  const s = sweeper();
   now += 6 * MINUTE;
-  const lines = await tickLogged(sweeper());
+  const lines = await tickLogged(s);
   expect(attempts).toBe(1);
   expect(marks().autocompletedAt).toBeUndefined();
   expect(companyFiled(steps())).toBe(false);
@@ -287,8 +397,17 @@ test("a throwing playground call writes no marker, and is made again on the next
     message: "doola playground is down",
   });
 
+  // Two more ticks a minute apart: the failure backs off, no second call yet.
   now += MINUTE;
-  await sweeper().tick();
+  await s.tick();
+  now += MINUTE;
+  await s.tick();
+  expect(attempts).toBe(1);
+  expect(marks().autocompletedAt).toBeUndefined();
+
+  // Five minutes after the failure: the next call, and the filing.
+  now += 3 * MINUTE;
+  await s.tick();
   expect(attempts).toBe(2);
   expect(companyFiled(steps())).toBe(true);
   expect(marks().autocompletedAt).toBe(now);
