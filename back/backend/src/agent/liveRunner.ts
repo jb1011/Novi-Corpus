@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import Database from "better-sqlite3";
 import { http, type WalletClient, createPublicClient, createWalletClient, parseEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { ArcAdapter } from "../adapters/arc/arcAdapter";
+import { ArcAdapter, FullProductDisabledError } from "../adapters/arc/arcAdapter";
 import { managerWalletClient, sendClientFor } from "../adapters/arc/clients";
 import { USDC_TRANSFER_GAS } from "../adapters/arc/gas";
 import { buildOperatorWalletClientForEntity } from "../adapters/turnkey/operatorWallet";
@@ -206,7 +206,7 @@ export async function fundPocket(
       sendClient: sendClientFor(cfg),
       operatorWallet,
       chainId: cfg.chainId,
-      factory: (cfg.factoryAddress ?? "0x0") as Address,
+      factory: cfg.factoryAddress,
       identityRegistry: cfg.identityRegistry,
     });
     const gateway = new PocketGateway({ pocketPrivateKey: pocketKey, rpcUrl: cfg.rpcUrl });
@@ -272,6 +272,9 @@ export async function fundPocket(
 export async function buildLiveAgentRunner(
   cfg: Config = loadConfig(),
 ): Promise<(query: string) => Promise<LiveRunResult>> {
+  // The live agent spends from an AgentTreasury, which only the full product creates. A Minimal-only
+  // deployment has no treasury-backed agents to run, so it stops here, by name, before any setup.
+  if (!cfg.factoryAddress) throw new FullProductDisabledError();
   if (!cfg.anthropicApiKey) throw new Error("set ANTHROPIC_API_KEY to run the agent");
   // Leg 2's customer signs for itself. The config no longer falls back to the platform key, so a
   // missing var must stop the run here rather than silently sign customer payments as governance.
@@ -293,7 +296,7 @@ export async function buildLiveAgentRunner(
     publicClient: pub,
     managerWallet: undefined as never,
     chainId: cfg.chainId,
-    factory: (cfg.factoryAddress ?? "0x0") as Address,
+    factory: cfg.factoryAddress,
     identityRegistry: cfg.identityRegistry,
   });
   const db = new Database(cfg.dbPath);

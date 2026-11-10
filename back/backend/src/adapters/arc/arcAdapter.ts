@@ -153,7 +153,9 @@ export interface ArcAdapterDeps {
   sendClient?: PlatformSendClient;
   operatorWallet?: WalletClient; // signs/sends as the operator (the enclave); required for fundOperator/spend
   chainId: number; // reserved for the M4 setAgentWallet EIP-712 domain (see walletSet.ts)
-  factory: Address;
+  /** The full-product LegalManagerFactory. Absent on a Minimal-only deployment: creating an entity
+   *  then throws FullProductDisabledError, and every read that does not touch the factory works. */
+  factory?: Address;
   identityRegistry: Address;
   /** NoviController (design/2026-08-13-novi-controller-design.md). Present => the on-chain manager
    *  identity is this contract and every ROLE-GATED manager call is relayed through it
@@ -181,8 +183,22 @@ export interface CreateEntityResult {
   txHash: Hex;
 }
 
+/** Thrown by every full-product write on a deployment with no FACTORY_ADDRESS. */
+export class FullProductDisabledError extends Error {
+  constructor() {
+    super("the full product is off on this deployment: FACTORY_ADDRESS is unset");
+    this.name = "FullProductDisabledError";
+  }
+}
+
 export class ArcAdapter {
   constructor(private readonly d: ArcAdapterDeps) {}
+
+  /** The full-product factory, or FullProductDisabledError when this deployment has none. */
+  private requireFactory(): Address {
+    if (!this.d.factory) throw new FullProductDisabledError();
+    return this.d.factory;
+  }
 
   get chainId(): number {
     return this.d.chainId;
@@ -572,6 +588,7 @@ export class ArcAdapter {
    * confirmCreateEntity so a crash in between can adopt this tx on resume instead of re-minting.
    */
   async broadcastCreateEntity(p: CreateEntityParams): Promise<Hex> {
+    const factory = this.requireFactory();
     const args = [
       p.manager,
       p.guardian,
@@ -591,7 +608,7 @@ export class ArcAdapter {
     ] as const;
 
     return this.sendManagerCall({
-      target: this.d.factory,
+      target: factory,
       abi: legalManagerFactoryAbi as Abi,
       functionName: "createEntity",
       args,
@@ -608,6 +625,7 @@ export class ArcAdapter {
    * mint on resume rather than broadcasting a second one.
    */
   async confirmCreateEntity(txHash: Hex, agentManager?: Address): Promise<CreateEntityResult> {
+    const factory = this.requireFactory();
     // R1, the same window one step earlier and with higher stakes: the agent NFT may already be
     // minted. A receipt-read failure here is `BroadcastUnconfirmedError` rather than a bare 429,
     // so nothing above it can say "nothing was sent" about a mint that is on chain — and the
@@ -623,7 +641,7 @@ export class ArcAdapter {
     // plus anything the relayed call touches), and EntityCreated(uint256,address,address) is not a
     // signature only our factory can emit. Read the ids from the CONFIGURED FACTORY's logs only.
     const factoryLogs = receipt.logs.filter(
-      (l) => l.address.toLowerCase() === this.d.factory.toLowerCase(),
+      (l) => l.address.toLowerCase() === factory.toLowerCase(),
     );
     // One pass over the logs for both events; viem still types each `.args` precisely because the
     // event names are a literal union, so the result is discriminated on `eventName`.

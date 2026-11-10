@@ -56,7 +56,7 @@ export function buildPocketFunding(
         publicClient: pub,
         managerWallet: undefined as never, // reads only — nothing here sends as the manager
         chainId: cfg.chainId,
-        factory: (cfg.factoryAddress ?? "0x0") as Address,
+        factory: cfg.factoryAddress,
         identityRegistry: cfg.identityRegistry,
       });
       // Same per-entity serialization as the turnkey path — funding and jobs share the key space.

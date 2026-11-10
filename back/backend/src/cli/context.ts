@@ -29,11 +29,16 @@ export interface CliContext {
   outflows: OutflowMeter;
 }
 
-/** Build the live context from env (.env loaded). Throws if FACTORY_ADDRESS/operator signer missing. */
+/** Build the live context from env (.env loaded). Throws if neither factory is configured or the
+ *  operator signer is missing. With only LEGAL_BODY_FACTORY_ADDRESS (a Minimal-only deployment) the
+ *  adapter has no full-product factory, and an entity create throws FullProductDisabledError. */
 export async function buildContext(): Promise<CliContext> {
   loadDotenv();
   const cfg = loadConfig();
-  if (!cfg.factoryAddress) throw new Error("FACTORY_ADDRESS is required (deploy first; see M0).");
+  if (!cfg.factoryAddress && !cfg.legalBodyFactory)
+    throw new Error(
+      "at least one of FACTORY_ADDRESS or LEGAL_BODY_FACTORY_ADDRESS is required (deploy first; see M0).",
+    );
 
   const db = openDatabase(cfg.dbPath);
   migrate(db);
@@ -50,7 +55,7 @@ export async function buildContext(): Promise<CliContext> {
     // The two calls that happen inside the send lock, on their own bounded transport.
     sendClient: sendClientFor(cfg),
     chainId: cfg.chainId,
-    factory: cfg.factoryAddress as Address,
+    factory: cfg.factoryAddress,
     identityRegistry: cfg.identityRegistry,
     controller: cfg.controllerAddress,
   });
