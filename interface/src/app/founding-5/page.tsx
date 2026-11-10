@@ -4,7 +4,7 @@ import { Footer } from "@/components/landing/Footer";
 import { Nav } from "@/components/landing/Nav";
 
 export const metadata: Metadata = {
-  title: "Arc mainnet beta, Novi Corpus",
+  title: "Arc mainnet beta, NoviCorpus",
   description:
     "Apply for the invite only Arc mainnet beta. About ten Wyoming companies. The first 2 to 5 formations are free. No filing date is promised.",
 };
