@@ -166,6 +166,23 @@ export function isDocumentDownloadPath(joinedPath: string): boolean {
 }
 
 /**
+ * The one address to send upstream with a founding application.
+ *
+ * The backend keys its limiter on the last `X-Forwarded-For` entry and treats that entry as the
+ * proxy's own. This hop is that proxy. The header is not on the allowlist (a client must not be
+ * able to smuggle one through every route), so the route sets it itself, and only for the public
+ * POST, and only as this single entry: the last one the platform appended on the way in.
+ */
+export function foundingForwardedFor(header: string | null): string | null {
+  const last = header
+    ?.split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "")
+    .pop();
+  return last ? last : null;
+}
+
+/**
  * Paths whose responses must never be cached by anything between the backend and the browser.
  *
  * The connection package and the bootstrap response carry freshly minted credentials. Document
@@ -184,6 +201,10 @@ export function isNoStorePath(joinedPath: string): boolean {
     // legal-body-orders and everything under it: the list, one order, its link and its binding
     /^legal-body-orders(\/|$)/.test(joinedPath) ||
     // companies/customer and companies/customer/statement-message
-    /^companies\/customer(\/|$)/.test(joinedPath)
+    /^companies\/customer(\/|$)/.test(joinedPath) ||
+    // Founding applications: emails and answers. The public config route is not in this list.
+    joinedPath === "founding/applications" ||
+    joinedPath === "founding/applications.csv" ||
+    joinedPath.startsWith("founding/applications/")
   );
 }
