@@ -37,17 +37,26 @@ import { operatorConfig, print, refuse } from "./operator";
  *  - body_linked: legal bodies, at their first `linked` event;
  *  - statement_reads: the sum over the days of the week of the distinct anonymous callers of each
  *    legal body's statement (`statement_reads`); null, `not_available`, on a database that has
- *    never recorded a read (no `funnel_statement_reads_since`: the API records reads only where
+ *    never recorded reads (no `funnel_statement_reads_since`: the API records reads only where
  *    FUNNEL_SALT is set). The database decides, never this command's own FUNNEL_SALT: the command
- *    may run without the API's environment.
+ *    needs no FUNNEL_SALT of its own to decide whether reads were recorded, since it reads the
+ *    database's own key; on production it loads the same configuration as the API.
  *
  * NO ZERO FOR A WEEK NOTHING WAS RECORDED IN. Two stages began to be recorded on a date of their
  * own, kept in `meta`: the sign-ins when `migrate` created their table (`funnel_first_seen_since`;
  * the earliest account the database already knew then, if earlier: those accounts are filled in
- * at their earliest times), the statement reads with the first one recorded
- * (`funnel_statement_reads_since`). A week wholly before that date prints null for the stage, and
- * its label ends "recorded since <YYYY-MM-DD>". With no date kept, the sign-ins (a database older
- * than the key) are counted in every week, and the statement reads, never recorded, are null.
+ * at their earliest times), the statement reads at the API's first salted boot, or with the first
+ * read on a database salted before that boot wrote the date (`funnel_statement_reads_since`). A
+ * week wholly before that date prints null for the stage, and its label ends "recorded since
+ * <YYYY-MM-DD>". With no date kept, the sign-ins (a database older than the key) are counted in
+ * every week, and the statement reads, never recorded, are null.
+ *
+ * WHAT A FILLED-IN WEEK COUNTS. The day of the migrate that created the sign-ins' table is kept too
+ * (`funnel_first_seen_recorded_since`). Before it, the stage counts each account's earliest stored
+ * row, a lower bound: an account that signed in and left no row is missing, and a World ID row
+ * carries the account's latest verification. When that day lies after the earliest date, the
+ * label says so: "first sign-in per account; before <day> the earliest stored row of an account (a
+ * lower bound)".
  *
  * A database this build has not migrated (no funnel table) is refused in plain words: the API
  * makes the tables at its boot, and this command, read-only, makes none.
@@ -144,8 +153,12 @@ function parseTenants(value: string): string[] {
   });
 }
 
-/** The `meta` key of the time the sign-ins began to be recorded, written by `migrate`. */
+/** The `meta` key of the time the sign-ins began to be recorded, written by `migrate`: the
+ *  earliest account it filled in, or its own time. */
 const FIRST_SEEN_SINCE_KEY = "funnel_first_seen_since";
+/** The `meta` key of the time of that migrate itself, written with the other: from it on, every
+ *  first sign-in is recorded; before it, the stage counts the rows the migrate filled in. */
+const FIRST_SEEN_RECORDED_SINCE_KEY = "funnel_first_seen_recorded_since";
 
 /** The UTC day a stage began to be recorded, from `meta`; undefined when no date was kept. A value
  *  that is not a time refuses: a wrong date would print false nulls or false zeros. */
@@ -175,15 +188,24 @@ function isoWeekOf(ms: number): string {
 function sourcesOf(o: {
   includeSandbox: boolean;
   since: { signed_in: string | undefined; statement_reads: string | undefined };
+  /** The day of the migrate that created the sign-ins' table, when it was kept. */
+  signInsRecordedSince: string | undefined;
 }): Record<FunnelColumn, string> {
   const since = (day: string | undefined) => (day === undefined ? "" : `; recorded since ${day}`);
+  // The days from the earliest date to the migrate's count what the migrate filled in.
+  const filledIn =
+    o.signInsRecordedSince !== undefined &&
+    o.since.signed_in !== undefined &&
+    o.signInsRecordedSince > o.since.signed_in
+      ? `; before ${o.signInsRecordedSince} the earliest stored row of an account (a lower bound)`
+      : "";
   const rows = o.includeSandbox
     ? "sandbox and synthetic rows included"
     : "production rows only; not synthetic";
   const requested = (provider: string) =>
     `companies.created_at; purpose_kind legal_body; provider ${provider}; ${rows}`;
   return {
-    signed_in: `tenant_first_seen.first_seen_at; first sign-in per account; ${
+    signed_in: `tenant_first_seen.first_seen_at; first sign-in per account${filledIn}; ${
       o.includeSandbox ? "any deployment" : "a production deployment only"
     }${since(o.since.signed_in)}`,
     world_verified: `guardian_verifications.verified_at; latest accepted verification per account (per World ID; of several the earliest); ${
@@ -263,10 +285,11 @@ export function funnelExport(
   const read = () => ({
     since: {
       signed_in: recordedSince(db, FIRST_SEEN_SINCE_KEY),
-      // Whether reads were ever recorded is the database's to say: the API writes this key with
-      // the first one, and this command may run without the API's FUNNEL_SALT.
+      // Whether reads were ever recorded is the database's to say: the API writes this key at a
+      // salted boot, and this command needs no FUNNEL_SALT of its own to read it.
       statement_reads: recordedSince(db, STATEMENT_READS_SINCE_KEY),
     },
+    signInsRecordedSince: recordedSince(db, FIRST_SEEN_RECORDED_SINCE_KEY),
     signed_in: signInsCounted
       ? times(
           `SELECT first_seen_at AS t FROM tenant_first_seen
@@ -397,7 +420,11 @@ export function funnelExport(
     includeSandbox,
     excludedTenants: excluded.length,
     stages: FUNNEL_STAGES,
-    sources: sourcesOf({ includeSandbox, since: rows.since }),
+    sources: sourcesOf({
+      includeSandbox,
+      since: rows.since,
+      signInsRecordedSince: rows.signInsRecordedSince,
+    }),
     weeks,
   };
 }

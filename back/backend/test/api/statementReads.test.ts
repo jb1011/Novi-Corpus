@@ -573,6 +573,14 @@ describe("the store", () => {
     expect(() => repo.record({ ...good, callerDayHash: CLIENT_A as never })).toThrow(/hash/);
     expect(() => repo.record({ ...good, firstReadAt: 0 })).toThrow(/milliseconds/);
     expect(rows()).toHaveLength(1);
+    // A boot time in seconds is refused too, and keeps no date.
+    s.db.prepare("DELETE FROM meta WHERE key = 'funnel_statement_reads_since'").run();
+    expect(
+      () => new SqliteStatementReadRepository(s.db, { bootedAt: Math.floor(CLOCK_MS / 1000) }),
+    ).toThrow(/bootedAt must be whole unix milliseconds/);
+    expect(
+      s.db.prepare("SELECT value FROM meta WHERE key = 'funnel_statement_reads_since'").get(),
+    ).toBeUndefined();
   });
 
   test("the first row it records writes when reads are recorded since; a later row changes nothing", () => {

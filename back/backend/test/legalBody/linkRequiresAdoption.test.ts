@@ -369,7 +369,7 @@ describe("the doors and the tools answer the same code and sentence", () => {
     expect(chainReads()).toBe(0);
   });
 
-  test("get_link_message and submit_link answer agreement_not_adopted with the same sentence, and there is no adoption tool", async () => {
+  test("get_link_message and submit_link answer agreement_not_adopted with the same sentence, both descriptions name the step, and there is no adoption tool", async () => {
     const app = appOver(db, s);
     const row = draft();
     const key = new SqliteApiKeyStore(db).mint(tenant, { capability: "provision" }).key;
@@ -391,11 +391,14 @@ describe("the doors and the tools answer the same code and sentence", () => {
     try {
       const tools = (await client.listTools()).tools;
       expect(tools.map((t) => t.name).filter((name) => /adopt/i.test(name))).toEqual([]);
-      // The agent learns of the step before it is refused: the guardian adopts in the web app.
-      const description = tools.find((t) => t.name === "get_link_message")?.description ?? "";
-      expect(description).toContain(
-        "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
-      );
+      // The agent learns of the step before it is refused, from either tool: the guardian adopts
+      // in the web app.
+      for (const name of ["get_link_message", "submit_link"]) {
+        const description = tools.find((t) => t.name === name)?.description ?? "";
+        expect(description, name).toContain(
+          "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
+        );
+      }
     } finally {
       await close();
     }

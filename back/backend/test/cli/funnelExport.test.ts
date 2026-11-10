@@ -6,9 +6,10 @@
  * not have prints null with the source `not_available`, never 0 (the invite stage, the split of a
  * payment by settlement kind, and the statement reads on a database that never recorded one,
  * whatever the command's own FUNNEL_SALT). Two stages were not recorded before their table, or
- * their first row, existed: a week wholly before that date prints null too, and the stage's label
- * says "recorded since" the date; the accounts a database knew before the sign-ins were recorded
- * count in the week they first appear. The command opens the database read-only, and refuses a
+ * their first salted boot, existed: a week wholly before that date prints null too, and the
+ * stage's label says "recorded since" the date; the accounts a database knew before the sign-ins
+ * were recorded count in the week they first appear, and the label says those weeks count each
+ * account's earliest stored row. The command opens the database read-only, and refuses a
  * database that is not there, or that this build has not migrated, rather than make one.
  *
  * The command opens the database through the configuration, so every test works in a temporary
@@ -87,6 +88,7 @@ beforeEach(() => {
   });
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   process.env = { ...savedEnv };
   db.close();
@@ -264,9 +266,13 @@ function reads(
 }
 
 /** The seed every export test reads; the expected counts are in the tests. */
-/** The day a stage has been recorded since, as `migrate` and the first read row write it. */
+/** The day a stage has been recorded since, as `migrate`, a salted boot and the first read row
+ *  write it; and the day `migrate` created the sign-ins' table (`..._recorded_since`). */
 function recordedSince(
-  key: "funnel_first_seen_since" | "funnel_statement_reads_since",
+  key:
+    | "funnel_first_seen_since"
+    | "funnel_first_seen_recorded_since"
+    | "funnel_statement_reads_since",
   day: string,
 ) {
   db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(key, String(at(day)));
@@ -338,8 +344,10 @@ function seed(): void {
   reads(bodyF, "2026-10-23", ["192.0.2.5"]);
 
   // Both stages recorded since before the window (`migrate` and the first read wrote today's and
-  // the first seeded read's dates): every week of it counts.
+  // the first seeded read's dates): every week of it counts. The sign-ins' table was made that day,
+  // on a database that knew no account: nothing was filled in.
   recordedSince("funnel_first_seen_since", "2026-09-01");
+  recordedSince("funnel_first_seen_recorded_since", "2026-09-01");
   recordedSince("funnel_statement_reads_since", "2026-09-01");
 }
 
@@ -565,14 +573,36 @@ describe("the counts", () => {
     );
   });
 
+  test("a salted deployment with no read yet: 0 for the weeks from its first boot, null for the weeks before; a later boot moves nothing", async () => {
+    seed();
+    db.prepare("DELETE FROM statement_reads").run();
+    db.prepare("DELETE FROM meta WHERE key = 'funnel_statement_reads_since'").run();
+    // The API's store, as a salted boot builds it: on 2026-10-14 first, then again on 2026-10-21.
+    const boot = (day: string) => new SqliteStatementReadRepository(db, { bootedAt: at(day) });
+    boot("2026-10-14");
+    boot("2026-10-21");
+    const [salted, unsalted] = await withAndWithoutSalt(WINDOW);
+    expect(unsalted).toEqual(salted);
+    expect(salted.weeks.map((w) => w.statement_reads)).toEqual([null, 0, 0]);
+    expect(salted.sources.statement_reads).toBe(
+      "statement_reads.day; distinct anonymous callers per legal body per day summed; production rows only; not synthetic; recorded since 2026-10-14",
+    );
+  });
+
   test("accounts the database knew before the sign-ins were recorded: each counted in the week it first appears, and not again at a later sign-in", async () => {
     db.exec("DROP TABLE tenant_first_seen");
-    db.prepare("DELETE FROM meta WHERE key = 'funnel_first_seen_since'").run();
+    db.prepare(
+      "DELETE FROM meta WHERE key IN ('funnel_first_seen_since', 'funnel_first_seen_recorded_since')",
+    ).run();
     // A's first trace is its company, in week 41; B's its World ID verification, in week 42.
     company(A, "2026-10-06");
     verified(B, "2026-10-13");
     company(B, "2026-10-21");
+    // The migrate that makes the table runs on 2026-11-02.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse("2026-11-02T09:00:00.000Z"));
     migrate(db);
+    vi.useRealTimers();
     // A signs in in week 43: its first sign-in stays the one the backfill found.
     expect(new SqliteTenantFirstSeenRepository(db).recordFirstSeen(A, at("2026-10-22"))).toBe(
       false,
@@ -580,14 +610,48 @@ describe("the counts", () => {
 
     const out = await exported([...WINDOW, "--include-sandbox"]);
     expect(out.weeks.map((w) => w.signed_in)).toEqual([1, 1, 0]);
+    // Before the migrate's day the stage counts each account's earliest stored row: a lower bound.
     expect(out.sources.signed_in).toBe(
-      "tenant_first_seen.first_seen_at; first sign-in per account; any deployment; recorded since 2026-10-06",
+      "tenant_first_seen.first_seen_at; first sign-in per account; before 2026-11-02 the earliest stored row of an account (a lower bound); any deployment; recorded since 2026-10-06",
     );
+  });
+
+  test("a database migrated with accounts it already knew keeps both dates, the earliest account's and the migrate's own, and the label names the migrate's day", async () => {
+    db.exec("DROP TABLE tenant_first_seen");
+    db.prepare(
+      "DELETE FROM meta WHERE key IN ('funnel_first_seen_since', 'funnel_first_seen_recorded_since')",
+    ).run();
+    company(A, "2026-10-06");
+    const before = Date.now();
+    migrate(db);
+    const after = Date.now();
+
+    const kept = (key: string) =>
+      (db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as { value: string } | undefined)
+        ?.value;
+    expect(kept("funnel_first_seen_since")).toBe(String(at("2026-10-06")));
+    const recorded = Number(kept("funnel_first_seen_recorded_since"));
+    expect(recorded).toBeGreaterThanOrEqual(before);
+    expect(recorded).toBeLessThanOrEqual(after);
+    const migrateDay = new Date(recorded).toISOString().slice(0, 10);
+    expect([before, after].map((t) => new Date(t).toISOString().slice(0, 10))).toContain(
+      migrateDay,
+    );
+
+    const out = await exported([...WINDOW, "--include-sandbox"]);
+    expect(out.sources.signed_in).toBe(
+      `tenant_first_seen.first_seen_at; first sign-in per account; before ${migrateDay} the earliest stored row of an account (a lower bound); any deployment; recorded since 2026-10-06`,
+    );
+    const header = (await run([...WINDOW, "--include-sandbox", "--format", "csv"]))
+      .join("\n")
+      .split("\n")[0] as string;
+    expect(header).toContain(`signed_in [${out.sources.signed_in}]`);
   });
 
   test("a stage recorded since mid-window: null for the weeks wholly before, counted from the week it began; the label says since when", async () => {
     seed();
     recordedSince("funnel_first_seen_since", "2026-10-14");
+    recordedSince("funnel_first_seen_recorded_since", "2026-10-14");
     recordedSince("funnel_statement_reads_since", "2026-10-20");
     const out = await exported([...WINDOW, "--include-sandbox"]);
 

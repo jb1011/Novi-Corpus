@@ -1165,10 +1165,11 @@ async function main() {
     // The funnel's first stage: every box records an account's first sign-in.
     tenantFirstSeen: new SqliteTenantFirstSeenRepository(db),
     // The funnel's last stage, only where FUNNEL_SALT is set: without the salt no statement read
-    // is recorded (a production box cannot boot without it, `assertFunnelConfig`).
+    // is recorded (a production box cannot boot without it, `assertFunnelConfig`). The boot time
+    // is kept as the day reads are recorded since, so the weeks before a first read print 0.
     statementReads: cfg.funnel?.salt
       ? {
-          repo: new SqliteStatementReadRepository(db),
+          repo: new SqliteStatementReadRepository(db, { bootedAt: Date.now() }),
           salt: cfg.funnel.salt,
           lines: statementReadLines,
         }

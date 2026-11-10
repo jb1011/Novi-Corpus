@@ -444,6 +444,7 @@ const GET_LINK_MESSAGE_DESCRIPTION = [
 const SUBMIT_LINK_DESCRIPTION = [
   "Submit the identity owner's signature of the message from get_link_message: the platform then creates the order's legal body, once, and the identity's owner points the identity at it (see get_binding).",
   "orderId is the order the message was served for; message is typedData.message exactly as served; signature is the owner's signature of typedData, as 0x-prefixed hex.",
+  "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
   "Requires the provision capability.",
   "The answer's status is reserved (the identity is held for this order and its body's creation is on its way: poll get_binding), deployed (the body exists, and its pointer comes next) or linked, with the order. Calling again answers the order's state and changes nothing.",
   "A refused link answers status refused, with a code, a fixed message that says what to do next, a detail of hex and decimals, and the order.",

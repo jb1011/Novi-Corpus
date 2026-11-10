@@ -17,9 +17,12 @@ import type { Hex } from "viem";
  * Not `statement_log`, which skips a statement whose claims did not change and would count a
  * second read as nothing. The table is `statement_reads` in db.ts; nothing but the funnel reads it.
  *
- * The first row recorded also writes `funnel_statement_reads_since` in `meta` (its time, unix
- * milliseconds as text; INSERT OR IGNORE, so the first one stands): the export prints no zero for
- * a week before reads were recorded.
+ * WHEN READS BEGAN TO BE RECORDED: `funnel_statement_reads_since` in `meta` (unix milliseconds as
+ * text; INSERT OR IGNORE, so the first one stands), so the export prints no zero for a week before
+ * reads were recorded, and a measured zero after. The API builds this store only on a salted
+ * deployment and hands it its boot time (`bootedAt`), written at once: the weeks from the first
+ * salted boot print 0 until a read comes. The first row recorded writes its own time too, the
+ * fallback for a database salted before the boot wrote it.
  */
 
 /** `owner`: the request carried a valid session of the body's own tenant. */
@@ -72,7 +75,11 @@ export class SqliteStatementReadRepository implements StatementReadRepository {
   /** This store has seen the since-key written (or found): no second write of it per process. */
   private sinceWritten = false;
 
-  constructor(db: Database.Database) {
+  /**
+   * `bootedAt`: the API's boot time, unix milliseconds, given only where the API records reads (a
+   * salted deployment): written as the time reads are recorded since, unless one is kept already.
+   */
+  constructor(db: Database.Database, o: { bootedAt?: number } = {}) {
     this.stmts = {
       insert: db.prepare(
         `INSERT OR IGNORE INTO statement_reads
@@ -95,6 +102,12 @@ export class SqliteStatementReadRepository implements StatementReadRepository {
         this.stmts.since.run(STATEMENT_READS_SINCE_KEY, String(read.firstReadAt));
       return inserted;
     });
+    if (o.bootedAt !== undefined) {
+      if (!Number.isSafeInteger(o.bootedAt) || o.bootedAt < MIN_MILLIS)
+        refuse("bootedAt", "must be whole unix milliseconds");
+      this.stmts.since.run(STATEMENT_READS_SINCE_KEY, String(o.bootedAt));
+      this.sinceWritten = true;
+    }
   }
 
   record(read: StatementRead): boolean {

@@ -158,7 +158,9 @@ const FACTORY = getAddress("0x00000000000000000000000000000000000fac70");
 /** The database as an earlier build left it: every table but the sign-ins, and no date for them. */
 function asBeforeTheTable(): void {
   db.exec("DROP TABLE tenant_first_seen");
-  db.prepare("DELETE FROM meta WHERE key = 'funnel_first_seen_since'").run();
+  db.prepare(
+    "DELETE FROM meta WHERE key IN ('funnel_first_seen_since', 'funnel_first_seen_recorded_since')",
+  ).run();
 }
 
 /** `ms` as SQLite's CURRENT_TIMESTAMP writes it (UTC, to the second). */
@@ -287,22 +289,27 @@ test("a later sign-in of a backfilled account keeps the backfilled time", async 
   expect(rows()).toEqual([{ address: account.address, first_seen_at: earlier }]);
 });
 
-test("migrate records when the sign-ins began to be recorded, once: when it creates the table", () => {
+test("migrate records when the sign-ins began to be recorded, once: when it creates the table; on a database with no account the two dates are one", () => {
   const fresh = openDatabase(":memory:");
   try {
     const before = Date.now();
     migrate(fresh);
     const after = Date.now();
-    const since = () =>
-      fresh.prepare("SELECT value FROM meta WHERE key = 'funnel_first_seen_since'").get() as
+    const kept = (key: string) =>
+      fresh.prepare("SELECT value FROM meta WHERE key = ?").get(key) as
         | { value: string }
         | undefined;
+    const since = () => kept("funnel_first_seen_since");
+    const recorded = () => kept("funnel_first_seen_recorded_since");
     const first = Number(since()?.value);
     expect(first).toBeGreaterThanOrEqual(before);
     expect(first).toBeLessThanOrEqual(after);
-    // A later migrate finds the table and leaves the date alone.
+    // Nothing filled in: the earliest date is the migrate's own, so no week counts stored rows.
+    expect(recorded()).toEqual(since());
+    // A later migrate finds the table and leaves both dates alone.
     migrate(fresh);
     expect(Number(since()?.value)).toBe(first);
+    expect(Number(recorded()?.value)).toBe(first);
   } finally {
     fresh.close();
   }

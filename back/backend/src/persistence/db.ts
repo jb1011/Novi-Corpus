@@ -1507,10 +1507,13 @@ const sqlIsMillis = (column: string) =>
  *
  * WHEN EACH BEGAN, in `meta`, so the export prints no zero for a week nothing was recorded in:
  * `funnel_first_seen_since` is written by `migrate` when it creates `tenant_first_seen` (unix
- * milliseconds, as text); `funnel_statement_reads_since` by the first read row recorded
+ * milliseconds, as text); `funnel_statement_reads_since` by the API's first salted boot, or by the
+ * first read row recorded on a database salted before that write existed
  * (`statementReadRepository.ts`), since reads are recorded only where FUNNEL_SALT is set. When
  * `migrate` creates `tenant_first_seen` on a database that already knows accounts, it fills them in
- * at their earliest times (`backfillTenantFirstSeen`), and the date is the earliest of those.
+ * at their earliest times (`backfillTenantFirstSeen`), and the date is the earliest of those; the
+ * same transaction writes `funnel_first_seen_recorded_since`, the migrate's own time: before it,
+ * the stage counts each account's earliest stored row, a lower bound, not its first sign-in.
  */
 const FUNNEL_DDL = `
   CREATE TABLE IF NOT EXISTS tenant_first_seen (
@@ -2452,9 +2455,15 @@ export function migrate(db: Database.Database): void {
       db.exec(FUNNEL_DDL);
       if (created) {
         const earliest = backfillTenantFirstSeen(db);
-        db.prepare(
-          "INSERT OR IGNORE INTO meta (key, value) VALUES ('funnel_first_seen_since', ?)",
-        ).run(String(Math.min(earliest ?? Number.POSITIVE_INFINITY, Date.now())));
+        const now = Date.now();
+        const keep = db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)");
+        keep.run(
+          "funnel_first_seen_since",
+          String(Math.min(earliest ?? Number.POSITIVE_INFINITY, now)),
+        );
+        // The sign-ins themselves are recorded from now: before it, the stage counts what the
+        // backfill found, each account's earliest stored row.
+        keep.run("funnel_first_seen_recorded_since", String(now));
       }
     }).immediate();
   // The treasury of record references `legal_bodies` too, and stands outside that step likewise.
