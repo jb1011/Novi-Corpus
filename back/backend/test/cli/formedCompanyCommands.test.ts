@@ -637,7 +637,7 @@ const NO_STORED_OPTION = /^matches no stored option/;
 const NO_ENTITY_ENDING =
   "no entity ending (LLC, L.L.C., Limited Liability Company): the State's record of an LLC carries its ending; check the name";
 const NO_FILING_NUMBER =
-  "the company has no filing number: it cannot be ordered until one is recorded";
+  "the company has no filing number: the API's next poll fills it for a company doola filed; for a filing done by hand, formation:record-filed records it";
 
 /** One poll of the formation processor, doola reporting the company filed under `name`. */
 async function poll(companyId: string, name: string): Promise<void> {
@@ -765,7 +765,7 @@ describe("company:filed-name", () => {
     }
   });
 
-  test("a filed company with no filing number is written, with a warning in the dry run and the write: it cannot be ordered until one is recorded", async () => {
+  test("a filed company with no filing number is written, with a warning in the dry run and the write: it cannot be ordered until its number is recorded", async () => {
     const companyId = formedCompany({ legalNameFiled: null, filingNumber: null });
     expect(companies.find(companyId)?.filingNumber).toBeNull();
     // A stored option with its ending, so the missing number is the only advice.
