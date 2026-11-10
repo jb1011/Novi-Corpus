@@ -17,7 +17,12 @@ import {
   retryDelayMs,
 } from "../formation/schedule";
 import { eraseSsnLogged } from "../formation/ssnErasure";
-import { deriveFormationStatus } from "../formation/status";
+import {
+  companyFiled,
+  deriveFormationStatus,
+  einIssued,
+  manuallyRecorded,
+} from "../formation/status";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { CompanyRepository } from "../persistence/companyRepository";
@@ -68,7 +73,11 @@ import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./form
  *       `failed` so the retry pass skips it. Both used to strand the formation forever;
  *   (c) retry `failed` rows with backoff, and give up at a bounded attempt count rather than
  *       retrying a hopeless row forever;
- *   (d) poll doola for anything still in flight, with its own much slower backoff;
+ *   (d) poll doola for anything still in flight, with its own much slower backoff, never a filing
+ *       an operator recorded by hand (a `manual:` ref names nothing at doola, so the retry pass
+ *       in (c) skips it too);
+ *   (d2) on a SANDBOX deployment only, complete a legal-body company's filing, then its EIN,
+ *        through doola's playground five minutes after each opened, and advance it at once;
  *   (e) drive the ON-CHAIN anchor sub-saga — open the cycle a confirmed fact justifies, adopt a
  *       broadcast a crash orphaned, and execute what the timelock has released. This is the leg
  *       that makes anchoring GUARANTEED rather than merely fast: the webhook path opens a version
@@ -153,6 +162,47 @@ export const ANCHOR_CONCURRENCY = 4;
  *  wrote it is gone (C2). The client's own deadline plus slack — imported, never re-typed, so the
  *  two cannot drift. */
 export const SUBMITTED_STALL_MS = DOOLA_DEFAULT_TIMEOUT_MS + SUBMITTED_STALL_SLACK_MS;
+
+/**
+ * SANDBOX ONLY (F-A-2a): how long a legal-body filing waits after `create_provider` confirmed
+ * before the sweeper completes it through doola's playground, and how long its EIN then waits
+ * after `await_filing` confirmed. Measured on each row's `facts_updated_at`.
+ */
+export const SANDBOX_AUTOCOMPLETE_DELAY_MS = 5 * 60_000;
+
+/** What the sandbox leg writes on the `create_provider` row's `detail` (unix ms): the playground
+ *  call has been made, so it is never made twice. */
+interface SandboxAutocompleteMarks {
+  autocompletedAt?: number;
+  einAutocompletedAt?: number;
+}
+
+/**
+ * The two playground calls, a TABLE (the `drivers` reasoning): which call completes which step,
+ * the marker it leaves, its ops line, and the step whose confirmation starts its five minutes.
+ */
+const SANDBOX_PLAYGROUND = {
+  await_filing: {
+    call: "playgroundCompleteFormation",
+    mark: "autocompletedAt",
+    event: "sandbox_filing_autocompleted",
+    after: "create_provider",
+  },
+  await_ein: {
+    call: "playgroundCompleteEin",
+    mark: "einAutocompletedAt",
+    event: "sandbox_ein_autocompleted",
+    after: "await_filing",
+  },
+} as const satisfies Record<
+  "await_filing" | "await_ein",
+  {
+    call: "playgroundCompleteFormation" | "playgroundCompleteEin";
+    mark: keyof SandboxAutocompleteMarks;
+    event: string;
+    after: FormationStep;
+  }
+>;
 
 // ── deps ────────────────────────────────────────────────────────────────────────────────────
 
@@ -267,6 +317,9 @@ export class FormationSweeper {
       await this.resumeStalledCreates();
       await this.retryFailedSteps();
       await this.pollInFlight();
+      // After the poll, so a company the poll just advanced is judged on its new rows. Sandbox
+      // only; on production it returns at once.
+      await this.completeSandboxFilings();
       await this.advanceAnchors();
       this.erasePii();
       if (amortised) {
@@ -612,6 +665,11 @@ export class FormationSweeper {
   private async retryFailedSteps(): Promise<void> {
     const now = this.now();
     for (const row of this.d.requests.listByState("failed")) {
+      // ── RECORDED BY HAND: never the saga's. An operator recorded this company's filing
+      //    (`formation:record-filed`), so its `manual:` ref names nothing at doola: a retry could
+      //    only fail, and the abandon below would overrule the operator's record. Before
+      //    everything, the abandon verdict included.
+      if (manuallyRecorded(this.d.requests.stepsOf(row.companyId))) continue;
       // ── PARKED FOR A HUMAN, and it comes FIRST — before the attempt bound, deliberately.
       //
       //    doola REJECTED this intake. Re-sending the identical body cannot succeed, so the
@@ -791,6 +849,9 @@ export class FormationSweeper {
     );
     for (const companyId of candidates) {
       const steps = this.d.requests.stepsOf(companyId);
+      // The in-memory twin of the due-set's own exclusion: a filing recorded by hand is never
+      // polled, whatever handed it here.
+      if (manuallyRecorded(steps)) continue;
       const status = deriveFormationStatus(steps);
       // `failed` companies belong to the retry path above, not here; `complete`/`none` are done or
       // have not started. What is left is genuinely in flight.
@@ -841,6 +902,85 @@ export class FormationSweeper {
     // The same helper the processor uses, so the blob and the `next_poll_at` column are written
     // together by ONE piece of code — the column is an index over the blob, never a second truth.
     persistPollBackoff(this.d, row, { advanced });
+  }
+
+  // ── (d2) the sandbox playground, for a legal-body filing (F-A-2a) ─────────────────────────
+
+  /**
+   * Complete a legal-body company's SANDBOX filing through doola's playground, then its EIN.
+   *
+   * doola's test environment never files with the State: a sandbox filing stays `SUBMITTED` until
+   * somebody calls the playground, so a demo of the formed door would wait forever. Five minutes
+   * after `create_provider` confirmed, this calls `playgroundCompleteFormation`; five minutes
+   * after `await_filing` confirmed, `playgroundCompleteEin`. Each call is followed AT ONCE by a
+   * fetch-and-advance: a local box gets no webhook, and the next poll of a row that was never
+   * polled is `POLL_BASE_MS` away. The facts are then read back through the ordinary processor,
+   * on its own rules, exactly as a real filing's would be.
+   *
+   * Scoped to `legal_body` companies (the plan's §0 call): the full product's testnet behaviour
+   * does not change. A filing an operator recorded by hand is never touched.
+   *
+   * THE CALL COMES BEFORE THE MARKER. A throwing call writes nothing, so the next tick tries
+   * again; a crash between the call and the marker repeats a call doola's sandbox takes
+   * harmlessly. The marker, once written, is what stops a second call when doola has not shown
+   * the filing yet: the poll catches that company up.
+   *
+   * Production returns at once. The client's `assertSandbox` refuses the call on a production
+   * client as well, and is the second guard.
+   */
+  private async completeSandboxFilings(): Promise<void> {
+    if (this.d.environment !== "sandbox") return;
+    const now = this.now();
+    for (const companyId of this.d.requests.listOpenCompanyIds()) {
+      const company = this.d.companies.find(companyId);
+      if (
+        company?.provider !== "doola" ||
+        company.purposeKind !== "legal_body" ||
+        company.environment !== "sandbox"
+      )
+        continue;
+      const steps = this.d.requests.stepsOf(companyId);
+      if (manuallyRecorded(steps)) continue;
+      const create = steps.find((s) => s.step === "create_provider");
+      if (create?.state !== "confirmed" || !create.providerRef) continue;
+
+      const step = !companyFiled(steps) ? "await_filing" : !einIssued(steps) ? "await_ein" : null;
+      if (!step) continue;
+      const leg = SANDBOX_PLAYGROUND[step];
+      if (parseDetail<SandboxAutocompleteMarks>(create.detail)[leg.mark] !== undefined) continue;
+      const since = steps.find((s) => s.step === leg.after)?.factsUpdatedAt;
+      if (!since || now - parseSqliteUtc(since) < SANDBOX_AUTOCOMPLETE_DELAY_MS) continue;
+
+      try {
+        await this.d.doola[leg.call](create.providerRef);
+      } catch (err) {
+        opsLog("sandbox_autocomplete_failed", {
+          level: "warn",
+          companyId,
+          step,
+          ...describeDoolaError(err),
+        });
+        continue;
+      }
+      // Merged into the row as it is NOW, not as the loop read it: the marker adds one field and
+      // must not put back an older detail.
+      const current = this.d.requests.find(companyId, "create_provider");
+      this.d.requests.transition(companyId, "create_provider", "confirmed", "confirmed", {
+        detail: JSON.stringify({
+          ...parseDetail<Record<string, unknown>>(current?.detail ?? null),
+          [leg.mark]: now,
+        }),
+        // A marker is not a fact: the anchor gate must not re-derive a manifest for it.
+        touchFacts: false,
+      });
+      opsLog(leg.event, { companyId, providerRef: create.providerRef });
+      try {
+        await this.advance(companyId);
+      } catch (err) {
+        // The marker stands and the poll is the backstop, as for any advance that throws.
+        opsLog("formation_poll_failed", { level: "warn", companyId, ...describeDoolaError(err) });
+      }
+    }
   }
 
   // ── (e) the on-chain anchor sub-saga (design §7) ──────────────────────────────────────────

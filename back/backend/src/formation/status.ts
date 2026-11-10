@@ -75,6 +75,24 @@ export function providerRefOf(steps: FormationRequestRecord[]): string | null {
 }
 
 /**
+ * The provider ref an operator's record of a filing carries (`formation:record-filed`):
+ * `manual:<operator>`. It names no company at doola, so nothing may ever be asked of doola under
+ * it. The poll due-set (`listPollDue` in `persistence/formationRepository.ts`) spells the same
+ * prefix in SQL.
+ */
+export const MANUAL_REF_PREFIX = "manual:";
+
+export function isManualRef(ref: string | null): boolean {
+  return ref?.startsWith(MANUAL_REF_PREFIX) ?? false;
+}
+
+/** Any step of the company carries a `manual:` provider ref: an operator recorded its filing; the
+ *  saga never polls it. */
+export function manuallyRecorded(steps: FormationRequestRecord[]): boolean {
+  return steps.some((s) => isManualRef(s.providerRef));
+}
+
+/**
  * The projection, in the ONE order that keeps it honest.
  *
  * `filed` and `complete` are checked BEFORE `failed`, deliberately: an entity whose company was
