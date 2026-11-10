@@ -763,7 +763,9 @@ describe("pilot:kleros check", () => {
       seen.push(new Headers(init?.headers).get("authorization") ?? "");
       const result =
         body.method === "initialize"
-          ? { instructions: "arbitrum-sepolia-testnet, court 8" }
+          ? {
+              instructions: "this call sends them: court 8, 5 jurors, on arbitrum-sepolia-testnet.",
+            }
           : body.method === "tools/list"
             ? {
                 tools: ["dispute_create", "evidence_pin", "evidence_submit"].map((name) => ({
@@ -868,7 +870,9 @@ describe("pilot:dispute end to end", () => {
       };
       const result =
         tool === "initialize"
-          ? { instructions: "arbitrum-sepolia-testnet, court 8, 5 jurors" }
+          ? {
+              instructions: "this call sends them: court 8, 5 jurors, on arbitrum-sepolia-testnet.",
+            }
           : tool === "tools/list"
             ? {
                 tools: ["dispute_create", "evidence_pin", "evidence_submit"].map((name) => ({

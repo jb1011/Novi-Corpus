@@ -16,11 +16,13 @@ import { withoutEmDash } from "./job";
  * and every problem in the answers. Reads only; nothing here can write.
  *
  *  - `tools/list` must hold the three write tools the key's preset grants.
- *  - The `instructions` string a key answers on `initialize` names its deployment, court, juror
- *    count and broadcast setting, and the docs say to believe it over any page. It is printed in
- *    full and refused only on a clear mismatch: the other deployment's chain as a whole word, or a
- *    court phrase naming another court than the stage's. On a real deployment a missing string is
- *    a problem too, since a filing has nothing to believe then. A stage with no deployment (a
+ *  - The `instructions` string a key answers on `initialize` says, in one sentence, what its
+ *    filing sends ("this call sends them: court 8, 5 jurors, on arbitrum-sepolia-testnet"), and
+ *    the docs say to believe it over any page. It is printed in full. That sentence must be there
+ *    once, and its court, juror count and chain must be the stage's; the rest of the string is
+ *    general text that names every chain the service reads, the live one included, and is not
+ *    held to the stage. On a real deployment a missing string, or one without the sentence, is a
+ *    problem, since a filing has nothing to believe then. A stage with no deployment (a
  *    rehearsal) must answer the fake's own string: a rehearsal files with the fake only.
  *  - `court_get` on the stage's own chain and court must answer, with an evidence period of at
  *    least five minutes: the evidence is submitted within it, and a shorter one is not the court
@@ -126,11 +128,14 @@ function originOf(raw: string): string {
   }
 }
 
-/** A court named in the instructions: "court 8", "Court ID 34", "court #8". */
-const COURT_PHRASE = /\bcourt\s*(?:id\s*)?#?\s*(\d+)\b/gi;
-
-/** A chain name as a whole word: not inside a longer name such as "arbitrum-one-archive". */
-const wholeWord = (name: string) => new RegExp(`(?<![A-Za-z0-9_-])${name}(?![A-Za-z0-9_-])`, "i");
+/**
+ * The one sentence of a key's instructions that says what its filing sends, as Kleros words it:
+ * "The court, juror count and template are fixed for you, and this call sends them: court 8,
+ * 5 jurors, on arbitrum-sepolia-testnet." The rest of the string is general text that lists every
+ * chain the service reads, the live one included, so only this sentence is held to the stage.
+ */
+const SENDS_SENTENCE =
+  /\bthis call sends them:\s*court\s+(\d+)\s*,\s*(\d+)\s+jurors?\s*,\s*on\s+([a-z0-9]+(?:-[a-z0-9]+)*)/gi;
 
 /**
  * The court a stage without a deployment reads: a rehearsal rehearses the testnet stage, which
@@ -214,16 +219,32 @@ async function instructionsProblems(
     return [
       "the instructions string could not be read: it names the key's deployment and court, and a filing believes it over any document",
     ];
+  const said = new Set(
+    [...text.matchAll(SENDS_SENTENCE)].map(
+      ([, court, jurors, chain]) => `${Number(court)}|${Number(jurors)}|${chain?.toLowerCase()}`,
+    ),
+  );
+  if (said.size === 0)
+    return [
+      `the instructions never say what this key's filing sends ("this call sends them: court N, J jurors, on CHAIN"): a filing believes that sentence, so nothing is filed until the key's instructions hold it`,
+    ];
+  if (said.size > 1)
+    return [
+      `the instructions say what this key's filing sends more than once, and differently (${[...said].map((s) => s.split("|").join(", ")).join("; ")}): nothing is filed until they agree`,
+    ];
+  const [court, jurors, chain] = ([...said][0] as string).split("|") as [string, string, string];
   const found: string[] = [];
-  for (const other of Object.values(KLEROS_DEPLOYMENTS))
-    if (other.chain !== deployment.chain && wholeWord(other.chain).test(text))
-      found.push(
-        `the instructions name ${other.chain}, and this stage files on ${deployment.chain}`,
-      );
-  for (const m of text.matchAll(COURT_PHRASE))
-    if (Number(m[1]) !== deployment.courtId)
-      found.push(
-        `the instructions name court ${m[1]}, and this stage files in court ${deployment.courtId}`,
-      );
-  return [...new Set(found)];
+  if (chain !== deployment.chain)
+    found.push(
+      `the instructions say this key files on ${chain}, and this stage files on ${deployment.chain}`,
+    );
+  if (Number(court) !== deployment.courtId)
+    found.push(
+      `the instructions say this key files in court ${court}, and this stage files in court ${deployment.courtId}`,
+    );
+  if (Number(jurors) !== deployment.jurors)
+    found.push(
+      `the instructions say this key's filing sends ${jurors} juror${jurors === "1" ? "" : "s"}, and this stage expects ${deployment.jurors}`,
+    );
+  return found;
 }
