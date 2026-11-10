@@ -1,7 +1,9 @@
 import { readFileSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
+import { isIntakeFrozen } from "../formation/freeze";
 import { hasEntityEnding } from "../formation/intake";
+import { eraseSsnLogged } from "../formation/ssnErasure";
 import {
   MANUAL_REF_PREFIX,
   companyFiled,
@@ -515,6 +517,13 @@ function paidLegalBodyCompany(s: Stores, companyId: string): CompanyRecord {
 /** The operator a `manual:` ref names. */
 const recorder = (ref: string): string => ref.slice(MANUAL_REF_PREFIX.length);
 
+/** Where `formation:record-filed` takes `create_provider` from, and whether its create was frozen
+ *  (see `recordableFrom`). */
+interface Recordable {
+  from: "unopened" | "pending" | "failed";
+  frozenCreate: boolean;
+}
+
 /**
  * Where `formation:record-filed` takes the company's formation rows from, or a refusal:
  *  - `unopened`: no row at all, the saga never opened the filing; the write opens all four
@@ -525,12 +534,21 @@ const recorder = (ref: string): string => ref.slice(MANUAL_REF_PREFIX.length);
  * (`submitted`), which may still return a company; a create the API confirmed; a create doola
  * answered with a company id, which the saga adopts; an abandoned create; and a later step that is
  * not `pending`, which no API filing of an unconfirmed create leaves.
+ *
+ * And a FROZEN create (`isIntakeFrozen`) unless the operator passes `--doola-confirmed-no-company`:
+ * a company body went out under the attempt's live key and its answer was lost (an outage, which
+ * never burns the attempt), or its detail cannot be read, which proves nothing either way. doola
+ * may hold that company. If it does, a record by hand would stop the saga from ever adopting it;
+ * if it does not, the saga's same-key re-send after the outage would file a company on top of the
+ * hand filing, unless the record wins first. Only doola can say which, so only the operator's
+ * confirmation that doola holds none lets the record through.
  */
 function recordableFrom(
   companyId: string,
   steps: FormationRequestRecord[],
-): "unopened" | "pending" | "failed" {
-  if (steps.length === 0) return "unopened";
+  doolaConfirmedNoCompany: boolean,
+): Recordable {
+  if (steps.length === 0) return { from: "unopened", frozenCreate: false };
   const manual = steps.find((row) => isManualRef(row.providerRef))?.providerRef;
   if (manual)
     refuse(`the filing of company ${companyId} is already recorded by ${recorder(manual)}`);
@@ -547,6 +565,11 @@ function recordableFrom(
     );
   if (create.state === "abandoned")
     refuse(`the filing of company ${companyId} was abandoned: nothing can be recorded on it`);
+  const frozenCreate = isIntakeFrozen(create);
+  if (frozenCreate && !doolaConfirmedNoCompany)
+    refuse(
+      `a create went out to doola for company ${companyId} and its answer was lost: doola may hold the company. Ask doola whether it holds one for this company's customer. If it does, do not record: the saga's next retry re-sends the same key and doola answers with that company, or its lookup by the customer finds it, and the saga adopts it. If doola confirms it holds none, run again with --doola-confirmed-no-company`,
+    );
   for (const step of FORMATION_STEP_ORDER) {
     if (step === "create_provider") continue;
     const state = stepStateOf(steps, step);
@@ -555,15 +578,19 @@ function recordableFrom(
         `the ${step} step of company ${companyId} is ${state ?? "missing"}, not pending: find out why before recording`,
       );
   }
-  return create.state;
+  return { from: create.state, frozenCreate };
 }
 
 /** `--filed-at`: a date of the calendar (`Date.parse` reads 2026-02-30 as 2 March, which
- *  `isCalendarDate` refuses), not after today's date in UTC, as unix seconds at UTC midnight: the
- *  value the processor writes from doola's `formationFilingDate` (`filingDateToUnix`). */
+ *  `isCalendarDate` refuses), not before 1970-01-01 (the unix seconds `filed_at` holds, which the
+ *  statement reads back only from zero, `calendarDateOfUtcMidnight`) and not after today's date in
+ *  UTC, as unix seconds at UTC midnight: the value the processor writes from doola's
+ *  `formationFilingDate` (`filingDateToUnix`). */
 function parseFiledAt(value: string, nowMs: number): number {
   if (!isCalendarDate(value))
     refuse("--filed-at must be a date of the calendar, written YYYY-MM-DD");
+  if (value < "1970-01-01")
+    refuse("--filed-at is before 1970-01-01: check it against the State's record");
   const today = new Date(nowMs).toISOString().slice(0, 10);
   if (value > today)
     refuse(
@@ -575,19 +602,27 @@ function parseFiledAt(value: string, nowMs: number): number {
   return filedAt;
 }
 
+/** Advice, never a refusal: doola may file before Novi's company row exists (a filing it began by
+ *  hand), so an earlier date may be the State's record; it is more often a typo. */
+const FILED_BEFORE_CREATED =
+  "the filing date is before the company was created at Novi: check it against the State's record";
+
 interface RecordFiledOptions {
   filingNumber: string;
   filedAt: string;
   legalName: string;
   articles: string;
   operator: string;
+  doolaConfirmedNoCompany?: boolean;
   yes?: boolean;
 }
 
 /**
  * Records a paid formed company's filing done by hand, in ONE immediate transaction:
  *  - `create_provider` confirmed under `manual:<operator>`, its detail `{ recordedBy, recordedAt }`;
- *  - `await_filing` confirmed, its detail `{ filingNumber, filedAt, recordedBy }`;
+ *  - `await_filing` confirmed, its detail `{ filingNumber, filingDate, filedAt, recordedBy }`: the
+ *    processor's `AwaitFilingDetail` keys (`filingDate` as typed, yyyy-MM-dd), and `filed_at`'s
+ *    unix seconds;
  *  - `fetch_documents` confirmed, its detail `{ recordedBy, docIds }`: the Articles are the
  *    documents, recorded by hand;
  *  - `await_ein` left `pending` under the same manual ref, never polled (`formation:record-ein`
@@ -596,6 +631,9 @@ interface RecordFiledOptions {
  *    the name exactly as typed (the State's record is the truth);
  *  - the Articles' index row (`source = operator`), and the `formationFiled` event as the
  *    processor records it (it reaches no entity: a legal-body company has none attached);
+ *  - the party's SSN erased (`eraseSsnLogged`, reason `provider_persisted`), as the filer erases
+ *    it in the transaction that persists doola's company id: the filing is done, so nothing may
+ *    send it again;
  *  - the Articles' bytes LAST, as `recordDaoSupplement` writes them.
  *
  * Every rule is checked before the file is read, so a wrong company is refused as such whatever
@@ -613,8 +651,9 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
 
   withDatabase((db, docStoreDir) => {
     const s = storesOf(db);
+    const confirmed = opts.doolaConfirmedNoCompany === true;
     paidLegalBodyCompany(s, companyId);
-    recordableFrom(companyId, s.requests.stepsOf(companyId));
+    recordableFrom(companyId, s.requests.stepsOf(companyId), confirmed);
     const bytes = readPdfDocument("--articles", opts.articles);
     const sha256 = sha256Of(bytes);
     const providerDocId = `operator:${ARTICLES_DOC_TYPE}:${sha256}`;
@@ -626,9 +665,16 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
     const found = db
       .transaction(() => {
         const company = paidLegalBodyCompany(s, companyId);
-        const from = recordableFrom(companyId, s.requests.stepsOf(companyId));
+        const { from, frozenCreate } = recordableFrom(
+          companyId,
+          s.requests.stepsOf(companyId),
+          confirmed,
+        );
         const matched = matchFiledNameAgainst(company.nameOptions, legalNameFiled) !== null;
-        if (opts.yes !== true) return { written: false as const, matched };
+        // `created_at` is SQLite's UTC "YYYY-MM-DD HH:MM:SS": its day against the typed day.
+        const filedBeforeCreated = opts.filedAt < company.createdAt.slice(0, 10);
+        const facts = { matched, frozenCreate, filedBeforeCreated };
+        if (opts.yes !== true) return { written: false as const, ...facts };
         // Unreachable when false: no row existed, in this transaction.
         if (from === "unopened" && !s.requests.claimAllSteps(companyId))
           throw new Error(`company ${companyId}: its formation rows were opened twice`);
@@ -645,7 +691,12 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
             },
           ) &&
           s.requests.transition(companyId, "await_filing", "pending", "confirmed", {
-            detail: JSON.stringify({ filingNumber, filedAt, recordedBy: operator }),
+            detail: JSON.stringify({
+              filingNumber,
+              filingDate: opts.filedAt,
+              filedAt,
+              recordedBy: operator,
+            }),
             error: null,
           }) &&
           s.requests.transition(companyId, "fetch_documents", "pending", "confirmed", {
@@ -681,15 +732,18 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
           "formationFiled",
           JSON.stringify({ providerRef, filingNumber, filedAt, environment: company.environment }),
         );
+        // The filer's own erase and its audit line (`persistRefAndEraseSsn`), in this transaction.
+        eraseSsnLogged(s.parties, companyId, "provider_persisted", company.environment);
         // Last: see `recordDaoSupplement`.
         docStore.putBytes(path, bytes);
-        return { written: true as const, matched };
+        return { written: true as const, ...facts };
       })
       .immediate();
 
     const advice = [
       ...(found.matched ? [] : [NO_STORED_OPTION]),
       ...(hasEntityEnding(legalNameFiled) ? [] : [NO_ENTITY_ENDING]),
+      ...(found.filedBeforeCreated ? [FILED_BEFORE_CREATED] : []),
     ];
     const warnings = advice.length === 0 ? {} : { warnings: advice };
     if (!found.written) {
@@ -703,10 +757,12 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
       });
       return;
     }
-    // Never the name, the number or a path: ids, a boolean and the operator only.
+    // Never the name, the number or a path: ids, booleans and the operator only. `frozenCreate`
+    // marks a record made over a create doola may have held, on the operator's confirmation.
     opsLog("formation_recorded_filed", {
       companyId,
       matched: found.matched,
+      ...(found.frozenCreate ? { frozenCreate: true } : {}),
       operator,
       operatorOsUser,
     });
@@ -727,11 +783,19 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
 }
 
 /**
- * The `await_ein` row `formation:record-ein` confirms, or a refusal: `pending` under a `manual:`
- * ref, which only `formation:record-filed` writes. A company doola filed through the API has its
- * EIN read by the processor (`advanceEin`), never recorded by hand.
+ * What `formation:record-ein` does with the company's `await_ein` row, or a refusal. The row is
+ * under a `manual:` ref, which only `formation:record-filed` writes: a company doola filed through
+ * the API has its EIN read by the processor (`advanceEin`), never recorded by hand.
+ *  - `confirm`: the row is `pending`; it is confirmed, with the EIN when `--ein` gives one;
+ *  - `add`: the row was confirmed without a value and the company holds no EIN; `--ein` stores it.
+ * A company that already holds an EIN takes no second one, whatever its value.
  */
-function einRecordable(companyId: string, steps: FormationRequestRecord[]): FormationRequestRecord {
+function einRecordable(
+  company: CompanyRecord,
+  steps: FormationRequestRecord[],
+  ein: string | null,
+): { row: FormationRequestRecord; act: "confirm" | "add" } {
+  const { companyId } = company;
   const row = steps.find((r) => r.step === "await_ein");
   if (row === undefined || !isManualRef(row.providerRef)) {
     const ref = providerRefOf(steps);
@@ -741,8 +805,15 @@ function einRecordable(companyId: string, steps: FormationRequestRecord[]): Form
       `company ${companyId} has no filing recorded by hand: formation:record-filed records it first`,
     );
   }
-  if (row.state === "confirmed")
-    refuse(`the EIN step of company ${companyId} is already recorded (await_ein is confirmed)`);
+  if (ein !== null && company.ein !== null)
+    refuse(`company ${companyId} already holds an EIN: nothing to record`);
+  if (row.state === "confirmed") {
+    if (ein === null)
+      refuse(
+        `the EIN step of company ${companyId} is already recorded (await_ein is confirmed): pass --ein to store the EIN it lacks`,
+      );
+    return { row, act: "add" };
+  }
   if (row.state !== "pending")
     refuse(
       `the await_ein step of company ${companyId} is ${row.state}, not pending: find out why before recording`,
@@ -752,7 +823,7 @@ function einRecordable(companyId: string, steps: FormationRequestRecord[]): Form
     refuse(
       `the State's filing of company ${companyId} is not confirmed yet (await_filing is ${stepStateOf(steps, "await_filing") ?? "missing"})`,
     );
-  return row;
+  return { row, act: "confirm" };
 }
 
 interface RecordEinOptions {
@@ -766,8 +837,10 @@ interface RecordEinOptions {
  * immediate transaction: `await_ein` confirmed with `{ recordedBy, observedAt }` (`observedAt` in
  * unix ms, as the processor writes it), the EIN on the company through `recordEin` when `--ein`
  * gives it (the processor's writer; without it, the step is confirmed with no value), and the
- * `formationEin` event as the processor records it, which carries no EIN. No line it prints
- * carries the EIN either: the output and the ops line say only whether one was stored.
+ * `formationEin` event as the processor records it, which carries no EIN. A step confirmed without
+ * a value takes the EIN later, once: the EIN alone is written, and the step and its event stay as
+ * they were. No line it prints carries the EIN: the output and the ops line say only whether one
+ * was stored.
  */
 function recordEin(companyId: string, opts: RecordEinOptions): void {
   const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
@@ -782,8 +855,14 @@ function recordEin(companyId: string, opts: RecordEinOptions): void {
     const written = db
       .transaction(() => {
         const company = paidLegalBodyCompany(s, companyId);
-        const row = einRecordable(companyId, s.requests.stepsOf(companyId));
+        const { row, act } = einRecordable(company, s.requests.stepsOf(companyId), ein);
         if (opts.yes !== true) return false;
+        if (act === "add") {
+          // Unreachable when false: the company held no EIN, in this transaction.
+          if (ein === null || !s.companies.recordEin(companyId, ein))
+            throw new Error(`company ${companyId}: the EIN did not change`);
+          return true;
+        }
         const moved = s.requests.transition(companyId, "await_ein", "pending", "confirmed", {
           detail: JSON.stringify({
             ...parseDetail<Record<string, unknown>>(row.detail),
@@ -879,6 +958,10 @@ export function registerFormedCompanyCommands(program: Command): void {
       "the Articles of Organization doola sent, at most 10 MiB",
     )
     .requiredOption("--operator <name>", `who records: ${OPERATOR_NAME.source}`)
+    .option(
+      "--doola-confirmed-no-company",
+      "doola confirmed it holds no company for this company's customer, after a create whose answer was lost",
+    )
     .option("--yes", "confirm: record the filing")
     .action((companyId: string, opts: RecordFiledOptions) => recordFiled(companyId, opts));
 
@@ -888,7 +971,10 @@ export function registerFormedCompanyCommands(program: Command): void {
     .description(
       "confirm the EIN step of a company recorded by hand, when the IRS letter arrives; with --ein, store the EIN as the processor stores one",
     )
-    .option("--ein <NN-NNNNNNN>", "the EIN on the IRS letter; without it, no value is stored")
+    .option(
+      "--ein <NN-NNNNNNN>",
+      "the EIN on the IRS letter; without it, no value is stored, and a later run with it stores it once",
+    )
     .requiredOption("--operator <name>", `who records: ${OPERATOR_NAME.source}`)
     .option("--yes", "confirm: record the EIN step")
     .action((companyId: string, opts: RecordEinOptions) => recordEin(companyId, opts));

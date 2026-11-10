@@ -18,6 +18,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { signSession } from "../../src/auth/session";
 import { companyNameOptions } from "../../src/formation/intake";
+import { formationSummary } from "../../src/formation/status";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
@@ -274,6 +275,32 @@ test("the page carries the documents, the attached agents and the open required 
   // the responsible party.
   expect(body.requiredActions).toEqual(["FORMATION_NAME_OPTIONS_EXHAUSTED"]);
   expect(JSON.stringify(body)).not.toContain("Ada Lovelace");
+});
+
+test("a filing recorded by hand serves no provider ref: the operator's manual: handle stays internal, here and in the formation summary", async () => {
+  const id = newCompany({ purposeKind: "legal_body" });
+  requests.claimAllSteps(id);
+  requests.transition(id, "create_provider", "pending", "confirmed", {
+    providerRef: "manual:ops.example",
+  });
+  requests.transition(id, "await_filing", "pending", "confirmed");
+  requests.transition(id, "await_ein", "pending", "pending", {
+    providerRef: "manual:ops.example",
+    touchFacts: false,
+  });
+  const body = await detail(id);
+  expect(body.providerRef).toBeNull();
+  expect(body.formationStatus).toBe("filed");
+  expect(JSON.stringify(body)).not.toContain("ops.example");
+
+  // The summary every entity surface spreads, the public ones included.
+  const company = companies.find(id)!;
+  expect(formationSummary(company, requests.stepsOf(id))?.providerRef).toBeNull();
+  // doola's own id is served as ever.
+  const api = newCompany();
+  requests.claimAllSteps(api);
+  requests.transition(api, "create_provider", "pending", "confirmed", { providerRef: "cmp-7" });
+  expect(formationSummary(companies.find(api)!, requests.stepsOf(api))?.providerRef).toBe("cmp-7");
 });
 
 test("NO PII: a bound party's identity is nowhere in the response", async () => {

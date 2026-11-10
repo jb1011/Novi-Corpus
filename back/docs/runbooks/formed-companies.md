@@ -160,6 +160,7 @@ Organization. Copy every value from the State's record, not from an email.
 | `a create is being sent to doola: wait for it` | The saga is sending the create now. Run the command again in a few minutes. |
 | `the API filed this company: nothing to record` | `create_provider` is confirmed: the API created it at doola, and the saga follows it. |
 | `doola holds a company for company <id> (create_provider has a provider ref): ...` | A create returned a company id. The saga adopts it. |
+| `a create went out to doola for company <id> and its answer was lost: doola may hold the company. ...` | A create was sent under a key that is still live and its answer never came back (an outage), or the row's detail cannot be read. Ask doola whether it holds a company for this company's customer. If it does, do not record: the saga's next retry re-sends the same key and doola answers with that company, or its lookup by the customer finds it, and the saga adopts it. If doola confirms it holds none, run again with `--doola-confirmed-no-company`; the ops line then carries `frozenCreate: true`. Record soon after: until the record lands, the saga keeps retrying that create. |
 | `the filing of company <id> is already recorded by <operator>` | A record exists. Nothing is written twice. |
 | `the <step> step of company <id> is <state>, not pending: ...` | A shape no filing leaves. Tell the backend owner. |
 
@@ -167,9 +168,11 @@ Organization. Copy every value from the State's record, not from an email.
 
 - `--filing-number`: the agreement's filing-number rule (4 to 32 of A-Z, a-z, 0-9 and hyphens). A
   space at an end is refused.
-- `--filed-at`: a real calendar date written `YYYY-MM-DD` (2026-02-30 is refused), not after
-  today's date in UTC. It is stored as unix seconds at UTC midnight, as the processor stores
-  doola's filing date.
+- `--filed-at`: a real calendar date written `YYYY-MM-DD` (2026-02-30 is refused), not before
+  1970-01-01 and not after today's date in UTC. It is stored as unix seconds at UTC midnight, as
+  the processor stores doola's filing date. A date before the day the company was created at
+  Novi is written, with the warning `the filing date is before the company was created at Novi`:
+  doola may file before Novi's row exists, but check it against the State's record.
 - `--legal-name`: the full legal name, stored exactly as typed. It is held to the company-name
   rule of `company:filed-name`, with the same two warnings (`matches no stored option`,
   `no entity ending`). Neither refuses: the State's record is the truth.
@@ -181,12 +184,13 @@ Organization. Copy every value from the State's record, not from an email.
 | Row | An API filing (the processor) | `formation:record-filed` |
 | --- | --- | --- |
 | `create_provider` | `confirmed`, ref = doola's company id | `confirmed`, ref = `manual:<operator>`, detail `{ recordedBy, recordedAt }` |
-| `await_filing` | `confirmed`, detail with doola's `filingNumber` and `filingDate` | `confirmed`, detail `{ filingNumber, filedAt, recordedBy }` |
+| `await_filing` | `confirmed`, detail with doola's `filingNumber` and `filingDate` | `confirmed`, detail `{ filingNumber, filingDate, filedAt, recordedBy }` |
 | `fetch_documents` | `confirmed` once the Articles and the operating agreement are stored | `confirmed`, detail `{ recordedBy, docIds }`: the Articles are the documents |
 | `await_ein` | `pending`, polled | `pending`, ref = `manual:<operator>`, never polled |
 | `companies` | `filed_at`, `filing_number`, `legal_name_filed`; `status` stays `ready` | the same three, from the command's values; `status` stays `ready` |
 | `documents` | doola's documents, `source = provider` | the Articles, `doc_type = ArticlesOfOrganization`, `source = operator` |
 | event `formationFiled` | on every attached entity | the same; a legal-body company has none |
+| the party's SSN | erased (`provider_persisted`) when doola's company id lands | erased the same way, in the same transaction |
 
 A test files one company through the sandbox and the processor and records another with the same
 name, number and date, and compares these rows (`test/cli/recordFiled.test.ts`). The order door
@@ -194,8 +198,15 @@ takes both alike, and both agreements print the same name and number.
 
 **Output.** One JSON object: the recorded values, `matched`, any `warnings`, the document's id,
 hash and size, and `next: "formation:record-ein when the IRS letter arrives"`. One ops line
-`formation_recorded_filed` carries the company id, `matched`, the operator and the OS user. Never
-the name, the number or the path.
+`formation_recorded_filed` carries the company id, `matched`, `frozenCreate: true` when
+`--doola-confirmed-no-company` let it through, the operator and the OS user. Never the name, the
+number or the path. When the party held an SSN, the erasure's own line `formation_ssn_erased`
+(company, reason, environment) comes before it.
+
+**Afterwards.** Nothing asks doola about the company: the saga skips it, and its compliance page
+answers at once with no events and `recordedByHand: true` (the annual-report placeholder stays).
+The operator's handle in the `manual:` ref is internal: every view serves the provider ref as
+null.
 
 No email is sent yet. The filing email for this path comes in a later change.
 
@@ -219,14 +230,16 @@ warning.
 | --- | --- |
 | `the API tracks this company's EIN: nothing to record` | doola filed it through the API. The processor reads the EIN. |
 | `company <id> has no filing recorded by hand: ...` | Run `formation:record-filed` first. |
-| `the EIN step of company <id> is already recorded (await_ein is confirmed)` | Done already. |
+| `company <id> already holds an EIN: nothing to record` | An EIN is stored. A second one is refused, whatever its value. |
+| `the EIN step of company <id> is already recorded (await_ein is confirmed): pass --ein to store the EIN it lacks` | The step was confirmed without a value. Run again with `--ein` to store it. |
 | `--ein must be written NN-NNNNNNN: ...` | Two digits, a hyphen and seven digits. |
 
 **What it writes**, in one transaction:
 
 - `await_ein` `confirmed`, detail `{ recordedBy, observedAt }`;
 - with `--ein`, the EIN on the company (`companies.ein`), as the processor stores one. Without it,
-  the step is confirmed and no value is stored;
+  the step is confirmed and no value is stored. A later run with `--ein` stores it, once: only the
+  EIN is written, and the step stays as the first run confirmed it;
 - the `formationEin` event, as the processor writes it, without the EIN.
 
 A legal body's statement for the company then reads `einIssued: true`. The output and the ops line

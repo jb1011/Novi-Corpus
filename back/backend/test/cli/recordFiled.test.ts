@@ -25,6 +25,7 @@ import type { LegalBodyChainPort } from "../../src/adapters/arc/legalBodyChain";
 import { buildCli } from "../../src/cli/index";
 import { syntheticFormationParty } from "../../src/formation";
 import { companyNameOptions } from "../../src/formation/intake";
+import { encryptSsn, parsePiiKey } from "../../src/formation/pii";
 import { companyFiled, einIssued, providerRefOf } from "../../src/formation/status";
 import { agreementDocNames } from "../../src/legalBody/agreement";
 import { type LegalBodyOrderDeps, createOrder } from "../../src/legalBody/orders";
@@ -64,8 +65,17 @@ const MANUAL_REF = `manual:${OPERATOR}`;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** The injected clock the sandbox playground files company A on: a day before any real today. */
 const FILING_CLOCK = Date.parse("2026-11-02T12:00:00Z");
+/** When every fixture company row was created (SQLite UTC text): before every filing date typed. */
+const CREATED_AT = "2026-10-30 09:00:00";
 const STEPS: FormationStep[] = ["create_provider", "await_filing", "fetch_documents", "await_ein"];
 
+/** A test key for the SSN ring: never a deployment's. */
+const RING = { current: parsePiiKey(Buffer.alloc(32, 7).toString("base64"), "FORMATION_PII_KEY") };
+/** The refusal of a create that may exist at doola, for one company. */
+const mayHoldCompany = (companyId: string) =>
+  `refusing: a create went out to doola for company ${companyId} and its answer was lost: doola may hold the company. Ask doola whether it holds one for this company's customer. If it does, do not record: the saga's next retry re-sends the same key and doola answers with that company, or its lookup by the customer finds it, and the saga adopts it. If doola confirms it holds none, run again with --doola-confirmed-no-company`;
+const FILED_BEFORE_CREATED =
+  "the filing date is before the company was created at Novi: check it against the State's record";
 const NO_STORED_OPTION = /^matches no stored option/;
 const NO_ENTITY_ENDING =
   "no entity ending (LLC, L.L.C., Limited Liability Company): the State's record of an LLC carries its ending; check the name";
@@ -135,6 +145,9 @@ function paidCompany(
     nameOptions: companyNameOptions(...(opts.names ?? ["Lantern Works", "Lantern Works Two"])),
     businessPurpose: "Software services.",
   });
+  // Created before every filing date the fixtures type, so none of them warns that the filing
+  // predates the company; the test of that warning moves this stamp itself.
+  db.prepare("UPDATE companies SET created_at = ? WHERE company_id = ?").run(CREATED_AT, companyId);
   const party = opts.party ?? "bound";
   if (party !== "none") {
     const partyId = parties.create({
@@ -364,19 +377,24 @@ describe("formation:record-filed, against the saga's own rows", () => {
       "confirmed",
       "pending",
     ]);
-    // The filing's facts in await_filing's detail: the same number, the same date. The processor
-    // keeps doola's date as it read it (`filingDate`, yyyy-MM-dd) and the record keeps it in the
-    // unix seconds `filed_at` holds, so the two are compared as the one date they are.
+    // The filing's facts in await_filing's detail: the same number and the same date, in the
+    // processor's own `AwaitFilingDetail` keys (`filingDate`, yyyy-MM-dd), and the date again in
+    // the unix seconds `filed_at` holds.
     const detailA = parseDetail<{ filingNumber?: string; filingDate?: string }>(
       rowOf(a, "await_filing")!.detail,
     );
-    const detailB = parseDetail<{ filingNumber?: string; filedAt?: number; recordedBy?: string }>(
-      rowOf(b, "await_filing")!.detail,
-    );
+    const detailB = parseDetail<{
+      filingNumber?: string;
+      filingDate?: string;
+      filedAt?: number;
+      recordedBy?: string;
+    }>(rowOf(b, "await_filing")!.detail);
     expect(detailB.filingNumber).toBe(detailA.filingNumber);
+    expect(detailB.filingDate).toBe(detailA.filingDate);
     expect(detailB.filedAt).toBe(filingDateToUnix(detailA.filingDate));
     expect(detailB).toEqual({
       filingNumber: "PLAYGROUND-FILING",
+      filingDate: "2026-11-02",
       filedAt: filedA.filedAt,
       recordedBy: OPERATOR,
     });
@@ -590,6 +608,106 @@ describe("formation:record-filed", () => {
     expect(companyFiled(requests.stepsOf(companyId))).toBe(true);
   });
 
+  test("a create that went out to doola with its answer lost, or whose detail cannot be read, is refused, writing nothing, until doola confirms it holds no company", async () => {
+    // The body went out under the attempt's key and the answer was lost: a failure that never
+    // burns the attempt (an outage), so the next retry re-sends the same key.
+    const sent = paidCompany();
+    requests.claimAllSteps(sent);
+    const attempt = rowOf(sent, "create_provider")!.attempt;
+    expect(
+      requests.transition(sent, "create_provider", "pending", "failed", {
+        detail: JSON.stringify({ customerId: "cus-1", companySentAttempt: attempt }),
+        error: "doola did not answer",
+      }),
+    ).toBe(true);
+    // A detail that is not JSON proves nothing either way, so it reads as sent.
+    const unreadable = paidCompany();
+    requests.claimAllSteps(unreadable);
+    expect(
+      requests.transition(unreadable, "create_provider", "pending", "pending", {
+        detail: "{not json",
+      }),
+    ).toBe(true);
+
+    for (const companyId of [sent, unreadable]) {
+      const before = writtenFor(companyId);
+      for (const more of [["--yes"], []])
+        expect(await refusal(recordFiledArgs(companyId, {}, ...more)), companyId).toBe(
+          mayHoldCompany(companyId),
+        );
+      expect(writtenFor(companyId)).toEqual(before);
+    }
+
+    // doola confirmed it holds none: recorded, and the ops line says the create was one that
+    // went out.
+    const { ops } = await run(recordFiledArgs(sent, {}, "--doola-confirmed-no-company", "--yes"));
+    expect(rowOf(sent, "create_provider")).toMatchObject({
+      state: "confirmed",
+      providerRef: MANUAL_REF,
+      error: null,
+    });
+    expect(companyFiled(requests.stepsOf(sent))).toBe(true);
+    expect(ops).toEqual([
+      {
+        opslog: "formation_recorded_filed",
+        at: expect.any(String),
+        companyId: sent,
+        matched: true,
+        frozenCreate: true,
+        operator: OPERATOR,
+        operatorOsUser: OS_USER,
+      },
+    ]);
+    await run(recordFiledArgs(unreadable, {}, "--doola-confirmed-no-company", "--yes"));
+    expect(companyFiled(requests.stepsOf(unreadable))).toBe(true);
+
+    // A create doola refused burned its attempt, so its key is not live: no flag needed, and the
+    // line carries no frozenCreate.
+    const refused = paidCompany();
+    requests.claimAllSteps(refused);
+    expect(
+      requests.transition(refused, "create_provider", "pending", "failed", {
+        detail: JSON.stringify({ companySentAttempt: attempt - 1 }),
+      }),
+    ).toBe(true);
+    const plain = await run(recordFiledArgs(refused, {}, "--yes"));
+    expect(plain.ops).toHaveLength(1);
+    expect(plain.ops[0]).not.toHaveProperty("frozenCreate");
+  });
+
+  test("the party's SSN is erased in the record's own transaction, as the API path erases it when doola's company id lands; the dry run keeps it", async () => {
+    const companyId = paidCompany();
+    const party = parties.findByCompanyId(companyId)!;
+    expect(
+      parties.storeSsn(
+        party.partyId,
+        companyId,
+        encryptSsn(RING, "123-45-6789", { partyId: party.partyId, companyId }),
+      ),
+    ).toBe(true);
+    await run(recordFiledArgs(companyId, {}));
+    expect(parties.ssnState(companyId)).toMatchObject({ hasSsn: true });
+
+    const { ops } = await run(recordFiledArgs(companyId, {}, "--yes"));
+    expect(parties.ssnState(companyId)).toEqual({
+      hasSsn: false,
+      ssnErasedReason: "provider_persisted",
+    });
+    expect(parties.findSsnByCompanyId(companyId)).toBeUndefined();
+    // The erasure's own audit line, the company, the reason and the environment only, then the
+    // record's.
+    expect(ops).toEqual([
+      {
+        opslog: "formation_ssn_erased",
+        at: expect.any(String),
+        companyId,
+        reason: "provider_persisted",
+        environment: "sandbox",
+      },
+      expect.objectContaining({ opslog: "formation_recorded_filed", companyId }),
+    ]);
+  });
+
   test("a create being sent, a create doola answered, and an abandoned or partial filing are refused, writing nothing", async () => {
     const submitted = paidCompany();
     requests.claimAllSteps(submitted);
@@ -677,6 +795,15 @@ describe("formation:record-filed", () => {
         "2026-11-11",
         "refusing: --filed-at is after today's date in UTC (2026-11-10): the State cannot have filed the company yet",
       ],
+      // A calendar date, but before the unix epoch: no filing of a company Novi forms.
+      [
+        "1969-12-31",
+        "refusing: --filed-at is before 1970-01-01: check it against the State's record",
+      ],
+      [
+        "0001-01-01",
+        "refusing: --filed-at is before 1970-01-01: check it against the State's record",
+      ],
     ];
     for (const [date, expected] of cases) {
       expect(await refusal(recordFiledArgs(companyId, { date }, "--yes")), date).toBe(expected);
@@ -687,6 +814,43 @@ describe("formation:record-filed", () => {
     );
     expect(output.filedAt).toBe(Date.parse("2026-11-10T00:00:00Z") / 1000);
     expect(companies.find(companyId)?.filedAt).toBe(output.filedAt);
+  });
+
+  test("a filing date before the company row was created is written, with a warning in the dry run and the write; the creation day itself is not warned", async () => {
+    const companyId = paidCompany();
+    db.prepare("UPDATE companies SET created_at = ? WHERE company_id = ?").run(
+      "2026-11-03 18:30:00",
+      companyId,
+    );
+    const { output: dry } = await run<{ warnings?: string[] }>(
+      recordFiledArgs(companyId, { date: "2026-11-02" }),
+    );
+    expect(dry.warnings).toEqual([FILED_BEFORE_CREATED]);
+    const { output } = await run<FiledRecorded>(
+      recordFiledArgs(companyId, { date: "2026-11-02" }, "--yes"),
+    );
+    expect(output.warnings).toEqual([FILED_BEFORE_CREATED]);
+    expect(companies.find(companyId)?.filedAt).toBe(filingDateToUnix("2026-11-02"));
+
+    // Its warning comes after the name's.
+    const other = paidCompany();
+    db.prepare("UPDATE companies SET created_at = ? WHERE company_id = ?").run(
+      "2026-11-03 18:30:00",
+      other,
+    );
+    const { output: all } = await run<{ warnings?: string[] }>(
+      recordFiledArgs(other, { date: "2026-11-02", name: "Lantern Labs" }),
+    );
+    expect(all.warnings).toEqual([
+      expect.stringMatching(NO_STORED_OPTION),
+      NO_ENTITY_ENDING,
+      FILED_BEFORE_CREATED,
+    ]);
+    // Filed on the day the row was created: no warning.
+    const { output: sameDay } = await run<{ warnings?: string[] }>(
+      recordFiledArgs(other, { date: "2026-11-03" }),
+    );
+    expect(sameDay.warnings).toBeUndefined();
   });
 
   test("--filing-number is held to the agreement's filing-number rule, refused and never cleaned", async () => {
@@ -812,10 +976,63 @@ describe("formation:record-ein", () => {
     // A legal-body company has no entity, so the `formationEin` event reaches none.
     expect(entityEventCount()).toBe(0);
 
-    // A second time: already recorded.
-    expect(await refusal(recordEinArgs(b, "--ein", "12-3456789", "--yes"))).toBe(
-      `refusing: the EIN step of company ${b} is already recorded (await_ein is confirmed)`,
+    // A second EIN on a company that holds one: refused, whatever its value.
+    for (const ein of ["12-3456789", "98-7654321"])
+      expect(await refusal(recordEinArgs(b, "--ein", ein, "--yes")), ein).toBe(
+        `refusing: company ${b} already holds an EIN: nothing to record`,
+      );
+    expect(companies.find(b)?.ein).toBe("12-3456789");
+  });
+
+  test("an EIN step confirmed without a value takes the EIN later, once; without --ein a second run is refused", async () => {
+    const b = paidCompany();
+    await run(recordFiledArgs(b, {}, "--yes"));
+    await run(recordEinArgs(b, "--yes"));
+    const confirmed = rowOf(b, "await_ein");
+    expect(confirmed?.state).toBe("confirmed");
+    expect(companies.find(b)?.ein).toBeNull();
+
+    expect(await refusal(recordEinArgs(b, "--yes"))).toBe(
+      `refusing: the EIN step of company ${b} is already recorded (await_ein is confirmed): pass --ein to store the EIN it lacks`,
     );
+
+    // The dry run of the addition writes nothing.
+    const { output: dry, ops: dryOps } = await run<Record<string, unknown>>(
+      recordEinArgs(b, "--ein", "12-3456789"),
+    );
+    expect(dry).toMatchObject({ recorded: false, wouldRecord: { withValue: true } });
+    expect(dryOps).toEqual([]);
+    expect(companies.find(b)?.ein).toBeNull();
+
+    const { output, ops, lines } = await run<Record<string, unknown>>(
+      recordEinArgs(b, "--ein", "12-3456789", "--yes"),
+    );
+    expect(output).toEqual({
+      recorded: true,
+      companyId: b,
+      withValue: true,
+      operator: OPERATOR,
+      operatorOsUser: OS_USER,
+    });
+    expect(ops).toEqual([
+      {
+        opslog: "formation_recorded_ein",
+        at: expect.any(String),
+        companyId: b,
+        withValue: true,
+        operator: OPERATOR,
+        operatorOsUser: OS_USER,
+      },
+    ]);
+    for (const line of lines) expect(line).not.toContain("3456789");
+    expect(companies.find(b)?.ein).toBe("12-3456789");
+    // The step itself stays as the first run confirmed it.
+    expect(rowOf(b, "await_ein")).toEqual(confirmed);
+
+    expect(await refusal(recordEinArgs(b, "--ein", "98-7654321", "--yes"))).toBe(
+      `refusing: company ${b} already holds an EIN: nothing to record`,
+    );
+    expect(companies.find(b)?.ein).toBe("12-3456789");
   });
 
   test("without --ein: the step is confirmed with no value stored; the dry run writes nothing", async () => {

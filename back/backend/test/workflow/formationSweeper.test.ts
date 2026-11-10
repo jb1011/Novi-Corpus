@@ -859,6 +859,7 @@ function seedManualFiling() {
   requests.transition(COMPANY_KEY, "await_filing", "pending", "confirmed", {
     detail: JSON.stringify({
       filingNumber: "2026-001234567",
+      filingDate: "2026-08-19",
       filedAt: Date.parse("2026-08-19T00:00:00Z") / 1000,
       recordedBy: "ops-a",
     }),
@@ -906,6 +907,32 @@ test("the poll skips a manual: company even when the due-set hands it over", asy
   await sweeper().tick();
   expect(doola.calls).toEqual([]);
   expect(rowOf("await_ein")).toMatchObject({ state: "pending", nextPollAt: null });
+});
+
+test("advanceFormation itself never asks doola about a manual: company, whoever calls it", async () => {
+  // Defence in depth behind the sweeper's guards: a webhook wake-up or any other caller that
+  // reaches the processor for this company is answered without a provider call.
+  seedManualFiling();
+  const before = requests.stepsOf(COMPANY_KEY);
+  const outcome = await advanceFormation(
+    {
+      repo,
+      companies,
+      requests,
+      documents,
+      docStore,
+      doola: doola.api,
+      environment: "sandbox",
+      fetchImpl: doola.fetchImpl,
+      lookupImpl: doola.lookupImpl,
+      now: () => now,
+    },
+    COMPANY_KEY,
+    { requiredActions: true },
+  );
+  expect(outcome).toEqual({ fetched: false, advanced: false, skipped: "manual_record" });
+  expect(doola.calls).toEqual([]);
+  expect(requests.stepsOf(COMPANY_KEY)).toEqual(before);
 });
 
 test("a manual: company is never completed by the sandbox playground", async () => {
