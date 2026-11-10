@@ -56,10 +56,7 @@ function filingStarted(steps: FormationRequestRecord[]): boolean {
  * there to be refunded: no tenant, no name, no address.
  */
 export function abandonFormedCompany(
-  deps: Pick<
-    CreateCompanyDeps,
-    "companies" | "parties" | "requests" | "payment" | "transaction" | "now"
-  >,
+  deps: Pick<CreateCompanyDeps, "companies" | "parties" | "requests" | "payment" | "transaction">,
   tenantId: string,
   companyId: string,
 ): void {

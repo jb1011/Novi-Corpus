@@ -74,14 +74,13 @@ type AbandonDeps = Parameters<typeof abandonFormedCompany>[0];
 function deps(over: Partial<AbandonDeps> = {}): AbandonDeps {
   const base: Pick<
     CreateCompanyDeps,
-    "companies" | "parties" | "requests" | "payment" | "transaction" | "now"
+    "companies" | "parties" | "requests" | "payment" | "transaction"
   > = {
     companies,
     parties,
     requests,
     payment,
     transaction: (fn) => db.transaction(fn)(),
-    now: () => NOW,
   };
   return { ...base, ...over };
 }

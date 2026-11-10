@@ -1018,8 +1018,13 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         inputSchema: {
           /** The sandbox shortcut: no personal data at all. */
           synthetic: z.boolean().optional(),
-          legalFirstName: z.string().optional(),
-          legalLastName: z.string().optional(),
+          /**
+           * Any value reaches the handler: on production a name of any value, null included, is
+           * refused by name (`refuseTypedNames`), as REST refuses it, rather than by the SDK's own
+           * validation; on a sandbox `FormationPartySchema` checks that it is a string.
+           */
+          legalFirstName: z.unknown().optional(),
+          legalLastName: z.unknown().optional(),
           email: z.string().optional(),
           /** Optional HERE only because the synthetic shortcut passes no fields at all; a real
            *  party without one is refused by `FormationPartySchema` (C6) — doola will not file
@@ -1105,11 +1110,11 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
           /**
            * ⚠ DECLARED IN ORDER TO BE REFUSED, as `ssn` is: the names are never edited here. On
            * production they are written from the guardian's identity record, and a call carrying
-           * either one answers `party_name_is_written_by_novi`; elsewhere the edit schema refuses
-           * it by name.
+           * either one, whatever its value (null included), answers `party_name_is_written_by_novi`;
+           * elsewhere the edit schema refuses it by name.
            */
-          legalFirstName: z.string().optional(),
-          legalLastName: z.string().optional(),
+          legalFirstName: z.unknown().optional(),
+          legalLastName: z.unknown().optional(),
           email: z.string(),
           /** REQUIRED, exactly as at intake (C6): doola will not file a party with no phone. */
           phone: z.string(),

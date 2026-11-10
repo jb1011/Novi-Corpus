@@ -206,6 +206,10 @@ describe("create_formation_party on production", () => {
         { legalFirstName: "Someone" },
         { legalLastName: "Else" },
         { legalFirstName: "Someone", legalLastName: "Else" },
+        // Any value, as on REST: a null or a non-string name is refused by name too, not by the
+        // SDK's own validation.
+        { legalFirstName: null },
+        { legalLastName: 7 },
       ]) {
         const res = await c.callTool({
           name: "create_formation_party",
@@ -311,17 +315,23 @@ describe("a marketing consent is never taken through a tool", () => {
 });
 
 describe("update_company_party on production", () => {
-  test("a name argument is refused with the code and its sentence, and nothing moves", async () => {
+  test("a name argument of any value, null included, is refused with the code and its sentence, and nothing moves", async () => {
     verified();
     const { companyId, partyId } = formedCompany();
-    const res = await withClient(buildTestApp(), (c) =>
-      c.callTool({
-        name: "update_company_party",
-        arguments: { companyId, ...EDIT, legalFirstName: "Someone" },
-      }),
-    );
-    expect(isError(res)).toBe(true);
-    expect(JSON.parse(textOf(res))).toEqual(NAME_REFUSAL);
+    await withClient(buildTestApp(), async (c) => {
+      for (const name of [
+        { legalFirstName: "Someone" },
+        { legalFirstName: null },
+        { legalLastName: null },
+      ]) {
+        const res = await c.callTool({
+          name: "update_company_party",
+          arguments: { companyId, ...EDIT, ...name },
+        });
+        expect(isError(res), JSON.stringify(name)).toBe(true);
+        expect(JSON.parse(textOf(res))).toEqual(NAME_REFUSAL);
+      }
+    });
     expect(parties.findOwned(TENANT, partyId)!.email).toBe(PARTY.email);
   });
 
