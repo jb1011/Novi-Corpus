@@ -9,7 +9,10 @@ Novi Corpus gives an AI agent a legal body: a company bound on chain to the agen
 identity, with a person verified with World ID (the **guardian**) who answers for it. The
 contracts are deployed on **Arc testnet** (chain 5042002) and verified on
 [explorer.testnet.arc.io](https://explorer.testnet.arc.io); they are not deployed on Arc mainnet
-yet. The code of every contract in scope is identical to what is deployed.
+yet. When this document was written, the code of every contract in scope was identical to what
+is deployed. The fixes made after the automated security scan by Olympix, arranged by Circle
+(2026-10-23), are in the tree ahead of a redeploy, so until then the deployed addresses in the
+scope table run the pre-fix code; the differences are the commits that cite the scan.
 
 ---
 
@@ -20,7 +23,7 @@ yet. The code of every contract in scope is identical to what is deployed.
 | `src/NoviController.sol` | The governed root of platform authority: a selector-allowlisted relay with an admin and an executor. | `0x9526E228E94A125843B2d010c1155780CBBAFb5c` |
 | `src/LegalManagerFactory.sol` | Creates a full-product agent: registers its ERC-8004 identity, deploys its `LegalManager` (beacon proxy) and its `AgentTreasury`, and hands the identity to the controller. Deploys the beacon in its constructor. | `0x83D529E813Fe825b84250034A7A63f460A2ECA77` (beacon `0x432ed0814FcDDd03330add098093482128Ad2CfD`) |
 | `src/LegalManager.sol` | One agent's legal body: the operating-agreement hash, timelocked amendments with a guardian veto, and dissolution. Used behind the beacon (full product) and as EIP-1167 clones (bring your own). | implementation `0xc2e89ABf562f2EB366e4dde42325af16EeF542a6` |
-| `src/AgentTreasury.sol` | One agent's USDC vault: a rolling cap, an optional allowlist, guardian safety powers, timelocked policy changes. Immutable, one per agent. | one per agent, e.g. `0x11FCfd8d6DeB1BC820f7123989fD05EdA245a973` |
+| `src/AgentTreasury.sol` | One agent's USDC vault: a per-period cap in a fixed window, an optional allowlist, guardian safety powers, timelocked policy changes. Immutable, one per agent. | one per agent, e.g. `0x11FCfd8d6DeB1BC820f7123989fD05EdA245a973` |
 | `src/LegalBodyFactory.sol` | Creates a legal body for an identity the customer owns and keeps: an immutable clone of the `LegalManager`, with no treasury, authorised by the identity owner's EIP-712 signature. | `0x069f4ADEabcBEd3ffFe2cB6Aaf9e7a66E8731456` |
 | `src/BreakGlassOneShot.sol` | A single-use helper for one admin action through the controller (grant, act and revoke in one transaction). | one instance (`0x17dfFf8963E18a731f7Ec1c74e49f9d427057Dd1`), used once on 2026-08-18 to accept the factory's ownership |
 | `src/libraries/ControllerSelectors.sol` | The selectors the executor is granted, derived from the ABIs. | (library) |
@@ -102,12 +105,14 @@ of failing). `slither.config.json` is the static-analysis configuration used bef
 7. **A raised cap applies to the current spending window at once** (the window is not reset). Spend
    within any window never exceeds the cap in effect; this is stated at `executePolicyUpdate`.
 8. **Either role of a `LegalManager` can initiate a dissolution, and after the window either can
-   sweep to an address it chooses.** The role that did not initiate can cancel at any time before
-   the body is finalized, and nothing moves until the window (the amendment delay) has passed; sweeping stays open after dissolution so late assets are never
-   stranded and a lost key does not lock them. In the full product the executor holds no grant for
-   these functions; in bring-your-own bodies the factory exposes none of them, so only the guardian
-   can initiate, sweep and finalize, and a dissolution the guardian starts cannot be cancelled by
-   anyone.
+   sweep to an address it chooses.** Either role can also cancel while the body is winding down,
+   at any time before it is finalized: the role that did not initiate vetoes the dissolution and
+   the initiator withdraws it. Nothing moves until the window (the amendment delay, between one
+   hour and 365 days) has passed. A sweep made during the window stays made after a cancel, which
+   is how a guardian recovers stray funds without finalizing. Sweeping stays open after dissolution
+   so late assets are never stranded and a lost key does not lock them. In the full product the
+   executor holds no grant for these functions. In bring-your-own bodies the factory exposes none
+   of them, so only the guardian can initiate, cancel, sweep and finalize.
 9. **A guardian veto is permanent for that hash or policy tuple** until the guardian lifts it, so a
    vetoed change cannot simply be scheduled again.
 10. **`LegalBodyFactory` is the manager of every body it creates, on purpose.** Its only power over a
@@ -137,10 +142,9 @@ of failing). `slither.config.json` is the static-analysis configuration used bef
 17. **Native value.** The controller has no `receive` and is not payable, so it never holds native
     USDC. A `LegalManager` can receive native value and sweeps it with `sweepNative`.
 
-Two code comments predate later changes: `AgentTreasury` and `LegalManagerFactory` describe the
-operator as a "non-custodial" Turnkey EOA. Today the operator may also be a Circle smart account,
-and the wallet is run by the platform; we do not describe the product as non-custodial. The
-comments are left as they are so the source keeps matching the deployed, verified code.
+Comment-only changes do not alter runtime code. `DeployLegalBodyFactory.s.sol` compares deployed
+code with the metadata stripped, so a changed comment does not trip it. The testnet treasuries were
+compiled at commit `a6ecb26`; their source differs from the current tree only in comments.
 
 ## 6. External dependencies
 

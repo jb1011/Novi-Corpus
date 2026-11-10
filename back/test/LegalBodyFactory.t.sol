@@ -785,9 +785,12 @@ contract LegalBodyFactoryAmendmentTest is LegalBodyFactoryTestBase {
         LegalManager(payable(body)).initiateDissolution();
         vm.prank(guardian);
         LegalManager(payable(body)).initiateDissolution();
-        vm.prank(guardian); // the initiator cannot cancel, and the manager (the factory) never will
+        vm.prank(novi); // novi owns the factory but is not the body's manager (the factory is)
         vm.expectRevert(LegalManager.NotAuthorized.selector);
         LegalManager(payable(body)).cancelDissolution();
+        vm.prank(guardian); // the guardian withdraws its own dissolution
+        LegalManager(payable(body)).cancelDissolution();
+        assertEq(uint8(LegalManager(payable(body)).status()), uint8(LegalManager.Status.Active));
     }
 
     function Clones_clone(address implementation_) internal returns (address) {
@@ -869,6 +872,17 @@ contract LegalBodyFactoryPredicateTest is LegalBodyFactoryTestBase {
         vm.prank(guardian);
         LegalManager(payable(body)).initiateDissolution();
         assertEq(factory.linkedLegalBody(agentId), address(0), "winding down is not linked");
+    }
+
+    function test_guardianCancelsOwnDissolutionAndLinkReturns() public {
+        _point(factory.encodePointer(body));
+        assertEq(factory.linkedLegalBody(agentId), body);
+        vm.prank(guardian);
+        LegalManager(payable(body)).initiateDissolution();
+        assertEq(factory.linkedLegalBody(agentId), address(0), "winding down is not linked");
+        vm.prank(guardian);
+        LegalManager(payable(body)).cancelDissolution();
+        assertEq(factory.linkedLegalBody(agentId), body, "a cancelled dissolution links again");
     }
 
     function test_clearedPointerUnlinks() public {

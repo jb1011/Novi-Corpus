@@ -107,6 +107,17 @@ contract LegalManagerInitTest is LegalManagerTestBase {
         );
     }
 
+    function test_rejectsDelayAboveCeiling() public {
+        _expectInitRevert(
+            LegalManager.DelayTooLong.selector, manager, guardian, lm.MAX_AMENDMENT_DELAY() + 1
+        );
+    }
+
+    function test_acceptsDelayAtCeiling() public {
+        LegalManager m = _deploy(manager, guardian, lm.MAX_AMENDMENT_DELAY(), 1, "x", 1, bytes32(0));
+        assertEq(m.amendmentDelay(), m.MAX_AMENDMENT_DELAY());
+    }
+
     function test_acceptsDelayAtFloor() public {
         LegalManager m = _deploy(manager, guardian, lm.MIN_AMENDMENT_DELAY(), 1, "x", 1, bytes32(0));
         assertEq(m.amendmentDelay(), m.MIN_AMENDMENT_DELAY());
@@ -391,12 +402,67 @@ contract LegalManagerDissolveTest is LegalManagerTestBase {
         assertEq(oa, h);
     }
 
-    function test_initiatorCannotVetoOwnDissolution() public {
+    function test_initiatorCanCancelOwnDissolution() public {
         vm.prank(guardian);
         lm.initiateDissolution();
-        vm.prank(guardian); // initiator cannot veto itself
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.DissolutionVetoed(guardian);
+        vm.prank(guardian); // the initiator withdraws its own dissolution
+        lm.cancelDissolution();
+
+        assertEq(uint8(lm.status()), uint8(LegalManager.Status.Active));
+        assertEq(lm.dissolutionInitiator(), address(0));
+        assertEq(lm.dissolutionExecutableAt(), 0);
+    }
+
+    function test_managerInitiatorCanCancelOwnDissolution() public {
+        vm.prank(manager);
+        lm.initiateDissolution();
+
+        vm.expectEmit(true, true, true, true, address(lm));
+        emit LegalManager.DissolutionVetoed(manager);
+        vm.prank(manager);
+        lm.cancelDissolution();
+
+        assertEq(uint8(lm.status()), uint8(LegalManager.Status.Active));
+        assertEq(lm.dissolutionInitiator(), address(0));
+        assertEq(lm.dissolutionExecutableAt(), 0);
+    }
+
+    function test_strangerCannotCancelDissolution() public {
+        vm.prank(guardian);
+        lm.initiateDissolution();
+        vm.prank(address(0xBAD));
         vm.expectRevert(LegalManager.NotAuthorized.selector);
         lm.cancelDissolution();
+        assertEq(uint8(lm.status()), uint8(LegalManager.Status.WindingDown));
+    }
+
+    function test_cancelAfterWindowStillReturnsToActive() public {
+        _windDown(); // guardian initiates, then the whole window elapses
+        vm.prank(guardian);
+        lm.cancelDissolution();
+        assertEq(uint8(lm.status()), uint8(LegalManager.Status.Active));
+        assertEq(lm.dissolutionInitiator(), address(0));
+        assertEq(lm.dissolutionExecutableAt(), 0);
+    }
+
+    /// Stray funds: a body can receive tokens, and the guardian recovers them without finalizing.
+    /// A sweep made during the window stays made when the dissolution is then cancelled.
+    function test_sweepThenCancelReturnsToActive() public {
+        _windDown();
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(usdc);
+        vm.prank(guardian);
+        lm.sweep(tokens, treasury);
+        vm.prank(guardian);
+        lm.cancelDissolution();
+
+        assertEq(uint8(lm.status()), uint8(LegalManager.Status.Active));
+        assertEq(lm.dissolutionExecutableAt(), 0);
+        assertEq(usdc.balanceOf(treasury), 1_000_000);
+        assertEq(usdc.balanceOf(address(lm)), 0);
     }
 
     function test_strangerCannotVeto() public {

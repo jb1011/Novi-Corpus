@@ -10,15 +10,16 @@ interface ILegalManagerStatus {
 }
 
 /// @title AgentTreasury
-/// @notice Immutable, per-agent non-custodial USDC vault. The operator (agent's Turnkey EOA) spends
-///         within a rolling per-period cap; the guardian (human) has instant safety powers + policy veto;
+/// @notice Immutable, per-agent USDC vault run by the platform. The operator (agent's Turnkey EOA) spends
+///         within a per-period cap in a fixed window that resets on the first spend after the period
+///         ends; the guardian (human) has instant safety powers + policy veto;
 ///         the manager (platform) proposes timelocked policy changes; spending halts when the agent's
 ///         LegalManager leaves Active. No upgrade key — no party can drain beyond the on-chain rules.
 contract AgentTreasury is ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     uint256 public constant MIN_POLICY_DELAY = 1 hours;
-    /// @notice Upper bound on the spending `period`. Caps the rolling window so a (malicious or
+    /// @notice Upper bound on the spending `period`. Caps the spend window so a (malicious or
     ///         mistaken) manager cannot set a period large enough to overflow `windowStart + period`
     ///         — which would brick `available()`/`spend` — or to freeze the window indefinitely.
     uint256 public constant MAX_POLICY_PERIOD = 365 days;
@@ -246,9 +247,11 @@ contract AgentTreasury is ReentrancyGuard {
         emit VetoLifted(policyId);
     }
 
-    /// @dev Applies to the IN-FLIGHT spend window: `windowStart`/`spentInWindow` are not reset here, so a
-    ///      raised cap grants the extra headroom immediately and a shortened period resets on the next spend.
-    ///      The invariant "spent within any window <= cap-in-effect" always holds (no cap bypass / drain).
+    /// @dev Applies to the IN-FLIGHT spend window: `windowStart`/`spentInWindow` are not reset here.
+    ///      A raised cap applies at once, so the extra headroom is available immediately. A shortened
+    ///      period resets the window on the next spend once it has elapsed. A lengthened period can
+    ///      revive an already-expired window until `windowStart + newPeriod`, so spending in that
+    ///      stretch counts against the old `spentInWindow` (fix deferred to the full product).
     function executePolicyUpdate(bytes32 policyId) external onlyManager {
         PendingPolicy storage pp = pendingPolicy[policyId];
         if (!pp.exists) revert NotScheduled();

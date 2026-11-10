@@ -62,10 +62,9 @@ contract Handler is Test {
         try lm.initiateDissolution() {} catch {}
     }
 
-    function cancel() external {
-        // veto must come from the role that did NOT initiate
-        address nonInitiator = lm.dissolutionInitiator() == manager ? guardian : manager;
-        vm.prank(nonInitiator);
+    function cancel(uint256 who) external {
+        // either authorized role may cancel: the initiator withdraws, the other role vetoes
+        vm.prank(who % 2 == 0 ? manager : guardian);
         try lm.cancelDissolution() {} catch {}
     }
 
@@ -148,6 +147,19 @@ contract LegalManagerInvariantTest is StdInvariant, Test {
     /// (no arbitrary writes bypassing the schedule/timelock path).
     function invariant_operatingAgreementIsKnown() public view {
         assertTrue(handler.known(handler.currentOA()));
+    }
+
+    /// The dissolution fields always agree with the status: both are cleared while Active and
+    /// both are set while WindingDown, so a cancel can never leave a stale initiator or deadline.
+    function invariant_dissolutionFieldsMatchStatus() public view {
+        LegalManager.Status st = lm.status();
+        if (st == LegalManager.Status.Active) {
+            assertEq(lm.dissolutionInitiator(), address(0));
+            assertEq(lm.dissolutionExecutableAt(), 0);
+        } else if (st == LegalManager.Status.WindingDown) {
+            assertTrue(lm.dissolutionInitiator() != address(0));
+            assertTrue(lm.dissolutionExecutableAt() != 0);
+        }
     }
 
     /// Once dissolved, the operating-agreement hash is frozen.
