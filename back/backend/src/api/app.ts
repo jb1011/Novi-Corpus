@@ -265,14 +265,6 @@ export interface ApiDeps extends EntityViewDeps {
      * DEFAULT_FORMATION_FILING_WORKING_DAYS, the setting's own default.
      */
     filingWorkingDays?: number;
-    /**
-     * FORMATION_MAX_TOTAL: how many formed legal-body companies this deployment takes in all
-     * (`countChargeableFormedLegalBodies`), on production only. `/config.legalBodies.formedDoor`
-     * reads it through `formedCapReached`, the rule the create door applies with
-     * `companyDeps.maxTotal`; the composition root passes the one setting to both. Absent, nothing
-     * caps the formed door, and `formedDoor` never reads `cap_reached`.
-     */
-    maxTotal?: number;
   };
 
   /**
@@ -441,8 +433,9 @@ type FormedDoorDeps = Pick<ApiDeps, "formation" | "identity" | "invites">;
  * texts approved, the guardian identity record wired, invite codes required, and the formed
  * legal-body companies below the total cap (World is a boot invariant of production formation).
  * It reads `cap_reached` when the cap is the only gate that fails, and `hidden` otherwise. The
- * cap is `formedCapReached`, the rule `createCompany` refuses by, read last and only under
- * production: a sandbox is never capped.
+ * cap is `formedCapReached` over the create door's own deps (`companyDeps.companies` and
+ * `companyDeps.maxTotal`, FORMATION_MAX_TOTAL), the rule and the figure `createCompany` refuses
+ * by, read last and only under production: a sandbox is never capped.
  */
 function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production"): FormedDoor {
   const formation = deps.formation;
@@ -457,9 +450,8 @@ function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production
     deps.identity !== undefined &&
     deps.invites?.required === true;
   if (!gated) return "hidden";
-  return formedCapReached(formation.companies, formation.maxTotal, door)
-    ? "cap_reached"
-    : "offered";
+  const create = formation.companyDeps;
+  return formedCapReached(create.companies, create.maxTotal, door) ? "cap_reached" : "offered";
 }
 
 /** The `/config.legalBodies` answer of these deps. */

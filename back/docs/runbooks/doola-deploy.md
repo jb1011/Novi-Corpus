@@ -234,6 +234,21 @@ Since A1 the two count different things, on purpose:
   including FAILED ones, deliberately: a create that failed after doola committed has already cost
   a real company and a real fee.
 
+`FORMATION_MAX_TOTAL` (default 10, a whole number from 1) is the formed door's lifetime cap: how
+many formed legal-body companies (`POST /companies` with `for: "legal_body"`) the deployment takes
+in all, over every tenant. It applies **on production only**: a box where both doola's pin and the
+network are sandbox forms demo companies without a limit. It counts companies with provider doola and
+purpose `legal_body` that are `ready`, plus drafts with a live quote (`quoted` or `settling`). A
+draft nobody pays for and an `abandoned` company take no place, so abandoning one frees it.
+Companies for agents are never counted. A create past the cap answers 409
+`formation_cap_reached`, and `/config.legalBodies.formedDoor` reads `cap_reached` (when every
+other gate of the door holds). Both read the same figure from the create door's deps. The cap is
+checked after the per-tenant quota and again inside the mint transaction, so two people creating
+at once cannot both take the last place. Each refusal writes one ops line,
+`formation_cap_reached`, with `level: "warn"`, `check` (`count` or `mint`, the check that
+refused), `maxTotal` and `counted`, and no tenant or name. The mainnet box's figure is set when
+the box is configured.
+
 `FORMATION_MAX_AGENTS_PER_COMPANY` (default 10) bounds how many agents may share one filing. Each
 attached agent is its own anchor sequence per late fact — two sponsored on-chain writes through
 its own timelock, plus a guardian notification — so an EIN arriving on a ten-agent company is

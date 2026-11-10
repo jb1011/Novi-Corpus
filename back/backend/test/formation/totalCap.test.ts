@@ -248,18 +248,80 @@ function anotherPersonsCompany(tenantId: Address = DEE.tenant): string {
   });
 }
 
-/** The refused create of `fn`, and what it left: the error, the payment rows before it, and
- *  whether it printed a `company_created` line. */
+/** The ops event a printed line carries, if it is an ops line. */
+function opslogOf(line: string): string | undefined {
+  try {
+    const parsed = JSON.parse(line) as { opslog?: unknown };
+    return typeof parsed.opslog === "string" ? parsed.opslog : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Every `formation_cap_reached` ops line printed in the test, as printed. */
+const capLines = (): string[] =>
+  printed.filter((line) => opslogOf(line) === "formation_cap_reached");
+
+/** The refused create of `fn`, and what it left: the error, the payment rows before it, whether
+ *  it printed a `company_created` line, and the `formation_cap_reached` lines it printed. */
 function refusedCreate(fn: () => unknown): {
   err: ApiError | null;
   paymentsBefore: number;
   printedCreated: boolean;
+  capLines: string[];
 } {
   const paymentsBefore = paymentRows();
   const mark = printed.length;
   const err = thrown(fn);
-  const printedCreated = printed.slice(mark).some((line) => line.includes("company_created"));
-  return { err, paymentsBefore, printedCreated };
+  const lines = printed.slice(mark);
+  return {
+    err,
+    paymentsBefore,
+    printedCreated: lines.some((line) => opslogOf(line) === "company_created"),
+    capLines: lines.filter((line) => opslogOf(line) === "formation_cap_reached"),
+  };
+}
+
+/**
+ * The refusal printed exactly one `formation_cap_reached` line: a warning that says which check
+ * refused (`count`, after the quota; `mint`, inside the transaction), with the cap and the count
+ * and nothing else. No tenant, no name, no address, and the line's own timestamp intact.
+ */
+function oneCapLine(
+  refused: ReturnType<typeof refusedCreate>,
+  check: "count" | "mint",
+  counted: number,
+  g: Guardian,
+): void {
+  expect(refused.capLines).toHaveLength(1);
+  const raw = refused.capLines[0] as string;
+  const line = JSON.parse(raw) as Record<string, unknown>;
+  expect(Object.keys(line).sort()).toEqual([
+    "at",
+    "check",
+    "counted",
+    "level",
+    "maxTotal",
+    "opslog",
+  ]);
+  expect(line).toMatchObject({
+    opslog: "formation_cap_reached",
+    level: "warn",
+    check,
+    maxTotal: 2,
+    counted,
+  });
+  // `at` is the ops line's own timestamp, which a field of the same name would overwrite.
+  expect(line.at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  for (const personal of [
+    g.tenant,
+    g.tenant.toLowerCase(),
+    g.nullifier,
+    "Example",
+    "person@example.com",
+    "Cheyenne",
+  ])
+    expect(raw, personal).not.toContain(personal);
 }
 
 /** The refusal of the total cap, with nothing written for the guardian's create: no company, the
@@ -277,7 +339,7 @@ function refusedWithNothingWritten(
 }
 
 /** `/config.legalBodies.formedDoor` of a deployment whose create door runs on `companyDeps`,
- *  wired as the composition root wires it: the same deps, the same total cap. */
+ *  wired as the composition root wires it: the cap is read from those deps, nowhere else. */
 function formedDoorServed(
   companyDeps: CreateCompanyDeps,
   extra: { identity?: IdentityDeps; invites?: { required: boolean } } = {},
@@ -298,7 +360,6 @@ function formedDoorServed(
     companyDeps: rest,
     payment: companyDeps.payment,
     feeUsdc: 399,
-    maxTotal: companyDeps.maxTotal,
   };
   const config = legalBodyConfigOf({
     legalBodyOrders: legalBodyOrderDeps(s, {
@@ -352,14 +413,18 @@ describe("the total cap at the formed door on production", () => {
       });
     expect(companies.countChargeableFormedLegalBodies()).toBe(2);
 
+    expect(capLines()).toHaveLength(0);
+
     const partyId = newParty(CAL);
     const refused = refusedCreate(() => createCompany(deps, CAL.tenant, intake(partyId)));
     refusedWithNothingWritten(refused, CAL, partyId);
+    oneCapLine(refused, "count", 2, CAL);
 
     // The same person, the same party, the same deps: a company for agents is not capped.
     const agent = createCompany(deps, CAL.tenant, intake(partyId, "agent"));
     expect(companies.find(idOf(agent))!.purposeKind).toBe("agent");
     expect(companies.countChargeableFormedLegalBodies()).toBe(2);
+    expect(capLines()).toHaveLength(1);
   });
 
   test("companies for agents take no place: they are neither counted nor refused, and never read the count", () => {
@@ -390,6 +455,7 @@ describe("the total cap at the formed door on production", () => {
     const partyId = newParty(CAL);
     const refused = refusedCreate(() => createCompany(deps, CAL.tenant, intake(partyId)));
     refusedWithNothingWritten(refused, CAL, partyId);
+    oneCapLine(refused, "count", 2, CAL);
     expect(paymentRows()).toBe(2);
   });
 
@@ -434,6 +500,8 @@ describe("the total cap at the formed door on production", () => {
     // The mint was reached, so the first count let the create through.
     expect(interleaved).toBe(1);
     refusedWithNothingWritten(refused, CAL, partyId);
+    // One line, from the re-check inside the mint: the first count let the create through.
+    oneCapLine(refused, "mint", 2, CAL);
     expect(paymentRows()).toBe(1);
     // Two places taken, never three: Ada's and the one minted in between.
     expect(companies.countChargeableFormedLegalBodies()).toBe(2);
@@ -465,6 +533,7 @@ describe("the total cap at the formed door on production", () => {
       }),
     );
     refusedWithNothingWritten(refused, CAL, partyId);
+    oneCapLine(refused, "count", 2, CAL);
     expect(opened).toBe(0);
   });
 
@@ -492,6 +561,7 @@ describe("a sandbox is never capped", () => {
     expect(count).not.toHaveBeenCalled();
     count.mockRestore();
     expect(companies.countChargeableFormedLegalBodies()).toBe(2);
+    expect(capLines()).toHaveLength(0);
     expect(formedDoorServed(deps)).toBe("offered");
   });
 });

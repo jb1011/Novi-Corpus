@@ -111,8 +111,9 @@ export interface CreateCompanyDeps {
   dailyCeiling: number;
   /**
    * FORMATION_MAX_TOTAL: how many formed legal-body companies the formed door takes in all, on
-   * production only (`formedCapReached`, the rule `/config.legalBodies.formedDoor` reads too).
-   * Absent = no cap. A company for agents is never counted and never refused.
+   * production only (`formedCapReached`). `/config.legalBodies.formedDoor` reads this field, on
+   * `ApiDeps.formation.companyDeps`, so the door and the config cannot hold two figures. Absent =
+   * no cap. A company for agents is never counted and never refused.
    */
   maxTotal?: number;
   /**
@@ -232,6 +233,24 @@ class PartyBindLost extends Error {}
  */
 class CapReached extends Error {}
 
+/**
+ * The ops line of a create the total cap refused, one per refusal: `check` says which check
+ * refused it (`count`, step 4b after the quota; `mint`, the re-check inside the transaction). The
+ * cap and the count only: no tenant, no name. Named `check` rather than `at`, which is the line's
+ * own timestamp (`opsLog`).
+ */
+function logCapReached(
+  deps: Pick<CreateCompanyDeps, "companies" | "maxTotal">,
+  check: "count" | "mint",
+): void {
+  opsLog("formation_cap_reached", {
+    level: "warn",
+    check,
+    maxTotal: deps.maxTotal,
+    counted: deps.companies.countChargeableFormedLegalBodies(),
+  });
+}
+
 export function createCompany(
   deps: CreateCompanyDeps,
   tenantId: string,
@@ -317,8 +336,10 @@ export function createCompany(
   //     early-access beta takes so many formed companies in all, over every tenant. A sandbox
   //     forms demo companies without number, and a company for agents is never counted or capped.
   //     Asked again inside the mint (step 8), where two people creating at once meet.
-  if (formed && formedCapReached(deps.companies, deps.maxTotal, door))
+  if (formed && formedCapReached(deps.companies, deps.maxTotal, door)) {
+    logCapReached(deps, "count");
     throw refusal("formation_cap_reached", 409);
+  }
 
   // 5. The platform daily ceiling, still on `create_provider` rows.
   const inWindow = deps.requests.createRequestsSince(sqliteUtcTimestamp(now() - DAY_MS));
@@ -409,7 +430,10 @@ export function createCompany(
     });
   } catch (e) {
     if (e instanceof PartyBindLost) return { error: formationPartyUnavailableMessage() };
-    if (e instanceof CapReached) throw refusal("formation_cap_reached", 409);
+    if (e instanceof CapReached) {
+      logCapReached(deps, "mint");
+      throw refusal("formation_cap_reached", 409);
+    }
     throw e;
   }
 

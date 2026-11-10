@@ -103,8 +103,8 @@ interface FormationOptions {
   pin: DoolaEnvironment;
   /** Whether the deployment charges. Absent: no payment config at all. */
   paymentRequired?: boolean;
-  /** FORMATION_MAX_TOTAL, on the formation block and the create door's deps alike, as the
-   *  composition root passes it. Absent: nothing caps the door. */
+  /** FORMATION_MAX_TOTAL, on the create door's deps, where `/config` reads it too. Absent:
+   *  nothing caps the door. */
   maxTotal?: number;
   /** FORMATION_FILING_WORKING_DAYS. */
   filingWorkingDays?: number;
@@ -145,7 +145,6 @@ function formationDeps(o: FormationOptions): NonNullable<ApiDeps["formation"]> {
     },
     payment,
     feeUsdc: 399,
-    ...(o.maxTotal === undefined ? {} : { maxTotal: o.maxTotal }),
     ...(o.filingWorkingDays === undefined ? {} : { filingWorkingDays: o.filingWorkingDays }),
   };
 }
@@ -378,6 +377,14 @@ describe("formedDoor on a production deployment", () => {
     expect(count).not.toHaveBeenCalled();
     expect(await formedDoorOf(productionWithEveryGate())).toBe("offered");
     expect(count).toHaveBeenCalledTimes(1);
+  });
+
+  test("the cap is read from the create door's deps: companyDeps.maxTotal reached reads cap_reached", async () => {
+    formedLegalBody(s.companies);
+    const uncapped = formationDeps({ pin: "production", paymentRequired: true });
+    const capped = { ...uncapped, companyDeps: { ...uncapped.companyDeps, maxTotal: 1 } };
+    expect(await formedDoorOf(productionWithEveryGate({ formation: capped }))).toBe("cap_reached");
+    expect(await formedDoorOf(productionWithEveryGate({ formation: uncapped }))).toBe("offered");
   });
 
   test("with no maxTotal in the deps, nothing caps the door", async () => {

@@ -25,7 +25,9 @@ Creating one (`POST /companies` with `for: "legal_body"`) runs the formed door's
 this order: a real human (a waiver is refused), the per-human company cap, the guardian identity
 record and the approved operating agreement (these two on production only). Production then
 refuses (`formed_door_not_offered`, 403) until the invite codes ship. The door runs under
-production when doola's pin or the network is production.
+production when doola's pin or the network is production. On production, the formed door also
+stops at its lifetime cap, `FORMATION_MAX_TOTAL` (`formation_cap_reached`, 409; see "Spend
+controls" in `doola-deploy.md`).
 
 ## 2. company:filed-name
 
