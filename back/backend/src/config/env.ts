@@ -368,6 +368,10 @@ const EnvSchema = z.object({
    *  logic of every pre-cutover agent and is therefore just as fleet-critical. */
   MONITOR_WATCH_BEACONS: z.string().optional(),
   MONITOR_WATCH_FACTORIES: z.string().optional(),
+  /** Extra LegalBodyFactory addresses to watch, comma-separated. LEGAL_BODY_FACTORY_ADDRESS is
+   *  watched anyway; after a factory redeploy the old one goes here, so the bodies it created
+   *  stay watched. */
+  MONITOR_WATCH_LEGAL_BODY_FACTORIES: z.string().optional(),
 
   // --- doola formation provider (docs/design/2026-08-19-doola-formation-provider-design.md §2).
   // The API key and the webhook secret are ALL-OR-NOTHING (`cfg.doola`, mirroring the Circle
@@ -976,6 +980,7 @@ export interface Config {
     dbPath: string;
     watchBeacons: Address[];
     watchFactories: Address[];
+    watchLegalBodyFactories: Address[];
   };
   /** doola formation provider credentials; present only when the API key AND the webhook secret
    *  are both set (all-or-nothing). Absent = this deployment forms nothing and every entity keeps
@@ -1465,6 +1470,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       dbPath: `${e.DATA_DIR}/monitor.db`,
       watchBeacons: parseAddressList(e.MONITOR_WATCH_BEACONS, "MONITOR_WATCH_BEACONS"),
       watchFactories: parseAddressList(e.MONITOR_WATCH_FACTORIES, "MONITOR_WATCH_FACTORIES"),
+      watchLegalBodyFactories: parseAddressList(
+        e.MONITOR_WATCH_LEGAL_BODY_FACTORIES,
+        "MONITOR_WATCH_LEGAL_BODY_FACTORIES",
+      ),
     },
     doola,
     arcNetwork: e.ARC_NETWORK,

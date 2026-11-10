@@ -12,12 +12,27 @@ import type { Alert, Severity } from "./alerts";
  * runnable from a different box, or deleted and restarted from a cold cursor, without touching
  * anything the API owns.
  *
- * Three tables:
+ * Four tables:
  *  - `cursor`      the single last-scanned block; the reason a restart does not re-page.
  *  - `open_grants` grants seen but not yet revoked — the working set rule 2 sweeps for TTL.
  *  - `alerts`      every alert at every severity. This IS the audit log and the guardian
  *                  notification record required by design §8, which is why INFO is written too.
+ *  - `legal_bodies_seen` every legal body whose `LegalBodyCreated` the monitor read on chain. The
+ *                  API's own record of legal bodies is the other half of the watch set; this half
+ *                  covers a body created while the API was down, or on a factory the API no longer
+ *                  names, so the monitor keeps watching it either way.
  */
+
+/** A legal body as the monitor first saw it created. Addresses are stored lowercase. */
+export interface SeenLegalBody {
+  address: string;
+  factory: string;
+  /** decimal string */
+  agentId: string | null;
+  guardian: string | null;
+  block: bigint;
+  tx: string;
+}
 
 export interface OpenGrant {
   role: string;
@@ -50,6 +65,9 @@ export interface MonitorStore {
    *  caller must not re-emit it to stdout or the webhook. */
   recordAlert(alert: Alert): boolean;
   listAlerts(limit?: number): StoredAlert[];
+  /** Idempotent: the first sighting of a body wins (a re-scanned creation log is a no-op). */
+  recordLegalBody(body: SeenLegalBody): void;
+  listLegalBodies(): SeenLegalBody[];
   close(): void;
 }
 
@@ -95,6 +113,16 @@ export function migrateMonitor(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_alerts_ts ON alerts(ts);
     CREATE INDEX IF NOT EXISTS idx_alerts_severity ON alerts(severity, ts);
+
+    -- Append-only. A body address is fixed at creation, so its first sighting is final.
+    CREATE TABLE IF NOT EXISTS legal_bodies_seen (
+      address  TEXT PRIMARY KEY,
+      factory  TEXT NOT NULL,
+      agent_id TEXT,
+      guardian TEXT,
+      block    INTEGER NOT NULL,
+      tx       TEXT NOT NULL
+    );
   `);
 }
 
@@ -199,6 +227,45 @@ export class SqliteMonitorStore implements MonitorStore {
       detail: string;
     }[];
     return rows.map((r) => ({ ...r, detail: JSON.parse(r.detail) }));
+  }
+
+  recordLegalBody(body: SeenLegalBody): void {
+    this.db
+      .prepare(
+        "INSERT INTO legal_bodies_seen (address, factory, agent_id, guardian, block, tx) VALUES (?,?,?,?,?,?) ON CONFLICT(address) DO NOTHING",
+      )
+      .run(
+        body.address.toLowerCase(),
+        body.factory.toLowerCase(),
+        body.agentId,
+        body.guardian?.toLowerCase() ?? null,
+        body.block,
+        body.tx.toLowerCase(),
+      );
+  }
+
+  listLegalBodies(): SeenLegalBody[] {
+    const rows = this.db
+      .prepare(
+        "SELECT address, factory, agent_id, guardian, block, tx FROM legal_bodies_seen ORDER BY rowid",
+      )
+      .safeIntegers(true)
+      .all() as {
+      address: string;
+      factory: string;
+      agent_id: string | null;
+      guardian: string | null;
+      block: bigint;
+      tx: string;
+    }[];
+    return rows.map((r) => ({
+      address: r.address,
+      factory: r.factory,
+      agentId: r.agent_id,
+      guardian: r.guardian,
+      block: BigInt(r.block),
+      tx: r.tx,
+    }));
   }
 
   close(): void {

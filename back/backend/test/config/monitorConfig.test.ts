@@ -17,6 +17,7 @@ test("monitor config defaults are present on every boot (no new required env)", 
     dbPath: "/srv/novi/data/monitor.db",
     watchBeacons: [],
     watchFactories: [],
+    watchLegalBodyFactories: [],
   });
   expect(cfg.alertWebhookUrl).toBeUndefined();
 });

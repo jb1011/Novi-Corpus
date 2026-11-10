@@ -3,7 +3,11 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 import { noviControllerAbi } from "../../src/abis/generated";
 import { LEGAL_BODY_GRANTED_SELECTORS, selectorRole } from "../../src/adapters/arc/bootVerify";
 import { type Alert, type AlertSink, buildAlertSink } from "../../src/monitor/alerts";
-import type { EntityLookup, MonitoredEntity } from "../../src/monitor/entityLookup";
+import type {
+  EntityLookup,
+  LegalBodyRecord,
+  MonitoredEntity,
+} from "../../src/monitor/entityLookup";
 import { EntityLookupError } from "../../src/monitor/errors";
 import { WILDCARD_ROLE } from "../../src/monitor/events";
 import { Monitor, type MonitorConfig } from "../../src/monitor/monitor";
@@ -16,6 +20,7 @@ const BASE_CFG: MonitorConfig = {
   registry: ADDR.registry,
   factories: [ADDR.factory],
   beacons: [],
+  legalBodyFactories: [],
   executor: ADDR.executor,
   pollMs: 30_000,
   grantTtlMs: 15 * 60_000,
@@ -28,13 +33,19 @@ function collectingSink() {
   return { sink, alerts };
 }
 
-function lookup(entities: MonitoredEntity[] = [entity()]): EntityLookup {
-  return { all: () => entities, close: () => {} };
+function lookup(
+  entities: MonitoredEntity[] = [entity()],
+  legalBodies: LegalBodyRecord[] = [],
+): EntityLookup {
+  return { all: () => entities, legalBodies: () => legalBodies, close: () => {} };
 }
 
 function failingLookup(): EntityLookup {
   return {
     all: () => {
+      throw new EntityLookupError("database is locked");
+    },
+    legalBodies: () => {
       throw new EntityLookupError("database is locked");
     },
     close: () => {},
@@ -51,6 +62,7 @@ function rpcStub(over: {
   failLogs?: boolean;
   blockTimestamp?: bigint;
   payout?: Address;
+  read?: (p: Parameters<MonitorRpc["readContract"]>[0]) => Promise<unknown>;
 }): RpcStub {
   const queries: LogQuery[] = [];
   return {
@@ -62,7 +74,7 @@ function rpcStub(over: {
       return over.logsFor?.(q) ?? [];
     },
     getBlockTimestamp: async () => over.blockTimestamp ?? 1_700_000_000n,
-    readContract: async () => over.payout ?? ADDR.operator,
+    readContract: async (p) => (over.read ? over.read(p) : (over.payout ?? ADDR.operator)),
   };
 }
 
@@ -524,6 +536,7 @@ describe("entity lookup resilience", () => {
           schemaMismatch: true,
         });
       },
+      legalBodies: () => [],
       close: () => {},
     };
     const store = SqliteMonitorStore.open(":memory:");
