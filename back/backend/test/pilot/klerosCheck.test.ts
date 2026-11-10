@@ -282,6 +282,38 @@ describe("the problems", () => {
     }
   });
 
+  test("a chain with more after it is not read as its first part: the sentence counts as missing", async () => {
+    for (const chain of [
+      "arbitrum-sepolia-testnet_v2",
+      "arbitrum-sepolia-testnet.v2",
+      "arbitrum-sepolia-testneté",
+    ]) {
+      const { fetch } = klerosFetch({ instructions: sends(8, 5, chain) });
+      const r = await checkKleros(httpStage("testnet", fetch));
+      expect(r.problems).toEqual([expect.stringContaining("this call sends them")]);
+    }
+  });
+
+  test("the court, jurors and chain without the sentence's own words are general text", async () => {
+    const bare = klerosFetch({
+      instructions: "Example: court 8, 5 jurors, on arbitrum-sepolia-testnet.",
+    });
+    expect((await checkKleros(httpStage("testnet", bare.fetch))).problems).toEqual([
+      expect.stringContaining("this call sends them"),
+    ]);
+    const extra = klerosFetch({
+      instructions: `Example: court 34, 5 jurors, on arbitrum-one.\n${INSTRUCTIONS.testnet}`,
+    });
+    expect((await checkKleros(httpStage("testnet", extra.fetch))).problems).toEqual([]);
+  });
+
+  test("the chain in any case and the numbers with leading zeros are the same sentence", async () => {
+    const { fetch } = klerosFetch({
+      instructions: `${sends(8, 5, "arbitrum-sepolia-testnet")}\nthis call sends them: court 008, 05 jurors, on ARBITRUM-SEPOLIA-TESTNET.`,
+    });
+    expect((await checkKleros(httpStage("testnet", fetch))).problems).toEqual([]);
+  });
+
   test("two sentences that disagree are a problem, even when one matches the stage", async () => {
     const { fetch } = klerosFetch({
       instructions: `${sends(8, 5, "arbitrum-sepolia-testnet")}\n${sends(34, 5, "arbitrum-one")}`,

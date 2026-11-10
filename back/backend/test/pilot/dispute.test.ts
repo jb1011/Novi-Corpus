@@ -276,6 +276,12 @@ const INSTRUCTIONS: Record<KlerosDeploymentName, string> = {
   testnet: "This call sends them: court 8, 5 jurors, on arbitrum-sepolia-testnet.",
   live: "This call sends them: court 34, 5 jurors, on arbitrum-one.",
 };
+/** The instructions the Kleros testnet key answered on 10 November 2026, kept as received. */
+const REAL_TESTNET_INSTRUCTIONS = (
+  JSON.parse(
+    readFileSync(new URL("../fixtures/kleros/instructions-testnet.json", import.meta.url), "utf8"),
+  ) as { instructions: string }
+).instructions;
 const COURT_TIMES: Record<KlerosDeploymentName, string[]> = {
   testnet: ["900", "2700", "1800", "2700"],
   live: ["600", "2700", "1800", "129600"],
@@ -638,6 +644,15 @@ describe("a rehearsal: the fake, script by script", () => {
 // --- the real client's shape: testnet and live ---
 
 describe("a testnet stage over HTTP", () => {
+  test("the instructions the testnet key really answers file", async () => {
+    const h = setup();
+    const row = await h.contested("testnet");
+    const { stage } = http("testnet", { instructions: REAL_TESTNET_INSTRUCTIONS });
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    const out = await fileDispute(h.deps(stage), row.caseId, { confirmedFlag: "--testnet" });
+    expect(out).toMatchObject({ outcome: "filed" });
+  });
+
   test("files on arbitrum-sepolia-testnet in court 8; dispute_create carries only the two aliases", async () => {
     const h = setup();
     const row = await h.contested("testnet");

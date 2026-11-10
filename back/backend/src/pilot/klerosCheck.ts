@@ -18,8 +18,8 @@ import { withoutEmDash } from "./job";
  *  - `tools/list` must hold the three write tools the key's preset grants.
  *  - The `instructions` string a key answers on `initialize` says, in one sentence, what its
  *    filing sends ("this call sends them: court 8, 5 jurors, on arbitrum-sepolia-testnet"), and
- *    the docs say to believe it over any page. It is printed in full. That sentence must be there
- *    once, and its court, juror count and chain must be the stage's; the rest of the string is
+ *    the docs say to believe it over any page. It is printed in full. That sentence must be there,
+ *    every copy of it must agree, and its court, juror count and chain must be the stage's; the rest of the string is
  *    general text that names every chain the service reads, the live one included, and is not
  *    held to the stage. On a real deployment a missing string, or one without the sentence, is a
  *    problem, since a filing has nothing to believe then. A stage with no deployment (a
@@ -133,9 +133,11 @@ function originOf(raw: string): string {
  * "The court, juror count and template are fixed for you, and this call sends them: court 8,
  * 5 jurors, on arbitrum-sepolia-testnet." The rest of the string is general text that lists every
  * chain the service reads, the live one included, so only this sentence is held to the stage.
+ * The chain ends at a full stop, a comma, a space or the end: a longer name such as
+ * "arbitrum-sepolia-testnet_v2" is not read as its first part, and the sentence counts as missing.
  */
 const SENDS_SENTENCE =
-  /\bthis call sends them:\s*court\s+(\d+)\s*,\s*(\d+)\s+jurors?\s*,\s*on\s+([a-z0-9]+(?:-[a-z0-9]+)*)/gi;
+  /\bthis call sends them:\s*court\s+(\d+)\s*,\s*(\d+)\s+jurors?\s*,\s*on\s+([a-z0-9]+(?:-[a-z0-9]+)*)(?![A-Za-z0-9_]|[.-][A-Za-z0-9_]|\P{ASCII})/giu;
 
 /**
  * The court a stage without a deployment reads: a rehearsal rehearses the testnet stage, which
@@ -226,11 +228,18 @@ async function instructionsProblems(
   );
   if (said.size === 0)
     return [
-      `the instructions never say what this key's filing sends ("this call sends them: court N, J jurors, on CHAIN"): a filing believes that sentence, so nothing is filed until the key's instructions hold it`,
+      `the instructions never say what this key's filing sends ("this call sends them: court N, J jurors, on CHAIN"), and a filing believes that sentence, so nothing is filed: read the instructions with pilot:kleros check; if Kleros reworded the sentence, the check must follow the new wording, and if it is gone, ask Kleros what the key's preset sends`,
     ];
   if (said.size > 1)
     return [
-      `the instructions say what this key's filing sends more than once, and differently (${[...said].map((s) => s.split("|").join(", ")).join("; ")}): nothing is filed until they agree`,
+      `the instructions say what this key's filing sends more than once, and differently (${[
+        ...said,
+      ]
+        .map((s) => {
+          const [court, jurors, chain] = s.split("|");
+          return `court ${court}, ${jurors} jurors, on ${chain}`;
+        })
+        .join("; ")}): nothing is filed until they agree`,
     ];
   const [court, jurors, chain] = ([...said][0] as string).split("|") as [string, string, string];
   const found: string[] = [];
