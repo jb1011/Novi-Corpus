@@ -1,15 +1,18 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Address, getAddress } from "viem";
 import { describe, expect, test } from "vitest";
 import {
   SqliteEntityLookup,
   assertLookupSchema,
   indexEntities,
+  indexLegalBodies,
 } from "../../src/monitor/entityLookup";
 import { EntityLookupError } from "../../src/monitor/errors";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
+import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
 import type { EntityRecord } from "../../src/types";
 import { ADDR, entity } from "./helpers";
 
@@ -201,5 +204,119 @@ describe("the OA anchor projection (design §8, audit H3/14)", () => {
       oaManifestPendingVersion: null,
     });
     lookup.close();
+  });
+});
+
+describe("legal bodies", () => {
+  const TENANT = getAddress("0x00000000000000000000000000000000000000a1");
+  const FACTORY = getAddress("0x00000000000000000000000000000000000fac70");
+  const BODY = getAddress("0x00000000000000000000000000000000b0d1e001");
+  const OTHER = getAddress("0x00000000000000000000000000000000000fac71");
+
+  /** A legalbody.db holding one legal body reserved at BODY and one draft with no address. */
+  function seedWithLegalBodies(): string {
+    const path = seedMainDb([record()]);
+    const db = openDatabase(path);
+    db.prepare(
+      `INSERT INTO companies (company_id, tenant_id, status, provider, environment, name_options, business_purpose, industry_label)
+       VALUES ('co_1', ?, 'ready', 'customer', 'sandbox', '["Example Holdings Wyoming DAO LLC"]', 'existing', 'existing')`,
+    ).run(TENANT);
+    const repo = new SqliteLegalBodyRepository(db);
+    const draft = () =>
+      repo.create({
+        tenantId: TENANT,
+        companyId: "co_1",
+        chainId: 5042002,
+        factory: FACTORY,
+        amendmentDelay: 172_800,
+      }).legalBodyId;
+    const placed = draft();
+    expect(repo.freezeAgreement(placed, { hash: `0x${"aa".repeat(32)}`, version: 1 })).toBe(true);
+    expect(
+      repo.reserve(placed, {
+        agentId: "42",
+        identityOwner: TENANT,
+        linkDigest: `0x${"bb".repeat(32)}`,
+        linkDeadline: 1_900_000_000,
+        linkSignature: "0x01",
+        bodyAddress: BODY,
+        observedAtBlock: 1,
+        firstCheckAt: 1_800_000_000_000,
+      }),
+    ).toBe("reserved");
+    draft(); // no body address yet: nothing on chain to watch
+    db.close();
+    return path;
+  }
+
+  test("lists the rows that have a body address, with agent id, guardian and factory", () => {
+    const lookup = new SqliteEntityLookup(seedWithLegalBodies());
+    const bodies = lookup.legalBodies();
+    expect(bodies).toHaveLength(1);
+    expect(bodies[0]?.address.toLowerCase()).toBe(BODY.toLowerCase());
+    expect(bodies[0]?.agentId).toBe("42");
+    expect(bodies[0]?.factory.toLowerCase()).toBe(FACTORY.toLowerCase());
+    expect(bodies[0]?.guardian.toLowerCase()).toBe(TENANT.toLowerCase());
+    lookup.close();
+  });
+
+  test("a database without the legal_bodies table fails the startup probe", () => {
+    const path = seedMainDb([record()]);
+    const writer = openDatabase(path);
+    writer.exec("PRAGMA foreign_keys = OFF; DROP TABLE legal_bodies");
+    writer.close();
+    const lookup = new SqliteEntityLookup(path);
+    expect(() => assertLookupSchema(lookup)).toThrow(/DEPLOY ORDER/);
+    lookup.close();
+  });
+
+  test("indexLegalBodies unions both sources, lowercased, the API's row first", () => {
+    const seenOnly = "0xBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBb" as Address;
+    const index = indexLegalBodies(
+      [{ address: BODY, agentId: "42", guardian: TENANT, factory: FACTORY }],
+      [
+        {
+          address: BODY.toLowerCase(),
+          factory: OTHER.toLowerCase(),
+          agentId: "1",
+          guardian: null,
+          block: 1n,
+          tx: "0x01",
+        },
+        {
+          address: seenOnly.toLowerCase(),
+          factory: FACTORY.toLowerCase(),
+          agentId: "77",
+          guardian: null,
+          block: 2n,
+          tx: "0x02",
+        },
+      ],
+    );
+    expect([...index.keys()]).toEqual([BODY.toLowerCase(), seenOnly.toLowerCase()]);
+    expect(index.get(BODY.toLowerCase())).toEqual({
+      address: BODY.toLowerCase(),
+      factory: FACTORY.toLowerCase(),
+      agentId: "42",
+      guardian: TENANT,
+    });
+  });
+
+  test("a factory that is not an address reads as unknown, and a sighting fills it in", () => {
+    const recorded = [
+      { address: BODY, agentId: null, guardian: TENANT, factory: "not-an-address" },
+    ];
+    expect(indexLegalBodies(recorded, []).get(BODY.toLowerCase())?.factory).toBeNull();
+    const filled = indexLegalBodies(recorded, [
+      {
+        address: BODY.toLowerCase(),
+        factory: OTHER.toLowerCase(),
+        agentId: null,
+        guardian: null,
+        block: 1n,
+        tx: "0x01",
+      },
+    ]);
+    expect(filled.get(BODY.toLowerCase())?.factory).toBe(OTHER.toLowerCase());
   });
 });

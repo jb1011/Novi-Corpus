@@ -1,5 +1,6 @@
-import { expect, test } from "vitest";
+import { describe, expect, test } from "vitest";
 import { loadConfig, redact } from "../../src/config/env";
+import { watchedLegalBodyFactories } from "../../src/monitor/monitor";
 
 const base = {
   ARC_TESTNET_RPC_URL: "https://rpc.testnet.arc.network",
@@ -75,4 +76,48 @@ test("ALERT_WEBHOOK_URL must be a URL and is REDACTED (the token is in the URL)"
   });
   expect(cfg.alertWebhookUrl).toContain("SUPER-SECRET-TOKEN");
   expect(JSON.stringify(redact(cfg))).not.toContain("SUPER-SECRET-TOKEN");
+});
+
+describe("MONITOR_WATCH_LEGAL_BODY_FACTORIES", () => {
+  const LEGAL_BODY_FACTORY = "0xA1A1a1a1A1A1A1A1A1a1a1a1a1a1A1A1a1A1a1a1";
+  const OLD_LEGAL_BODY_FACTORY = "0xa2A2a2A2A2A2A2a2a2a2a2A2A2A2A2a2A2A2a2a2";
+  const withLegalBodyFactory = {
+    ...base,
+    CONTROLLER_ADDRESS: "0x9526E228E94A125843B2d010c1155780CBBAFb5c",
+    LEGAL_BODY_FACTORY_ADDRESS: LEGAL_BODY_FACTORY,
+  };
+
+  test("parses and checksum-normalizes the list", () => {
+    const cfg = loadConfig({
+      ...base,
+      MONITOR_WATCH_LEGAL_BODY_FACTORIES: ` ${OLD_LEGAL_BODY_FACTORY.toLowerCase()} `,
+    });
+    expect(cfg.monitor?.watchLegalBodyFactories).toEqual([OLD_LEGAL_BODY_FACTORY]);
+  });
+
+  test("the watched list is the configured factory plus the old one, deduplicated in any casing", () => {
+    const cfg = loadConfig({
+      ...withLegalBodyFactory,
+      MONITOR_WATCH_LEGAL_BODY_FACTORIES: `${LEGAL_BODY_FACTORY.toLowerCase()},${OLD_LEGAL_BODY_FACTORY}`,
+    });
+    expect(
+      watchedLegalBodyFactories(cfg.legalBodyFactory, cfg.monitor?.watchLegalBodyFactories ?? []),
+    ).toEqual([LEGAL_BODY_FACTORY, OLD_LEGAL_BODY_FACTORY]);
+  });
+
+  test("with no legal-body factory configured, the watch list alone is watched", () => {
+    const cfg = loadConfig({ ...base, MONITOR_WATCH_LEGAL_BODY_FACTORIES: OLD_LEGAL_BODY_FACTORY });
+    expect(
+      watchedLegalBodyFactories(cfg.legalBodyFactory, cfg.monitor?.watchLegalBodyFactories ?? []),
+    ).toEqual([OLD_LEGAL_BODY_FACTORY]);
+  });
+
+  test("a malformed entry refuses the boot, naming the variable", () => {
+    expect(() =>
+      loadConfig({
+        ...base,
+        MONITOR_WATCH_LEGAL_BODY_FACTORIES: `${OLD_LEGAL_BODY_FACTORY},0xnope`,
+      }),
+    ).toThrow(/MONITOR_WATCH_LEGAL_BODY_FACTORIES contains "0xnope"/);
+  });
 });

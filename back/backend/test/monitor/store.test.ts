@@ -143,6 +143,51 @@ describe("alerts", () => {
   });
 });
 
+describe("legal_bodies_seen", () => {
+  const BODY = {
+    address: "0xBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBbBb",
+    factory: "0xA1A1a1a1A1A1A1A1A1a1a1a1a1a1A1A1a1A1a1a1",
+    agentId: "77",
+    guardian: ADDR.guardian,
+    block: 9_007_199_254_740_993n,
+    tx: `0x${"E1".repeat(32)}`,
+  };
+
+  test("round-trips a body, lowercased, across a restart, with a block beyond Number.MAX_SAFE_INTEGER", () => {
+    const path = tempDbPath();
+    const store = SqliteMonitorStore.open(path);
+    store.recordLegalBody(BODY);
+    store.close();
+    const reopened = SqliteMonitorStore.open(path);
+    expect(reopened.listLegalBodies()).toEqual([
+      {
+        address: BODY.address.toLowerCase(),
+        factory: BODY.factory.toLowerCase(),
+        agentId: "77",
+        guardian: ADDR.guardian.toLowerCase(),
+        block: 9_007_199_254_740_993n,
+        tx: BODY.tx.toLowerCase(),
+      },
+    ]);
+    reopened.close();
+  });
+
+  test("the first sighting wins: a re-scanned creation is a no-op, in any casing", () => {
+    const store = SqliteMonitorStore.open(":memory:");
+    store.recordLegalBody(BODY);
+    store.recordLegalBody({ ...BODY, address: BODY.address.toLowerCase(), block: 1n });
+    expect(store.listLegalBodies().map((b) => b.block)).toEqual([9_007_199_254_740_993n]);
+    store.close();
+  });
+
+  test("a body with no agent id or guardian is stored with nulls", () => {
+    const store = SqliteMonitorStore.open(":memory:");
+    store.recordLegalBody({ ...BODY, agentId: null, guardian: null });
+    expect(store.listLegalBodies()[0]).toMatchObject({ agentId: null, guardian: null });
+    store.close();
+  });
+});
+
 describe("migration", () => {
   test("is idempotent", () => {
     const path = tempDbPath();
