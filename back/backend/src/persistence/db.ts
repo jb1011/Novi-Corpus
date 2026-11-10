@@ -1792,6 +1792,17 @@ export function migrate(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_platform_outflows_at ON platform_outflows(at);
 
+    -- The controller's WILDCARD_ROLE holders, rebuilt from its RoleGranted/RoleRevoked logs and
+    -- kept here so each boot resumes from cursor_block instead of replaying from the deploy block.
+    -- holders_json is a JSON array of { account, grantedTx, grantedBlock }; addresses lowercase.
+    CREATE TABLE IF NOT EXISTS controller_role_ledger (
+      controller   TEXT    NOT NULL,
+      chain_id     INTEGER NOT NULL,
+      cursor_block INTEGER NOT NULL,
+      holders_json TEXT    NOT NULL,
+      PRIMARY KEY (controller, chain_id)
+    );
+
     -- S5: one row per billable Turnkey enclave signature (metered plan: 25/month, then per-sig).
     CREATE TABLE IF NOT EXISTS turnkey_sigs (
       id   INTEGER PRIMARY KEY AUTOINCREMENT,
