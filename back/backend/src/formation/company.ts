@@ -82,8 +82,9 @@ import { findRestrictedWord } from "./wyRestrictedWords";
  * company for agents, `assertRealHuman` and `assertHumanCompanyCap` for the formed door. The rule
  * the design gives is "the gate is on the doors that spend the money", and the gate's
  * implementation is a request refusal (an `ApiError`). Re-implementing it here would be a second
- * personhood check, which is exactly the drift this module exists to prevent. The layering test forbids `src/workflow` →
- * `src/api`; this is `src/formation`, which is the door layer's own domain module.
+ * personhood check, which is exactly the drift this module exists to prevent. The layering test
+ * forbids `src/workflow` → `src/api`; this is `src/formation`, which is the door layer's own
+ * domain module.
  */
 
 export interface CreateCompanyDeps {
@@ -129,6 +130,10 @@ export interface CreateCompanyDeps {
    * PLACEHOLDER, the shape of `ApiDeps.invites`: PR 2b replaces it with its InviteDeps and
    * `assertInvited`. The composition root passes nothing until then, so a production formed door
    * refuses with `formed_door_not_offered` after every other gate.
+   *
+   * ⚠ `required: true` here checks no invite. Never pass it outside tests until `assertInvited`
+   * replaces the line in step 0; passing it on production would open the formed door to anyone who
+   * passes World, identity and the texts.
    */
   invites?: { required: boolean };
   /**
@@ -223,7 +228,8 @@ export function createCompany(
 
   // 0. THE FORMED DOOR's gates, for a company that will stand behind a legal body, in this order
   //    and before anything is written. It runs under production when the doola pin OR the network
-  //    is production (`formedDoorEnvironment`, the rule `/config.legalBodies.formedDoor` reads too).
+  //    is production (`formedDoorEnvironment`, the rule `/config.legalBodies.formedDoor` reads
+  //    too).
   //     a. A REAL human, whatever the enforcement switch says: a waiver is refused on both
   //        environments, and a box with no World block answers 503 rather than filing.
   //     b. The per-human company cap, counted as the agent door counts it.

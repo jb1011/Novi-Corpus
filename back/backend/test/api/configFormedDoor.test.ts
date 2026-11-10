@@ -4,11 +4,13 @@
  * says a filing usually takes.
  *
  * `formedDoor` is one of three words. On a sandbox deployment the door is `offered` wherever doola
- * is configured and `hidden` otherwise. On a production deployment it is `offered` only when every
- * gate holds: doola pinned to production, a deployment that charges, both legal texts approved, the
- * guardian identity record wired, invite codes required, and the formed legal bodies below the total
- * cap. When the cap is the only gate that fails it reads `cap_reached`; otherwise `hidden`. Invite
- * codes are not wired yet (trust-and-access PR 2b), so on production the door stays hidden for now.
+ * and World ID are both configured, and `hidden` otherwise: the door's first gate is a real human,
+ * so without World every create would answer 503. On a production deployment it is `offered` only
+ * when every gate holds: doola pinned to production, a deployment that charges, both legal texts
+ * approved, the guardian identity record wired, invite codes required, and the formed legal bodies
+ * below the total cap. When the cap is the only gate that fails it reads `cap_reached`; otherwise
+ * `hidden`. Invite codes are not wired yet (trust-and-access PR 2b), so on production the door
+ * stays hidden for now.
  *
  * Both legal texts are drafts today, so a production deployment that offers the door can only be
  * shown with them approved: the two text modules are replaced here by copies whose status each test
@@ -19,6 +21,7 @@ import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { DoolaEnvironment } from "../../src/adapters/doola/types";
 import { type ApiDeps, buildApiApp, legalBodyConfigOf } from "../../src/api/app";
+import { type WorldIdDeps, buildWorldIdDeps } from "../../src/api/routes/worldId";
 import { loadConfig } from "../../src/config/env";
 import { companyNameOptions } from "../../src/formation/intake";
 import { parsePiiKey } from "../../src/formation/pii";
@@ -34,6 +37,8 @@ import { SqliteFormationPaymentRepository } from "../../src/persistence/formatio
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
+import { SqliteWorldStore } from "../../src/persistence/worldStore";
+import { worldFor } from "../helpers/customerCompanyFixtures";
 import { DeletableMemoryDocumentStore } from "../helpers/deletableDocumentStore";
 import { paymentCfg } from "../helpers/formationPayment";
 import {
@@ -101,6 +106,8 @@ interface FormationOptions {
   maxTotal?: number;
   /** FORMATION_FILING_WORKING_DAYS. */
   filingWorkingDays?: number;
+  /** World ID, as the create door's deps carry it. Absent: the box has no World block. */
+  world?: WorldIdDeps;
 }
 
 /** The formation deps of a deployment where doola is configured, over this test's database. */
@@ -131,6 +138,7 @@ function formationDeps(o: FormationOptions): NonNullable<ApiDeps["formation"]> {
       sandboxSyntheticPii: o.pin === "sandbox",
       ...limits,
       payment,
+      world: o.world,
     },
     payment,
     feeUsdc: 399,
@@ -222,17 +230,57 @@ function formedLegalBody(companies: SqliteCompanyRepository, tenantId = TENANT):
 // ── formedDoor ───────────────────────────────────────────────────────────────────────────────
 
 describe("formedDoor on a sandbox deployment", () => {
-  test("offered where doola is configured, hidden where it is not", async () => {
+  test("offered where doola and World are configured, hidden where doola is not", async () => {
+    const world = worldFor(new SqliteWorldStore(db));
     expect(
-      await formedDoorOf({ environment: "sandbox", formation: formationDeps({ pin: "sandbox" }) }),
+      await formedDoorOf({
+        environment: "sandbox",
+        formation: formationDeps({ pin: "sandbox", world }),
+      }),
     ).toBe("offered");
     expect(await formedDoorOf({ environment: "sandbox" })).toBe("hidden");
+  });
+
+  test("doola configured without a World block: hidden, since every create would answer 503", async () => {
+    expect(
+      await formedDoorOf({ environment: "sandbox", formation: formationDeps({ pin: "sandbox" }) }),
+    ).toBe("hidden");
+  });
+
+  test("a testnet box's World block, read from its config, offers the door", async () => {
+    // The shape of the testnet box (.env.sandbox.example): doola's sandbox, the testnet network
+    // and a World block on World's sandbox; the credentials here are placeholders.
+    const BOX = {
+      ARC_TESTNET_RPC_URL: "https://rpc.example",
+      PLATFORM_PRIVATE_KEY: `0x${"a".repeat(64)}`,
+      WORLD_ACTION: "guardian-sandbox",
+      WORLD_REQUIRE_GUARDIAN: "true",
+      WORLD_ENVIRONMENT: "sandbox",
+    };
+    const WORLD_BLOCK = {
+      WORLD_APP_ID: "app_example",
+      WORLD_RP_ID: "rp_example",
+      WORLD_RP_SIGNING_KEY: `0x${"1".repeat(64)}`,
+    };
+    const store = new SqliteWorldStore(db);
+    const doorOf = async (env: Record<string, string>) => {
+      const cfg = loadConfig(env);
+      const world = cfg.world ? buildWorldIdDeps(cfg.world, store) : undefined;
+      return formedDoorOf({
+        environment: "sandbox",
+        formation: formationDeps({ pin: "sandbox", world }),
+      });
+    };
+    expect(await doorOf({ ...BOX, ...WORLD_BLOCK })).toBe("offered");
+    // Without the credentials there is no World block, and the door is hidden.
+    expect(await doorOf(BOX)).toBe("hidden");
   });
 
   test("a sandbox serves draft texts, takes no identity record nor invite, and reads no count", async () => {
     texts.agreement = "draft";
     texts.statement = "draft";
-    const formation = formationDeps({ pin: "sandbox", maxTotal: 1 });
+    const world = worldFor(new SqliteWorldStore(db));
+    const formation = formationDeps({ pin: "sandbox", maxTotal: 1, world });
     formedLegalBody(s.companies);
     const count = vi.spyOn(s.companies, "countChargeableFormedLegalBodies");
     expect(await formedDoorOf({ environment: "sandbox", formation })).toBe("offered");

@@ -21,7 +21,7 @@ import type DatabaseType from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError } from "../../src/api/errors";
 import type { WorldIdDeps } from "../../src/api/routes/worldId";
-import { companyNameEndingRefusedMessage } from "../../src/formation";
+import { companyNameEndingRefusedMessage, companyNameTooLongMessage } from "../../src/formation";
 import {
   type CreateCompanyDeps,
   type CreateCompanyResult,
@@ -29,7 +29,13 @@ import {
   updateCompanyIntake,
 } from "../../src/formation/company";
 import { formedDoorEnvironment } from "../../src/formation/formedDoor";
-import { DEFAULT_INDUSTRY, companyNameOptions } from "../../src/formation/intake";
+import {
+  DEFAULT_INDUSTRY,
+  NAME_MAX_LENGTH,
+  companyNameOptions,
+  hasEntityEnding,
+  withEntityEnding,
+} from "../../src/formation/intake";
 import { parsePiiKey } from "../../src/formation/pii";
 import type { IdentityDeps } from "../../src/identity/state";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
@@ -49,7 +55,8 @@ import {
 } from "../helpers/customerCompanyFixtures";
 import { paymentCfg } from "../helpers/formationPayment";
 
-/** The status the operating agreement reads as in a test: approved unless the test says otherwise. */
+/** The status the operating agreement reads as in a test: approved unless the test says
+ *  otherwise. */
 const texts = vi.hoisted(() => ({ agreement: "approved" as LegalTextStatus }));
 
 vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
@@ -472,6 +479,68 @@ describe("a name option typed with its entity ending", () => {
     expect(companies.listByTenant(TENANT)).toHaveLength(0);
   });
 
+  test("the ending is checked before the length: a long option ending in LLC answers the ending refusal", () => {
+    human();
+    const world = worldFor(store);
+    const long = `${"Acme ".repeat(30).trim()} LLC`;
+    expect(long.length).toBeGreaterThan(NAME_MAX_LENGTH);
+    expect(
+      createCompany(sandboxDeps({ world }), TENANT, intake(newParty(), { names: options(long) })),
+    ).toEqual({ error: companyNameEndingRefusedMessage(1) });
+    // The agent door has no ending rule, so the length is what it refuses.
+    expect(
+      createCompany(sandboxDeps(), TENANT, {
+        ...intake(newParty(), { names: options(long) }),
+        for: undefined,
+      }),
+    ).toEqual({ error: companyNameTooLongMessage(1, NAME_MAX_LENGTH) });
+  });
+
+  test("every Wyoming LLC ending is refused at the formed door, in any case, spacing or periods", () => {
+    human();
+    const world = worldFor(store);
+    const endings = [
+      "Acme LC",
+      "Acme L.C.",
+      "Acme l.c",
+      "Acme L. L. C.",
+      "Acme, llc",
+      "Acme  LLC",
+      "Acme Limited Liability Co.",
+      "Acme Ltd. Liability Co.",
+      "Acme Ltd. Liability Company",
+      "Acme ltd liability co",
+      "Acme Limited  Liability   Company",
+      // W.S. 17-29-108(a) also allows "limited company", with the same abbreviations.
+      "Acme Limited Company",
+      "Acme Ltd. Co.",
+      // An option that is nothing but an ending.
+      "LC",
+    ];
+    for (const first of endings)
+      expect(
+        createCompany(
+          sandboxDeps({ world }),
+          TENANT,
+          intake(newParty(), { names: options(first) }),
+        ),
+        first,
+      ).toEqual({ error: companyNameEndingRefusedMessage(1) });
+    expect(companies.listByTenant(TENANT)).toHaveLength(0);
+  });
+
+  test("a word that merely ends in those letters is not an ending", () => {
+    const words = ["Acme Kalc", "Acme Apollo", "Acme Metallic", "Calc", "Acme Unlimited Co."];
+    // Nor is a word of an ending on its own.
+    for (const name of [...words, "Acme Ltd.", "Acme Co.", "Acme Limited", "Acme Liability"])
+      expect(hasEntityEnding(name), name).toBe(false);
+    human();
+    const world = worldFor(store);
+    const names = ["Acme Kalc", "Acme Apollo", "Acme Metallic"];
+    const created = createCompany(sandboxDeps({ world }), TENANT, intake(newParty(), { names }));
+    expect(companies.find(idOf(created))!.nameOptions.map((o) => o.name)).toEqual(names);
+  });
+
   test("the sentence says what to do", () => {
     expect(companyNameEndingRefusedMessage(1)).toBe(
       "company name option 1: leave out the entity ending (LLC, L.L.C., Limited Liability Company): it is added when the company is filed",
@@ -479,14 +548,17 @@ describe("a name option typed with its entity ending", () => {
   });
 
   test("still creates at the agent door, which strips one LLC ending as before", () => {
-    const stored = WITH_ENDING.map((first) => {
+    // The strip and `withEntityEnding` read `stripEntityEnding`, not `hasEntityEnding`: unchanged.
+    const stored = [...WITH_ENDING, "Acme LC"].map((first) => {
       const result = createCompany(sandboxDeps(), TENANT, {
         ...intake(newParty(), { names: options(first) }),
         for: undefined,
       });
       return companies.find(idOf(result))!.nameOptions[0]!.name;
     });
-    expect(stored).toEqual(["Acme", "Acme", "Acme Limited Liability Company"]);
+    expect(stored).toEqual(["Acme", "Acme", "Acme Limited Liability Company", "Acme LC"]);
+    expect(withEntityEnding("Acme")).toBe("Acme LLC");
+    expect(withEntityEnding("Acme LLC")).toBe("Acme LLC");
   });
 
   test("PATCH /companies/:id refuses it the same way on a legal-body company, and not on one for agents", () => {

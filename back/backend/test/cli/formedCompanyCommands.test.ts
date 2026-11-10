@@ -746,12 +746,18 @@ describe("company:filed-name", () => {
     const { output: dry } = await run<{ warnings: string[] }>(filedNameArgs(other, "Lantern Labs"));
     expect(dry.warnings).toEqual([expect.stringMatching(NO_STORED_OPTION), NO_ENTITY_ENDING]);
 
-    // Every spelling of the ending counts as one.
+    // Every spelling of the ending counts as one: every Wyoming LLC ending, as the formed door
+    // reads them (`hasEntityEnding`).
     for (const name of [
       "Lantern Works L.L.C.",
       "Lantern Works, llc",
       "Lantern Works Limited Liability Company",
       "Lantern Works Ltd. Liability Co.",
+      "Lantern Works LC",
+      "Lantern Works L.C.",
+      "Lantern Works Limited Liability Co.",
+      "Lantern Works Ltd. Liability Company",
+      "Lantern Works Limited Company",
     ]) {
       const companyId = formedCompany({ legalNameFiled: null });
       const { output } = await run<FiledNameRecorded>(filedNameArgs(companyId, name));

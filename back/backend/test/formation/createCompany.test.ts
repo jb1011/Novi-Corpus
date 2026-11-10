@@ -207,7 +207,8 @@ test("A3: an intake a HUMAN typed is never marked synthesized", () => {
 
 // ── what the company is for ────────────────────────────────────────────────────────────────
 
-/** Three candidates without an entity ending: the formed door refuses a candidate typed with one. */
+/** Three candidates without an entity ending: the formed door refuses a candidate typed with
+ *  one. */
 const BARE_NAMES = ["Acme Robotics", "Acme Automata", "Acme Mechanicals"];
 
 /** The formed door's World gate met: a real human's row for TENANT. */
