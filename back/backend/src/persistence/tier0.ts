@@ -55,6 +55,21 @@ export function assertTurnkeyCoverage(db: Database.Database, turnkeyServiceable:
     );
 }
 
+/** A Minimal-only deployment (no FACTORY_ADDRESS) cannot serve full-product agents: every row in
+ *  `entities` is one (legal bodies live in `legal_bodies`). Refuse to BOOT if any exist, rather than
+ *  fail each of their operations later with FullProductDisabledError. */
+export function assertFullProductCoverage(
+  db: Database.Database,
+  factoryAddress: string | undefined,
+): void {
+  if (factoryAddress) return;
+  const r = db.prepare("SELECT COUNT(*) AS n FROM entities").get() as { n: number };
+  if (r.n > 0)
+    throw new Error(
+      `${r.n} full-product agent(s) are recorded but FACTORY_ADDRESS is not configured — refusing to boot (they would be unserviceable)`,
+    );
+}
+
 export function assertCircleCoverage(
   db: Database.Database,
   circle: { apiKey: string; entitySecret: string } | undefined,

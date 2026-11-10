@@ -10,6 +10,7 @@ import {
   assertControllerWiring,
   assertLegacyFactoryOwner,
   assertLegalBodyFactoryWiring,
+  assertNoFullProductGrants,
 } from "../adapters/arc/bootVerify";
 import {
   managerAccount,
@@ -21,6 +22,7 @@ import {
 } from "../adapters/arc/clients";
 import { LegalBodyChain } from "../adapters/arc/legalBodyChain";
 import { readUsdcDomain } from "../adapters/arc/usdcToken";
+import { assertNoWildcardHolder } from "../adapters/arc/wildcardLedger";
 import { withCircleRateLimit } from "../adapters/circle/circleRateLimit";
 import {
   activateCircleSca,
@@ -105,6 +107,7 @@ import { SqlitePasskeyStore } from "../persistence/passkeyStore";
 import { SqlitePaymentIdempotencyStore } from "../persistence/paymentIdempotencyStore";
 import {
   assertCircleCoverage,
+  assertFullProductCoverage,
   assertPaymentAddressSeparation,
   assertTurnkeyCoverage,
   backfillPocketAddresses,
@@ -135,7 +138,12 @@ import { installShutdownHandlers, shouldInstallSignalHandlers } from "./shutdown
 
 async function main() {
   const cfg = loadConfig();
-  if (!cfg.factoryAddress) throw new Error("FACTORY_ADDRESS is required to run the API server");
+  // A full-product factory, a legal-body factory, or both. With only the legal-body factory this is
+  // a Minimal-only deployment: the full product is off and the adapter refuses to create entities.
+  if (!cfg.factoryAddress && !cfg.legalBodyFactory)
+    throw new Error(
+      "at least one of FACTORY_ADDRESS or LEGAL_BODY_FACTORY_ADDRESS is required to run the API server",
+    );
   // Turnkey is now per-deployment (mirror of circle): a deployment shipping no TURNKEY_* is
   // turnkey-less by construction — the circle-only mainnet shape. The DB-coverage assert below
   // still refuses to boot if turnkey-custody agents exist that this deployment can't serve.
@@ -151,6 +159,7 @@ async function main() {
   // so read paths can stop deriving from the master seed (spec audit items 1 + 7).
   assertCircleCoverage(db, cfg.circle);
   assertTurnkeyCoverage(db, turnkeyServiceable);
+  assertFullProductCoverage(db, cfg.factoryAddress);
   if (cfg.pocketMasterSeed) backfillPocketAddresses(db, cfg.pocketMasterSeed);
   // ...and, AFTER the pocket backfill so every derived address is a row this can see: the DB half
   // of the payment-address separation invariants (2026-08-26 §6.6, B1 gate A2). env.ts checks the
@@ -196,22 +205,41 @@ async function main() {
   // verification below and by the ENS apex fallback further down.
   const executor = managerAccount(cfg);
   const publicClient = publicClientFor(cfg);
-  const factoryAddress = cfg.factoryAddress as Address;
+  const factoryAddress = cfg.factoryAddress;
 
   // Boot-time on-chain verification (design §5). loadConfig can only check the env against itself;
   // these are the relational facts that live on the chain, and every one of them otherwise fails at
   // the first onboarding instead of at boot. See adapters/arc/bootVerify.ts.
   if (cfg.controllerAddress) {
-    await assertControllerWiring(publicClient, {
+    if (factoryAddress) {
+      await assertControllerWiring(publicClient, {
+        controller: cfg.controllerAddress,
+        factory: factoryAddress,
+        identityRegistry: cfg.identityRegistry,
+        executor: executor.address,
+      });
+      console.log(
+        `[boot] controller wiring verified on-chain: factory owner, ${CONTROLLER_GRANTED_SELECTORS.length} executor grants, ${CONTROLLER_PINNED_SELECTORS.length} registry pins`,
+      );
+    } else {
+      await assertNoFullProductGrants(publicClient, {
+        controller: cfg.controllerAddress,
+        executor: executor.address,
+      });
+      console.log(
+        `[boot] Minimal-only controller verified on-chain: none of the ${CONTROLLER_GRANTED_SELECTORS.length} full-product executor grants, none of the ${CONTROLLER_PINNED_SELECTORS.length} registry pins`,
+      );
+    }
+    const ledger = await assertNoWildcardHolder(publicClient, db, {
       controller: cfg.controllerAddress,
-      factory: factoryAddress,
-      identityRegistry: cfg.identityRegistry,
+      chainId: cfg.chainId,
+      deployTx: cfg.controllerDeployTx,
       executor: executor.address,
     });
     console.log(
-      `[boot] controller wiring verified on-chain: factory owner, ${CONTROLLER_GRANTED_SELECTORS.length} executor grants, ${CONTROLLER_PINNED_SELECTORS.length} registry pins`,
+      `[boot] WILDCARD_ROLE verified on-chain: held by neither the executor nor the default admin, and no holder in the role history through block ${ledger.toBlock}${ledger.fromBlock !== undefined ? ` (read blocks ${ledger.fromBlock} to ${ledger.toBlock} in ${ledger.windows} window(s))` : ""}`,
     );
-  } else {
+  } else if (factoryAddress) {
     await assertLegacyFactoryOwner(publicClient, {
       factory: factoryAddress,
       signer: executor.address,
@@ -259,7 +287,7 @@ async function main() {
   const platformManagerAddress = platformManagerAddressOf(cfg);
   if (cfg.controllerAddress)
     console.warn(
-      `⚠ NoviController mode: manager identity = ${platformManagerAddress}, executor (signing key) = ${executor.address}, factory = ${factoryAddress}`,
+      `⚠ NoviController mode: manager identity = ${platformManagerAddress}, executor (signing key) = ${executor.address}, factory = ${factoryAddress ?? "none (Minimal only)"}`,
     );
 
   // The ONE resolver for the question "is this address a Novi legal body whose standing is
