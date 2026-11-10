@@ -17,6 +17,12 @@ const privKeySchema = z
   .regex(/^0x[0-9a-fA-F]{64}$/, { message: "must be 0x + 64 hex chars" })
   .transform((s) => s as Hex);
 
+/** A transaction hash: 0x and 32 bytes, accepted in any case and stored lowercase. */
+const txHashSchema = z
+  .string()
+  .regex(/^0x[0-9a-fA-F]{64}$/, { message: "must be a transaction hash (0x + 64 hex chars)" })
+  .transform((s) => s.toLowerCase() as Hex);
+
 const etherSchema = z.string().refine(
   (v) => {
     try {
@@ -184,6 +190,10 @@ const EnvSchema = z.object({
    *  becomes the EXECUTOR (tx sender) only. Every role-gated manager call is then relayed through it.
    *  Unset = legacy: the signing key IS the manager and calls targets directly. */
   CONTROLLER_ADDRESS: addressSchema.optional(),
+  /** The transaction that created CONTROLLER_ADDRESS. Required whenever CONTROLLER_ADDRESS is set:
+   *  boot checks that its receipt created exactly that contract, and replays the controller's
+   *  WILDCARD_ROLE grants and revokes from its block to prove nobody holds the role. */
+  CONTROLLER_DEPLOY_TX: txHashSchema.optional(),
   /** Address the ENS apex (`ENS_PARENT_NAME`) resolves to. Explicit BY DESIGN: in controller mode
    *  the platform manager address becomes a contract that can neither hold nor be paid, so the apex
    *  must never inherit it by accident. Unset = today's behavior (the platform signing key). */
@@ -804,10 +814,16 @@ export interface Config {
   platformPrivateKey: Hex;
   identityRegistry: Address;
   usdc: Address;
+  /** The full-product LegalManagerFactory; undefined = the full product is off (a Minimal-only
+   *  deployment, which runs the legal-body factory alone and never creates an entity). */
   factoryAddress?: Address;
   /** NoviController address; present => controller mode (see CONTROLLER_ADDRESS). The platform
-   *  manager identity is this contract and every role-gated manager call is relayed through it. */
+   *  manager identity is this contract and every role-gated manager call is relayed through it.
+   *  Requires at least one of `factoryAddress` and `legalBodyFactory`. */
   controllerAddress?: Address;
+  /** The hash of the transaction that created the controller; set whenever `controllerAddress` is.
+   *  Boot verifies the receipt's contract address and starts the WILDCARD_ROLE ledger at its block. */
+  controllerDeployTx?: Hex;
   /** LegalBodyFactory address; undefined = the legal-body feature is off. */
   legalBodyFactory?: Address;
   /** The legal-body flow's settings (see LEGAL_BODY_FLOW_DEFAULTS). Optional in the TYPE only, for
@@ -1300,6 +1316,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     usdc: e.USDC_ADDRESS,
     factoryAddress: e.FACTORY_ADDRESS,
     controllerAddress: e.CONTROLLER_ADDRESS,
+    controllerDeployTx: e.CONTROLLER_DEPLOY_TX,
     legalBodyFactory: e.LEGAL_BODY_FACTORY_ADDRESS,
     legalBodyFlow: {
       amendmentDelaySeconds: e.LEGAL_BODY_AMENDMENT_DELAY_SECONDS,
@@ -1966,16 +1983,26 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     );
   }
 
-  // NoviController (design §5). Controller mode only makes sense against the NEW factory whose
-  // OWNER is the controller: the old factory is owned by the platform EOA, so relayed createEntity
-  // calls would revert OwnableUnauthorizedAccount at the first onboarding. We cannot verify
-  // `factory.owner() == controller` at boot (no chain I/O in loadConfig), so the enforceable form
-  // is: naming a controller obliges you to name its factory EXPLICITLY. FACTORY_ADDRESS has no
-  // schema default, so "explicitly set" is simply "present" — there is no inherited value to
-  // mistake for a deliberate one.
-  if (cfg.controllerAddress && !cfg.factoryAddress) {
+  // NoviController. A controller is only useful through a factory it OWNS: the
+  // full-product factory (FACTORY_ADDRESS) or the legal-body factory (LEGAL_BODY_FACTORY_ADDRESS).
+  // The old full-product factory is owned by the platform EOA, so relayed createEntity calls would
+  // revert OwnableUnauthorizedAccount at the first onboarding. We cannot verify ownership here (no
+  // chain I/O in loadConfig; boot does it), so the enforceable form is: naming a controller obliges
+  // you to name at least one of its factories EXPLICITLY. Neither variable has a schema default, so
+  // "explicitly set" is simply "present". A controller with the legal-body factory and no
+  // FACTORY_ADDRESS is the Minimal-only deployment: the full product is off, and boot checks the
+  // controller carries none of its grants.
+  if (cfg.controllerAddress && !cfg.factoryAddress && !cfg.legalBodyFactory) {
     throw new Error(
-      "Invalid config: CONTROLLER_ADDRESS is set but FACTORY_ADDRESS is missing — controller mode requires the factory whose owner is the controller to be named explicitly",
+      "Invalid config: CONTROLLER_ADDRESS is set but neither FACTORY_ADDRESS nor LEGAL_BODY_FACTORY_ADDRESS is — controller mode requires a factory whose owner is the controller to be named explicitly",
+    );
+  }
+  // The deploy transaction anchors the boot's WILDCARD_ROLE check: it proves which contract the
+  // controller is and where its role history starts. Without it there is no first block to replay
+  // from, and a holder granted before any block we picked would go unseen.
+  if (cfg.controllerAddress && !cfg.controllerDeployTx) {
+    throw new Error(
+      "Invalid config: CONTROLLER_ADDRESS is set but CONTROLLER_DEPLOY_TX is missing — boot proves nobody holds the controller's WILDCARD_ROLE by replaying its role history from the transaction that created it",
     );
   }
   if (cfg.legalBodyFactory && !cfg.controllerAddress) {

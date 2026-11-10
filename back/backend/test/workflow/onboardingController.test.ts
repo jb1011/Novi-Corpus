@@ -89,7 +89,11 @@ beforeEach(() => {
 afterEach(() => db.close());
 
 test("controller mode: the AgentWalletSet signature commits to owner == CONTROLLER", async () => {
-  const cfg = loadConfig({ ...env, CONTROLLER_ADDRESS: CONTROLLER });
+  const cfg = loadConfig({
+    ...env,
+    CONTROLLER_ADDRESS: CONTROLLER,
+    CONTROLLER_DEPLOY_TX: `0x${"ab".repeat(32)}`,
+  });
   const manager = platformManagerAddress(cfg); // what both onboard doors force into roles.manager
   expect(manager).toBe(cfg.controllerAddress);
 
@@ -197,7 +201,11 @@ test("a create broadcast pre-flip confirms against the manager it was MINTED wit
 });
 
 test("a controller-managed agent threads the CONTROLLER as its manager everywhere", async () => {
-  const cfg = loadConfig({ ...env, CONTROLLER_ADDRESS: CONTROLLER });
+  const cfg = loadConfig({
+    ...env,
+    CONTROLLER_ADDRESS: CONTROLLER,
+    CONTROLLER_DEPLOY_TX: `0x${"ab".repeat(32)}`,
+  });
   const manager = platformManagerAddress(cfg);
   const { arc, signer } = makeFakeArc();
   await runOnboarding({
