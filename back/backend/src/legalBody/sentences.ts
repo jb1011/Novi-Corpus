@@ -105,6 +105,10 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // value: the names of the responsible person are written from the guardian's identity record.
   party_name_is_written_by_novi:
     "The responsible party's names are written from the verified identity record: leave out legalFirstName and legalLastName.",
+  // MCP `create_formation_party` or `update_company_party` with a `marketingConsent` argument,
+  // whatever its value: the consent is the person's own act, given in the web app, never an agent's.
+  marketing_consent_is_given_in_the_web_app:
+    "The marketing consent is given by the person in the web app: leave out marketingConsent.",
   // MCP `create_company` with a `for` argument: the tool creates companies for agents only.
   create_company_agents_only:
     "This tool creates companies for agents only: a company to stand behind a legal body is created from the legal-body page of the web app.",

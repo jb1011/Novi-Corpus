@@ -759,6 +759,8 @@ test("the party-edit door exists on MCP too, takes no ssn, and is gated on forma
     "email",
     "phone",
     "address",
+    // Declared to be refused too: a marketing consent is the person's, given in the web app.
+    "marketingConsent",
     "ssn",
   ]);
   expect(tool!.description).toMatch(/NEVER an ssn/);

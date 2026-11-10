@@ -8,6 +8,10 @@
  * identity gates answer their own code and message the same way. Without a name, the party's
  * names are the record's, and the edit leaves them as they are. A sandbox deployment is as before.
  *
+ * Neither tool ever takes a marketing consent, on any deployment: the consent is the person's own
+ * act, given in the web app. A `marketingConsent` argument, whatever its value, is answered
+ * `marketing_consent_is_given_in_the_web_app` before anything is written; REST still takes it.
+ *
  * Every tenant, name and id here is an invention, the PII key a constant test key.
  */
 import type Database from "better-sqlite3";
@@ -236,13 +240,10 @@ describe("create_formation_party on production", () => {
     expect(partyRows()).toBe(0);
   });
 
-  test("without names, the party holds the record's names, and the answer is the handle alone", async () => {
+  test("without names, the party holds the record's names, no consent, and the answer is the handle alone", async () => {
     verified();
     const res = await withClient(buildTestApp(), (c) =>
-      c.callTool({
-        name: "create_formation_party",
-        arguments: { ...PARTY, marketingConsent: true },
-      }),
+      c.callTool({ name: "create_formation_party", arguments: PARTY }),
     );
     expect(isError(res)).toBe(false);
     const body = JSON.parse(textOf(res)) as { partyId: string };
@@ -252,8 +253,60 @@ describe("create_formation_party on production", () => {
       legalFirstName: NAMES_OF_RECORD.first,
       legalLastName: NAMES_OF_RECORD.last,
       email: PARTY.email,
+      marketingConsentAt: null,
     });
-    expect(row.marketingConsentAt).not.toBeNull();
+  });
+});
+
+/** The refusal of a consent argument: the code and its fixed sentence, as one JSON object. */
+const CONSENT_REFUSAL = {
+  code: "marketing_consent_is_given_in_the_web_app",
+  message: LEGAL_BODY_SENTENCES.marketing_consent_is_given_in_the_web_app,
+};
+
+describe("a marketing consent is never taken through a tool", () => {
+  test("create_formation_party refuses marketingConsent, true or false, on production and on a sandbox, and writes nothing", async () => {
+    verified();
+    for (const environment of ["production", "sandbox"] as const)
+      await withClient(buildTestApp(environment), async (c) => {
+        const tool = (await c.listTools()).tools.find((t) => t.name === "create_formation_party")!;
+        // Declared, so a sent value reaches the tool and is refused rather than stripped.
+        expect(Object.keys(tool.inputSchema.properties ?? {})).toContain("marketingConsent");
+        for (const marketingConsent of [true, false]) {
+          const body =
+            environment === "sandbox"
+              ? { ...PARTY, legalFirstName: "Someone", legalLastName: "Else" }
+              : PARTY;
+          const res = await c.callTool({
+            name: "create_formation_party",
+            arguments: { ...body, marketingConsent },
+          });
+          expect(isError(res), `${environment} ${marketingConsent}`).toBe(true);
+          expect(JSON.parse(textOf(res))).toEqual(CONSENT_REFUSAL);
+        }
+      });
+    expect(partyRows()).toBe(0);
+  });
+
+  test("update_company_party refuses marketingConsent, true or false, and nothing moves", async () => {
+    verified();
+    const { companyId, partyId } = formedCompany();
+    await withClient(buildTestApp(), async (c) => {
+      const tool = (await c.listTools()).tools.find((t) => t.name === "update_company_party")!;
+      expect(Object.keys(tool.inputSchema.properties ?? {})).toContain("marketingConsent");
+      for (const marketingConsent of [true, false]) {
+        const res = await c.callTool({
+          name: "update_company_party",
+          arguments: { companyId, ...EDIT, marketingConsent },
+        });
+        expect(isError(res)).toBe(true);
+        expect(JSON.parse(textOf(res))).toEqual(CONSENT_REFUSAL);
+      }
+    });
+    expect(parties.findOwned(TENANT, partyId)).toMatchObject({
+      email: PARTY.email,
+      marketingConsentAt: null,
+    });
   });
 });
 

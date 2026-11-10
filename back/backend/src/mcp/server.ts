@@ -972,6 +972,21 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       : null;
 
   /**
+   * A party tool's call that carries `marketingConsent`, whatever its value and on every
+   * deployment: the consent to marketing email is the person's own act, given in the web app (the
+   * REST door, behind the guardian's session), never by an agent through a tool. Declared on both
+   * tools only so that a sent value is seen and refused rather than stripped by the SDK; answered
+   * at the names refusal's place, before anything is written.
+   */
+  const refuseConsent = (args: unknown): ToolRefusal | null =>
+    (args as { marketingConsent?: unknown }).marketingConsent !== undefined
+      ? codeRefusal(
+          "marketing_consent_is_given_in_the_web_app",
+          sentenceFor("marketing_consent_is_given_in_the_web_app"),
+        )
+      : null;
+
+  /**
    * PII intake, the MCP twin of POST /formation-party (design §5).
    *
    * Registered ONLY when the deployment forms entities: a tool that exists but always refuses
@@ -999,7 +1014,7 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       "create_formation_party",
       {
         title: "Create formation party",
-        description: `Register the legal identity of the natural person your agent's legal entity will be filed under, and get back an opaque partyId to pass to create_company. ${formationCapabilityNote(deps)} Personal data belongs ONLY in this call — never in create_company's arguments and never in onboard_agent's spec. A real party requires email, PHONE and address (doola will not file a responsible party without a phone number). On production its names are written from the guardian's verified identity record, and a call carrying legalFirstName or legalLastName is refused; on a sandbox that takes test parties both names are required. marketingConsent, if true, records that the guardian agreed to marketing email; nothing is sent for it. ⚠ It NEVER takes an SSN, and never will — an SSN in a tool argument would sit in this client's context window and its logs; the field is declared only so that passing one is REFUSED rather than silently dropped. An SSN is collected only by the web form (POST /companies), which mints the (party, company) pair it is sealed under. The response contains the handle and nothing else.`,
+        description: `Register the legal identity of the natural person your agent's legal entity will be filed under, and get back an opaque partyId to pass to create_company. ${formationCapabilityNote(deps)} Personal data belongs ONLY in this call — never in create_company's arguments and never in onboard_agent's spec. A real party requires email, PHONE and address (doola will not file a responsible party without a phone number). On production its names are written from the guardian's verified identity record, and a call carrying legalFirstName or legalLastName is refused; on a sandbox that takes test parties both names are required. It never takes a marketing consent: the person gives it in the web app, and a call carrying marketingConsent is refused. ⚠ It NEVER takes an SSN, and never will — an SSN in a tool argument would sit in this client's context window and its logs; the field is declared only so that passing one is REFUSED rather than silently dropped. An SSN is collected only by the web form (POST /companies), which mints the (party, company) pair it is sealed under. The response contains the handle and nothing else.`,
         inputSchema: {
           /** The sandbox shortcut: no personal data at all. */
           synthetic: z.boolean().optional(),
@@ -1011,8 +1026,11 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
            *  a responsible party with no phone. */
           phone: z.string().optional(),
           address: z.record(z.unknown()).optional(),
-          /** The guardian's consent to marketing email, as REST takes it: stored on production. */
-          marketingConsent: z.boolean().optional(),
+          /**
+           * ⚠ DECLARED IN ORDER TO BE REFUSED, whatever its value: the consent to marketing email
+           * is the person's own act, given in the web app, never an agent's (`refuseConsent`).
+           */
+          marketingConsent: z.unknown().optional(),
           /** ⚠ DECLARED IN ORDER TO BE REFUSED (§4.1) — see the block comment above. */
           ssn: z.string().optional(),
         },
@@ -1025,7 +1043,10 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         // two PII doors. Then, on a production door, a name: written from the identity record.
         const companyDeps = deps.formation!.companyDeps;
         const denied =
-          requireProvisionTenantWide(scope) ?? refuseSsn(args) ?? refuseTypedNames(args);
+          requireProvisionTenantWide(scope) ??
+          refuseSsn(args) ??
+          refuseTypedNames(args) ??
+          refuseConsent(args);
         if (denied) return denied;
         try {
           // `ssn` is destructured OUT as well as refused above: `FormationPartySchema` is
@@ -1078,7 +1099,7 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       "update_company_party",
       {
         title: "Update the company's responsible party",
-        description: `Correct the contact and address of the responsible person on a filing the provider REFUSED — the one exit from a company parked on awaitingPartyEdit (see get_company). It is addressed by companyId: the party is the one this company was filed with, so no other company's person can be touched. Editable only until the filing has been sent: once the provider has the person, it is never asked for them again, and an edit here would change our copy and nothing else. Takes create_formation_party's email, phone and address; NEVER the names (on production they are written from the guardian's verified identity record, and a call carrying legalFirstName or legalLastName is refused) and NEVER an ssn — an SSN is collected only by the web form, which is also the only place it can be re-captured. ${formationCapabilityNote(deps)} The response contains the handle and nothing else.`,
+        description: `Correct the contact and address of the responsible person on a filing the provider REFUSED — the one exit from a company parked on awaitingPartyEdit (see get_company). It is addressed by companyId: the party is the one this company was filed with, so no other company's person can be touched. Editable only until the filing has been sent: once the provider has the person, it is never asked for them again, and an edit here would change our copy and nothing else. Takes create_formation_party's email, phone and address; NEVER the names (on production they are written from the guardian's verified identity record, and a call carrying legalFirstName or legalLastName is refused), NEVER a marketing consent (the person gives it in the web app) and NEVER an ssn — an SSN is collected only by the web form, which is also the only place it can be re-captured. ${formationCapabilityNote(deps)} The response contains the handle and nothing else.`,
         inputSchema: {
           companyId: z.string(),
           /**
@@ -1093,6 +1114,8 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
           /** REQUIRED, exactly as at intake (C6): doola will not file a party with no phone. */
           phone: z.string(),
           address: z.record(z.unknown()),
+          /** ⚠ DECLARED IN ORDER TO BE REFUSED, whatever its value (`refuseConsent`). */
+          marketingConsent: z.unknown().optional(),
           /** ⚠ DECLARED IN ORDER TO BE REFUSED (§4.1) — see the block comment above. */
           ssn: z.string().optional(),
         },
@@ -1103,7 +1126,10 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         // answer — same order, same sentence, as `create_company`; then, on a production door, a
         // name, at the same place as REST refuses it.
         const denied =
-          requireProvisionTenantWide(scope) ?? refuseSsn(args) ?? refuseTypedNames(args);
+          requireProvisionTenantWide(scope) ??
+          refuseSsn(args) ??
+          refuseTypedNames(args) ??
+          refuseConsent(args);
         if (denied) return denied;
         try {
           const { companyId, ssn: _ssn, ...rest } = args as Record<string, unknown>;

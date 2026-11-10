@@ -200,7 +200,9 @@ export const FormationPartySchema = z
     /**
      * The guardian's consent to marketing email: a box left unticked unless they tick it. `true`
      * stores `marketing_consent_at` on a production door; false or absent stores nothing. The
-     * filing email is sent whatever this says: it confirms a service the customer paid for.
+     * filing email is sent whatever this says: it confirms a service the customer paid for. It is
+     * the person's own act, so only the web app's door (`POST /formation-party`) takes it: the MCP
+     * tools refuse it, whatever its value (`marketing_consent_is_given_in_the_web_app`).
      */
     marketingConsent: z.boolean().optional(),
   })
