@@ -273,8 +273,8 @@ const httpStatus = (code: number) =>
     headers: { "content-type": "application/json" },
   });
 const INSTRUCTIONS: Record<KlerosDeploymentName, string> = {
-  testnet: "This key files on arbitrum-sepolia-testnet, court 8, 5 jurors; the preset broadcasts.",
-  live: "This key files on arbitrum-one, court 34, 5 jurors; the preset broadcasts.",
+  testnet: "This call sends them: court 8, 5 jurors, on arbitrum-sepolia-testnet.",
+  live: "This call sends them: court 34, 5 jurors, on arbitrum-one.",
 };
 const COURT_TIMES: Record<KlerosDeploymentName, string[]> = {
   testnet: ["900", "2700", "1800", "2700"],
@@ -978,7 +978,7 @@ describe("the pre-flight refuses, and writes nothing", () => {
     const h = setup();
     const row = await h.contested("testnet");
     const { stage, seen } = http("testnet", {
-      instructions: "This key files on arbitrum-one, court 34.",
+      instructions: "This call sends them: court 34, 5 jurors, on arbitrum-one.",
     });
     const out = await fileDispute(h.deps(stage), row.caseId, { confirmedFlag: "--testnet" });
     expect(notSent(out)).toBe(true);
