@@ -8,6 +8,11 @@
  * `formation:record-ein`, the saga never touches it afterwards, and its legal body is stated the
  * same way. No ops line of the case names a company, a person or an EIN.
  *
+ * The fake doola answers as doola's spec does: its full company answer carries no name, so the
+ * filed name is read from its list, and its sandbox files with no filing number, so the saga's
+ * company holds the sandbox stand-in (`TEST-STANDIN-`), which its agreement prints and its
+ * statement carries beside `environment: "sandbox"`.
+ *
  * The real API app with its auth, company, party, order, link, binding and statement doors; the
  * real repositories over a database file and a file document store; the real formation sweeper
  * over `fakeSandboxDoola` (the in-code doola of Task 13: no key, no network, no doola); the real
@@ -63,6 +68,7 @@ import {
 import { DEFAULT_INDUSTRY } from "../../src/formation/intake";
 import { redactPii } from "../../src/formation/pii";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import { sandboxStandInFilingNumber } from "../../src/legalBody/companyFields";
 import { expireStaleCustomerCompanies } from "../../src/legalBody/customerCompany";
 import { expireEvidenceBytes } from "../../src/legalBody/evidence";
 import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
@@ -624,7 +630,7 @@ async function order(
   expect(agreement.status).toBe(200);
   expect(agreement.body.manifestHash).toBe(ordered.body.agreement.hash);
   expect(agreement.body.termsDoc).toContain(filed.legalName);
-  expect(agreement.body.termsDoc).toContain(filed.filingNumber);
+  expect(agreement.body.termsDoc).toContain(`with filing number "${filed.filingNumber}"`);
   return { id, agreement: agreement.body };
 }
 
@@ -768,6 +774,8 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
   expect(callsOf("createCustomer")).toHaveLength(1);
   expect(callsOf("createCompany")).toHaveLength(1);
   const [lanternRef] = callsOf("createCompany").map((c) => c.split(":")[1]);
+  // The stand-in the saga's company will hold is the one for this doola id.
+  expect(sandboxStandInFilingNumber(lanternRef!)).toBe(LANTERN_STAND_IN);
   expect(await companyView(g, lantern)).toMatchObject({
     state: "in_progress",
     providerRef: lanternRef,
@@ -790,6 +798,11 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
     legalNameFiled: LANTERN_FILED,
     filingNumber: LANTERN_STAND_IN,
     filedAt: filingDateToUnix(lanternFiledOn),
+  });
+  // The row itself: the name doola lists, as our first option with its ending, and the stand-in.
+  expect(d.companies.find(lantern)).toMatchObject({
+    legalNameFiled: LANTERN_FILED,
+    filingNumber: LANTERN_STAND_IN,
   });
   const indexed = d.documents.listByCompany(lantern);
   expect(indexed.map((doc) => [doc.docType, doc.source]).sort()).toEqual([
@@ -902,6 +915,7 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
     "company_created",
     "formation_stranded_opened",
     "sandbox_filing_autocompleted",
+    "sandbox_filing_number_stand_in",
     "sandbox_ein_autocompleted",
     "formation_recorded_filed",
     "formation_recorded_ein",

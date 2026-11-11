@@ -8,6 +8,9 @@
  * company at once: the filing, the documents and the filed name land in the same tick, read back
  * through the ordinary processor. Five minutes after the filing, the EIN follows the same way.
  *
+ * The fake answers as doola's sandbox does: the name is on the list item only, and the filing
+ * carries no number, so the company holds the sandbox stand-in for its doola id.
+ *
  * Every test runs the real filing step (`runFormationCreateProvider`) against `fakeSandboxDoola`,
  * then pins the rows to the injected clock.
  */
@@ -16,6 +19,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { sqliteUtcTimestamp, syntheticFormationParty } from "../../src/formation";
 import { withEntityEnding } from "../../src/formation/intake";
 import { companyFiled, documentsFetched, einIssued } from "../../src/formation/status";
+import { sandboxStandInFilingNumber } from "../../src/legalBody/companyFields";
 import { filingFacts } from "../../src/legalBody/filings";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -166,6 +170,9 @@ test("six minutes after: one playground call, and the filing, documents and name
   const company = companies.find(COMPANY_KEY)!;
   expect(company.legalNameFiled).toBe(withEntityEnding(company.nameOptions[0]!.name));
   expect(company.filingNumber).toBe(STAND_IN);
+  expect(sandboxStandInFilingNumber(COMPANY_ID)).toBe(STAND_IN);
+  // The name came from doola's list, read once, under the company's customer.
+  expect(callsOf("listCompanies")).toEqual(["listCompanies:cus-1"]);
   expect(company.filedAt).toBe(filingDateToUnix(wyomingDate(Math.floor(now / 1000))));
   // The EIN waits for its own five minutes.
   expect(callsOf("playgroundCompleteEin")).toEqual([]);
@@ -177,6 +184,15 @@ test("six minutes after: one playground call, and the filing, documents and name
   expect(line).toBeDefined();
   const { opslog: _event, at: _at, ...fields } = line!;
   expect(fields).toEqual({ companyId: COMPANY_KEY, providerRef: COMPANY_ID });
+  // The stand-in says what it is, once.
+  expect(lines.filter((l) => l.opslog === "sandbox_filing_number_stand_in")).toEqual([
+    expect.objectContaining({
+      level: "info",
+      companyId: COMPANY_KEY,
+      providerRef: COMPANY_ID,
+      filingNumber: STAND_IN,
+    }),
+  ]);
 });
 
 test("at 03:00 UTC the playground files under Wyoming's date, the day before, and the statement's facts read the filing as verified", async () => {
@@ -368,11 +384,12 @@ test("six minutes after the filing, one EIN playground call, and the EIN is issu
   // No ops line of the tick carries the EIN.
   expect(lines.some((l) => JSON.stringify(l).includes("12-3456789"))).toBe(false);
 
-  // Fully formed: nothing more is asked of the playground.
+  // Fully formed: nothing more is asked of the playground, and the stand-in stands.
   now += 10 * MINUTE;
   await sweeper().tick();
   expect(callsOf("playgroundCompleteFormation")).toHaveLength(1);
   expect(callsOf("playgroundCompleteEin")).toHaveLength(1);
+  expect(companies.find(COMPANY_KEY)?.filingNumber).toBe(STAND_IN);
 });
 
 test("an agent company is never completed by the playground", async () => {

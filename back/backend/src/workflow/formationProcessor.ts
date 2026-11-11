@@ -123,8 +123,8 @@ export type PollBackoff = StepBackoff;
 
 /** `formation_requests.await_filing.detail`. NEVER PII. */
 export interface AwaitFilingDetail extends PollBackoff {
-  /** doola's intake status at the last fetch (one of the six `formationSubmissionStatus` values)
-   *  — not "filed". */
+  /** doola's intake status at the last fetch (one of the six `formationSubmissionStatus` values),
+   *  not "filed". */
   submissionStatus?: string;
   /** doola's `formationFilingDate`, verbatim (yyyy-MM-dd). The parsed unix value goes on the
    *  ENTITY; this keeps the string we parsed, so a bad parse is diagnosable. */
