@@ -6,11 +6,13 @@
  * how the wake-up-only rule (audit H2) is actually proven rather than asserted.
  */
 import { ContractRevertError } from "../../src/adapters/arc/relay";
-import type { DoolaApi } from "../../src/adapters/doola/doolaClient";
-import type {
-  DoolaCompany,
-  DoolaDocument,
-  DoolaRequiredAction,
+import { type DoolaApi, DoolaApiError } from "../../src/adapters/doola/doolaClient";
+import {
+  type CreateCompanyInput,
+  DOOLA_DESCRIPTION_MAX_LENGTH,
+  type DoolaCompany,
+  type DoolaDocument,
+  type DoolaRequiredAction,
 } from "../../src/adapters/doola/types";
 import { companyNameOptions } from "../../src/formation/intake";
 import type { HostLookup } from "../../src/payments/ssrfGuard";
@@ -179,6 +181,37 @@ function notImplemented(name: string) {
   };
 }
 
+/**
+ * The per-field code the fakes give a too-long `description`. doola does not publish its
+ * per-field codes, so this one is the fakes' own; what the fakes copy from doola is the SHAPE of
+ * the refusal (`E_VALIDATION_FAILED`, 400, the field keyed under `error.fields` with a
+ * `{code, message}` of its own) and the limit it enforces.
+ */
+export const FAKE_DESCRIPTION_TOO_LONG_CODE = "E_FIELD_TOO_LONG";
+
+/**
+ * Refuse a create body the way doola refuses it, for the one length rule doola documents:
+ * `description` longer than `DOOLA_DESCRIPTION_MAX_LENGTH` (50). Throws; returns nothing.
+ *
+ * Shared, so every fake that files holds the body to the limit doola holds it to, and a fixture
+ * that drifts past it fails in the test the way it would fail against the sandbox.
+ */
+export function refuseLikeDoola(input: CreateCompanyInput): void {
+  if (input.description.length > DOOLA_DESCRIPTION_MAX_LENGTH)
+    throw new DoolaApiError(
+      "E_VALIDATION_FAILED",
+      400,
+      "one or more fields are invalid",
+      "req-fake-validation",
+      {
+        description: {
+          code: FAKE_DESCRIPTION_TOO_LONG_CODE,
+          message: `size must be between 1 and ${DOOLA_DESCRIPTION_MAX_LENGTH}`,
+        },
+      },
+    );
+}
+
 /** doola document fixtures, spelled the way the wire spells them (`documentType`, not `type`). */
 export function doolaDoc(id: string, documentType: string): DoolaDocument {
   return { id, companyId: COMPANY_ID, name: `${documentType}.pdf`, documentType };
@@ -195,7 +228,9 @@ export function doolaDoc(id: string, documentType: string): DoolaDocument {
  *
  * - `createCustomer` answers `cus-<n>`; `createCompany` answers `cmp-<n>` (the first is
  *   `COMPANY_ID`), `SUBMITTED`, becomes `state.company`, and remembers the first name option's
- *   bare `name`, which is what the playground's filing reports back;
+ *   bare `name`, which is what the playground's filing reports back. A body doola would refuse
+ *   (`refuseLikeDoola`: a description over 50 characters) is refused instead, pushes
+ *   `createCompany:refused` and creates nothing;
  * - `listCompanies` answers `[]` (the pre-create lookup finds nothing);
  * - `playgroundCompleteFormation` files the company: the remembered name (the company's own name
  *   when no create was made), the filing date Wyoming's calendar date of `opts.now()` (doola
@@ -226,6 +261,12 @@ export function fakeSandboxDoola(
       return { doolaCustomerId };
     },
     async createCompany(input) {
+      try {
+        refuseLikeDoola(input);
+      } catch (e) {
+        calls.push("createCompany:refused");
+        throw e;
+      }
       const doolaCompanyId = `cmp-${++created}`;
       calls.push(`createCompany:${doolaCompanyId}`);
       bareName = input.nameOptions[0]?.name;

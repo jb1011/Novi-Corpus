@@ -1,4 +1,9 @@
-import { awaitsSsnDecision, parkedForIntakeEdit, parkedForPartyEdit } from "../formation/freeze";
+import {
+  awaitsSsnDecision,
+  parkedForIntakeEdit,
+  parkedForPartyEdit,
+  refusedFieldsOf,
+} from "../formation/freeze";
 import {
   type CompanyState,
   type FormationStatus,
@@ -658,10 +663,15 @@ export function toEntityViews(rows: EntityRecord[], deps: EntityViewDeps = {}): 
  * a company that had simply stopped — and two of the three have an exit they alone can take. So
  * the view says which one it is, and the section renders the sentence and the form that clears it.
  *
- * NO PII, exactly as everywhere else. `awaitingPartyEdit` says a party field was refused; it does
- * not say WHICH, because doola's rejection prose is free text their operators write and can name
- * the responsible party. The SSN park is read through `parties.ssnState`, which selects an enum
- * and a NULL-check and no personal column at all.
+ * NO PII, exactly as everywhere else. A park names WHICH fields doola refused by their PATHS
+ * alone (`refusedFields: ["description"]`), never by doola's sentences about them: that prose is
+ * free text their operators write and can name the responsible party. A path is different in
+ * kind: it is the name of a field in OUR request body, it is written only from the keys doola
+ * gave its refusal, and it is served only after it passes the path rule (`isDoolaFieldPath`): its
+ * first segment must be one of the refused request's own top-level fields, so a value used as a
+ * key (a phone number, `john.smith`) is never served. So the rule "the view carries codes only"
+ * still holds, with field names beside the codes. The SSN park is read through `parties.ssnState`, which selects an
+ * enum and a NULL-check and no personal column at all.
  */
 export interface CompanyDetailView extends CompanyView {
   /** The row's own column. On the DETAIL only: a page about one company can honestly show the
@@ -687,7 +697,8 @@ export interface CompanyDetailView extends CompanyView {
   documents: DocumentView[];
   /** The agents attached to this filing. `agents` (inherited) is this array's length. */
   attachedAgents: { id: string; name: string; status: EntityRecord["status"] }[];
-  /** What stopped this filing and who can restart it. All three are false on a healthy company. */
+  /** What stopped this filing and who can restart it. All three flags are false, and
+   *  `refusedFields` empty, on a healthy company. */
   park: {
     /** A doola-rejected INTAKE. Exit: `PATCH /companies/:companyId` with new names/purpose/
      *  industry — one edit buys one retry. */
@@ -697,6 +708,10 @@ export interface CompanyDetailView extends CompanyView {
     /** The §4.6a clock erased an SSN before the filing was ever sent. Exit:
      *  `PATCH /companies/:companyId` with a fresh `ssn`, or `proceedWithoutSsn: true`. */
     awaitingSsnDecision: boolean;
+    /** The fields doola named when it refused the body the flag above waits on, by PATH only
+     *  (`["description"]`, `["members[0].address.phone"]`), each through the path rule.
+     *  Never doola's text and never a value. Empty when no flag is set or doola named none. */
+    refusedFields: string[];
   };
 }
 
@@ -777,6 +792,9 @@ export function toCompanyDetailView(
         create,
         deps.formation?.parties.ssnState(company.companyId),
       ),
+      // PATHS only, re-checked against the allowlist on the way out (see the interface comment):
+      // which field, so the owner's form can point at it, and nothing doola wrote about it.
+      refusedFields: refusedFieldsOf(create),
     },
   };
 }

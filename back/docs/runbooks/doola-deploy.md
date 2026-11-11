@@ -149,6 +149,8 @@ the park and hand doola a retry of the exact body it refused. The freeze also ri
 ⚠ **`GET /formation/industries` was RENAMED to `GET /formation/rules`** in the same phase, and it
 now serves the four intake limits (`nameOptionCount`, `nameMaxLength`, `purposeMaxLength`,
 `nameCharset`) beside the labels — the interface used to mirror those as constants of its own.
+`purposeMaxLength` is **50** since 2026-11-11 (doola's `description` limit; see "The business
+purpose" below).
 Wyoming's restricted words stay server-only: the matcher is the rule, not the data. The route is
 ETag-validated, and the Vercel proxy forwards `if-none-match`/`etag` for that one path.
 
@@ -377,6 +379,54 @@ a tool description that crowds out every other tool in an agent's context window
 reads it whole from **`GET /formation/rules`** — public, day-cacheable, ETag-validated, and deliberately not a
 `/config` field, since `/config` is fetched by every page before auth and cached for the life of
 the tab.
+
+## The business purpose: at most 50 characters (2026-11-11)
+
+The purpose is filed VERBATIM as doola's `CreateCompanyRequest.description`, and doola's published
+OpenAPI document gives that field `maxLength: 50` (`minLength: 1`). No other field of the create
+body has a length rule there. Until 2026-11-11 the intake allowed 500, on the belief that doola
+documented no maximum, so a 109-character purpose passed the door and doola refused the create
+with `E_VALIDATION_FAILED` after the customer was created. The company parked correctly, but no
+log line said which field.
+
+Now one constant, `DOOLA_DESCRIPTION_MAX_LENGTH = 50` (`src/adapters/doola/types.ts`), is
+`PURPOSE_MAX_LENGTH`, and every door reads it:
+
+| Door | What it does with a 51-character purpose |
+|---|---|
+| `POST /companies` | 400, `businessPurpose is longer than 50 characters` |
+| `PATCH /companies/:companyId` | the same 400, and the stored purpose is untouched |
+| MCP `create_company` | the same sentence as a tool error; the tool description states the limit |
+| `GET /formation/rules` | serves `purposeMaxLength: 50` to the form |
+
+The onboarding door (`POST /onboard`, MCP `onboard_agent`) takes no purpose: it attaches an agent
+to a company that already exists. The fallback sent when a company has no purpose at all,
+`DEFAULT_DESCRIPTION`, is now "Operates autonomous software agents." (36 characters).
+
+**Companies stored before the limit are not cut.** A purpose over 50 characters that a company
+already holds goes out as stored: shortening a legal description at send time would file a
+sentence nobody wrote. doola refuses it, the filing parks under `awaitingIntakeEdit`, the
+`formation_stale` line (CRITICAL, `reason: create_rejected_awaiting_intake_edit`) names
+`description` in its `message` and its `fieldErrors`, `GET /companies/:companyId` reports
+`park.refusedFields: ["description"]`, and the owner's edit through `PATCH /companies/:companyId`
+(held to 50) re-arms exactly one retry. To find such companies before they are filed:
+
+```bash
+sqlite3 /var/lib/legalbody/legalbody.db \
+  "SELECT c.company_id, c.status, length(c.business_purpose) AS purpose_length
+     FROM companies c
+     LEFT JOIN formation_requests f
+       ON f.company_id = c.company_id AND f.step = 'create_provider'
+    WHERE c.provider = 'doola'
+      AND c.status != 'abandoned'
+      AND length(c.business_purpose) > 50
+      AND f.provider_ref IS NULL;"
+```
+
+The interface keeps a fallback of its own (`FALLBACK_INTAKE_RULES.purposeMaxLength: 500` in
+`interface/src/lib/formation/companyIntake.ts`), used only while `GET /formation/rules` is in
+flight. The served 50 replaces it, and the door refuses either way; the fallback is the interface
+owner's to align.
 
 ## A2: the SSN wire shape cannot be smoke-tested
 

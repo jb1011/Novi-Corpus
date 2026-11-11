@@ -120,6 +120,22 @@ export interface DoolaRequestedService {
   variant: "Standard" | "Expedite";
 }
 
+/**
+ * The longest `CreateCompanyRequest.description` doola accepts: `maxLength: 50` (and
+ * `minLength: 1`) in the published OpenAPI document cited at the top of this file, re-read
+ * 2026-11-11. doola's own example description is 49 characters. No other field of the create
+ * body carries a length rule there.
+ *
+ * A longer description is refused with `E_VALIDATION_FAILED` AFTER the customer was created,
+ * which parks the filing for a human: that is how a 109-character purpose stopped a sandbox
+ * filing on 2026-11-11. The intake's `PURPOSE_MAX_LENGTH` is this constant, so the door refuses
+ * what doola would refuse, before anything is sent.
+ *
+ * doola's wording ("size must be between 1 and 50") is Jakarta Bean Validation's `@Size`, which
+ * counts UTF-16 code units, as JavaScript's `length` does: the door and doola agree on what 50 is.
+ */
+export const DOOLA_DESCRIPTION_MAX_LENGTH = 50;
+
 /** `CreateCompanyRequest`. `addresses`, `description`, `doolaCustomerId`, `nameOptions`,
  *  `responsibleParty` and `state` are REQUIRED by the API; `members` is required for an LLC. */
 export interface CreateCompanyInput {
@@ -132,6 +148,7 @@ export interface CreateCompanyInput {
   /** The `industry` label from GET /references/naics-codes. Preferred over the deprecated
    *  `naicsCode`. */
   industry: string;
+  /** At most `DOOLA_DESCRIPTION_MAX_LENGTH` characters, and at least one. */
   description: string;
   responsibleParty: DoolaResponsibleParty;
   /** Exactly two entries: one `mailing`, one `business`. */
@@ -239,7 +256,8 @@ export interface DoolaErrorEnvelope {
     code?: string;
     message?: string;
     /** Field-level detail. Live shape is `{field: {code, message}}` — NOT the flat
-     *  `{field: "reason"}` PR 1 assumed — so it is carried opaquely and only ever logged. */
+     *  `{field: "reason"}` PR 1 assumed — so it is carried opaquely, and read only by
+     *  `summarizeDoolaFields`, which keeps the path, the code and a redacted message. */
     fields?: Record<string, unknown>;
     requestId?: string;
   };

@@ -1,3 +1,4 @@
+import { DOOLA_FIELD_LIMIT, isDoolaFieldPath } from "../adapters/doola/fieldErrors";
 import type { FormationState } from "../persistence/formationRepository";
 
 /**
@@ -221,6 +222,31 @@ export function parkedForPartyEdit(step: FreezableStep | undefined): boolean {
 /** The INTAKE half. Same rule, other flag — see `parkedForPartyEdit`. */
 export function parkedForIntakeEdit(step: FreezableStep | undefined): boolean {
   return parkedFlag(step, "awaitingIntakeEdit");
+}
+
+/**
+ * The field PATHS doola named when it refused the body a park is waiting on (2026-11-11), for
+ * the company view's `park.refusedFields`.
+ *
+ * Only while one of the two flags above is set: a list is a claim about a refusal that is still
+ * in place, and the door that re-arms the retry takes it off with the flag. Every entry is
+ * re-checked against the path rule (`isDoolaFieldPath`) for the body the flag names (the
+ * company's for the intake park, the customer's for the party park) rather than trusted because
+ * the filer wrote it, for the view's rule that it carries names and codes, never free text: the
+ * blob is a column, and a column can hold anything. Capped at the summary's own limit.
+ */
+export function refusedFieldsOf(step: FreezableStep | undefined): string[] {
+  const body = parkedForIntakeEdit(step)
+    ? "company"
+    : parkedForPartyEdit(step)
+      ? "customer"
+      : undefined;
+  if (body === undefined) return [];
+  const parsed = parseJson(step?.detail ?? "") as Record<string, unknown> | undefined;
+  const raw = parsed?.refusedFields;
+  return Array.isArray(raw)
+    ? raw.filter((p) => isDoolaFieldPath(p, body)).slice(0, DOOLA_FIELD_LIMIT)
+    : [];
 }
 
 function parkedFlag(

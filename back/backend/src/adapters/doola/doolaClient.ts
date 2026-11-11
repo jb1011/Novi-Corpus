@@ -2,6 +2,12 @@ import { redactPii } from "../../formation/pii";
 import { opsLog } from "../../observability/opsLog";
 import { withDeadline } from "../../util/deadline";
 import { readCappedText } from "../../util/readStreamCapped";
+import {
+  type DoolaFieldError,
+  type DoolaRefusedBody,
+  fieldErrorsClause,
+  readDoolaFields,
+} from "./fieldErrors";
 import type {
   CreateCompanyInput,
   CreateCustomerInput,
@@ -64,7 +70,9 @@ export class DoolaApiError extends Error {
     /** doola's correlation id — the FIRST thing their support asks for. */
     readonly requestId?: string,
     /** Field-level detail on a validation failure. Opaque: doola nests `{code, message}` per
-     *  field, and a narrower type would be a claim about a partner surface we do not control. */
+     *  field, and a narrower type would be a claim about a partner surface we do not control.
+     *  Read ONLY through `summarizeDoolaFields` (`fieldErrors.ts`), which is what keeps a value
+     *  doola echoes back out of every surface. */
     readonly fields?: Record<string, unknown>,
   ) {
     super(message);
@@ -97,6 +105,9 @@ export class DoolaTimeoutError extends Error {
   }
 }
 
+/** What stands in for doola's own sentence when the refused body was the responsible person's. */
+export const CUSTOMER_TEXT_WITHHELD = "provider text withheld";
+
 /**
  * ONE description of a doola failure, for every error string and every ops line (M4).
  *
@@ -109,14 +120,45 @@ export class DoolaTimeoutError extends Error {
  * A timeout gets a code of its own (`E_TIMEOUT`) rather than none: "we never heard back" is the
  * single most important distinction the create step makes, because it is the one case where the
  * request may have COMMITTED at doola and the answer was lost.
+ *
+ * A validation failure also carries WHICH fields doola refused (2026-11-11): `fieldErrors`, read
+ * by `summarizeDoolaFields` (paths through an allowlist, doola's per-field code, a redacted and
+ * capped message for the company's own fields only, never a submitted value), and the paths and
+ * codes appended to `message`, so the step's stored error and the company's event trail name the
+ * field too. Present only when doola named at least one field, so every ops line that spreads
+ * this result carries it exactly then.
+ *
+ * `body` says which body was refused. The default is the company's. `customer` (the responsible
+ * person's own body) keeps no per-field message at all, and WITHHOLDS doola's top-level sentence
+ * too: on that body it can say "customer with email x already exists", and `redactPii` removes
+ * SSN shapes only. Its `message` is then doola's code, `CUSTOMER_TEXT_WITHHELD` and the field
+ * clause, so the step's error, the event trail and the ops lines still say what was refused.
+ *
+ * `fieldErrorsDropped` counts the entries of doola's map that were NOT kept (the path rule, the
+ * field bound, a malformed map), present only when there were some, so a refusal whose every key
+ * was refused still says that doola named fields.
  */
-export function describeDoolaError(e: unknown): {
+export function describeDoolaError(
+  e: unknown,
+  opts: { body?: DoolaRefusedBody } = {},
+): {
   message: string;
   code?: string;
   requestId?: string;
+  fieldErrors?: DoolaFieldError[];
+  fieldErrorsDropped?: number;
 } {
-  if (e instanceof DoolaApiError)
-    return { message: redactPii(`${e.code}: ${e.message}`), code: e.code, requestId: e.requestId };
+  if (e instanceof DoolaApiError) {
+    const { fieldErrors, dropped } = readDoolaFields(e.fields, opts);
+    const sentence = opts.body === "customer" ? CUSTOMER_TEXT_WITHHELD : e.message;
+    return {
+      message: redactPii(`${e.code}: ${sentence}${fieldErrorsClause(fieldErrors)}`),
+      code: e.code,
+      requestId: e.requestId,
+      ...(fieldErrors.length > 0 ? { fieldErrors } : {}),
+      ...(dropped > 0 ? { fieldErrorsDropped: dropped } : {}),
+    };
+  }
   if (e instanceof DoolaTimeoutError) return { message: redactPii(e.message), code: "E_TIMEOUT" };
   return { message: redactPii((e as Error)?.message ?? String(e)) };
 }
