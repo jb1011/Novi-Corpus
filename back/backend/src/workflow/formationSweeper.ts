@@ -21,6 +21,7 @@ import {
   companyFiled,
   deriveFormationStatus,
   einIssued,
+  isManualRef,
   manuallyRecorded,
 } from "../formation/status";
 import { opsLog } from "../observability/opsLog";
@@ -49,6 +50,7 @@ import {
   advanceFormation,
   currentPolledStep,
   processDoolaEvent,
+  retireUnmappedEvent,
 } from "./formationProcessor";
 import { runFormationCreateProvider } from "./formationProvider";
 import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./formationStep";
@@ -434,11 +436,18 @@ export class FormationSweeper {
         { eventId: lead.eventId, eventName: lead.eventName, providerRef: lead.providerRef },
         { source: "sweeper", acceptUnknownNames: true, requiredActions: true },
       );
-      // Only a real read may retire an event — and it retires the whole group, because one read
-      // is exactly what all of them were asking for.
+      // Only a real read may retire an event, or the grace retirement below for one no company
+      // owns — and a read retires the whole group, because one read is exactly what all of them
+      // were asking for.
       if (result.fetched)
         for (const e of group)
           if (e.eventId !== lead.eventId) this.d.events.markProcessed(e.eventId);
+      // The lead was retired: no company here owns the id the whole group shares, and the lead
+      // (the oldest) is past the grace. The rest are judged on THEIR OWN clocks, so one still
+      // inside the grace is kept, and the old ones go on this tick instead of one per tick.
+      if (result.retired)
+        for (const e of group)
+          if (e.eventId !== lead.eventId) retireUnmappedEvent(this.d, e, "sweeper");
     } catch (err) {
       opsLog("doola_event_redrive_failed", {
         level: "warn",
@@ -507,7 +516,7 @@ export class FormationSweeper {
         environment: this.d.environment,
       });
       try {
-        await withKeyedLock(row.companyId, () => this.retryCreateProvider(row.companyId));
+        await this.retryCreateAndRead(row.companyId);
       } catch (err) {
         opsLog("formation_retry_failed", {
           level: "warn",
@@ -798,8 +807,7 @@ export class FormationSweeper {
    * never retries.
    */
   private readonly drivers: Record<FormationStep, (companyId: string) => Promise<unknown>> = {
-    create_provider: (companyId) =>
-      withKeyedLock(companyId, () => this.retryCreateProvider(companyId)),
+    create_provider: (companyId) => this.retryCreateAndRead(companyId),
     await_filing: (companyId) => this.advance(companyId),
     fetch_documents: (companyId) => this.advance(companyId),
     await_ein: (companyId) => this.advance(companyId),
@@ -815,6 +823,44 @@ export class FormationSweeper {
     return withKeyedLock(companyId, () =>
       advanceFormation(this.d, companyId, { requiredActions: true }),
     );
+  }
+
+  /**
+   * Re-run the filing step from a RETRY or a RESUME, and read the company AT ONCE if this run is
+   * the one that landed its doola company id.
+   *
+   * A create whose answer was lost lands its ref on a later retry, on a doubling backoff, or on
+   * the resume after an outage, and either can be well past `UNMAPPED_EVENT_GRACE_MS`. By then
+   * doola's webhooks for the company may have been retired as unowned (the boot tick re-drives
+   * events BEFORE it resumes creates), and the read they would have triggered is done here
+   * instead, rather than a day later by the poll. The first create (the stranded-open leg, and
+   * onboarding) is not routed here: its webhooks are inside the grace and place themselves.
+   *
+   * Only a ref this run moved from NULL: a ref already on the row meant its events were never
+   * unowned. A `manual:` ref is skipped (no create writes one, and `advanceFormation` refuses it
+   * anyway). The read runs AFTER the create's lock is released, because the keyed lock is not
+   * re-entrant and `advance` takes the same key.
+   */
+  private async retryCreateAndRead(companyId: string): Promise<void> {
+    const refOf = () => this.d.requests.find(companyId, "create_provider")?.providerRef ?? null;
+    const { before, after } = await withKeyedLock(companyId, async () => {
+      const before = refOf();
+      await this.retryCreateProvider(companyId);
+      return { before, after: refOf() };
+    });
+    if (before !== null || after === null || isManualRef(after)) return;
+    try {
+      const outcome = await this.advance(companyId);
+      // The filing started NOW, not when its rows were claimed: restart the poll clock from this
+      // read, so a row claimed over a day ago is not read a second time by the poll leg this tick.
+      if (outcome.fetched) this.persistBackoff(companyId, true);
+    } catch (err) {
+      opsLog("formation_create_read_failed", {
+        level: "warn",
+        companyId,
+        ...describeDoolaError(err),
+      });
+    }
   }
 
   /**
