@@ -570,6 +570,8 @@ describe("company:reinstate on a sandbox deployment", () => {
     Object.assign(process.env, {
       ARC_NETWORK: "mainnet",
       ARC_CHAIN_ID: "8004",
+      // The funnel's salt: a production deployment refuses to boot without one.
+      FUNNEL_SALT: "0f".repeat(32),
       DOOLA_API_KEY: "dk_test_key",
       DOOLA_WEBHOOK_SECRET: "whsec_test",
       DOOLA_ENVIRONMENT: "production",

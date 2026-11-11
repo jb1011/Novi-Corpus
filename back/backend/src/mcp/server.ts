@@ -460,6 +460,7 @@ function partyToolError(tool: string, err: unknown): ToolRefusal {
 const GET_LINK_MESSAGE_DESCRIPTION = [
   "Get the message the owner of an agent's ERC-8004 identity signs to have a legal body created for an order and linked to that identity.",
   "orderId is an order your tenant placed in the browser: no tool places an order.",
+  "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
   "agentId is the identity's id, as a decimal string.",
   `ttlSeconds, if given, is how long the message stays signable: a whole number of seconds from ${MIN_SERVED_LINK_TTL_SECONDS} to ${MAX_SERVED_LINK_TTL_SECONDS} (${DEFAULT_LINK_TTL_SECONDS} if omitted).`,
   "The answer is typedData, the EIP-712 typed data to sign (the three uint256 fields of its message are decimal strings); identityOwner, the address that must sign it, which the identity registry names as the owner now; and deadline, in unix seconds of chain time.",
@@ -471,6 +472,7 @@ const GET_LINK_MESSAGE_DESCRIPTION = [
 const SUBMIT_LINK_DESCRIPTION = [
   "Submit the identity owner's signature of the message from get_link_message: the platform then creates the order's legal body, once, and the identity's owner points the identity at it (see get_binding).",
   "orderId is the order the message was served for; message is typedData.message exactly as served; signature is the owner's signature of typedData, as 0x-prefixed hex.",
+  "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
   "Requires the provision capability.",
   "The answer's status is reserved (the identity is held for this order and its body's creation is on its way: poll get_binding), deployed (the body exists, and its pointer comes next) or linked, with the order. Calling again answers the order's state and changes nothing.",
   "A refused link answers status refused, with a code, a fixed message that says what to do next, a detail of hex and decimals, and the order.",

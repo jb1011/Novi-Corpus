@@ -3,6 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import type { Hex } from "viem";
 import { ZodError } from "zod";
 import type { AuthVars } from "../../auth/middleware";
+import { adoptAgreement, adoptionMessage } from "../../legalBody/adoption";
 import { readVerifiedAgreement } from "../../legalBody/agreement";
 import { type BindingView, checkBinding, readBinding } from "../../legalBody/binding";
 import { type GasSeedDeps, requestGasSeed } from "../../legalBody/gasSeed";
@@ -44,6 +45,13 @@ import { assertRealHuman } from "./worldId";
  *    stored bytes, re-verified: the caller can check keccak256 of `manifest` against the hash its
  *    link signs, and the manifest's `terms.hash` against keccak256 of `termsDoc`;
  *  - `POST /legal-body-orders/:id/abandon` closes a draft;
+ *  - `POST /legal-body-orders/:id/adoption-message` serves `{ typedData, issuedAt }`: the EIP-712
+ *    message by which the guardian adopts the draft's frozen agreement, issued on the server's
+ *    clock. It writes nothing;
+ *  - `POST /legal-body-orders/:id/adoption` with `{ issuedAt, signature }` stores the guardian's
+ *    signed adoption, once: 200 with `{ adoptedAt }`. An order already adopted answers the stored
+ *    time before any signature is checked, whatever is posted, as does one since reserved,
+ *    deployed or linked. Both link doors refuse 409 `agreement_not_adopted` until it is stored;
  *  - `POST /legal-body-orders/:id/link-message` with `{ agentId, ttlSeconds? }` serves the EIP-712
  *    message the identity's owner signs, and writes nothing;
  *  - `POST /legal-body-orders/:id/link` with `{ message, signature }` accepts the signed link and
@@ -69,15 +77,15 @@ import { assertRealHuman } from "./worldId";
  *    wallet its agent pays from, once the registry shows it as the agent's wallet. 200 with the
  *    block the lookups serve (`TreasuryBlock`). Mounted where the deployment wires the record.
  *
- * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/linkDoor.ts`,
- * `legalBody/resolver.ts`, `legalBody/binding.ts`, `legalBody/gasSeed.ts`,
- * `legalBody/treasury.ts`); these handlers decide
- * only what is a well-formed request, and the refresh which of the domain's two passes to run.
- * Every door starts with the real-human check (a verified credential, never a waiver), the reads
- * included; the domain functions of the order door, the two link doors and the binding door
- * (`readBinding`, which the `get_binding` tool calls too) make that check first themselves. The
- * one exception is the gas seed: while it is off, it answers before that check, reading nothing
- * and spending no token; on, `requestGasSeed` makes the check first.
+ * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/adoption.ts`,
+ * `legalBody/linkDoor.ts`, `legalBody/resolver.ts`, `legalBody/binding.ts`,
+ * `legalBody/gasSeed.ts`, `legalBody/treasury.ts`); these handlers decide only what is a
+ * well-formed request, and the refresh which of the domain's two passes to run. Every door starts
+ * with the real-human check (a verified credential, never a waiver), the reads included; the
+ * domain functions of the order door, the two adoption doors, the two link doors and the binding
+ * door (`readBinding`, which the `get_binding` tool calls too) make that check first themselves.
+ * The one exception is the gas seed: while it is off, it answers before that check, reading
+ * nothing and spending no token; on, `requestGasSeed` makes the check first.
  * Mounted under their own session protection, and only where the deployment wires the feature.
  *
  * An error a door did not choose never reaches the caller as it was thrown: anything but an
@@ -235,6 +243,26 @@ export function mountLegalBodyOrderRoutes(
     door("abandon", async () => {
       const tenantId = realHuman(c.get("tenantId"));
       return c.json(await abandonOrder(deps, tenantId, c.req.param("id")));
+    }),
+  );
+
+  // Both adoption doors check the real human first themselves. The adoption reads anything but
+  // the fields it defines as missing, and `verifyAdoption` refuses a missing field as not valid.
+  app.post("/legal-body-orders/:id/adoption-message", limit, (c) =>
+    door("adoption_message", () =>
+      c.json(adoptionMessage(deps, c.get("tenantId"), c.req.param("id"))),
+    ),
+  );
+
+  app.post("/legal-body-orders/:id/adoption", limit, (c) =>
+    door("adoption", async () => {
+      const body = (await readJson(c)) as { issuedAt?: unknown; signature?: unknown } | null;
+      return c.json(
+        await adoptAgreement(deps, c.get("tenantId"), c.req.param("id"), {
+          issuedAt: body?.issuedAt,
+          signature: body?.signature,
+        }),
+      );
     }),
   );
 

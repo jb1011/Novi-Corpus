@@ -61,6 +61,10 @@ export function requireHash(field: string, value: unknown): Hex {
   return hash;
 }
 
+/** r, s and v as hex: an ECDSA signature of 65 bytes, in either letter case. The only signature
+ *  form a guardian's adoption is accepted and stored in. */
+export const ECDSA_SIGNATURE = /^0x[0-9a-fA-F]{130}$/;
+
 /** The largest time the seconds columns hold. A time in milliseconds is past it for centuries. */
 export const MAX_UNIX_SECONDS = 99_999_999_999;
 

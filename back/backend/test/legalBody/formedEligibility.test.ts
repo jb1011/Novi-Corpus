@@ -37,6 +37,7 @@ import { seedCompany } from "../helpers/formationFakes";
 import {
   type LegalBodyStores,
   REGISTRY,
+  adoptFor,
   appendCheck,
   customerCompany,
   legalBodyOrderDeps,
@@ -327,6 +328,7 @@ describe("a formed company the operator revoked", () => {
     const deps = orderDeps();
     const companyId = formedCompany();
     const order = createOrder(deps, tenant, { companyId });
+    adoptFor(s, { legalBodyId: order.id });
     const never = {
       create: async () => {
         throw new Error("the create is never reached");

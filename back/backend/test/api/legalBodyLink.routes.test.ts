@@ -40,6 +40,7 @@ import {
   LINK_HEAD,
   type LegalBodyStores,
   TransportFailure,
+  adoptFor,
   answerOf,
   asChainPort,
   call,
@@ -123,7 +124,8 @@ function makeApp(legalBodyOrders?: LegalBodyOrderDeps) {
 }
 
 let filings = 0;
-/** A draft of `who` for a checked company of its own, as the order door makes one. */
+/** A draft of `who` for a checked company of its own, as the order door makes one, its agreement
+ *  adopted by its guardian, as every link requires. */
 async function ordered(app: ReturnType<typeof makeApp>, who = guardian): Promise<LegalBodyRecord> {
   const companyId = customerCompany(s, who.address, {
     filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
@@ -132,6 +134,7 @@ async function ordered(app: ReturnType<typeof makeApp>, who = guardian): Promise
     await call(app, "POST", "/legal-body-orders", await sessionOf(who), { companyId }),
   );
   expect(res.status).toBe(201);
+  adoptFor(s, { legalBodyId: res.body.id });
   const row = s.repo.findById(res.body.id);
   if (!row) throw new Error("the order is not stored");
   return row;

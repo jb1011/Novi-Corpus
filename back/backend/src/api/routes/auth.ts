@@ -1,8 +1,10 @@
 import type { Hono } from "hono";
 import { signSession } from "../../auth/session";
 import { verifySiwe } from "../../auth/siwe";
+import { opsLog } from "../../observability/opsLog";
 import type { ApiDeps } from "../app";
 import { ApiError } from "../errors";
+import { errorNameOf } from "./legalBodies";
 
 const NONCE_TTL_MS = 600_000; // 10 min
 
@@ -32,6 +34,14 @@ export function mountAuthRoutes(
       chainId: deps.chainId,
       now: now(),
     });
+    // The funnel's first stage, once the signature is checked: the account's first sign-in, kept
+    // for good (a later one writes nothing). A record that fails never fails the sign-in, and its
+    // ops line names the error only, never the account.
+    try {
+      deps.tenantFirstSeen?.recordFirstSeen(address, now());
+    } catch (e) {
+      opsLog("tenant_first_seen_failed", { errorName: errorNameOf(e) });
+    }
     const { token, expiresAt } = await signSession(
       address,
       deps.jwtSecret,

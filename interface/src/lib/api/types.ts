@@ -1327,6 +1327,9 @@ export type LegalBodyOrderView = {
   replacedBy: string | null;
   /** The company name its declaration states; null when the declaration is missing. */
   companyName: string | null;
+  /** When the guardian adopted the order's agreement, in unix seconds; null until then. The link
+   *  doors refuse `agreement_not_adopted` until it is set. Absent from a backend before F-A-3. */
+  adoptedAt?: number | null;
 };
 export const LEGAL_BODY_ORDER_VIEW_KEYS = [
   "id",
@@ -1352,6 +1355,7 @@ export const LEGAL_BODY_ORDER_VIEW_KEYS = [
   "supersededBy",
   "replacedBy",
   "companyName",
+  "adoptedAt",
 ] as const satisfies readonly (keyof LegalBodyOrderView)[];
 
 /** What the identity's owner should do: point the identity at its body. It holds no calldata: the

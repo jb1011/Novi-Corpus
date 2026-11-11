@@ -109,6 +109,7 @@ import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../../src/persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../../src/persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
@@ -322,6 +323,7 @@ function deploy(opts: { charging?: boolean; gasSeedUsdc?: string } = {}): Deploy
 
   const orderDeps: LegalBodyOrderDeps = {
     repo: legalBodies,
+    adoptions: new SqliteLegalBodyAdoptionRepository(db),
     companies,
     declarations,
     checks,
@@ -767,12 +769,24 @@ async function api(method: "GET" | "POST", path: string, g: Guardian, body?: obj
   return answer;
 }
 
-/** The guardian orders a body for its company: a draft, its agreement frozen. */
+/**
+ * A new draft of `g`, whose agreement `g` then adopts with its own wallet, as the web app has it
+ * do before any link: the served adoption message, signed as it arrives. Answers the order's view
+ * once adopted.
+ */
 async function order(g: Guardian): Promise<Json> {
   const res = await api("POST", ORDERS, g, { companyId: g.companyId });
   expect(res.status).toBe(201);
   expect(res.body).toMatchObject({ state: "draft", guardian: g.address, companyId: g.companyId });
-  return res.body;
+  const id: string = res.body.id;
+  const served = await api("POST", `${orderPath(id)}/adoption-message`, g, {});
+  expect(served.status).toBe(200);
+  const adopted = await api("POST", `${orderPath(id)}/adoption`, g, {
+    issuedAt: served.body.issuedAt,
+    signature: await g.account.signTypedData(served.body.typedData),
+  });
+  expect(adopted.status).toBe(200);
+  return readOrder(g, id);
 }
 
 async function readOrder(g: Guardian, id: string): Promise<Json> {

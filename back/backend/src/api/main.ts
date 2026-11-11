@@ -96,6 +96,7 @@ import { SqliteFormationPartyRepository } from "../persistence/formationPartyRep
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
 import { SqliteIdentityRepository } from "../persistence/identityRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
 import { SqliteLegalBodyTreasuryRepository } from "../persistence/legalBodyTreasuryRepository";
@@ -103,6 +104,8 @@ import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
 import { SqliteOaAnchorRepository } from "../persistence/oaAnchorRepository";
 import { SqlitePasskeyStore } from "../persistence/passkeyStore";
 import { SqlitePaymentIdempotencyStore } from "../persistence/paymentIdempotencyStore";
+import { SqliteStatementReadRepository } from "../persistence/statementReadRepository";
+import { SqliteTenantFirstSeenRepository } from "../persistence/tenantFirstSeenRepository";
 import {
   assertCircleCoverage,
   assertPaymentAddressSeparation,
@@ -128,6 +131,7 @@ import { buildApiApp } from "./app";
 import { ApiError } from "./errors";
 import { TokenBucket } from "./routes/agentBook";
 import { bucketsByKey } from "./routes/legalBodyOrders";
+import { StatementReadLines } from "./routes/legalBodyStatements";
 import type { PilotCaseDeps } from "./routes/pilotCases";
 import { buildWorldIdDeps } from "./routes/worldId";
 import { buildX402DemoDeps } from "./routes/x402Demo";
@@ -636,6 +640,8 @@ async function main() {
     legalBodies && cfg.legalBodyFactory && legalBodyChain
       ? {
           repo: legalBodies,
+          // The guardians' adoptions of their orders' agreements: the link doors require one.
+          adoptions: new SqliteLegalBodyAdoptionRepository(db),
           companies,
           declarations: companyDeclarations,
           checks: companyChecks,
@@ -657,6 +663,7 @@ async function main() {
           maxOrdersPerTenantPerDay: legalBodyFlow.maxOrdersPerTenantPerDay,
           maxCreatesPerTenantPerDay: legalBodyFlow.maxCreatesPerTenantPerDay,
           maxCreatesPerDay: legalBodyFlow.maxCreatesPerDay,
+          adoptionMaxAgeSeconds: legalBodyFlow.adoptionMaxAgeSeconds,
           doorBudget: new TokenBucket(20, 1),
           tenantBucket: bucketsByKey(5, 1 / 10),
           identityBucket: bucketsByKey(3, 1 / 20),
@@ -1160,11 +1167,26 @@ async function main() {
         }
       : undefined;
 
+  // The statement reads' once-a-minute ops lines: built here so the shutdown below prints what
+  // they still hold.
+  const statementReadLines = cfg.funnel?.salt ? new StatementReadLines() : undefined;
   const foundingEnv = foundingFromEnv(process.env);
 
   const app = buildApiApp({
     webOrigin: cfg.webOrigin,
     nonceStore,
+    // The funnel's first stage: every box records an account's first sign-in.
+    tenantFirstSeen: new SqliteTenantFirstSeenRepository(db),
+    // The funnel's last stage, only where FUNNEL_SALT is set: without the salt no statement read
+    // is recorded (a production box cannot boot without it, `assertFunnelConfig`). The boot time
+    // is kept as the day reads are recorded since, so the weeks before a first read print 0.
+    statementReads: cfg.funnel?.salt
+      ? {
+          repo: new SqliteStatementReadRepository(db, { bootedAt: Date.now() }),
+          salt: cfg.funnel.salt,
+          lines: statementReadLines,
+        }
+      : undefined,
     siweDomain: cfg.siweDomain,
     chainId: cfg.chainId,
     identityRegistry: cfg.identityRegistry,
@@ -1410,6 +1432,7 @@ async function main() {
       ],
       tasks: doolaTasks,
       server,
+      flush: statementReadLines ? [statementReadLines] : [],
     });
 }
 

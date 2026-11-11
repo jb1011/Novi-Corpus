@@ -72,6 +72,8 @@ export const IN_FLIGHT_BINDING_STATES = ["reserved", "deployed"] as const;
 export type LegalBodyEventKind =
   | "created"
   | "agreement_frozen"
+  /** The guardian adopted the frozen agreement (detail { digest }); it records no move. */
+  | "agreement_adopted"
   | "link_accepted"
   | "deploy_submitted"
   | "deployed"

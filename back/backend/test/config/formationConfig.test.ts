@@ -64,6 +64,8 @@ const MAINNET = {
   DOOLA_ENVIRONMENT: "production",
   ...WORLD,
   ...PII,
+  // The funnel's salt: a production deployment refuses to boot without one.
+  FUNNEL_SALT: "0f".repeat(32),
 };
 
 // A production-NODE_ENV env that already satisfies the pre-existing prod invariants, so a throw

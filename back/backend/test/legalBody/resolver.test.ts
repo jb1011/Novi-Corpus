@@ -43,6 +43,7 @@ import {
   LINK_HEAD,
   type LegalBodyStores,
   TransportFailure,
+  adoptFor,
   appendCheck,
   asChainPort,
   customerCompany,
@@ -140,7 +141,8 @@ function rowOf(id: string): LegalBodyRecord {
   return row;
 }
 
-/** A draft of the tenant, placed through the order door for a company of its own. */
+/** A draft of the tenant, placed through the order door for a company of its own, its agreement
+ *  adopted by its guardian, as every link requires. */
 function draft(): LegalBodyRecord {
   const companyId = customerCompany(s, tenant, {
     filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
@@ -148,6 +150,7 @@ function draft(): LegalBodyRecord {
   const view = createOrder(deps({ maxOpenPerTenant: 50, maxOrdersPerTenantPerDay: 50 }), tenant, {
     companyId,
   });
+  adoptFor(s, rowOf(view.id));
   return rowOf(view.id);
 }
 
@@ -413,6 +416,7 @@ describe("rule 1: the body exists, created by the row's owner", () => {
       "created",
       "agreement_frozen",
       "note",
+      "agreement_adopted",
       "link_accepted",
       "note",
     ]);

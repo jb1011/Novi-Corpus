@@ -23,8 +23,8 @@
  *
  * WHAT IT DOES NOT PROVE: doola's real sandbox (the request bodies it accepts, its playground, its
  * webhooks, the second-option name it reports); the payment path (a sandbox never charges); the
- * production gates (the formed door's unit tests under production deps); the adoption of the
- * agreement (PR #206 adds it to `order` below); the browser; the filing email.
+ * production gates (the formed door's unit tests under production deps); the browser; the filing
+ * email.
  *
  * Every key is derived from anvil's published test mnemonic, never a real wallet, and every name,
  * company, filing number and EIN is an invention.
@@ -85,6 +85,7 @@ import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../../src/persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../../src/persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../../src/persistence/legalBodyStatementRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
@@ -255,6 +256,7 @@ function deploy(): Deployment {
 
   const orderDeps: LegalBodyOrderDeps = {
     repo: legalBodies,
+    adoptions: new SqliteLegalBodyAdoptionRepository(db),
     companies,
     declarations,
     checks,
@@ -601,8 +603,9 @@ async function companyView(g: Guardian, companyId: string): Promise<Json> {
 
 /**
  * Step 9: the guardian orders a legal body for its company, a draft, and reads the agreement the
- * link will anchor: it prints the filed name and the filing number. The adoption of the agreement
- * (PR #206) goes here, after the read, so both doors of a company use it.
+ * link will anchor: it prints the filed name and the filing number. The guardian then adopts that
+ * agreement with its own wallet, as the web app has it do before any link: the served adoption
+ * message, signed as it arrives.
  */
 async function order(
   g: Guardian,
@@ -623,6 +626,14 @@ async function order(
   expect(agreement.body.manifestHash).toBe(ordered.body.agreement.hash);
   expect(agreement.body.termsDoc).toContain(filed.legalName);
   expect(agreement.body.termsDoc).toContain(filed.filingNumber);
+  const served = await api("POST", `${orderPath(id)}/adoption-message`, g.token, {});
+  expect(served.status).toBe(200);
+  expect(served.body.typedData.message.manifestHash).toBe(ordered.body.agreement.hash);
+  const adopted = await api("POST", `${orderPath(id)}/adoption`, g.token, {
+    issuedAt: served.body.issuedAt,
+    signature: await g.account.signTypedData(served.body.typedData),
+  });
+  expect(adopted.status).toBe(200);
   return { id, agreement: agreement.body };
 }
 

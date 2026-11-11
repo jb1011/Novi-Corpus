@@ -45,6 +45,8 @@ const MAINNET = {
   ...BASE,
   ...CONTROLLER_MODE,
   ARC_NETWORK: "mainnet",
+  // The funnel's salt: a production deployment refuses to boot without one.
+  FUNNEL_SALT: "0f".repeat(32),
   ARC_CHAIN_ID: MAINNET_CHAIN_ID,
   WORLD_APP_ID: "app_1",
   WORLD_RP_ID: "app.example",
