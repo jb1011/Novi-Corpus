@@ -207,12 +207,13 @@ Every line is one JSON object on stdout → journald.
 | `formation_document_stored` | A legal PDF was fetched, hashed and indexed |
 | `formation_failed` | doola's fetched state says the formation failed |
 | `formation_abandoned` | **CRITICAL** — a step burned all 8 attempts |
-| `formation_stale` | A step has been in flight > 14 days, OR (A2 §4.6a, `reason: ssn_ttl_no_provider_ref`, **CRITICAL**) an SSN has been held 7 days on a filing that reached doola and never got a company id back. Once per row per day. The A2 arm erases NOTHING and abandons nothing — a NULL `provider_ref` is not proof no company exists at doola |
+| `formation_stale` | A step has been in flight > 14 days, OR (A2 §4.6a, `reason: ssn_ttl_no_provider_ref`, **CRITICAL**) an SSN has been held 7 days on a filing that reached doola and never got a company id back. Once per row per day. The A2 arm erases NOTHING and abandons nothing — a NULL `provider_ref` is not proof no company exists at doola. OR (`reason: create_rejected_awaiting_intake_edit`, **CRITICAL**, once, at the refusal) doola refused the COMPANY's body: the row parks under `awaitingIntakeEdit` until `PATCH /companies/:companyId`. Its `message` names the refused fields and doola's code for each (`... (description: <code>)`), and `fieldErrors` carries doola's per-field reasons (see `formation_create_failed`) |
+| `formation_create_failed` | A create body was refused (or could not be built). Carries doola's `code` and `requestId` and, when doola named fields, `fieldErrors: [{field, code, message}]`: the field PATH only if it passes the allowlist (letters, digits, `_`, `.`, `[`, `]`, at most 100 characters), doola's per-field code, and doola's per-field message with SSN shapes redacted and cut to 160 characters. A value doola echoes back is never read |
 | `formation_party_erased` | PII destroyed for a filing that never happened |
 | `formation_ssn_erased` | The SSN was destroyed. `reason`: `provider_persisted` (the transaction that recorded the company id — the normal path), `terminal`, `ttl`, or `intake_reopened` (an edit-and-retry re-capture). Never carries the value or the person |
 | `formation_ssn_unreadable` | **CRITICAL** — a create body frozen WITH an SSN can no longer be rebuilt (the key is gone, or the row was erased out from under a live idempotency key). The filing is PARKED without burning the attempt: sending the body without the SSN is a different body under a live key, and re-keying would file a SECOND real Wyoming LLC. See `doola-deploy.md`, "If the key is LOST" |
 | `company_intake_updated` | An intake was re-opened after a rejected filing (§4.7) |
-| `formation_party_rejected` | **CRITICAL** — doola refused the responsible PERSON's body, not the company's. The row parks under `awaitingPartyEdit`, and since A3 its exit is `PATCH /companies/:companyId/party` (or MCP `update_company_party`), NOT `PATCH /companies/:companyId` — none of the four fields that door rewrites is one `createCustomer` reads |
+| `formation_party_rejected` | **CRITICAL** — doola refused the responsible PERSON's body, not the company's. The row parks under `awaitingPartyEdit`, and since A3 its exit is `PATCH /companies/:companyId/party` (or MCP `update_company_party`), NOT `PATCH /companies/:companyId` — none of the four fields that door rewrites is one `createCustomer` reads. Carries `fieldErrors` as `formation_create_failed` does; a party field's message is the likeliest to quote the person, so read it as you would doola's `message` |
 | `formation_party_updated` | A responsible party was corrected through the A3 door. Carries the tenant (truncated), the `partyId` and the `companyId` — never a name, an address, an email, and never a diff, which would be the whole identity in a log line |
 | `formation_ssn_erased_before_send` | **CRITICAL**, and NOT an engineering failure — the §4.6a retention clock destroyed an SSN before the filing was ever sent. The row parks WITHOUT burning an attempt, and the two exits are the OWNER's: re-supply the number, or `proceedWithoutSsn`. `GET /companies/:companyId` reports it as `park.awaitingSsnDecision`, which is what the Companies section explains |
 | `company_attach` | An agent joined a company. `agents` is the count BEFORE this attach |
@@ -241,12 +242,15 @@ sqlite3 /var/lib/legalbody/legalbody.db \
      LEFT JOIN entities e ON e.company_id = f.company_id
     WHERE f.state IN ('failed','abandoned') GROUP BY f.company_id, f.step;"
 
-# Which filings are PARKED waiting on a human, and on WHICH of the three decisions (A2/A3).
-# `GET /companies/:companyId` answers the same question for one company, in the owner's words.
+# Which filings are PARKED waiting on a human, and on WHICH of the three decisions (A2/A3),
+# with the field paths doola named (2026-11-11; empty when it named none, and cleared by the edit
+# that re-arms the retry). `GET /companies/:companyId` answers the same question for one company,
+# in the owner's words: `park.refusedFields` carries the same paths and never doola's text.
 sqlite3 /var/lib/legalbody/legalbody.db \
   "SELECT f.company_id,
           json_extract(f.detail,'$.awaitingIntakeEdit') AS intake_edit,
           json_extract(f.detail,'$.awaitingPartyEdit')  AS party_edit,
+          json_extract(f.detail,'$.refusedFields')      AS refused_fields,
           p.ssn_erased_reason
      FROM formation_requests f
      LEFT JOIN formation_parties p
