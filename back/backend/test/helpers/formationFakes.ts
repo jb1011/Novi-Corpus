@@ -17,6 +17,7 @@ import type { HostLookup } from "../../src/payments/ssrfGuard";
 import type { CompanyRepository } from "../../src/persistence/companyRepository";
 import type { DocumentStore, PutResult } from "../../src/persistence/documentStore";
 import type { EntityRecord } from "../../src/types";
+import { wyomingDate } from "../../src/util/wyomingCalendar";
 
 export const ENTITY_KEY = "tenant-a:agent-1";
 export const TENANT = "tenant-a";
@@ -197,7 +198,8 @@ export function doolaDoc(id: string, documentType: string): DoolaDocument {
  *   bare `name`, which is what the playground's filing reports back;
  * - `listCompanies` answers `[]` (the pre-create lookup finds nothing);
  * - `playgroundCompleteFormation` files the company: the remembered name (the company's own name
- *   when no create was made), the filing date `opts.now()` as `yyyy-MM-dd` UTC, the filing number
+ *   when no create was made), the filing date Wyoming's calendar date of `opts.now()` (doola
+ *   reports the State's date: at 03:00 UTC it is still the day before), the filing number
  *   `PLAYGROUND-FILING`, the formation service `completed`, and the Articles and the Operating
  *   Agreement as its documents;
  * - `playgroundCompleteEin` issues the EIN `12-3456789`.
@@ -239,7 +241,7 @@ export function fakeSandboxDoola(
       state.company = {
         ...state.company,
         name: bareName ?? state.company.name,
-        formationFilingDate: new Date(now()).toISOString().slice(0, 10),
+        formationFilingDate: wyomingDate(Math.floor(now() / 1000)),
         formationFilingNumber: "PLAYGROUND-FILING",
         services: [{ name: "Formation", status: "completed" }],
       };

@@ -88,6 +88,7 @@ import { SqliteFormationRepository } from "../../src/persistence/formationReposi
 import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../../src/persistence/legalBodyStatementRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
+import { wyomingDate } from "../../src/util/wyomingCalendar";
 import { filingDateToUnix } from "../../src/workflow/formationProcessor";
 import { FormationSweeper } from "../../src/workflow/formationSweeper";
 import { type AnvilHandle, startAnvil } from "../helpers/anvil";
@@ -776,7 +777,8 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
   //    documents and the filed name back through the processor.
   await moveTime(FIVE_MINUTES);
   await d.formationTick();
-  const lanternFiledOn = new Date(now()).toISOString().slice(0, 10);
+  // The State's date, as doola reports it and the fake files it: Wyoming's day, not UTC's.
+  const lanternFiledOn = wyomingDate(Math.floor(now() / 1000));
   expect(callsOf("playgroundCompleteFormation")).toEqual([
     `playgroundCompleteFormation:${lanternRef}`,
   ]);

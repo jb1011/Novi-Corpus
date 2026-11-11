@@ -16,6 +16,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { sqliteUtcTimestamp, syntheticFormationParty } from "../../src/formation";
 import { withEntityEnding } from "../../src/formation/intake";
 import { companyFiled, documentsFetched, einIssued } from "../../src/formation/status";
+import { filingFacts } from "../../src/legalBody/filings";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteDocumentIndexRepository } from "../../src/persistence/documentIndexRepository";
@@ -23,6 +24,7 @@ import { SqliteDoolaEventRepository } from "../../src/persistence/doolaEventRepo
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationRepository, parseDetail } from "../../src/persistence/formationRepository";
+import { calendarDateOfUtcMidnight, wyomingDate } from "../../src/util/wyomingCalendar";
 import { filingDateToUnix } from "../../src/workflow/formationProcessor";
 import { runFormationCreateProvider } from "../../src/workflow/formationProvider";
 import {
@@ -162,7 +164,7 @@ test("six minutes after: one playground call, and the filing, documents and name
   const company = companies.find(COMPANY_KEY)!;
   expect(company.legalNameFiled).toBe(withEntityEnding(company.nameOptions[0]!.name));
   expect(company.filingNumber).toBe("PLAYGROUND-FILING");
-  expect(company.filedAt).toBe(filingDateToUnix(new Date(now).toISOString().slice(0, 10)));
+  expect(company.filedAt).toBe(filingDateToUnix(wyomingDate(Math.floor(now / 1000))));
   // The EIN waits for its own five minutes.
   expect(callsOf("playgroundCompleteEin")).toEqual([]);
   expect(einIssued(steps())).toBe(false);
@@ -173,6 +175,33 @@ test("six minutes after: one playground call, and the filing, documents and name
   expect(line).toBeDefined();
   const { opslog: _event, at: _at, ...fields } = line!;
   expect(fields).toEqual({ companyId: COMPANY_KEY, providerRef: COMPANY_ID });
+});
+
+test("at 03:00 UTC the playground files under Wyoming's date, the day before, and the statement's facts read the filing as verified", async () => {
+  // 02:54 UTC on 21 August, so the call is at 03:00 UTC: 21:00 on 20 August in Cheyenne. doola
+  // reports the State's date, and the State's day is still the 20th.
+  now = Date.parse("2026-08-21T02:54:00Z");
+  await openFiling();
+  now += 6 * MINUTE;
+  await sweeper().tick();
+
+  expect(companyFiled(steps())).toBe(true);
+  const company = companies.find(COMPANY_KEY)!;
+  expect(company.filedAt).toBe(filingDateToUnix("2026-08-20"));
+  expect(
+    parseDetail<{ filingDate?: string }>(rowOf("await_filing")?.detail ?? null).filingDate,
+  ).toBe("2026-08-20");
+  // The statement's filing facts, composed as its `recordedFacts` composes them: the stored date
+  // against Wyoming's today, at the same instant. A date after today would read `unverified`.
+  const today = wyomingDate(Math.floor(now / 1000));
+  expect(today).toBe("2026-08-20");
+  expect(
+    filingFacts({
+      formationDate: calendarDateOfUtcMidnight(company.filedAt!),
+      lastReport: null,
+      today,
+    }),
+  ).toMatchObject({ filedAt: "2026-08-20", filingStatus: "not_yet_due", nextDue: "2027-08-01" });
 });
 
 test("a second tick makes no second playground call", async () => {
