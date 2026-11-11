@@ -19,7 +19,11 @@
  */
 import type DatabaseType from "better-sqlite3";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { type DoolaApi, DoolaApiError } from "../../src/adapters/doola/doolaClient";
+import {
+  CUSTOMER_TEXT_WITHHELD,
+  type DoolaApi,
+  DoolaApiError,
+} from "../../src/adapters/doola/doolaClient";
 import type { CreateCompanyInput } from "../../src/adapters/doola/types";
 import { toCompanyDetailView } from "../../src/api/views";
 import { businessPurposeTooLongMessage } from "../../src/formation";
@@ -52,6 +56,7 @@ const LONG_PURPOSE =
 const SHORT_PURPOSE = "Operates autonomous software agents.";
 const NINE_DIGITS = "123456789";
 const PARTY_PHONE = "+12125550100";
+const PARTY_EMAIL = "ada@example.com";
 
 let db: DatabaseType.Database;
 let companies: SqliteCompanyRepository;
@@ -101,7 +106,7 @@ function mint(): string {
       tenantId: TENANT,
       legalFirstName: "Ada",
       legalLastName: "Lovelace",
-      email: "ada@example.com",
+      email: PARTY_EMAIL,
       phone: PARTY_PHONE,
       line1: "1 Analytical Way",
       line2: null,
@@ -281,7 +286,8 @@ test("a refused PARTY names its field by path and code only: no doola message, n
       throw new DoolaApiError(
         "E_VALIDATION_FAILED",
         400,
-        "one or more fields are invalid",
+        // doola's TOP-LEVEL sentence quoting the person: withheld on this body.
+        `customer with email ${PARTY_EMAIL} and phone ${PARTY_PHONE} already exists`,
         "req_p",
         {
           phoneNumber: {
@@ -291,6 +297,8 @@ test("a refused PARTY names its field by path and code only: no doola message, n
             // doola echoing the submitted value back: never read, never repeated.
             value: PARTY_PHONE,
           },
+          // A VALUE used as a key: dropped, and counted.
+          [PARTY_EMAIL]: { code: "E_TAKEN" },
         },
       );
     },
@@ -298,13 +306,34 @@ test("a refused PARTY names its field by path and code only: no doola message, n
   await file(companyId, doola);
 
   expect(detailOf(companyId).awaitingPartyEdit).toBe(true);
-  expect(rowOf(companyId).error).toBe(
-    "E_VALIDATION_FAILED: one or more fields are invalid (phoneNumber: E_INVALID_PHONE)",
-  );
+  // doola's code and the field path stay; doola's sentence does not.
+  const named = `E_VALIDATION_FAILED: ${CUSTOMER_TEXT_WITHHELD} (phoneNumber: E_INVALID_PHONE)`;
+  expect(rowOf(companyId).error).toBe(named);
+  expect(
+    repo.listEvents(ENTITY_KEY).some((e) => e.detail === `formation create failed: ${named}`),
+  ).toBe(true);
   expect(line("formation_party_rejected")).toMatchObject({
     companyId,
     reason: "customer_rejected_awaiting_party_edit",
+    message: named,
+    fieldErrorsDropped: 1,
   });
+  expect(line("formation_create_failed")).toMatchObject({
+    code: "E_VALIDATION_FAILED",
+    fieldErrorsDropped: 1,
+  });
+  // Neither the email nor the phone, nor doola's sentence, reaches any printed line, the stored
+  // row (its error and its detail) or the agent's event trail.
+  const stored = [
+    rowOf(companyId).error ?? "",
+    rowOf(companyId).detail ?? "",
+    ...repo.listEvents(ENTITY_KEY).map((e) => e.detail ?? ""),
+  ];
+  for (const text of [...stdout, ...stored]) {
+    expect(text).not.toContain(PARTY_EMAIL);
+    expect(text).not.toContain(PARTY_PHONE);
+    expect(text).not.toContain("already exists");
+  }
   // Path and code, and NO message: the customer body is the person.
   expect(line("formation_party_rejected")!.fieldErrors).toEqual([
     { field: "phoneNumber", code: "E_INVALID_PHONE" },
@@ -399,6 +428,35 @@ test("a refused COMPANY body keeps doola's message for its own fields and drops 
   ]);
 });
 
+test("a refusal whose EVERY key is dropped still says doola named fields: the dropped count", async () => {
+  const companyId = mint();
+  await file(
+    companyId,
+    doolaAsDocumented({
+      createCompany: async () => {
+        throw new DoolaApiError(
+          "E_VALIDATION_FAILED",
+          400,
+          "one or more fields are invalid",
+          "req_d",
+          // Values used as keys, and a key that is no field of ours: none is repeated.
+          { "5551234567": { code: "E_X" }, "john.smith": { code: "E_X" }, nickname: {} },
+        );
+      },
+    }),
+  );
+  for (const event of ["formation_create_failed", "formation_stale"]) {
+    expect(line(event), event).toMatchObject({ fieldErrorsDropped: 3 });
+    expect(line(event), event).not.toHaveProperty("fieldErrors");
+  }
+  expect(rowOf(companyId).error).toBe("E_VALIDATION_FAILED: one or more fields are invalid");
+  expect("refusedFields" in detailOf(companyId)).toBe(false);
+  for (const l of stdout) {
+    expect(l).not.toContain("5551234567");
+    expect(l).not.toContain("john.smith");
+  }
+});
+
 test("a refusal that names NO field still parks, and adds no field keys anywhere", async () => {
   const companyId = mint();
   await file(
@@ -414,5 +472,7 @@ test("a refusal that names NO field still parks, and adds no field keys anywhere
   expect(rowOf(companyId).error).toBe("E_VALIDATION_FAILED: name is not filable");
   expect(line("formation_stale")).not.toHaveProperty("fieldErrors");
   expect(line("formation_create_failed")).not.toHaveProperty("fieldErrors");
+  // …and no dropped count, because doola sent no field map at all.
+  expect(line("formation_stale")).not.toHaveProperty("fieldErrorsDropped");
   expect(view(companyId).park.refusedFields).toEqual([]);
 });

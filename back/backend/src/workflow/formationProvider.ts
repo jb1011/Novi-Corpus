@@ -740,8 +740,9 @@ function onCallFailure(
   endpoint: "createCustomer" | "createCompany",
 ): void {
   const kind: DoolaFailureKind = classifyDoolaFailure(e);
-  // The customer body IS the responsible person, so a refusal of it keeps no per-field message:
-  // doola's text there can quote their name, email, phone or address (`DOOLA_MESSAGE_FIELDS`).
+  // The customer body IS the responsible person, so a refusal of it keeps no per-field message
+  // and none of doola's top-level sentence either: doola's text there can quote their name,
+  // email, phone or address. Its code and the refused field paths are kept.
   const described = describeDoolaError(e, {
     body: endpoint === "createCustomer" ? "customer" : "company",
   });
@@ -1043,6 +1044,9 @@ function failStep(
     // company's own fields only, never a value (`summarizeDoolaFields`). opsLog redacts only
     // top-level strings, which is why the summary arrives already redacted.
     fieldErrors: described.fieldErrors,
+    // How many entries of doola's map were left out, so a refusal whose every key was refused
+    // still says that doola named fields.
+    fieldErrorsDropped: described.fieldErrorsDropped,
   });
 }
 
@@ -1073,6 +1077,7 @@ function parkedForIntakeEdit(d: FormationCreateDeps, described: DoolaFailure): v
     // ticket: a message only for the company's own fields (`DOOLA_MESSAGE_FIELDS`), redacted and
     // capped; path and code for the rest; never a value.
     fieldErrors: described.fieldErrors,
+    fieldErrorsDropped: described.fieldErrorsDropped,
     environment: d.environment,
   });
   recordCompanyEvent(
@@ -1103,12 +1108,13 @@ function parkedForPartyEdit(d: FormationCreateDeps, described: DoolaFailure): vo
     companyId: d.company.companyId,
     step: "create_provider",
     reason: "customer_rejected_awaiting_party_edit",
-    // Third-party text: redacted at the choke point in `opsLog`, like every other `message`. It
-    // names the refused fields and their codes when doola gave any.
+    // doola's code and the refused fields with their codes. doola's own sentence is withheld on
+    // this body (`CUSTOMER_TEXT_WITHHELD`): it can quote the person.
     message: described.message,
     // The refused fields by path and code ONLY: this body is the person, so no per-field message
     // of doola's is kept (`describeDoolaError(e, { body: "customer" })`), and no value is read.
     fieldErrors: described.fieldErrors,
+    fieldErrorsDropped: described.fieldErrorsDropped,
     environment: d.environment,
   });
   recordCompanyEvent(

@@ -230,6 +230,23 @@ test("PARK: the refused fields are served by PATH only, through the allowlist, w
   expect(
     ((await detail(stale)).park as unknown as { refusedFields: string[] }).refusedFields,
   ).toEqual([]);
+
+  // A PARTY park is checked against the customer request's own fields: a company field, a value
+  // used as a key and a dotted name are not served.
+  const party = newCompany({
+    nameOptions: companyNameOptions("Gamma One", "Gamma Two", "Gamma Three"),
+  });
+  newParty(party);
+  requests.claimStep(party, "create_provider");
+  requests.transition(party, "create_provider", "pending", "failed", {
+    detail: JSON.stringify({
+      awaitingPartyEdit: true,
+      refusedFields: ["phoneNumber", "description", "5551234567", "john.smith", "email"],
+    }),
+  });
+  expect(
+    ((await detail(party)).park as unknown as { refusedFields: string[] }).refusedFields,
+  ).toEqual(["phoneNumber", "email"]);
 });
 
 test("PARK: the two `detail` flags are reported SEPARATELY — they have different exits", async () => {

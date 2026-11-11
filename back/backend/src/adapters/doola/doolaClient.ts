@@ -6,7 +6,7 @@ import {
   type DoolaFieldError,
   type DoolaRefusedBody,
   fieldErrorsClause,
-  summarizeDoolaFields,
+  readDoolaFields,
 } from "./fieldErrors";
 import type {
   CreateCompanyInput,
@@ -105,6 +105,9 @@ export class DoolaTimeoutError extends Error {
   }
 }
 
+/** What stands in for doola's own sentence when the refused body was the responsible person's. */
+export const CUSTOMER_TEXT_WITHHELD = "provider text withheld";
+
 /**
  * ONE description of a doola failure, for every error string and every ops line (M4).
  *
@@ -125,8 +128,15 @@ export class DoolaTimeoutError extends Error {
  * field too. Present only when doola named at least one field, so every ops line that spreads
  * this result carries it exactly then.
  *
- * `body` says which body was refused: `customer` (the responsible person's) keeps no per-field
- * message at all. The default is the company's.
+ * `body` says which body was refused. The default is the company's. `customer` (the responsible
+ * person's own body) keeps no per-field message at all, and WITHHOLDS doola's top-level sentence
+ * too: on that body it can say "customer with email x already exists", and `redactPii` removes
+ * SSN shapes only. Its `message` is then doola's code, `CUSTOMER_TEXT_WITHHELD` and the field
+ * clause, so the step's error, the event trail and the ops lines still say what was refused.
+ *
+ * `fieldErrorsDropped` counts the entries of doola's map that were NOT kept (the path rule, the
+ * field bound, a malformed map), present only when there were some, so a refusal whose every key
+ * was refused still says that doola named fields.
  */
 export function describeDoolaError(
   e: unknown,
@@ -136,14 +146,17 @@ export function describeDoolaError(
   code?: string;
   requestId?: string;
   fieldErrors?: DoolaFieldError[];
+  fieldErrorsDropped?: number;
 } {
   if (e instanceof DoolaApiError) {
-    const fieldErrors = summarizeDoolaFields(e.fields, opts);
+    const { fieldErrors, dropped } = readDoolaFields(e.fields, opts);
+    const sentence = opts.body === "customer" ? CUSTOMER_TEXT_WITHHELD : e.message;
     return {
-      message: redactPii(`${e.code}: ${e.message}${fieldErrorsClause(fieldErrors)}`),
+      message: redactPii(`${e.code}: ${sentence}${fieldErrorsClause(fieldErrors)}`),
       code: e.code,
       requestId: e.requestId,
       ...(fieldErrors.length > 0 ? { fieldErrors } : {}),
+      ...(dropped > 0 ? { fieldErrorsDropped: dropped } : {}),
     };
   }
   if (e instanceof DoolaTimeoutError) return { message: redactPii(e.message), code: "E_TIMEOUT" };

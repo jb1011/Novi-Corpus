@@ -667,10 +667,10 @@ export function toEntityViews(rows: EntityRecord[], deps: EntityViewDeps = {}): 
  * alone (`refusedFields: ["description"]`), never by doola's sentences about them: that prose is
  * free text their operators write and can name the responsible party. A path is different in
  * kind: it is the name of a field in OUR request body, it is written only from the keys doola
- * gave its refusal, and it is served only after it passes the allowlist (letters, digits, `_`,
- * `.`, `[`, `]`; `isDoolaFieldPath`), which keeps out anything with a space, an `@`, other
- * punctuation or an SSN-shaped run. So the rule "the view carries codes only" still holds, with
- * field names beside the codes. The SSN park is read through `parties.ssnState`, which selects an
+ * gave its refusal, and it is served only after it passes the path rule (`isDoolaFieldPath`): its
+ * first segment must be one of the refused request's own top-level fields, so a value used as a
+ * key (a phone number, `john.smith`) is never served. So the rule "the view carries codes only"
+ * still holds, with field names beside the codes. The SSN park is read through `parties.ssnState`, which selects an
  * enum and a NULL-check and no personal column at all.
  */
 export interface CompanyDetailView extends CompanyView {
@@ -709,7 +709,7 @@ export interface CompanyDetailView extends CompanyView {
      *  `PATCH /companies/:companyId` with a fresh `ssn`, or `proceedWithoutSsn: true`. */
     awaitingSsnDecision: boolean;
     /** The fields doola named when it refused the body the flag above waits on, by PATH only
-     *  (`["description"]`, `["members[0].address.phone"]`), each through the path allowlist.
+     *  (`["description"]`, `["members[0].address.phone"]`), each through the path rule.
      *  Never doola's text and never a value. Empty when no flag is set or doola named none. */
     refusedFields: string[];
   };
