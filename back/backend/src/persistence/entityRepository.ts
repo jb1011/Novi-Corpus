@@ -92,15 +92,14 @@ export interface EntityRepository {
    * the column out of its column list, so no ordinary record write can erase a pending schedule.
    */
   setScheduledPolicy(key: string, policy: ScheduledPolicyRecord | null): void;
-  /** Run fn inside a single SQLite transaction (atomic; rolls back if fn throws). */
-  transaction<T>(fn: () => T): T;
   /**
-   * The same, as an IMMEDIATE transaction: the write lock is taken at BEGIN, so a transaction that
-   * reads before it writes waits for another connection's write (the busy timeout) rather than
-   * failing at once with SQLITE_BUSY, as a deferred one does when it upgrades. Inside an outer
-   * transaction it is a savepoint, as `transaction` is.
+   * Run fn inside a single SQLite transaction (atomic; rolls back if fn throws), an IMMEDIATE one:
+   * the write lock is taken at BEGIN, so a transaction that reads before it writes waits for
+   * another connection's write (the busy timeout) rather than failing at once with SQLITE_BUSY,
+   * as a deferred one does when it upgrades. Inside an outer transaction, whoever opened it, it is
+   * a savepoint of that one. fn is synchronous: a transaction cannot span an await.
    */
-  immediateTransaction<T>(fn: () => T): T;
+  transaction<T>(fn: () => T): T;
   /**
    * Total atomic USDC this tenant's funding has committed: confirmed transfers PLUS unresolved
    * submissions.
@@ -619,13 +618,10 @@ export class SqliteEntityRepository implements EntityRepository {
       .run(policy ? JSON.stringify(policy) : null, key);
   }
 
-  /** Run fn inside a single SQLite transaction (atomic; rolls back if fn throws). */
   transaction<T>(fn: () => T): T {
-    return this.db.transaction(fn)();
-  }
-
-  /** `transaction`, taking the write lock at BEGIN (see the interface). */
-  immediateTransaction<T>(fn: () => T): T {
+    // IMMEDIATE, as `SqliteLegalBodyRepository.transaction` and for its reason: a deferred
+    // transaction that read first fails at its first write if another connection wrote since, or
+    // holds the lock, and no busy timeout can wait that out. Every caller writes.
     return this.db.transaction(fn).immediate();
   }
 

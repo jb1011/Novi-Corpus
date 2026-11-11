@@ -76,15 +76,12 @@ export interface FormationPaymentDeps {
    * it.
    */
   hasLinkedLegalBody?: (companyId: string) => boolean;
-  /** The company status move and the payment status move commit together. */
-  transaction: <T>(fn: () => T) => T;
   /**
-   * An IMMEDIATE transaction (`EntityRepository.immediateTransaction`), for a write that reads
-   * first: a re-quote's total-cap check and its quote insert. Absent: `transaction`. The doors'
-   * builder (`formationPaymentDeps`) always passes it; the sweeper, which never re-quotes, does
-   * not.
+   * The company status move and the payment status move commit together. The entity repository's
+   * transaction, an IMMEDIATE one: a re-quote's total-cap check reads before its quote insert
+   * writes, and the write lock taken at BEGIN is what lets it wait for another connection's write.
    */
-  immediateTransaction?: <T>(fn: () => T) => T;
+  transaction: <T>(fn: () => T) => T;
   /**
    * The create door's deps (`ApiDeps.formation.companyDeps`): doola's pin, the network's
    * environment and FORMATION_MAX_TOTAL. A re-quote of a formed legal-body company reads the
@@ -152,9 +149,8 @@ export function formationPaymentDeps(deps: {
     checks: deps.customerFacts?.checks,
     // …and whether one of its legal bodies is linked, so it is quoted and settled only after that.
     hasLinkedLegalBody: deps.customerFacts?.hasLinkedLegalBody,
+    // IMMEDIATE, for the re-quote's cap check and its insert among others.
     transaction: <T>(fn: () => T) => deps.repo.transaction(fn),
-    // …and the IMMEDIATE one, for the re-quote's cap check and its insert.
-    immediateTransaction: <T>(fn: () => T) => deps.repo.immediateTransaction(fn),
     // The formed door's cap, read from the create door's own deps.
     companyDeps: deps.formation?.companyDeps,
     now: deps.now,
@@ -840,7 +836,7 @@ export function requoteFormationPayment(
   // 'doola' is the formation provider, as `countChargeableFormedLegalBodies` counts it.
   const formed = current.provider === "doola" && current.purposeKind === "legal_body";
   const cap = deps.companyDeps;
-  const paymentId = (deps.immediateTransaction ?? deps.transaction)(() => {
+  const paymentId = deps.transaction(() => {
     if (
       formed &&
       cap !== undefined &&
