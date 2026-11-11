@@ -145,6 +145,10 @@ const BEACON = ["Beacon Works", "Beacon Labs", "Beacon Foundry"] as const;
 const BEACON_FILED = "Beacon Works LLC";
 const BEACON_FILING = "2026-000451207";
 const OPERATOR = "ops.example";
+/** record-filed's advice when the typed date is before the company row was created: the
+ *  operator path below types yesterday for a company created in the same run. */
+const FILED_BEFORE_CREATED =
+  "the filing date is before the company was created at Novi: check it against the State's record";
 
 let anvil: AnvilHandle | undefined;
 let rpcUrl = "";
@@ -812,7 +816,8 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
 
   const articles = join(dir, "beacon-articles.pdf");
   writeFileSync(articles, Buffer.from("%PDF-1.7\n% Beacon Works articles, a test file\n%%EOF\n"));
-  // The command reads the wall clock: the State filed it yesterday by that clock.
+  // The command reads the wall clock: the State filed it yesterday by that clock, before the
+  // company row this run created, so the command advises a check of the date, and writes.
   const beaconFiledOn = new Date(Date.now() - DAY_MS).toISOString().slice(0, 10);
   const filed = await operator([
     "formation:record-filed",
@@ -836,6 +841,7 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
     filingNumber: BEACON_FILING,
     filedAt: filingDateToUnix(beaconFiledOn),
     matched: true,
+    warnings: [FILED_BEFORE_CREATED],
     operator: OPERATOR,
   });
   expect(await companyView(g2, beacon)).toMatchObject({

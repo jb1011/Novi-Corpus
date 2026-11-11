@@ -426,10 +426,36 @@ describe("formation:record-filed, against the saga's own rows", () => {
       recordedAt: expect.any(Number),
     });
     const docId = documentIndexId(b, `operator:ArticlesOfOrganization:${sha256}`);
-    expect(parseDetail(rowOf(b, "fetch_documents")!.detail)).toEqual({
+    // fetch_documents' detail in the processor's `FetchDocumentsDetail` shape: `stored` lists
+    // each document by its provider document id, type and hash, as the processor maps the index
+    // rows; `missing` is empty. The operator's handle beside them.
+    type FetchDocuments = {
+      stored?: { docId: string; type: string; sha256: string }[];
+      missing?: string[];
+    };
+    const fetchedA = parseDetail<FetchDocuments>(rowOf(a, "fetch_documents")!.detail);
+    const fetchedB = parseDetail<FetchDocuments>(rowOf(b, "fetch_documents")!.detail);
+    expect(fetchedB).toEqual({
+      stored: [
+        {
+          docId: `operator:ArticlesOfOrganization:${sha256}`,
+          type: "ArticlesOfOrganization",
+          sha256,
+        },
+      ],
+      missing: [],
       recordedBy: OPERATOR,
-      docIds: [docId],
     });
+    expect(fetchedA.missing).toEqual([]);
+    expect(fetchedA.stored!.map((doc) => Object.keys(doc).sort())).toEqual(
+      fetchedA.stored!.map(() => ["docId", "sha256", "type"]),
+    );
+    // What the processor writes from the index, B's row matches.
+    expect(fetchedB.stored).toEqual(
+      documents
+        .listByCompany(b)
+        .map((r) => ({ docId: r.providerDocId, type: r.docType, sha256: r.sha256 })),
+    );
     expect(companyFiled(requests.stepsOf(a))).toBe(true);
     expect(companyFiled(requests.stepsOf(b))).toBe(true);
 

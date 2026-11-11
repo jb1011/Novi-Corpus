@@ -18,7 +18,11 @@ import { getAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError } from "../../src/api/errors";
 import { abandonFormedCompany } from "../../src/formation/abandonFormed";
-import type { CreateCompanyDeps } from "../../src/formation/company";
+import {
+  type CreateCompanyDeps,
+  type CreateCompanyResult,
+  createCompany,
+} from "../../src/formation/company";
 import { DEFAULT_INDUSTRY, companyNameOptions } from "../../src/formation/intake";
 import type { FormationPaymentConfig } from "../../src/formation/payment";
 import {
@@ -33,7 +37,10 @@ import {
   type FormationStep,
   SqliteFormationRepository,
 } from "../../src/persistence/formationRepository";
+import { SqliteWorldStore } from "../../src/persistence/worldStore";
 import type { Hex } from "../../src/types";
+import { abandonFormation } from "../../src/workflow/formationStep";
+import { ACTION, recordHuman, worldFor } from "../helpers/customerCompanyFixtures";
 import { paymentCfg } from "../helpers/formationPayment";
 
 const NOW = Date.parse("2026-11-10T12:00:00Z");
@@ -474,5 +481,155 @@ describe("an abandon refused, with nothing moved", () => {
     expect(() => abandonFormedCompany(deps({ parties: failing }), TENANT, companyId)).toThrow();
     expect(snapshot(companyId)).toEqual(before);
     expect(abandonLines()).toHaveLength(0);
+  });
+});
+
+// ── the person's lifetime slot ─────────────────────────────────────────────────────────────────
+//
+// The per-human company cap (WORLD_MAX_COMPANIES_PER_HUMAN) counts every company the person's
+// tenants own. A formed company abandoned with nothing at doola is left out, as a customer's
+// declaration withdrawn before a check is: with a cap of 1, an abandon must not be a trap. One
+// that reached doola, or may have, keeps counting, whoever abandoned it.
+
+describe("the person's lifetime slot after an abandon", () => {
+  const NULLIFIER = "4401";
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  let store: SqliteWorldStore;
+
+  beforeEach(() => {
+    store = new SqliteWorldStore(db);
+    recordHuman(store, TENANT, NULLIFIER, NOW - DAY_MS);
+  });
+
+  const counted = (): number => store.countCompaniesForNullifier(NULLIFIER, ACTION);
+
+  /** The formed door of a sandbox deployment, with World wired and a cap of one company. */
+  function formedDoor(): CreateCompanyDeps {
+    return {
+      companies,
+      parties,
+      requests,
+      pin: { provider: "doola", environment: "sandbox" },
+      legalBodyEnvironment: "sandbox",
+      sandboxSyntheticPii: false,
+      maxPerTenant: 10,
+      dailyCeiling: 100,
+      world: worldFor(store, { maxCompaniesPerHuman: 1 }),
+      transaction: (fn) => db.transaction(fn)(),
+      now: () => NOW,
+    };
+  }
+
+  /** An unbound party of the tenant, for the formed door. */
+  function newParty(): string {
+    return parties.create({
+      tenantId: TENANT,
+      legalFirstName: "Ada",
+      legalLastName: "Example",
+      email: "person@example.com",
+      phone: "+12125550100",
+      line1: "1 Example Way",
+      line2: null,
+      city: "Cheyenne",
+      region: "WY",
+      postalCode: "82001",
+      country: "USA",
+      synthetic: false,
+    });
+  }
+
+  const formedCreate = (partyId: string, names: [string, string, string]) =>
+    createCompany(formedDoor(), TENANT, {
+      partyId,
+      names,
+      businessPurpose: "Operating software agents.",
+      industryLabel: DEFAULT_INDUSTRY,
+      for: "legal_body",
+    });
+
+  const idOf = (result: CreateCompanyResult): string => {
+    if ("error" in result) throw new Error(result.error);
+    return result.companyId;
+  };
+
+  const CAP = { code: "guardian_company_cap", status: 403 };
+
+  /** The cap is reached: the count is one, and a second formed company is refused by it. */
+  function slotTaken(): void {
+    expect(counted()).toBe(1);
+    const err = thrown(() =>
+      formedCreate(newParty(), ["Sample Works", "Sample Labs", "Sample Studio"]),
+    );
+    expect(err).toMatchObject(CAP);
+  }
+
+  test("with a cap of one, a formed company abandoned with nothing at doola lets the same person create another", () => {
+    const first = idOf(
+      formedCreate(newParty(), ["Example Works", "Example Labs", "Example Studio"]),
+    );
+    slotTaken();
+
+    abandonFormedCompany(deps(), TENANT, first);
+
+    expect(counted()).toBe(0);
+    const second = idOf(formedCreate(newParty(), ["Sample Works", "Sample Labs", "Sample Studio"]));
+    expect(companies.find(second)).toMatchObject({ purposeKind: "legal_body", status: "ready" });
+    expect(counted()).toBe(1);
+  });
+
+  test("a create doola refused, then abandoned by the tenant, frees the slot: the burned key filed nothing", () => {
+    const { companyId } = company();
+    stepsOpened(companyId, "rejected");
+    expect(counted()).toBe(1);
+    abandonFormedCompany(deps(), TENANT, companyId);
+    expect(counted()).toBe(0);
+  });
+
+  test("a formed company abandoned with a provider_ref on create_provider still counts: doola filed it", () => {
+    const { companyId } = company();
+    stepsOpened(companyId, "provider_ref");
+    // The tenant's door refuses it; the saga's verdict (the operator's escape writes the same)
+    // abandons it with the ref kept.
+    expect(
+      abandonFormation(requests, companies, companyId, "operator abandon: test", {
+        transaction: (fn) => db.transaction(fn)(),
+        from: "failed",
+      }),
+    ).toBe(true);
+    expect(companies.find(companyId)!.status).toBe("abandoned");
+    expect(requests.find(companyId, "create_provider")).toMatchObject({
+      state: "abandoned",
+      providerRef: "doola-company-example",
+    });
+    slotTaken();
+  });
+
+  test.each([
+    ["a create whose answer was lost under the live key", "answer_lost", "failed"],
+    ["an unreadable create row", "unreadable", "pending"],
+  ] as const)(
+    "a formed company abandoned over %s still counts: doola may hold it",
+    (_, shape, from) => {
+      const { companyId } = company();
+      stepsOpened(companyId, shape);
+      expect(
+        abandonFormation(requests, companies, companyId, "operator abandon: test", {
+          transaction: (fn) => db.transaction(fn)(),
+          from,
+        }),
+      ).toBe(true);
+      expect(companies.find(companyId)!.status).toBe("abandoned");
+      slotTaken();
+    },
+  );
+
+  test("a ready formed company still counts", () => {
+    company();
+    slotTaken();
+  });
+
+  test("an abandoned company for agents still counts: the exemption is the formed door's", () => {
+    company({ purposeKind: "agent", status: "abandoned" });
+    slotTaken();
   });
 });

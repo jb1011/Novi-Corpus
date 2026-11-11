@@ -623,8 +623,10 @@ interface RecordFiledOptions {
  *  - `await_filing` confirmed, its detail `{ filingNumber, filingDate, filedAt, recordedBy }`: the
  *    processor's `AwaitFilingDetail` keys (`filingDate` as typed, yyyy-MM-dd), and `filed_at`'s
  *    unix seconds;
- *  - `fetch_documents` confirmed, its detail `{ recordedBy, docIds }`: the Articles are the
- *    documents, recorded by hand;
+ *  - `fetch_documents` confirmed, its detail the processor's `FetchDocumentsDetail`,
+ *    `{ stored: [{ docId, type, sha256 }], missing: [] }` with `recordedBy` beside it: the Articles
+ *    are the documents, recorded by hand, listed by their provider document id as the processor
+ *    lists an index row;
  *  - `await_ein` left `pending` under the same manual ref, never polled (`formation:record-ein`
  *    confirms it);
  *  - the filing facts on the company through `recordFilingFacts`, the writer the processor uses,
@@ -699,8 +701,14 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
             }),
             error: null,
           }) &&
+          // The processor's `FetchDocumentsDetail`: each stored document by its provider document
+          // id, type and hash, as it maps the index rows, and nothing missing.
           s.requests.transition(companyId, "fetch_documents", "pending", "confirmed", {
-            detail: JSON.stringify({ recordedBy: operator, docIds: [docId] }),
+            detail: JSON.stringify({
+              stored: [{ docId: providerDocId, type: ARTICLES_DOC_TYPE, sha256 }],
+              missing: [],
+              recordedBy: operator,
+            }),
             error: null,
           }) &&
           // The same ref on the step the company waits on, and no fact: nothing is known yet.

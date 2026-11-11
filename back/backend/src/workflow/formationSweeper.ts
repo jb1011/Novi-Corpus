@@ -179,6 +179,12 @@ export const SANDBOX_AUTOCOMPLETE_DELAY_MS = 5 * 60_000;
  *  ordinary poll is the backstop. */
 export const SANDBOX_READVANCE_WINDOW_MS = 30 * 60_000;
 
+/** SANDBOX ONLY: how many failed playground calls, for one company and step, before the leg gives
+ *  up on them in this process: one `sandbox_autocomplete_gave_up` error line, then no call. Six
+ *  calls spaced by `SANDBOX_AUTOCOMPLETE_DELAY_MS` are about half an hour of a sandbox that is
+ *  down. */
+export const SANDBOX_AUTOCOMPLETE_MAX_FAILURES = 6;
+
 /** What the sandbox leg writes on the `create_provider` row's `detail` (unix ms): the playground
  *  call has been made, so it is never made twice. */
 interface SandboxAutocompleteMarks {
@@ -284,6 +290,14 @@ export class FormationSweeper {
    */
   private readonly sandboxReadAt = new Map<string, number>();
   private readonly sandboxFailedAt = new Map<string, number>();
+  /**
+   * The failed playground calls in a row, keyed `companyId:step`: at
+   * `SANDBOX_AUTOCOMPLETE_MAX_FAILURES` the leg stops calling for that company and step. In memory
+   * like the two above, and never pruned by the delay: a restart starts the count again, which
+   * costs at most six more calls, and the database is never written for a failure. A call that
+   * succeeds clears its count.
+   */
+  private readonly sandboxFailures = new Map<string, number>();
 
   /**
    * Where the last anchor batch stopped (2026-08-26 §3) — PERSISTED in `meta.anchor_cursor`.
@@ -955,8 +969,10 @@ export class FormationSweeper {
    *
    * THE CALL COMES BEFORE THE MARKER. A throwing call writes nothing to the database, so a later
    * tick tries again; it backs off for `SANDBOX_AUTOCOMPLETE_DELAY_MS` in memory rather than
-   * calling doola every tick. A crash between the call and the marker repeats a call doola's
-   * sandbox takes harmlessly.
+   * calling doola every tick, and after `SANDBOX_AUTOCOMPLETE_MAX_FAILURES` failures for one
+   * company and step it gives up on them in this process, with one `sandbox_autocomplete_gave_up`
+   * error line. A crash between the call and the marker repeats a call doola's sandbox takes
+   * harmlessly.
    *
    * THE MARKER STOPS A SECOND CALL, NOT A SECOND READ. A read right after the call can learn
    * nothing (it failed, doola does not show the filing yet, or the advance threw), and the next
@@ -1009,10 +1025,15 @@ export class FormationSweeper {
       const since = steps.find((s) => s.step === leg.after)?.factsUpdatedAt;
       if (!since || now - parseSqliteUtc(since) < SANDBOX_AUTOCOMPLETE_DELAY_MS) continue;
       if (this.sandboxFailedAt.has(companyId)) continue;
+      const failureKey = `${companyId}:${step}`;
+      const failedBefore = this.sandboxFailures.get(failureKey) ?? 0;
+      if (failedBefore >= SANDBOX_AUTOCOMPLETE_MAX_FAILURES) continue;
 
       try {
         await this.d.doola[leg.call](create.providerRef);
       } catch (err) {
+        const failures = failedBefore + 1;
+        this.sandboxFailures.set(failureKey, failures);
         this.sandboxFailedAt.set(companyId, now);
         opsLog("sandbox_autocomplete_failed", {
           level: "warn",
@@ -1020,9 +1041,15 @@ export class FormationSweeper {
           step,
           ...describeDoolaError(err),
         });
+        // Once, at the bound: the leg makes no further call for this company and step in this
+        // process. doola's sandbox files nothing without the call, so the filing stays open until
+        // someone reads this line (a restart tries six more times). Ids and a count only.
+        if (failures === SANDBOX_AUTOCOMPLETE_MAX_FAILURES)
+          opsLog("sandbox_autocomplete_gave_up", { level: "error", companyId, step, failures });
         continue;
       }
       this.sandboxFailedAt.delete(companyId);
+      this.sandboxFailures.delete(failureKey);
       // Merged into the row as it is NOW, not as the loop read it: the marker adds one field and
       // must not put back an older detail.
       const current = this.d.requests.find(companyId, "create_provider");

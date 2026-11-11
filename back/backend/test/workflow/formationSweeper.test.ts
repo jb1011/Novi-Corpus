@@ -865,7 +865,17 @@ function seedManualFiling() {
     }),
   });
   requests.transition(COMPANY_KEY, "fetch_documents", "pending", "confirmed", {
-    detail: JSON.stringify({ recordedBy: "ops-a", docIds: ["doc-articles"] }),
+    detail: JSON.stringify({
+      stored: [
+        {
+          docId: `operator:ArticlesOfOrganization:0x${"ab".repeat(32)}`,
+          type: "ArticlesOfOrganization",
+          sha256: `0x${"ab".repeat(32)}`,
+        },
+      ],
+      missing: [],
+      recordedBy: "ops-a",
+    }),
   });
   requests.transition(COMPANY_KEY, "await_ein", "pending", "pending", {
     providerRef: MANUAL_REF,

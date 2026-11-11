@@ -25,7 +25,11 @@ import { SqliteFormationPartyRepository } from "../../src/persistence/formationP
 import { SqliteFormationRepository, parseDetail } from "../../src/persistence/formationRepository";
 import { filingDateToUnix } from "../../src/workflow/formationProcessor";
 import { runFormationCreateProvider } from "../../src/workflow/formationProvider";
-import { FormationSweeper, type FormationSweeperDeps } from "../../src/workflow/formationSweeper";
+import {
+  FormationSweeper,
+  type FormationSweeperDeps,
+  SANDBOX_AUTOCOMPLETE_DELAY_MS,
+} from "../../src/workflow/formationSweeper";
 import {
   COMPANY_ID,
   COMPANY_KEY,
@@ -411,4 +415,48 @@ test("a throwing playground call writes no marker, and is made again once the de
   expect(attempts).toBe(2);
   expect(companyFiled(steps())).toBe(true);
   expect(marks().autocompletedAt).toBe(now);
+});
+
+test("a playground call that keeps failing gives up after six failures with one error line, and the seventh tick makes no call", async () => {
+  await openFiling();
+  let attempts = 0;
+  doola.api.playgroundCompleteFormation = async () => {
+    attempts++;
+    throw new Error("doola playground is down");
+  };
+
+  const s = sweeper();
+  const lines: Record<string, unknown>[] = [];
+  now += 6 * MINUTE;
+  lines.push(...(await tickLogged(s)));
+  // Five more failing calls, each one the delay after the last.
+  for (let i = 0; i < 5; i++) {
+    now += SANDBOX_AUTOCOMPLETE_DELAY_MS;
+    lines.push(...(await tickLogged(s)));
+  }
+  expect(attempts).toBe(6);
+  expect(lines.filter((l) => l.opslog === "sandbox_autocomplete_failed")).toHaveLength(6);
+  const gaveUp = lines.filter((l) => l.opslog === "sandbox_autocomplete_gave_up");
+  expect(gaveUp).toHaveLength(1);
+  const { opslog: _event, at: _at, ...fields } = gaveUp[0]!;
+  // Ids, a step and a count: no personal data.
+  expect(fields).toEqual({
+    level: "error",
+    companyId: COMPANY_KEY,
+    step: "await_filing",
+    failures: 6,
+  });
+
+  // The seventh tick, the delay later: no call, and no second line.
+  now += SANDBOX_AUTOCOMPLETE_DELAY_MS;
+  const seventh = await tickLogged(s);
+  expect(attempts).toBe(6);
+  expect(
+    seventh.filter((l) =>
+      ["sandbox_autocomplete_failed", "sandbox_autocomplete_gave_up"].includes(String(l.opslog)),
+    ),
+  ).toEqual([]);
+  // The database is untouched: no marker, the filing still open.
+  expect(marks().autocompletedAt).toBeUndefined();
+  expect(companyFiled(steps())).toBe(false);
 });
