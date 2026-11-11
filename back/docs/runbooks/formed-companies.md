@@ -24,6 +24,60 @@ door and the resolver take it (`companyEligible`, `src/legalBody/orders.ts`) onc
 - its latest company check is not a revocation;
 - the company is not `abandoned`.
 
+### Where the filed name and the filing number come from
+
+For a company doola filed through its API, the formation processor writes both when it confirms
+the filing, and again on any later poll that learns one (`src/workflow/formationProcessor.ts`).
+
+- **The filed name comes from doola's list of the customer's companies** (`GET /companies`).
+  doola's full company answer carries no name. The processor reads the list only for a legal-body
+  company that doola reports filed and that holds no name yet, takes the item with the company's
+  own doola id, and stores the stored option that name matches, with its entity ending (for
+  example `Lantern Works LLC`), never doola's text. A name the company holds is never rewritten
+  by a poll. A company for agents reads no name at all.
+- **The filing number is doola's `formationFilingNumber`.** doola's sandbox never sets one, so on
+  a sandbox the processor records a stand-in (below).
+
+| Ops line | What it means | What to do |
+| --- | --- | --- |
+| `formation_filed_name_missing` (warn) | The company is filed and doola reports no name for it. `reason` is `no_customer_id` (no doola customer id to list by), `list_failed` (the list read failed, or its answer was not a list; doola's error rides along when there is one), `not_in_list` (the customer's list has no readable item with this doola id: an entry that is not an object is skipped) or `no_name` (the item's name is absent, blank or not text). The filing is confirmed all the same, with its date and number; the line repeats once per poll while the name is missing. | `list_failed`: wait for the next poll. Otherwise check the State's record and set the name with `company:filed-name` (section 2). |
+| `formation_filed_name_unmatched` (warn) | doola lists a name that matches none of the stored options. | Check the State's record and set the name with `company:filed-name`. |
+
+**Open question, with doola.** We do not know that the list's name is the State-accepted one when
+the State took the second or third option. If doola always lists the first choice, a company the
+State filed under another would hold the wrong option. Until doola answers, check a formed
+company's name against the State's record, and correct it with `company:filed-name --replace`
+while no agreement prints it.
+
+### A `TEST-STANDIN-` filing number
+
+A filing number starting `TEST-STANDIN-` is a sandbox stand-in, never a State filing number:
+`TEST-STANDIN-` and the first 16 hex characters, in upper case, of the SHA-256 of doola's company
+id (for example `TEST-STANDIN-D36A9A6177333DB7`). doola's sandbox files with no number, and a
+company with no number cannot be ordered, so the processor records one when all of these hold:
+the company's own pin is `sandbox`, it is a doola company for a legal body, doola reports it
+filed with no number, and the row holds no number. One info line `sandbox_filing_number_stand_in`
+marks the write; `formation_filing_healed` carries `filingNumberStandIn: true` when a later poll
+writes it.
+
+- **It never appears on production.** The rule reads the company's own pin, never the
+  deployment's; a company pinned to one environment is never read on the other; and a company
+  for agents never gets one.
+- **And production refuses one, whoever wrote it.** The order door answers
+  `filing_number_reserved` (409) for a production company whose filing number is in the stand-in
+  space, a declared company included, so no agreement prints one; `formation:record-filed`
+  refuses one for a production company (section 5). A declaration on production keeps the
+  number as the tenant's record; it just never reaches an agreement.
+- **The space is matched on the filing key** (upper case, hyphens dropped, as the declared door
+  compares numbers): `TEST-STAND-IN-…`, `TEST-STANDIND…` and `test-standin-…` are in it too.
+- **A number doola reports later replaces it.** A stand-in is never written over a number.
+- **The texts print it as they print any number.** The agreement says
+  `with filing number "TEST-STANDIN-…"`, and the public statement carries it beside
+  `environment: "sandbox"`.
+- **The declared door reserves the space on a sandbox**: a declared `filingNumber` in it is
+  refused, "is reserved for companies formed on this deployment: choose another
+  test number". Production takes it as any other string.
+
 Creating one (`POST /companies` with `for: "legal_body"`) runs the formed door's gates first, in
 this order: a real human (a waiver is refused), the per-human company cap, the guardian identity
 record and the approved operating agreement (these two on production only). Production then
@@ -38,8 +92,10 @@ Sets the company's filed name, its full legal name as the State's record prints 
 
 **When to run it.**
 
-- doola reported a name that matched none of the stored options. The processor then stores no
-  filed name, and the order door refuses the company (`company_not_eligible`).
+- doola reported a name that matched none of the stored options
+  (`formation_filed_name_unmatched`), or reports no name for a filed company
+  (`formation_filed_name_missing`). The processor then stores no filed name, and the order door
+  refuses the company (`company_not_eligible`).
 - The stored name differs from the State's record.
 
 **Copy the name exactly as the State's record prints it, with its entity ending.** It is stored
@@ -70,7 +126,7 @@ in the dry run and the real run alike.
 | --- | --- |
 | `matches no stored option` | Check the name against the State's record once more. |
 | `no entity ending` | The State's record of an LLC carries its ending. Check the name; correct it with `--replace` while no agreement prints it. |
-| `the company has no filing number` | The order door needs both the name and the number, so the company cannot be ordered yet. For a company doola filed through the API, the next poll fills the number once doola reports it. For a filing done by hand, `formation:record-filed` records it (section 5). |
+| `the company has no filing number` | The order door needs both the name and the number, so the company cannot be ordered yet. For a company doola filed through the API, the next poll fills the number once doola reports it (on a sandbox, the stand-in of section 1). For a filing done by hand, `formation:record-filed` records it (section 5). |
 
 **What it writes.** The filed name, a note (`filed_name_recorded`) on every legal body of the
 company, and one ops line `filed_name_recorded` with the company id, `matched`, `replaced`, the
@@ -167,7 +223,8 @@ Organization. Copy every value from the State's record, not from an email.
 **The values**, each refused, never cleaned:
 
 - `--filing-number`: the agreement's filing-number rule (4 to 32 of A-Z, a-z, 0-9 and hyphens). A
-  space at an end is refused.
+  space at an end is refused. For a company pinned to production, a number in the sandbox
+  stand-in space (`TEST-STANDIN-`, on the filing key) is refused: record the State's number.
 - `--filed-at`: a real calendar date written `YYYY-MM-DD` (2026-02-30 is refused), not before
   1970-01-01 and not after today's date in UTC. It is stored as unix seconds at UTC midnight, as
   the processor stores doola's filing date. A date before the day the company was created at

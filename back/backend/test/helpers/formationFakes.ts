@@ -11,6 +11,7 @@ import {
   type CreateCompanyInput,
   DOOLA_DESCRIPTION_MAX_LENGTH,
   type DoolaCompany,
+  type DoolaCompanyListItem,
   type DoolaDocument,
   type DoolaRequiredAction,
 } from "../../src/adapters/doola/types";
@@ -25,6 +26,8 @@ export const ENTITY_KEY = "tenant-a:agent-1";
 export const TENANT = "tenant-a";
 /** doola's company id — the `provider_ref` a webhook carries. */
 export const COMPANY_ID = "cmp-1";
+/** doola's customer id for `COMPANY_ID`: what the list read is scoped to. */
+export const CUSTOMER_ID = "cus-1";
 /** OUR company id: the sub-saga's key, and what an entity is attached to (2026-08-26 §2). */
 export const COMPANY_KEY = "company-1";
 
@@ -84,13 +87,24 @@ export function seedCompany(
 }
 
 export interface FakeDoolaState {
+  /** doola's FULL answer for the company (`GET /companies/{id}`). It carries no `name`, as the
+   *  real one carries none: the name is on the list item only. */
   company: DoolaCompany;
+  /**
+   * What `GET /companies` lists, across customers: `listCompanies` answers the items under the
+   * customer asked about, and nothing else. The knob for the reported name: a test sets an item's
+   * `name`, blanks it, or leaves it out. An item that is the current `company` reports that
+   * company's intake status, "as Get a company returns it".
+   */
+  listed: DoolaCompanyListItem[];
   documents: DoolaDocument[];
   requiredActions: DoolaRequiredAction[];
   /** Bytes served for each document id by the fake download URL. */
   bytes: Record<string, Buffer>;
   /** Set to make the next call of the named method throw. */
-  failNext?: Partial<Record<"getCompany" | "listDocuments" | "getDocumentDownloadUrl", boolean>>;
+  failNext?: Partial<
+    Record<"getCompany" | "listCompanies" | "listDocuments" | "getDocumentDownloadUrl", boolean>
+  >;
 }
 
 export interface FakeDoola {
@@ -118,7 +132,12 @@ const PDF = (id: string) => Buffer.from(`%PDF-1.7\n${id}\n`);
 export function fakeDoola(over: Partial<FakeDoolaState> = {}): FakeDoola {
   const calls: string[] = [];
   const state: FakeDoolaState = {
-    company: { doolaCompanyId: COMPANY_ID, formationSubmissionStatus: "SUBMITTED" },
+    company: {
+      doolaCompanyId: COMPANY_ID,
+      doolaCustomerId: CUSTOMER_ID,
+      formationSubmissionStatus: "SUBMITTED",
+    },
+    listed: [],
     documents: [],
     requiredActions: [],
     bytes: {},
@@ -143,6 +162,18 @@ export function fakeDoola(over: Partial<FakeDoolaState> = {}): FakeDoola {
       maybeFail("listDocuments");
       return state.documents;
     },
+    async listCompanies(customerId: string) {
+      calls.push(`listCompanies:${customerId}`);
+      maybeFail("listCompanies");
+      return state.listed
+        .filter((item) => item.doolaCustomerId === customerId)
+        .map((item) =>
+          item.doolaCompanyId === state.company.doolaCompanyId &&
+          state.company.formationSubmissionStatus !== undefined
+            ? { ...item, formationSubmissionStatus: state.company.formationSubmissionStatus }
+            : { ...item },
+        );
+    },
     async listRequiredActions(id: string) {
       calls.push(`listRequiredActions:${id}`);
       return state.requiredActions;
@@ -155,7 +186,6 @@ export function fakeDoola(over: Partial<FakeDoolaState> = {}): FakeDoola {
     },
     createCustomer: notImplemented("createCustomer"),
     createCompany: notImplemented("createCompany"),
-    listCompanies: notImplemented("listCompanies"),
     getComplianceCalendar: notImplemented("getComplianceCalendar"),
     playgroundCompleteFormation: notImplemented("playgroundCompleteFormation"),
     playgroundCompleteEin: notImplemented("playgroundCompleteEin"),
@@ -218,29 +248,51 @@ export function doolaDoc(id: string, documentType: string): DoolaDocument {
 }
 
 /**
+ * The list item doola reports for `COMPANY_ID` under `CUSTOMER_ID`: its `name` as given, or no
+ * `name` at all when `name` is undefined. Only the seven list fields, as the wire has them.
+ */
+export function listItem(
+  name: string | undefined,
+  over: Partial<DoolaCompanyListItem> = {},
+): DoolaCompanyListItem {
+  return {
+    doolaCompanyId: COMPANY_ID,
+    doolaCustomerId: CUSTOMER_ID,
+    ...(name === undefined ? {} : { name }),
+    state: "WY",
+    formationSubmissionStatus: "SUBMITTED",
+    ...over,
+  };
+}
+
+/**
  * `fakeDoola` plus the saga's and the sandbox's calls: createCustomer, createCompany,
- * listCompanies, playgroundCompleteFormation, playgroundCompleteEin.
+ * playgroundCompleteFormation, playgroundCompleteEin.
  *
- * A doola test environment as the sweeper meets it: the filing step can open a company, and the
- * two playground calls make doola's own state say what a real filing and a real EIN would. The
- * filing then reads back through the ordinary `getCompany` and `listDocuments`, so the processor
- * confirms it on its own rules, never on the fake's say-so.
+ * A doola test environment as the sweeper meets it, answering in the shapes doola's published
+ * spec gives: the filing step can open a company, and the two playground calls make doola's own
+ * state say what its sandbox says after a filing and an EIN. The filing then reads back through
+ * the ordinary `getCompany`, `listCompanies` and `listDocuments`, so the processor confirms it on
+ * its own rules, never on the fake's say-so.
  *
- * - `createCustomer` answers `cus-<n>`; `createCompany` answers `cmp-<n>` (the first is
- *   `COMPANY_ID`), `SUBMITTED`, becomes `state.company`, and remembers the first name option's
- *   bare `name`, which is what the playground's filing reports back. A body doola would refuse
+ * - `createCustomer` answers `cus-<n>`; `createCompany` answers the full shape, `cmp-<n>` (the
+ *   first is `COMPANY_ID`) with its customer, its name options numbered from 0 and `SUBMITTED`,
+ *   and it becomes `state.company`. It is listed under its customer, named as the list names it:
+ *   the first option and its ending, e.g. `Lantern Works LLC`. A body doola would refuse
  *   (`refuseLikeDoola`: a description over 50 characters) is refused instead, pushes
  *   `createCompany:refused` and creates nothing;
- * - `listCompanies` answers `[]` (the pre-create lookup finds nothing);
- * - `playgroundCompleteFormation` files the company: the remembered name (the company's own name
- *   when no create was made), the filing date Wyoming's calendar date of `opts.now()` (doola
- *   reports the State's date: at 03:00 UTC it is still the day before), the filing number
- *   `PLAYGROUND-FILING`, the formation service `completed`, and the Articles and the Operating
- *   Agreement as its documents;
- * - `playgroundCompleteEin` issues the EIN `12-3456789`.
+ * - `listCompanies` answers list items only, for the companies created under that customer, and
+ *   `[]` before any create. So a retried create may find and adopt its company rather than send
+ *   again, as it would against doola;
+ * - `playgroundCompleteFormation` files the company: the filing date Wyoming's calendar date of
+ *   `opts.now()` (doola reports the State's date: at 03:00 UTC it is still the day before),
+ *   `COMPLETED`, the formation service `Completed`, and the Articles and the Operating Agreement as
+ *   its documents. NO filing number: doola's sandbox never sets one;
+ * - `playgroundCompleteEin` issues the EIN `12-3456789` and adds the EIN letter to the documents.
  *
- * Each pushes `<method>:<id>` to `calls`. The other callers of `fakeDoola` keep its throwing
- * stubs: a code path that files must say so by using this one.
+ * A test that needs a number doola gave (the production shape) sets `formationFilingNumber` on
+ * `state.company` itself. Each call pushes `<method>:<id>` to `calls`. The other callers of
+ * `fakeDoola` keep its throwing stubs: a code path that files must say so by using this one.
  */
 export function fakeSandboxDoola(
   over: Partial<FakeDoolaState> = {},
@@ -251,7 +303,6 @@ export function fakeSandboxDoola(
   const now = opts.now ?? Date.now;
   let customers = 0;
   let created = 0;
-  let bareName: string | undefined;
 
   const api: DoolaApi = {
     ...fake.api,
@@ -269,33 +320,53 @@ export function fakeSandboxDoola(
       }
       const doolaCompanyId = `cmp-${++created}`;
       calls.push(`createCompany:${doolaCompanyId}`);
-      bareName = input.nameOptions[0]?.name;
-      state.company = { doolaCompanyId, formationSubmissionStatus: "SUBMITTED" };
+      state.company = {
+        doolaCompanyId,
+        doolaCustomerId: input.doolaCustomerId,
+        nameOptions: input.nameOptions.map((option, position) => ({
+          name: option.name,
+          entityTypeEnding: option.entityTypeEnding,
+          position,
+        })),
+        formationSubmissionStatus: "SUBMITTED",
+      };
+      const first = input.nameOptions[0];
+      state.listed.push({
+        doolaCompanyId,
+        doolaCustomerId: input.doolaCustomerId,
+        ...(first ? { name: `${first.name} ${first.entityTypeEnding}` } : {}),
+        state: input.state,
+        formationSubmissionStatus: "SUBMITTED",
+      });
       return { ...state.company };
-    },
-    async listCompanies(customerId) {
-      calls.push(`listCompanies:${customerId}`);
-      return [];
     },
     async playgroundCompleteFormation(id) {
       calls.push(`playgroundCompleteFormation:${id}`);
       state.company = {
         ...state.company,
-        name: bareName ?? state.company.name,
+        formationSubmissionStatus: "COMPLETED",
         formationFilingDate: wyomingDate(Math.floor(now() / 1000)),
-        formationFilingNumber: "PLAYGROUND-FILING",
-        services: [{ name: "Formation", status: "completed" }],
+        services: [{ name: "Formation", status: "Completed" }],
       };
       state.documents = [
         doolaDoc("doc-articles", "ArticlesOfOrganization"),
         doolaDoc("doc-oa", "OperatingAgreement"),
       ];
-      return { triggeredEvents: [] };
+      return {
+        doolaCompanyId: id,
+        service: "Formation",
+        triggeredEvents: ["company_formation_completed", "document_aoo_uploaded"],
+      };
     },
     async playgroundCompleteEin(id) {
       calls.push(`playgroundCompleteEin:${id}`);
       state.company = { ...state.company, ein: "12-3456789" };
-      return { triggeredEvents: [] };
+      state.documents = [...state.documents, doolaDoc("doc-ein", "EinLetter")];
+      return {
+        doolaCompanyId: id,
+        service: "EinCreation",
+        triggeredEvents: ["company_ein_issued", "document_einletter_uploaded"],
+      };
     },
   };
 

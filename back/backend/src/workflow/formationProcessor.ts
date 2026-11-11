@@ -1,6 +1,7 @@
 import { type DoolaApi, describeDoolaError } from "../adapters/doola/doolaClient";
 import type {
   DoolaCompany,
+  DoolaCompanyListItem,
   DoolaDocument,
   DoolaEnvironment,
   DoolaRequiredAction,
@@ -12,6 +13,7 @@ import {
 } from "../formation/intake";
 import { POLL_BASE_MS, POLL_CAP_MS, type StepBackoff, nextInterval } from "../formation/schedule";
 import { isManualRef, providerRefOf } from "../formation/status";
+import { sandboxStandInFilingNumber } from "../legalBody/companyFields";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { CompanyRepository } from "../persistence/companyRepository";
@@ -121,7 +123,8 @@ export type PollBackoff = StepBackoff;
 
 /** `formation_requests.await_filing.detail`. NEVER PII. */
 export interface AwaitFilingDetail extends PollBackoff {
-  /** doola's intake status at the last fetch (PENDING | SUBMITTED | FAILED) — not "filed". */
+  /** doola's intake status at the last fetch (one of the six `formationSubmissionStatus` values),
+   *  not "filed". */
   submissionStatus?: string;
   /** doola's `formationFilingDate`, verbatim (yyyy-MM-dd). The parsed unix value goes on the
    *  ENTITY; this keeps the string we parsed, so a bad parse is diagnosable. */
@@ -358,8 +361,16 @@ export async function advanceFormation(
   // treating a healthy row as a retry candidate.
   unparkAfterSuccessfulRead(d, companyId, steps);
 
+  // The name doola files the company under is on its LIST item only (design 2026-11-11 §1). Read
+  // here, before the advance, so the confirmation and the heal stay synchronous inside their
+  // transactions. It never fails or parks them; it may hold the lock up to the client timeout,
+  // once per pass.
+  const reportedName = await listedFiledName(d, companyId, steps, doolaCompany, providerRef);
+
   let advanced = false;
-  advanced = advanceFiling(d, companyId, doolaCompany, requiredActions, providerRef) || advanced;
+  advanced =
+    advanceFiling(d, companyId, doolaCompany, reportedName, requiredActions, providerRef) ||
+    advanced;
   advanced = (await advanceDocuments(d, companyId, providerRef, documents)) || advanced;
   advanced = advanceEin(d, companyId, doolaCompany, providerRef) || advanced;
 
@@ -411,11 +422,103 @@ function unparkAfterSuccessfulRead(
   }
 }
 
-/** `await_filing`: the STATE has filed the company. Writes the legal facts onto the COMPANY. */
+/** What `formation_filed_name_missing` says, whatever its reason. */
+const FILED_NAME_MISSING_MESSAGE =
+  "the company is filed and doola reports no name for it: legal_name_filed stays NULL and the company cannot be ordered until a name is found or an operator runs company:filed-name";
+
+/**
+ * The name doola LISTS the company under, for a legal-body company that is filed and holds no name
+ * yet (design 2026-11-11 §1), or undefined.
+ *
+ * doola's full answer carries no name; only the list item does, so this is one extra GET, made
+ * only when all of these hold: the company is for a legal body, its row holds no filed name, and
+ * doola's answer says it is filed. Before the State files, the list name is only our first choice.
+ * Once a name is held, the call stops. The same rule covers the confirmation and the heal, so a
+ * company confirmed during a list outage still gets its name on a later poll.
+ *
+ * AGENT COMPANIES NEVER READ IT. Their filed name feeds a manifest that is anchored on chain, and
+ * a name landing now would schedule an amendment for every attached agent: that roll-out is its own
+ * decision.
+ *
+ * The item is chosen by doola's company id, never by name and never as "the only one": doola
+ * answers a known email with its existing customer, so one guardian's two companies can share a
+ * customer. The customer id is the one the full answer names, else the one the create recorded.
+ *
+ * NEVER THROWS, AND NEVER STOPS THE CONFIRMATION. A failed list, a missing item or a blank name
+ * is "no name this time": one `formation_filed_name_missing` warning, and the filing still
+ * confirms with its date and number; nothing is parked, no attempt is burned and no backoff moves.
+ * The next poll asks again. What the name is then held to is `matchFiledName`'s.
+ *
+ * A MALFORMED ANSWER IS ONE OF THOSE. The whole read sits in the try, the call and every look at
+ * its answer, because a TypeError out of here would stop the confirmation on every poll: an answer
+ * that is not a list is `list_failed`, an entry that is not an object is skipped (ours may still be
+ * among the rest, else `not_in_list`), and a name that is not text is `no_name`.
+ */
+async function listedFiledName(
+  d: FormationAdvanceDeps,
+  companyId: string,
+  steps: FormationRequestRecord[],
+  doolaCompany: DoolaCompany,
+  providerRef: string,
+): Promise<string | undefined> {
+  const row = d.companies.find(companyId);
+  if (row?.purposeKind !== "legal_body" || row.legalNameFiled !== null) return undefined;
+  if (!isFormationFiled(doolaCompany)) return undefined;
+  // Nothing could store a name for a filing step that is gone or given up on.
+  const filing = steps.find((s) => s.step === "await_filing");
+  if (!filing || filing.state === "abandoned") return undefined;
+
+  const missing = (
+    reason: "no_customer_id" | "list_failed" | "not_in_list" | "no_name",
+    extra: Record<string, unknown> = {},
+  ): undefined => {
+    opsLog("formation_filed_name_missing", {
+      level: "warn",
+      companyId,
+      providerRef,
+      reason,
+      ...extra,
+      message: FILED_NAME_MISSING_MESSAGE,
+    });
+    return undefined;
+  };
+
+  // Text, or nothing: doola's answers and the stored detail are read as what they are at run time.
+  const textOf = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
+  const created = steps.find((s) => s.step === "create_provider");
+  const customerId =
+    textOf(doolaCompany.doolaCustomerId) ||
+    textOf(parseDetail<{ customerId?: unknown }>(created?.detail ?? null).customerId);
+  if (!customerId) return missing("no_customer_id");
+
+  try {
+    const answer: unknown = await d.doola.listCompanies(customerId);
+    if (!Array.isArray(answer))
+      return missing("list_failed", { error: "doola's list answer is not a list" });
+    const item = answer.find(
+      (entry: unknown): entry is DoolaCompanyListItem =>
+        typeof entry === "object" &&
+        entry !== null &&
+        (entry as { doolaCompanyId?: unknown }).doolaCompanyId === providerRef,
+    );
+    if (!item) return missing("not_in_list");
+    const name = textOf(item.name);
+    if (!name) return missing("no_name");
+    return name;
+  } catch (e) {
+    // doola's own description, under `error`: `message` is this line's sentence.
+    const { message: error, ...described } = describeDoolaError(e);
+    return missing("list_failed", { ...described, error });
+  }
+}
+
+/** `await_filing`: the STATE has filed the company. Writes the legal facts onto the COMPANY.
+ *  `reportedName` is the name doola lists the company under, when it was read. */
 function advanceFiling(
   d: FormationAdvanceDeps,
   companyId: string,
   company: DoolaCompany,
+  reportedName: string | undefined,
   requiredActions: DoolaRequiredAction[] | undefined,
   providerRef: string,
 ): boolean {
@@ -461,7 +564,7 @@ function advanceFiling(
   if (row.state === "confirmed") {
     let healed = false;
     d.repo.transaction(() => {
-      healed = healFilingFacts(d, companyId, company);
+      healed = healFilingFacts(d, companyId, company, reportedName, providerRef);
       d.requests.transition(companyId, "await_filing", "confirmed", "confirmed", {
         detail: JSON.stringify(next),
         touchFacts: healed,
@@ -479,7 +582,7 @@ function advanceFiling(
 
   const filedAt = filingDateToUnix(company.formationFilingDate);
   let won = false;
-  d.repo.transaction(() => {
+  const standIn = d.repo.transaction((): string | null => {
     // The CAS decides; the facts are written inside the transaction it won. A second driver
     // observing the same `from` gets false here and writes nothing — which is what makes
     // "advance exactly once" true without depending on the in-process lock.
@@ -487,11 +590,16 @@ function advanceFiling(
       detail: JSON.stringify(next),
       error: null,
     });
-    if (!won) return;
+    if (!won) return null;
+    // Judged inside the transaction that won, against the row as the write will find it.
+    const offered = sandboxStandIn(d, companyId, company, providerRef);
+    // doola's number, as before, unless the stand-in rule holds (and it holds only when doola
+    // gave none).
+    const filingNumber = offered ?? company.formationFilingNumber ?? null;
     d.companies.recordFilingFacts(companyId, {
       filedAt,
-      filingNumber: company.formationFilingNumber ?? null,
-      legalNameFiled: matchFiledName(d, companyId, company),
+      filingNumber,
+      legalNameFiled: matchFiledName(d, companyId, reportedName),
     });
     recordCompanyEvent(
       d.repo,
@@ -499,14 +607,62 @@ function advanceFiling(
       "formationFiled",
       JSON.stringify({
         providerRef,
-        filingNumber: company.formationFilingNumber ?? null,
+        filingNumber,
+        ...(offered !== null ? { filingNumberStandIn: true } : {}),
         filedAt,
         environment: d.environment,
       }),
     );
+    return offered;
   });
+  if (won && standIn !== null) logSandboxStandIn(companyId, providerRef, standIn);
   if (won) logFormationStep(companyId, "await_filing", "confirmed", row.attempt, { providerRef });
   return won;
+}
+
+/**
+ * The stand-in filing number to record for this company on this read, or null (design 2026-11-11
+ * §2). doola's sandbox playground files a company with no filing number, and a formed legal-body
+ * company cannot be ordered without one. ONE rule for both writers, the confirmation and the
+ * heal, and every part of it must hold:
+ *
+ *  1. the COMPANY's own pin is `sandbox`. The pin, never the deployment's environment: a company
+ *     pinned to production never gets one, whatever this box runs (and `advanceFormation` refuses
+ *     a pin that differs from the deployment before any read);
+ *  2. it is a doola company for a legal body, the sandbox leg's own scope, so no stand-in can
+ *     enter an agent's anchored manifest;
+ *  3. doola's answer says it is filed and carries no filing number;
+ *  4. the row holds no filing number. The repository REPLACES a number with a different one, so a
+ *     stand-in is never offered over a number. A number doola sends later replaces the stand-in,
+ *     which on a sandbox is the right outcome.
+ *
+ * Nothing else marks it: the value is its own mark (`TEST-STANDIN-`), and `AwaitFilingDetail`
+ * keeps doola's own value, verbatim, which is none.
+ */
+function sandboxStandIn(
+  d: FormationAdvanceDeps,
+  companyId: string,
+  company: DoolaCompany,
+  providerRef: string,
+): string | null {
+  const row = d.companies.find(companyId);
+  if (row?.environment !== "sandbox") return null;
+  if (row.provider !== "doola" || row.purposeKind !== "legal_body") return null;
+  if (!isFormationFiled(company) || company.formationFilingNumber?.trim()) return null;
+  if (row.filingNumber !== null) return null;
+  return sandboxStandInFilingNumber(providerRef);
+}
+
+/** Once, when a stand-in is written. The number is a test value and the ids are ours. */
+function logSandboxStandIn(companyId: string, providerRef: string, filingNumber: string): void {
+  opsLog("sandbox_filing_number_stand_in", {
+    level: "info",
+    companyId,
+    providerRef,
+    filingNumber,
+    message:
+      "doola's sandbox files without a filing number: a stand-in was recorded, never a State filing number",
+  });
 }
 
 /**
@@ -533,6 +689,11 @@ export function matchFiledNameAgainst(
 /**
  * Which of OUR name candidates the state actually accepted (design §5).
  *
+ * `reportedName` is the name doola lists the company under (`listedFiledName`): doola's full
+ * answer carries none, so nothing else can supply it, and it is read for legal-body companies
+ * only. An agent company is therefore never given one today; the agent rules below stay for the
+ * day that roll-out is decided.
+ *
  * doola reports the accepted name as free text, and free text is exactly what must never reach
  * `legal_name_filed`: the manifest hashes that field onto a public chain, so what is stored is
  * ALWAYS our own candidate string — the one whose normalized form matches. No match means no
@@ -554,9 +715,9 @@ export function matchFiledNameAgainst(
 function matchFiledName(
   d: FormationAdvanceDeps,
   companyId: string,
-  company: DoolaCompany,
+  reportedName: string | undefined,
 ): string | null {
-  const reported = company.name?.trim();
+  const reported = reportedName?.trim();
   if (!reported) return null;
   const row = d.companies.find(companyId);
   if (row?.purposeKind === "legal_body" && row.legalNameFiled !== null) return null;
@@ -598,12 +759,18 @@ function healFilingFacts(
   d: FormationAdvanceDeps,
   companyId: string,
   company: DoolaCompany,
+  reportedName: string | undefined,
+  providerRef: string,
 ): boolean {
-  const number = company.formationFilingNumber?.trim() || null;
+  // A sandbox company confirmed with no number (before the stand-in existed) gets one here; the
+  // rule (`sandboxStandIn`) never offers one over a number the row holds.
+  const standIn = sandboxStandIn(d, companyId, company, providerRef);
+  const number = company.formationFilingNumber?.trim() || standIn;
   const filedAt = filingDateToUnix(company.formationFilingDate);
   // The FILED NAME heals too, and for the same reason: doola may report a name only after the
-  // state assigns one, and `legal.companyName` cannot bootstrap itself from a manifest.
-  const name = matchFiledName(d, companyId, company);
+  // state assigns one, and `legal.companyName` cannot bootstrap itself from a manifest. It comes
+  // from the list (`listedFiledName`), so a confirmation during a list outage is healed here.
+  const name = matchFiledName(d, companyId, reportedName);
   if (number === null && filedAt === null && name === null) return false;
   // The repository refuses to downgrade and reports whether anything actually moved, so "did we
   // learn something?" is one statement rather than a read, three comparisons and a write.
@@ -621,8 +788,12 @@ function healFilingFacts(
     filingNumber: number ?? undefined,
     filedAt: filedAt ?? undefined,
     legalNameFiled: name ?? undefined,
+    // The only source of a name since 2026-11-11: doola's list item.
+    ...(name !== null ? { nameSource: "list" } : {}),
+    ...(standIn !== null ? { filingNumberStandIn: true } : {}),
     message: "a confirmed filing gained facts doola had not reported when the step confirmed",
   });
+  if (standIn !== null) logSandboxStandIn(companyId, providerRef, standIn);
   return true;
 }
 

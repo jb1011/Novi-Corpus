@@ -65,6 +65,9 @@ const MANUAL_REF = `manual:${OPERATOR}`;
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** The injected clock the sandbox playground files company A on: a day before any real today. */
 const FILING_CLOCK = Date.parse("2026-11-02T12:00:00Z");
+/** The filing number doola gives company A in the comparison: the production shape, since doola's
+ *  sandbox files with none. */
+const DOOLA_FILING = "2026-000451190";
 /** When every fixture company row was created (SQLite UTC text): before every filing date typed. */
 const CREATED_AT = "2026-10-30 09:00:00";
 const STEPS: FormationStep[] = ["create_provider", "await_filing", "fetch_documents", "await_ein"];
@@ -176,9 +179,14 @@ const advanceDeps = (fake: FakeDoola) => ({
 
 /**
  * Company A's path, Task 13's: the real filing step against the sandbox doola, the playground's
- * filing, then the ordinary processor reading it back.
+ * filing, then the ordinary processor reading it back. doola's sandbox files with no number;
+ * `filingNumber` gives one, as doola does on production.
  */
-async function filedThroughTheApi(companyId: string, fake: FakeDoola): Promise<void> {
+async function filedThroughTheApi(
+  companyId: string,
+  fake: FakeDoola,
+  opts: { filingNumber?: string } = {},
+): Promise<void> {
   await runFormationCreateProvider({
     company: companies.find(companyId)!,
     companies,
@@ -191,6 +199,8 @@ async function filedThroughTheApi(companyId: string, fake: FakeDoola): Promise<v
   const ref = providerRefOf(requests.stepsOf(companyId));
   expect(ref).toMatch(/^cmp-\d+$/);
   await fake.api.playgroundCompleteFormation(ref!);
+  if (opts.filingNumber !== undefined)
+    fake.state.company = { ...fake.state.company, formationFilingNumber: opts.filingNumber };
   await advanceFormation(advanceDeps(fake), companyId);
   expect(companyFiled(requests.stepsOf(companyId))).toBe(true);
 }
@@ -342,12 +352,15 @@ describe("formation:record-filed, against the saga's own rows", () => {
   test("a filing recorded by hand writes the rows an API filing writes, apart from its manual: ref, and the order door takes both alike", async () => {
     const fake = fakeSandboxDoola({}, { now: () => FILING_CLOCK });
     const a = paidCompany();
-    await filedThroughTheApi(a, fake);
+    // With doola's own number, so both rows carry the same number in the same place: a sandbox
+    // stand-in lives on the company row only, never in the step's detail.
+    await filedThroughTheApi(a, fake, { filingNumber: DOOLA_FILING });
     const filedA = companies.find(a)!;
-    // The playground filed it under the bare first option; the processor stored the full name.
+    // doola lists it under the first option and its ending; the processor stored that candidate's
+    // full name.
     expect(filedA).toMatchObject({
       legalNameFiled: "Lantern Works LLC",
-      filingNumber: "PLAYGROUND-FILING",
+      filingNumber: DOOLA_FILING,
     });
     const date = calendarDateOfUtcMidnight(filedA.filedAt!);
     expect(date).toBe("2026-11-02");
@@ -393,7 +406,7 @@ describe("formation:record-filed, against the saga's own rows", () => {
     expect(detailB.filingDate).toBe(detailA.filingDate);
     expect(detailB.filedAt).toBe(filingDateToUnix(detailA.filingDate));
     expect(detailB).toEqual({
-      filingNumber: "PLAYGROUND-FILING",
+      filingNumber: DOOLA_FILING,
       filingDate: "2026-11-02",
       filedAt: filedA.filedAt,
       recordedBy: OPERATOR,
@@ -490,7 +503,7 @@ describe("formation:record-filed, against the saga's own rows", () => {
     const [termsA, termsB] = [termsOf(a), termsOf(b)];
     for (const terms of [termsA, termsB]) {
       expect(terms).toContain('# Operating Agreement of "Lantern Works LLC"');
-      expect(terms).toContain('with filing number "PLAYGROUND-FILING"');
+      expect(terms).toContain(`with filing number "${DOOLA_FILING}"`);
     }
 
     // One JSON object, naming the next command; one ops line of ids and the operator.
@@ -498,7 +511,7 @@ describe("formation:record-filed, against the saga's own rows", () => {
       recorded: true,
       companyId: b,
       legalNameFiled: "Lantern Works LLC",
-      filingNumber: "PLAYGROUND-FILING",
+      filingNumber: DOOLA_FILING,
       filedAt: filedA.filedAt,
       matched: true,
       document: { docId, sha256, size: bytes.length },
@@ -517,7 +530,7 @@ describe("formation:record-filed, against the saga's own rows", () => {
       },
     ]);
     const opsText = lines.filter(isOpsLine).join("\n");
-    for (const leak of ["Lantern", "PLAYGROUND", "articles-b", dir])
+    for (const leak of ["Lantern", DOOLA_FILING, "articles-b", dir])
       expect(opsText).not.toContain(leak);
   });
 
@@ -901,6 +914,26 @@ describe("formation:record-filed", () => {
       else expect(message, number).toMatch(expected);
       expect(writtenFor(companyId)).toEqual(before);
     }
+  });
+
+  test("--filing-number in the sandbox stand-in space is refused for a production company, on the filing key, and nothing is written", async () => {
+    const companyId = paidCompany();
+    db.prepare("UPDATE companies SET environment = 'production' WHERE company_id = ?").run(
+      companyId,
+    );
+    const before = writtenFor(companyId);
+    for (const number of [
+      "TEST-STANDIN-D36A9A6177333DB7",
+      "TEST-STAND-IN-0001",
+      "test-standin-0001",
+    ])
+      expect(await refusal(recordFiledArgs(companyId, { number }, "--yes")), number).toBe(
+        "refusing: --filing-number is in the range kept for sandbox stand-ins (TEST-STANDIN-): record a production company's filing with the number on the State's record",
+      );
+    expect(writtenFor(companyId)).toEqual(before);
+    // The State's number goes through.
+    await run(recordFiledArgs(companyId, {}, "--yes"));
+    expect(companies.find(companyId)?.filingNumber).toBe("2026-000451207");
   });
 
   test("--legal-name is stored exactly as typed: a name with no entity ending is written with the warning, one that matches no option with its own", async () => {

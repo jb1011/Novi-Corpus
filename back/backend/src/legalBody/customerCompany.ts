@@ -13,7 +13,7 @@ import type { CompanyRepository } from "../persistence/companyRepository";
 import type { GuardianIdentityCheck } from "../persistence/identityRepository";
 import type { GuardianVerification } from "../persistence/worldStore";
 import { sqliteUtcTimestamp } from "../util/sqliteTime";
-import { COMPANY_NAME, FILING_NUMBER } from "./companyFields";
+import { COMPANY_NAME, FILING_NUMBER, isStandInFilingNumber } from "./companyFields";
 import { CUSTOMER_PROVIDER } from "./provider";
 import { automaticSandboxCheck, isAutomaticSandboxCheck, processOsUser } from "./sandboxCheck";
 import {
@@ -271,6 +271,20 @@ function prepare<T>(
     sandbox ? SANDBOX_FILING_NUMBER : FILING_NUMBER,
     problems,
   );
+  // On a sandbox, the stand-in space belongs to the companies formed here, whose filing numbers
+  // doola's sandbox never sets (`companyFields.ts`): a declared test number in it could pass for
+  // one, or be one. Judged on the filing key, as this door compares numbers, so a hyphen moved or
+  // dropped does not dodge it. A check of its own, so the sandbox rule keeps its sentence.
+  //
+  // Production declares such a number as any other: a declared company is the tenant's own record,
+  // and its operator's check holds it to the State's. The order door is the wall there: it prints
+  // no agreement for a production company whose number is in the stand-in space, a declared one
+  // included, so such a declaration never reaches an agreement.
+  if (sandbox && filingNumber !== undefined && isStandInFilingNumber(filingNumber))
+    problems.push({
+      field: "filingNumber",
+      problem: "is reserved for companies formed on this deployment: choose another test number",
+    });
   const more = readMore(body, problems);
   if (
     problems.length > 0 ||

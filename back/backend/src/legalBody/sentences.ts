@@ -25,6 +25,9 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // it: refused, never cleaned.
   company_name_unusable:
     "The filed company name or filing number cannot be printed in the agreement as it stands: an operator must set it.",
+  // A production company whose filing number is in the sandbox stand-in space (TEST-STANDIN-).
+  filing_number_reserved:
+    "This company's filing number is in the range kept for sandbox test numbers, and no agreement of a production company prints one: the State's number must be recorded first.",
   legal_body_cap:
     "You already hold as many open legal-body orders as you may at once: finish or abandon one before you order another.",
   legal_body_orders:

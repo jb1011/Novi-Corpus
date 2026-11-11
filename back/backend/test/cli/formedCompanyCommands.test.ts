@@ -51,7 +51,7 @@ import {
   FACTORY,
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
-import { MemoryDocumentStore, fakeDoola, seedCompany } from "../helpers/formationFakes";
+import { MemoryDocumentStore, fakeDoola, listItem, seedCompany } from "../helpers/formationFakes";
 import {
   type LegalBodyStores,
   legalBodyOrderDeps,
@@ -639,15 +639,19 @@ const NO_ENTITY_ENDING =
 const NO_FILING_NUMBER =
   "the company has no filing number: the API's next poll fills it for a company doola filed; for a filing done by hand, formation:record-filed records it";
 
-/** One poll of the formation processor, doola reporting the company filed under `name`. */
+/** One poll of the formation processor, doola reporting the company filed and its list item
+ *  naming it `name` (the full answer carries no name, as doola's carries none). */
 async function poll(companyId: string, name: string): Promise<void> {
+  const doolaCompanyId = `doola-${companyId}`;
+  const doolaCustomerId = `cus-${companyId}`;
   const doola = fakeDoola({
     company: {
-      doolaCompanyId: `doola-${companyId}`,
-      name,
+      doolaCompanyId,
+      doolaCustomerId,
       formationFilingDate: "2026-11-02",
       formationFilingNumber: FILING_NUMBER,
     },
+    listed: [listItem(name, { doolaCompanyId, doolaCustomerId })],
   });
   await advanceFormation(
     {

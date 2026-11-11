@@ -8,6 +8,11 @@
  * `formation:record-ein`, the saga never touches it afterwards, and its legal body is stated the
  * same way. No ops line of the case names a company, a person or an EIN.
  *
+ * The fake doola answers as doola's spec does: its full company answer carries no name, so the
+ * filed name is read from its list, and its sandbox files with no filing number, so the saga's
+ * company holds the sandbox stand-in (`TEST-STANDIN-`), which its agreement prints and its
+ * statement carries beside `environment: "sandbox"`.
+ *
  * The real API app with its auth, company, party, order, link, binding and statement doors; the
  * real repositories over a database file and a file document store; the real formation sweeper
  * over `fakeSandboxDoola` (the in-code doola of Task 13: no key, no network, no doola); the real
@@ -63,6 +68,7 @@ import {
 import { DEFAULT_INDUSTRY } from "../../src/formation/intake";
 import { redactPii } from "../../src/formation/pii";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import { sandboxStandInFilingNumber } from "../../src/legalBody/companyFields";
 import { expireStaleCustomerCompanies } from "../../src/legalBody/customerCompany";
 import { expireEvidenceBytes } from "../../src/legalBody/evidence";
 import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
@@ -139,7 +145,9 @@ const PURPOSE = "Software services for the company's own customers.";
 /** The company the saga files, and what the fake doola's playground reports for it. */
 const LANTERN = ["Lantern Works", "Lantern Labs", "Lantern Foundry"] as const;
 const LANTERN_FILED = "Lantern Works LLC";
-const PLAYGROUND_FILING = "PLAYGROUND-FILING";
+/** The stand-in filing number of doola's company `cmp-1`, the fake's first: doola's sandbox files
+ *  with none. */
+const LANTERN_STAND_IN = "TEST-STANDIN-D36A9A6177333DB7";
 /** The EIN the fake doola's playground issues. */
 const PLAYGROUND_EIN = "12-3456789";
 /** The company the operator records by hand, and what the State's record says of it. */
@@ -625,7 +633,7 @@ async function order(
   expect(agreement.status).toBe(200);
   expect(agreement.body.manifestHash).toBe(ordered.body.agreement.hash);
   expect(agreement.body.termsDoc).toContain(filed.legalName);
-  expect(agreement.body.termsDoc).toContain(filed.filingNumber);
+  expect(agreement.body.termsDoc).toContain(`with filing number "${filed.filingNumber}"`);
   const served = await api("POST", `${orderPath(id)}/adoption-message`, g.token, {});
   expect(served.status).toBe(200);
   expect(served.body.typedData.message.manifestHash).toBe(ordered.body.agreement.hash);
@@ -777,6 +785,8 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
   expect(callsOf("createCustomer")).toHaveLength(1);
   expect(callsOf("createCompany")).toHaveLength(1);
   const [lanternRef] = callsOf("createCompany").map((c) => c.split(":")[1]);
+  // The stand-in the saga's company will hold is the one for this doola id.
+  expect(sandboxStandInFilingNumber(lanternRef!)).toBe(LANTERN_STAND_IN);
   expect(await companyView(g, lantern)).toMatchObject({
     state: "in_progress",
     providerRef: lanternRef,
@@ -797,8 +807,13 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
   expect(await companyView(g, lantern)).toMatchObject({
     state: "filed",
     legalNameFiled: LANTERN_FILED,
-    filingNumber: PLAYGROUND_FILING,
+    filingNumber: LANTERN_STAND_IN,
     filedAt: filingDateToUnix(lanternFiledOn),
+  });
+  // The row itself: the name doola lists, as our first option with its ending, and the stand-in.
+  expect(d.companies.find(lantern)).toMatchObject({
+    legalNameFiled: LANTERN_FILED,
+    filingNumber: LANTERN_STAND_IN,
   });
   const indexed = d.documents.listByCompany(lantern);
   expect(indexed.map((doc) => [doc.docType, doc.source]).sort()).toEqual([
@@ -816,7 +831,7 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
   // 9 to 12. The order, the link, the binding and the statement.
   await standBehindLegalBody(g, lantern, {
     legalName: LANTERN_FILED,
-    filingNumber: PLAYGROUND_FILING,
+    filingNumber: LANTERN_STAND_IN,
     filedOn: lanternFiledOn,
   });
 
@@ -911,6 +926,7 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
     "company_created",
     "formation_stranded_opened",
     "sandbox_filing_autocompleted",
+    "sandbox_filing_number_stand_in",
     "sandbox_ein_autocompleted",
     "formation_recorded_filed",
     "formation_recorded_ein",

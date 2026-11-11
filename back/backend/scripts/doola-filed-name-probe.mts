@@ -19,6 +19,11 @@
  * Record the output in `docs/runbooks/doola-filed-name-2026-08.md` and point §5's matcher at
  * whichever surface actually carries it.
  *
+ * Since 11 Nov 2026 the processor reads the LIST item's `name` (`DoolaCompanyListItem`), for a
+ * legal-body company only: the full answer (`DoolaCompany`) carries no name at all. What this probe
+ * cannot settle is whether that name is the State-accepted one when a lower-ranked option is
+ * filed: the sandbox playground always files the first. That question is with doola.
+ *
  * NOT a test: it costs a real sandbox company and needs a live key, so it never runs in CI, and
  * no test in this repo makes a live doola call.
  *

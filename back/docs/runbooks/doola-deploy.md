@@ -444,10 +444,14 @@ test in this repo makes a live doola call.
 
 1. **`npx tsx scripts/doola-filed-name-probe.mts`** — files a sandbox company with THREE distinct
    name candidates, completes it through the playground, and prints which surface actually
-   carries the accepted name (list item `.name` / full `.nameOptions` / the AOO document). Until
-   this is recorded, the §5 matcher is pointed at the list item on the strength of one 2026-08-27
-   observation, and `legal_name_filed` stays NULL whenever it does not match — which is honest,
-   but it means `manifest.legal.companyName` never appears.
+   carries the accepted name (list item `.name` / full `.nameOptions` / the AOO document). Since
+   2026-11-11 the processor reads the list item's `name`, the only name doola reports (its full
+   company answer has none), for a legal-body company only, and stores it only when it matches a
+   stored option. The open question has moved to doola: is the list's name the State-accepted one
+   when the State took a lower-ranked option? This probe cannot settle it on sandbox, where the
+   playground always files the first. Until doola answers, `company:filed-name --replace` is the
+   correction path (`formed-companies.md`). A company for agents reads no name at all, so its
+   `manifest.legal.companyName` still never appears.
 2. **`npx tsx scripts/doola-idempotency-reorder-probe.mts`** — one request settles whether
    doola's idempotency comparison is byte-wise or semantic: same key, same values, keys
    reordered. A `409` means the stored body must be replayed VERBATIM, which is what makes

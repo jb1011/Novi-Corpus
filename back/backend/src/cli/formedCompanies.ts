@@ -11,7 +11,7 @@ import {
   providerRefOf,
   stepStateOf,
 } from "../formation/status";
-import { COMPANY_NAME, FILING_NUMBER } from "../legalBody/companyFields";
+import { COMPANY_NAME, FILING_NUMBER, isStandInFilingNumber } from "../legalBody/companyFields";
 import { sha256Of, startsAsPdf } from "../legalBody/evidence";
 import { type FieldProblem, type TextRule, applyTextRule } from "../legalBody/textRules";
 import { opsLog } from "../observability/opsLog";
@@ -654,7 +654,14 @@ function recordFiled(companyId: string, opts: RecordFiledOptions): void {
   withDatabase((db, docStoreDir) => {
     const s = storesOf(db);
     const confirmed = opts.doolaConfirmedNoCompany === true;
-    paidLegalBodyCompany(s, companyId);
+    const pinned = paidLegalBodyCompany(s, companyId);
+    // A stand-in is a sandbox's test value, never a State filing number: a production company's
+    // filing is recorded with the State's (`isStandInFilingNumber`, on the filing key). The pin
+    // never changes, so this one look holds for the transaction below too.
+    if (pinned.environment === "production" && isStandInFilingNumber(filingNumber))
+      refuse(
+        "--filing-number is in the range kept for sandbox stand-ins (TEST-STANDIN-): record a production company's filing with the number on the State's record",
+      );
     recordableFrom(companyId, s.requests.stepsOf(companyId), confirmed);
     const bytes = readPdfDocument("--articles", opts.articles);
     const sha256 = sha256Of(bytes);
