@@ -434,3 +434,15 @@ test("FORMATION_MAX_AGENTS_PER_COMPANY defaults to 10 and is overridable", () =>
       ?.maxAgentsPerCompany,
   ).toBe(2);
 });
+
+test("FORMATION_MAX_TOTAL defaults to 10, takes a whole number from 1, and refuses anything else", () => {
+  // The early-access beta's lifetime cap on formed legal-body companies, read on production only.
+  expect(loadConfig(BASE).formation?.maxTotal).toBe(10);
+  expect(loadConfig({ ...BASE, ...DOOLA_PROD }).formation?.maxTotal).toBe(10);
+  expect(loadConfig({ ...BASE, FORMATION_MAX_TOTAL: "12" }).formation?.maxTotal).toBe(12);
+  expect(loadConfig({ ...BASE, FORMATION_MAX_TOTAL: "1" }).formation?.maxTotal).toBe(1);
+  for (const refused of ["0", "-1", "2.5", "ten"])
+    expect(() => loadConfig({ ...BASE, FORMATION_MAX_TOTAL: refused }), refused).toThrow(
+      /FORMATION_MAX_TOTAL/,
+    );
+});

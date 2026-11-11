@@ -12,8 +12,9 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 ///         ERC-8004 agentId, and enforces a delayed, guardian-vetoable amendment and
 ///         dissolution process. Deployed per agent behind an UpgradeableBeacon proxy.
 /// @dev    Status is monotonic: Active -> WindingDown -> Dissolved. Amendments are only
-///         allowed while Active; asset sweeps only while WindingDown. A guardian veto is
-///         permanent for that operating-agreement hash until the guardian lifts it.
+///         allowed while Active; asset sweeps once a dissolution has begun, including after
+///         Dissolved. A guardian veto is permanent for that operating-agreement hash until the
+///         guardian lifts it.
 contract LegalManager is Initializable, ReentrancyGuardUpgradeable {
     using SafeERC20 for IERC20;
 
@@ -28,6 +29,10 @@ contract LegalManager is Initializable, ReentrancyGuardUpgradeable {
 
     /// @notice Lower bound on the amendment timelock, so a 0 delay can never bypass it.
     uint256 public constant MIN_AMENDMENT_DELAY = 1 hours;
+    /// @notice Upper bound, so `block.timestamp + amendmentDelay` can never overflow and a huge
+    ///         delay can never put dissolution, sweep or finalize out of reach for good.
+    ///         LegalBodyFactory caps lower (30 days); this is the body's own floor-and-ceiling.
+    uint256 public constant MAX_AMENDMENT_DELAY = 365 days;
 
     address public manager;   // the agent's controller (e.g. the platform-held wallet)
     address public guardian;  // can veto scheduled amendments / trigger dissolution
@@ -51,6 +56,7 @@ contract LegalManager is Initializable, ReentrancyGuardUpgradeable {
     error ZeroAddress();
     error RolesMustDiffer();
     error DelayTooShort();
+    error DelayTooLong();
     error Vetoed();
     error NotVetoed();
     error NativeSweepFailed();
@@ -111,6 +117,7 @@ contract LegalManager is Initializable, ReentrancyGuardUpgradeable {
         if (manager_ == address(0) || guardian_ == address(0)) revert ZeroAddress();
         if (manager_ == guardian_) revert RolesMustDiffer();
         if (amendmentDelay_ < MIN_AMENDMENT_DELAY) revert DelayTooShort();
+        if (amendmentDelay_ > MAX_AMENDMENT_DELAY) revert DelayTooLong();
         __ReentrancyGuard_init();
         manager = manager_;
         guardian = guardian_;
@@ -175,12 +182,13 @@ contract LegalManager is Initializable, ReentrancyGuardUpgradeable {
         emit DissolutionInitiated(msg.sender, dissolutionExecutableAt);
     }
 
-    /// @notice Veto a pending dissolution, returning the body to Active. Callable only by the
-    ///         authorized role that did NOT initiate it (the check on a single rogue/compromised
-    ///         key). Allowed any time before finalization.
+    /// @notice Cancel a pending dissolution, returning the body to Active. Callable by either
+    ///         authorized role while WindingDown: the role that did not initiate vetoes it, the
+    ///         initiator withdraws it. Allowed any time before finalization. Nothing moves on
+    ///         cancel; a sweep made during the window stays made: that is how a guardian recovers
+    ///         stray funds (native value or any ERC-20 sent to the body) without finalizing.
     function cancelDissolution() external whenWindingDown {
-        bool isRole = msg.sender == manager || msg.sender == guardian;
-        if (!isRole || msg.sender == dissolutionInitiator) revert NotAuthorized();
+        if (msg.sender != manager && msg.sender != guardian) revert NotAuthorized();
         status = Status.Active;
         dissolutionInitiator = address(0);
         dissolutionExecutableAt = 0;

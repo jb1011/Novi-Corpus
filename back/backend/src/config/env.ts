@@ -418,6 +418,19 @@ const EnvSchema = z.object({
     .min(1)
     .max(30)
     .default(DEFAULT_FORMATION_FILING_WORKING_DAYS),
+  /**
+   * How many formed legal-body companies the formed door takes in all: the early-access beta's
+   * lifetime cap, counted by `countChargeableFormedLegalBodies` (`ready`, or a draft with a live
+   * quote, over every tenant). A whole number from 1. Read on production only (`formedCapReached`):
+   * a sandbox forms demo companies without number. Companies for agents are never counted.
+   */
+  FORMATION_MAX_TOTAL: z.coerce.number().int().min(1).default(10),
+  /**
+   * How many days after a paid company is abandoned its refund may wait before the sweeper writes
+   * a CRITICAL `formation_refund_overdue` line, once a day until `formation:refund` records it:
+   * the delay the terms promise. A whole number of days from 1 to 60.
+   */
+  FORMATION_REFUND_DAYS: z.coerce.number().int().min(1).max(60).default(14),
   /** Tri-state, same shape as FORMATION_REQUIRED: unset = TRUE in sandbox. Real names/addresses
    *  are then neither collected nor sent to doola's development environment (§3 PII). */
   FORMATION_SANDBOX_SYNTHETIC_PII: z.string().optional(),
@@ -1047,6 +1060,12 @@ export interface Config {
      *  takes. Optional in the TYPE only (loadConfig always sets it); a reader falls back to
      *  DEFAULT_FORMATION_FILING_WORKING_DAYS. */
     filingWorkingDays?: number;
+    /** FORMATION_MAX_TOTAL: how many formed legal-body companies the formed door takes in all, on
+     *  production only (`formedCapReached`). */
+    maxTotal: number;
+    /** FORMATION_REFUND_DAYS: how many days a refund owed on an abandoned company may wait before
+     *  the sweeper's CRITICAL `formation_refund_overdue` line. */
+    refundDays: number;
     /** Sandbox files with a labeled synthetic identity instead of a real natural person. */
     sandboxSyntheticPii: boolean;
     /**
@@ -1564,6 +1583,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       maxAgentsPerCompany: e.FORMATION_MAX_AGENTS_PER_COMPANY,
       byoMaxOpenPerTenant: e.BYO_MAX_OPEN_PER_TENANT,
       filingWorkingDays: e.FORMATION_FILING_WORKING_DAYS,
+      maxTotal: e.FORMATION_MAX_TOTAL,
+      refundDays: e.FORMATION_REFUND_DAYS,
       sandboxSyntheticPii: boolWithDerivedDefault(
         e.FORMATION_SANDBOX_SYNTHETIC_PII,
         e.DOOLA_ENVIRONMENT === "sandbox",

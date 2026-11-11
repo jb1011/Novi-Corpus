@@ -26,9 +26,11 @@ import { SqliteDocumentIndexRepository } from "../../src/persistence/documentInd
 import { SqliteDoolaEventRepository } from "../../src/persistence/doolaEventRepository";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { sqliteUtcTimestamp } from "../../src/util/sqliteTime";
 import { TaskTracker } from "../../src/util/taskTracker";
 import {
   type FormationEventDeps,
+  UNMAPPED_EVENT_GRACE_MS,
   advanceFormation,
   currentPolledStep,
   eventSuggestsRequiredActions,
@@ -105,6 +107,19 @@ const wake = (over: Partial<DoolaWakeUp> = {}): DoolaWakeUp => ({
   providerRef: COMPANY_ID,
   ...over,
 });
+
+/**
+ * Pin an event's `received_at` to the INJECTED clock. SQLite stamps it from the real wall clock,
+ * and an unmapped event is kept only inside `UNMAPPED_EVENT_GRACE_MS` of it measured against
+ * `NOW`, so a test that expects one kept must say how old it is rather than inherit the gap
+ * between today and `NOW`.
+ */
+function pinReceivedAt(eventId: string, at: number): void {
+  db.prepare("UPDATE doola_webhook_events SET received_at = ? WHERE event_id = ?").run(
+    sqliteUtcTimestamp(at),
+    eventId,
+  );
+}
 
 beforeEach(() => {
   db = openDatabase(":memory:");
@@ -536,6 +551,8 @@ test("an event whose company id maps to nothing stays UNPROCESSED for the sweepe
     providerRef: "cmp-unknown",
     payload: "{}",
   });
+  // A minute old: inside the grace, where the create/webhook race is still possible.
+  pinReceivedAt("evt-1", NOW - 60_000);
   await processDoolaEvent(deps(), wake({ providerRef: "cmp-unknown" }));
   expect(events.find("evt-1")?.processedAt).toBeNull();
   expect(doola.calls).toHaveLength(0);
@@ -548,8 +565,94 @@ test("an event with NO company id stays unprocessed too", async () => {
     providerRef: null,
     payload: "{}",
   });
+  // A minute old: inside the grace, the operator's window to see the warning.
+  pinReceivedAt("evt-1", NOW - 60_000);
   await processDoolaEvent(deps(), wake({ providerRef: null, eventName: "company_ein_issued" }));
   expect(events.find("evt-1")?.processedAt).toBeNull();
+});
+
+/** Run `fn`, returning the ops lines it wrote, parsed. */
+async function opsLinesOf(fn: () => Promise<unknown>): Promise<Array<Record<string, unknown>>> {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (l: string) => lines.push(l);
+  try {
+    await fn();
+  } finally {
+    console.log = orig;
+  }
+  return lines.map((l) => JSON.parse(l));
+}
+
+test("a WEBHOOK-source event past the grace answers retired, with exactly one line", async () => {
+  events.record({
+    eventId: "evt-1",
+    eventName: "company_formation_completed",
+    providerRef: "cmp-unknown",
+    payload: "{}",
+  });
+  pinReceivedAt("evt-1", NOW - UNMAPPED_EVENT_GRACE_MS - 1000);
+
+  let result: Awaited<ReturnType<typeof processDoolaEvent>> | undefined;
+  const lines = await opsLinesOf(async () => {
+    result = await processDoolaEvent(deps(), wake({ providerRef: "cmp-unknown" }));
+  });
+
+  expect(result).toMatchObject({ fetched: false, skipped: "unmapped", retired: true });
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  const retired = lines.filter((l) => l.opslog === "doola_webhook_unmapped_retired");
+  expect(retired).toHaveLength(1);
+  expect(retired[0]).toMatchObject({ source: "webhook", eventId: "evt-1" });
+  expect(lines.filter((l) => l.opslog === "doola_webhook_unmapped")).toHaveLength(0);
+  expect(doola.calls).toHaveLength(0);
+});
+
+test("a ledger row it cannot find falls back to the warning, and retires nothing", async () => {
+  // `find` answers undefined (the row was swept, or never written): there is no receipt time to
+  // judge, so the event is treated as inside the grace, exactly as before the rule existed.
+  const marked: string[] = [];
+  const blind = {
+    ...events,
+    find: () => undefined,
+    markProcessed: (id: string) => {
+      marked.push(id);
+      return true;
+    },
+  } as unknown as SqliteDoolaEventRepository;
+
+  let result: Awaited<ReturnType<typeof processDoolaEvent>> | undefined;
+  const lines = await opsLinesOf(async () => {
+    result = await processDoolaEvent(deps({ events: blind }), wake({ providerRef: "cmp-unknown" }));
+  });
+
+  expect(result).toMatchObject({ fetched: false, skipped: "unmapped" });
+  expect(result?.retired).toBeUndefined();
+  expect(marked).toEqual([]);
+  expect(lines.filter((l) => l.opslog === "doola_webhook_unmapped")).toHaveLength(1);
+  expect(lines.filter((l) => l.opslog === "doola_webhook_unmapped_retired")).toHaveLength(0);
+});
+
+test("when another caller already won the mark, it answers retired and writes no second line", async () => {
+  events.record({
+    eventId: "evt-1",
+    eventName: "company_formation_completed",
+    providerRef: "cmp-unknown",
+    payload: "{}",
+  });
+  pinReceivedAt("evt-1", NOW - UNMAPPED_EVENT_GRACE_MS - 1000);
+  // The sweeper's re-drive (or the webhook's task) got there first: its compare-and-set won.
+  expect(events.markProcessed("evt-1")).toBe(true);
+
+  let result: Awaited<ReturnType<typeof processDoolaEvent>> | undefined;
+  const lines = await opsLinesOf(async () => {
+    result = await processDoolaEvent(deps(), wake({ providerRef: "cmp-unknown" }));
+  });
+
+  // Past the grace either way, so it is done, and it is not warned about again either.
+  expect(result).toMatchObject({ skipped: "unmapped", retired: true });
+  expect(lines.filter((l) => String(l.opslog).startsWith("doola_webhook_unmapped"))).toHaveLength(
+    0,
+  );
 });
 
 test("an UNKNOWN event name is left for the sweeper rather than acted on blind", async () => {

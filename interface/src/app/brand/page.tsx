@@ -133,7 +133,7 @@ export default function BrandPage() {
                   In the product
                 </div>
                 <div className="mt-5 flex items-center gap-6">
-                  <Wordmark />
+                  <Wordmark full />
                   <Mark />
                 </div>
                 <p className="mt-4 text-[13.5px] leading-[1.55] text-muted">

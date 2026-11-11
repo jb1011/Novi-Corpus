@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Button, Field, Textarea, TextInput } from "@/components/onboarding/primitives";
 import { ApiError } from "@/lib/api/types";
 import { submitFoundingApplication } from "@/lib/founding/api";
@@ -31,10 +31,10 @@ export function ApplyForm({ open }: { open: boolean }) {
     [],
   );
 
-  const shareHref =
-    typeof window === "undefined"
-      ? "https://x.com/intent/post"
-      : shareOnX(`${window.location.origin}/founding-5?utm_source=x&utm_medium=share`);
+  const [shareHref, setShareHref] = useState("https://x.com/intent/post");
+  useEffect(() => {
+    setShareHref(shareOnX(`${window.location.origin}/founding-5?utm_source=x&utm_medium=share`));
+  }, []);
 
   function set<K extends keyof ApplyFields>(key: K, value: ApplyFields[K]) {
     setFields((current) => ({ ...current, [key]: value }));
@@ -102,8 +102,9 @@ export function ApplyForm({ open }: { open: boolean }) {
           href={shareHref}
           target="_blank"
           rel="noreferrer"
-          className="mt-6 inline-flex items-center rounded-full bg-ink px-5 py-2.5 text-[13.5px] font-medium text-paper hover:bg-ink-hover"
+          className="mt-6 inline-flex w-full items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[13.5px] font-medium text-paper hover:bg-ink-hover sm:w-auto"
         >
+          <XLogo />
           Share on X
         </a>
       </div>
@@ -144,7 +145,7 @@ export function ApplyForm({ open }: { open: boolean }) {
           value={fields.xHandle}
           invalid={Boolean(errors.xHandle)}
           onChange={(event) => set("xHandle", event.target.value)}
-          placeholder="name"
+          placeholder="@name"
           autoComplete="off"
         />
       </Field>
@@ -186,10 +187,26 @@ export function ApplyForm({ open }: { open: boolean }) {
       </div>
 
       <div>
-        <Button type="submit" size="lg" loading={phase === "submitting"}>
+        <Button
+          type="submit"
+          size="lg"
+          loading={phase === "submitting"}
+          className="w-full whitespace-nowrap sm:w-auto"
+        >
           Submit application
         </Button>
       </div>
     </form>
+  );
+}
+
+function XLogo() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className="h-3.5 w-3.5">
+      <path
+        fill="currentColor"
+        d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.744l7.727-8.835L1.254 2.25H8.08l4.253 5.622L18.244 2.25zm-1.161 17.52h1.833L7.084 4.126H5.117z"
+      />
+    </svg>
   );
 }

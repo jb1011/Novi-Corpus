@@ -380,13 +380,12 @@ test("A3: a PARTY edit re-arms exactly one retry, and it goes out with the CORRE
           parties,
           requests,
           sandboxSyntheticPii: false,
+          pin: { provider: "doola", environment: "sandbox" },
           transaction: (fn) => db.transaction(fn)(),
         },
         TENANT,
         companyId,
         {
-          legalFirstName: "Grace",
-          legalLastName: "Hopper",
           email: "grace@example.com",
           phone: "+13075550142",
           line1: "30 N Gould St",
@@ -406,9 +405,10 @@ test("A3: a PARTY edit re-arms exactly one retry, and it goes out with the CORRE
     await sweeper(doola).tick();
 
     expect(doola.customers).toHaveLength(2);
+    // The corrected contact goes out; the names stay the ones the party was created with, since
+    // the edit door never rewrites them.
     expect(doola.customers[1]).toMatchObject({
-      firstName: "Grace",
-      lastName: "Hopper",
+      firstName: "Ada",
       email: "grace@example.com",
       phoneNumber: "+13075550142",
     });
@@ -439,13 +439,12 @@ test("A3: a company parked on its INTAKE has a party doola already holds — and
         parties,
         requests,
         sandboxSyntheticPii: false,
+        pin: { provider: "doola", environment: "sandbox" },
         transaction: (fn) => db.transaction(fn)(),
       },
       TENANT,
       companyId,
       {
-        legalFirstName: "Grace",
-        legalLastName: "Hopper",
         email: "grace@example.com",
         phone: "+13075550142",
         line1: "30 N Gould St",
@@ -458,7 +457,7 @@ test("A3: a company parked on its INTAKE has a party doola already holds — and
     );
     expect(refused).toEqual({ error: partyFrozenMessage() });
     // Nothing moved: not the identity, and not the intake park, which is the intake door's.
-    expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
+    expect(parties.findOwned(TENANT, partyId)!.email).not.toBe("grace@example.com");
     expect(parked(companyId)).toBe(true);
   })();
 });

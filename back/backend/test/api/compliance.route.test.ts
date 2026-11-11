@@ -39,6 +39,8 @@ let requests: SqliteFormationRepository;
 let calls: string[];
 let answer: () => Promise<DoolaComplianceEvent[]>;
 let now: number;
+/** Called each time the route reads a company's formation steps; see `untilJoined`. */
+let onStepsRead: () => void;
 
 beforeEach(() => {
   db = openDatabase(":memory:");
@@ -49,6 +51,7 @@ beforeEach(() => {
   calls = [];
   answer = async () => [EVENT];
   now = Date.parse("2026-09-07T12:00:00Z");
+  onStepsRead = () => {};
 });
 afterEach(() => db.close());
 
@@ -60,7 +63,10 @@ function app(withProvider = true) {
     repo,
     companies,
     docStore: { getBytesAsync: async () => Buffer.from("") },
-    formationSteps: (id: string) => requests.stepsOf(id),
+    formationSteps: (id: string) => {
+      onStepsRead();
+      return requests.stepsOf(id);
+    },
     now: () => now,
     formation: withProvider
       ? {
@@ -175,6 +181,36 @@ test("a company with no filing opened answers EMPTY without calling the provider
   expect(body.annualReport).toEqual(COMPLIANCE_ANNUAL_REPORT);
 });
 
+test("a filing recorded by hand is never asked of doola: 200, no events, no fetch, the placeholder, and the marker", async () => {
+  // `formation:record-filed` writes `manual:<operator>`, which names no company at doola: asking
+  // for its calendar could only fail, and the page would refuse forever.
+  const id = newCompany("manual:ops.example");
+  for (const withProvider of [true, false]) {
+    const res = await get(app(withProvider), id);
+    expect(res.status, String(withProvider)).toBe(200);
+    expect(await res.json()).toEqual({
+      companyId: id,
+      // The operator's handle is internal: never served.
+      providerRef: null,
+      fetchedAt: null,
+      events: [],
+      annualReport: COMPLIANCE_ANNUAL_REPORT,
+      recordedByHand: true,
+    });
+  }
+  expect(calls).toEqual([]);
+  // A ref that only LOOKS manual is doola's, and is asked as ever.
+  await get(app(), newCompany("Manual:ops.example"));
+  expect(calls).toEqual(["Manual:ops.example"]);
+});
+
+test("every other answer says it was not recorded by hand", async () => {
+  const fetched = (await (await get(app(), newCompany("cmp-1"))).json()) as Record<string, unknown>;
+  const unopened = (await (await get(app(), newCompany())).json()) as Record<string, unknown>;
+  expect(fetched.recordedByHand).toBe(false);
+  expect(unopened.recordedByHand).toBe(false);
+});
+
 // ── the cache ───────────────────────────────────────────────────────────────────────────────
 
 test("CACHE: a second view inside 24h reuses the answer; past it, the provider is asked again", async () => {
@@ -254,10 +290,36 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
-/** Wait until the provider has actually been reached — the handlers sign a session first. */
-async function untilCalled(): Promise<void> {
-  for (let i = 0; i < 200 && calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
-  expect(calls.length, "the provider was never reached").toBeGreaterThan(0);
+/**
+ * `joined` resolves once `n` requests are IN the in-flight slot: the one that started the provider
+ * call, and the rest waiting on it. Install it BEFORE sending the requests.
+ *
+ * The route reads the company's formation steps and then, in the same synchronous stretch (no
+ * `await` between the two), either joins the call already out to doola or starts it. So the n-th
+ * read of the steps means the n-th request has joined, and the continuation of `await` on this
+ * promise cannot run before that stretch ends. No polling and no timing margin: waiting only for
+ * the provider to be reached, as this file used to, let a slow viewer still be in the session
+ * middleware when the call settled, and that viewer then made a second call, by design.
+ *
+ * A route that never gets there fails FAST, with the count, instead of at the suite's timeout:
+ * `joined` rejects after `JOIN_DEADLINE_MS`. That bounds only the failure; a pass never waits on
+ * it. `seen()` is the running count, and a test asserts it equals `n` once its requests settle,
+ * so a route that read the steps twice per request fails every time instead of flaking.
+ */
+const JOIN_DEADLINE_MS = 2000;
+function untilJoined(n: number): { joined: Promise<void>; seen: () => number } {
+  const joined = deferred<void>();
+  let seen = 0;
+  const deadline = setTimeout(
+    () => joined.reject(new Error(`only ${seen} of ${n} requests reached the shared call`)),
+    JOIN_DEADLINE_MS,
+  );
+  onStepsRead = () => {
+    if (++seen !== n) return;
+    clearTimeout(deadline);
+    joined.resolve();
+  };
+  return { joined: joined.promise, seen: () => seen };
 }
 
 /**
@@ -274,12 +336,15 @@ test("concurrent first viewers of one company share a single provider call", asy
   const gate = deferred<DoolaComplianceEvent[]>();
   answer = () => gate.promise;
 
+  const slot = untilJoined(4);
   const inflight = [get(a, id), get(a, id), get(a, id), get(a, id)];
-  // The handlers each sign a session before they reach the provider; wait for the first one to
-  // actually arrive rather than for a fixed number of ticks.
-  await untilCalled();
+  // The handlers each verify a session before they reach the slot; release the provider only once
+  // all four are waiting on its one call, so none of them can be served by the cache instead.
+  await slot.joined;
+  expect(calls).toEqual(["cmp-1"]);
   gate.resolve([EVENT]);
   const bodies = await Promise.all((await Promise.all(inflight)).map((r) => r.json()));
+  expect(slot.seen()).toBe(4);
 
   expect(calls).toEqual(["cmp-1"]);
   for (const body of bodies) expect(body.events).toHaveLength(1);
@@ -291,10 +356,16 @@ test("a FAILED fetch is not cached — but concurrent failures share one call", 
   const gate = deferred<DoolaComplianceEvent[]>();
   answer = () => gate.promise;
 
+  const slot = untilJoined(3);
   const inflight = [get(a, id), get(a, id), get(a, id)];
-  await untilCalled();
+  // All three are waiting on the ONE call before it fails. A viewer that arrived after the failure
+  // settled would rightly make a new call (failures are not cached), and that was the flake.
+  await slot.joined;
+  expect(calls).toEqual(["cmp-1"]);
   gate.reject(new Error("upstream down"));
   for (const res of await Promise.all(inflight)) expect(res.status).toBe(502);
+  // Before the fourth request below, which reads the steps too.
+  expect(slot.seen()).toBe(3);
   // Rate-limited while in flight: three viewers, one call at a struggling partner.
   expect(calls).toEqual(["cmp-1"]);
 

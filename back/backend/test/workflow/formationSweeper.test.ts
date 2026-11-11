@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { sqliteUtcTimestamp } from "../../src/formation";
-import { deriveFormationStatus } from "../../src/formation/status";
+import { deriveFormationStatus, isManualRef } from "../../src/formation/status";
 import { withKeyedLock } from "../../src/payments/keyedMutex";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -21,7 +21,11 @@ import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import { SqliteOaAnchorRepository } from "../../src/persistence/oaAnchorRepository";
-import { advanceFormation, parseDetail } from "../../src/workflow/formationProcessor";
+import {
+  UNMAPPED_EVENT_GRACE_MS,
+  advanceFormation,
+  parseDetail,
+} from "../../src/workflow/formationProcessor";
 import {
   ANCHOR_BATCH,
   ANCHOR_CONCURRENCY,
@@ -44,6 +48,7 @@ import {
   doolaDoc,
   fakeAnchorChain,
   fakeDoola,
+  fakeSandboxDoola,
   formedEntity,
   seedCompany,
 } from "../helpers/formationFakes";
@@ -131,6 +136,16 @@ function fail(step: string, attempt: number, updatedMsAgo = 0) {
   ).run(attempt, sqliteUtcTimestamp(now - updatedMsAgo), COMPANY_KEY, step);
 }
 
+/** Record a doola event whose receipt time is pinned to the INJECTED clock, `ageMs` ago. SQLite
+ *  stamps `received_at` from the real wall clock, and the grace is measured against `now`. */
+function recordEventAged(eventId: string, ageMs: number, providerRef: string | null = COMPANY_ID) {
+  events.record({ eventId, eventName: "company_formation_completed", providerRef, payload: "{}" });
+  db.prepare("UPDATE doola_webhook_events SET received_at = ? WHERE event_id = ?").run(
+    sqliteUtcTimestamp(now - ageMs),
+    eventId,
+  );
+}
+
 beforeEach(() => {
   now = Date.parse("2026-08-21T12:00:00Z");
   db = openDatabase(":memory:");
@@ -216,6 +231,96 @@ test("create_provider is retried too — through the saga step, which ADOPTS rat
   expect(stateOf("create_provider")).toBe("confirmed");
   // `getCompany`, never `createCompany` — the fake throws if the create is ever called.
   expect(doola.calls.some((c) => c.startsWith("getCompany"))).toBe(true);
+});
+
+// ── a create whose ref lands LATE: its events may already be retired, so it is read at once ──
+
+/**
+ * A company whose create was sent, lost its answer, and is now due a RETRY: `failed`, no ref,
+ * its rows claimed `claimedAgoMs` ago. doola holds the company, and the retry's create returns it.
+ */
+function seedLostCreate(claimedAgoMs: number) {
+  seedCompany(companies);
+  repo.upsert(formedEntity({ specJson: JSON.stringify({ name: "Formation Agent" }) }));
+  newParty({ companyId: COMPANY_KEY });
+  requests.claimAllSteps(COMPANY_KEY);
+  stampRows(now - claimedAgoMs);
+  db.prepare(
+    "UPDATE formation_requests SET state='failed', attempt=1 WHERE company_id=? AND step='create_provider'",
+  ).run(COMPANY_KEY);
+  const api = doola.api as unknown as Record<string, unknown>;
+  api.listCompanies = async () => [];
+  api.createCustomer = async () => {
+    doola.calls.push("createCustomer");
+    return { doolaCustomerId: "cus-1" };
+  };
+  api.createCompany = async () => {
+    doola.calls.push("createCompany");
+    return { doolaCompanyId: COMPANY_ID, formationSubmissionStatus: "PENDING" };
+  };
+  // What a read of the company will find: the filing has gone through.
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
+}
+
+test("a create whose ref lands on a RETRY after the grace is read on that same tick", async () => {
+  // The answer was lost two hours ago. doola's webhook arrived meanwhile, and nothing owned the id.
+  seedLostCreate(2 * 60 * 60 * 1000);
+  recordEventAged("evt-1", UNMAPPED_EVENT_GRACE_MS + 60_000);
+
+  const lines = await tickLines(sweeper());
+
+  // The re-drive runs first and retires the event: it is past the grace and still unowned…
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(1);
+  // …then the retry lands the ref, and the company is read AT ONCE, not a day later by the poll.
+  expect(rowOf("create_provider")).toMatchObject({ state: "confirmed", providerRef: COMPANY_ID });
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(stateOf("await_filing")).toBe("confirmed");
+});
+
+test("a create whose ref lands on a RESUME after an outage is read on that same tick", async () => {
+  // The box died mid-create and was down for more than the grace: on the boot tick the re-drive
+  // runs before the resume, so the event is retired one step before it would have mapped.
+  seedLostCreate(2 * 60 * 60 * 1000);
+  db.prepare(
+    "UPDATE formation_requests SET state='submitted', attempt=0, updated_at=? WHERE company_id=? AND step='create_provider'",
+  ).run(sqliteUtcTimestamp(now - SUBMITTED_STALL_MS - 60 * 60 * 1000), COMPANY_KEY);
+  recordEventAged("evt-1", UNMAPPED_EVENT_GRACE_MS + 60_000);
+
+  await tickLines(sweeper());
+
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(rowOf("create_provider")).toMatchObject({ state: "confirmed", providerRef: COMPANY_ID });
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(stateOf("await_filing")).toBe("confirmed");
+});
+
+test("the read at a late landing is not repeated by the poll on the same tick", async () => {
+  // Claimed two days ago, so the never-polled filing row is ALSO due for the daily poll. The read
+  // at landing restarts its poll clock, and the poll leg then leaves it alone.
+  seedLostCreate(2 * DAY);
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationSubmissionStatus: "SUBMITTED" };
+
+  await tickLines(sweeper());
+
+  expect(rowOf("create_provider")).toMatchObject({ state: "confirmed", providerRef: COMPANY_ID });
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(rowOf("await_filing")?.nextPollAt).toBe(now + POLL_BASE_MS);
+});
+
+test("a retry that lands NO new ref reads nothing extra: the ref was already there", async () => {
+  // The adopt case: the id was persisted before the failure, so its events were never unowned.
+  seedLostCreate(2 * 60 * 60 * 1000);
+  db.prepare(
+    "UPDATE formation_requests SET provider_ref=? WHERE company_id=? AND step='create_provider'",
+  ).run(COMPANY_ID, COMPANY_KEY);
+
+  await tickLines(sweeper());
+
+  expect(stateOf("create_provider")).toBe("confirmed");
+  // The adopt's own `getCompany`, and no read of the filing behind it.
+  expect(doola.calls.filter((c) => c.startsWith("listDocuments"))).toHaveLength(0);
+  expect(stateOf("await_filing")).toBe("pending");
 });
 
 // ── C2: the two crash windows ──────────────────────────────────────────────────────────────
@@ -382,13 +487,9 @@ test("C3: an await_ein row's poll cadence GROWS instead of asking every tick for
 // ── (a) re-driving events that arrived too early ───────────────────────────────────────────
 
 test("an unmappable event is re-driven once create_provider lands the company id", async () => {
-  // The webhook beat the create's own response — a real race, not a hypothetical one.
-  events.record({
-    eventId: "evt-1",
-    eventName: "company_formation_completed",
-    providerRef: COMPANY_ID,
-    payload: "{}",
-  });
+  // The webhook beat the create's own response — a real race, not a hypothetical one. A minute
+  // old, so it is inside the grace by the injected clock rather than by the wall clock's lead.
+  recordEventAged("evt-1", 60_000);
   doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
 
   await sweeper().tick();
@@ -399,6 +500,153 @@ test("an unmappable event is re-driven once create_provider lands the company id
   await sweeper().tick();
   expect(events.find("evt-1")?.processedAt).not.toBeNull();
   expect(stateOf("await_filing")).toBe("confirmed");
+});
+
+// ── (a') events no company here owns: kept for the race, retired after the grace ──────────
+
+/** One tick, and the ops lines it wrote, parsed. */
+async function tickLines(s: FormationSweeper): Promise<Array<Record<string, unknown>>> {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (l: string) => lines.push(l);
+  try {
+    await s.tick();
+  } finally {
+    console.log = orig;
+  }
+  return lines.map((l) => JSON.parse(l));
+}
+const named = (lines: Array<Record<string, unknown>>, opslog: string) =>
+  lines.filter((l) => l.opslog === opslog);
+
+test("the unmapped-event grace is one hour", () => {
+  expect(UNMAPPED_EVENT_GRACE_MS).toBe(60 * 60 * 1000);
+});
+
+test("an unmapped event UNDER an hour old is kept, and re-driven on every tick", async () => {
+  // No `create_provider` row claims COMPANY_ID: the create's response may still be on its way.
+  recordEventAged("evt-young", UNMAPPED_EVENT_GRACE_MS - 60_000);
+  const s = sweeper();
+
+  const first = await tickLines(s);
+  expect(events.find("evt-young")?.processedAt).toBeNull();
+  expect(named(first, "doola_webhook_unmapped")).toHaveLength(1);
+  expect(named(first, "doola_webhook_unmapped_retired")).toHaveLength(0);
+
+  // Still inside the grace on the next tick: re-driven again, still kept.
+  now += 30_000;
+  const second = await tickLines(s);
+  expect(events.find("evt-young")?.processedAt).toBeNull();
+  expect(named(second, "doola_webhook_unmapped")).toHaveLength(1);
+  expect(named(second, "doola_webhook_unmapped_retired")).toHaveLength(0);
+  expect(doola.calls).toHaveLength(0);
+});
+
+test("an unmapped event OVER an hour old is retired with ONE line, and is not re-driven again", async () => {
+  // A sandbox company another machine created: doola sends every webhook to the one endpoint.
+  recordEventAged("evt-old", UNMAPPED_EVENT_GRACE_MS + 1000);
+  const s = sweeper();
+
+  const first = await tickLines(s);
+  expect(events.find("evt-old")?.processedAt).not.toBeNull();
+  const retired = named(first, "doola_webhook_unmapped_retired");
+  expect(retired).toHaveLength(1);
+  expect(retired[0]).toMatchObject({
+    level: "warn",
+    eventId: "evt-old",
+    eventName: "company_formation_completed",
+    providerRef: COMPANY_ID,
+  });
+  // The retire line REPLACES the per-tick warning; it is not one more line beside it.
+  expect(named(first, "doola_webhook_unmapped")).toHaveLength(0);
+
+  // Not owed any more: the next tick neither re-drives nor re-logs it.
+  now += 60_000;
+  const second = await tickLines(s);
+  expect(second.filter((l) => l.eventId === "evt-old")).toHaveLength(0);
+  expect(events.listUnprocessed()).toHaveLength(0);
+  expect(doola.calls).toHaveLength(0);
+});
+
+test("the SAME event ages out across ticks: kept at 59 minutes, retired past the hour", async () => {
+  recordEventAged("evt-1", 0);
+  const s = sweeper();
+  await tickLines(s);
+  now += UNMAPPED_EVENT_GRACE_MS - 60_000;
+  await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).toBeNull();
+
+  now += 2 * 60_000;
+  const lines = await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(1);
+});
+
+test("a coalesced group: each member is retired on ITS OWN clock, all the old ones on one tick", async () => {
+  // Three events for one unowned company, two past the grace and one inside it. The group is one
+  // re-drive (M5), and the lead is the oldest; the verdict "nobody here owns this id" holds for
+  // every member, but the grace is per event.
+  recordEventAged("evt-a", UNMAPPED_EVENT_GRACE_MS + 3 * 60_000);
+  recordEventAged("evt-b", UNMAPPED_EVENT_GRACE_MS + 2 * 60_000);
+  recordEventAged("evt-c", UNMAPPED_EVENT_GRACE_MS - 10 * 60_000);
+
+  const lines = await tickLines(sweeper());
+  expect(events.find("evt-a")?.processedAt).not.toBeNull();
+  expect(events.find("evt-b")?.processedAt).not.toBeNull();
+  expect(events.find("evt-c")?.processedAt).toBeNull();
+  // One line per event retired, and none for the one kept: it is not the lead on this tick.
+  expect(named(lines, "doola_webhook_unmapped_retired").map((l) => l.eventId)).toEqual([
+    "evt-a",
+    "evt-b",
+  ]);
+  expect(named(lines, "doola_webhook_unmapped")).toHaveLength(0);
+});
+
+test("an event with NO company id falls under the same grace: kept inside it, retired past it", async () => {
+  // A NULL provider_ref is set at receipt and never rewritten, so no later tick can ever place
+  // it; the hour is the operator's window to see it, not a race to wait out.
+  recordEventAged("evt-young", UNMAPPED_EVENT_GRACE_MS - 60_000, null);
+  recordEventAged("evt-old", UNMAPPED_EVENT_GRACE_MS + 1000, null);
+
+  const lines = await tickLines(sweeper());
+  expect(events.find("evt-young")?.processedAt).toBeNull();
+  expect(events.find("evt-old")?.processedAt).not.toBeNull();
+  expect(named(lines, "doola_webhook_unmapped").map((l) => l.eventId)).toEqual(["evt-young"]);
+  const retired = named(lines, "doola_webhook_unmapped_retired");
+  expect(retired).toHaveLength(1);
+  expect(retired[0]).toMatchObject({ level: "warn", eventId: "evt-old", providerRef: null });
+});
+
+test("a MAPPED event is unaffected by its age: an old one is fetched and advanced, not retired", async () => {
+  seedFormation();
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
+  // Older than the grace — e.g. it waited out a doola outage. Age is no reason to drop real work.
+  recordEventAged("evt-1", 2 * UNMAPPED_EVENT_GRACE_MS);
+
+  const lines = await tickLines(sweeper());
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(0);
+});
+
+test("an event that becomes mapped INSIDE the grace is processed normally, not retired", async () => {
+  // The race the grace exists for: the webhook beat the create's own response.
+  recordEventAged("evt-1", 0);
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
+  const s = sweeper();
+  await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).toBeNull();
+
+  // 59 minutes later the company's `create_provider` gains the ref.
+  now += UNMAPPED_EVENT_GRACE_MS - 60_000;
+  seedFormation();
+  const lines = await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(doola.calls.filter((c) => c.startsWith("getCompany")).length).toBeGreaterThan(0);
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(0);
+  expect(named(lines, "doola_webhook_unmapped")).toHaveLength(0);
 });
 
 test("an event with an UNKNOWN name is retired by the sweeper's ordinary fetch-and-advance", async () => {
@@ -835,6 +1083,139 @@ test("M5: the poll due-set is filtered in SQL — an entity that is not due is n
   expect(
     requests.listPollDueCompanyIds(later, sqliteUtcTimestamp(later - POLL_BASE_MS), 100),
   ).toEqual([COMPANY_KEY]);
+});
+
+// ── a filing an operator recorded by hand: the saga never polls it (F-A-2a, Task 13) ─────────
+//
+// `formation:record-filed` writes a `manual:<operator>` provider ref. That ref names no company at
+// doola, so a poll of it could only fail, and a retry or an abandon would overrule the operator's
+// record. The exclusion is by COMPANY: the ref sits on `create_provider` and `await_ein`, while
+// the rows the due-set would pick are the polled steps beside them.
+
+const MANUAL_REF = "manual:ops-a";
+
+/** The rows `formation:record-filed` leaves: the filing and its documents confirmed, the EIN
+ *  pending under the same `manual:` ref and never polled. */
+function seedManualFiling() {
+  seedCompany(companies, { purposeKind: "legal_body" });
+  requests.claimAllSteps(COMPANY_KEY);
+  requests.transition(COMPANY_KEY, "create_provider", "pending", "confirmed", {
+    providerRef: MANUAL_REF,
+    detail: JSON.stringify({ recordedBy: "ops-a", recordedAt: now }),
+  });
+  requests.transition(COMPANY_KEY, "await_filing", "pending", "confirmed", {
+    detail: JSON.stringify({
+      filingNumber: "2026-001234567",
+      filingDate: "2026-08-19",
+      filedAt: Date.parse("2026-08-19T00:00:00Z") / 1000,
+      recordedBy: "ops-a",
+    }),
+  });
+  requests.transition(COMPANY_KEY, "fetch_documents", "pending", "confirmed", {
+    detail: JSON.stringify({
+      stored: [
+        {
+          docId: `operator:ArticlesOfOrganization:0x${"ab".repeat(32)}`,
+          type: "ArticlesOfOrganization",
+          sha256: `0x${"ab".repeat(32)}`,
+        },
+      ],
+      missing: [],
+      recordedBy: "ops-a",
+    }),
+  });
+  requests.transition(COMPANY_KEY, "await_ein", "pending", "pending", {
+    providerRef: MANUAL_REF,
+    touchFacts: false,
+  });
+  stampRows(now);
+}
+
+test("a manual: company is never in the poll due-set, whichever of its rows is due", () => {
+  seedFormation();
+  const later = now + POLL_BASE_MS + 1000;
+  const due = () =>
+    requests.listPollDueCompanyIds(later, sqliteUtcTimestamp(later - POLL_BASE_MS), 100);
+  const setCreateRef = (ref: string) =>
+    db
+      .prepare(
+        "UPDATE formation_requests SET provider_ref = ? WHERE company_id = ? AND step = 'create_provider'",
+      )
+      .run(ref, COMPANY_KEY);
+  // Due by age as an API filing...
+  expect(due()).toEqual([COMPANY_KEY]);
+  // ...and still due under a ref that only LOOKS manual: the SQL spells the prefix exactly as
+  // `isManualRef` does, case included...
+  setCreateRef("Manual:ops-a");
+  expect(isManualRef("Manual:ops-a")).toBe(false);
+  expect(due()).toEqual([COMPANY_KEY]);
+  // ...and out of the set once any step of the company carries a manual ref, though the due rows
+  // themselves carry none.
+  setCreateRef(MANUAL_REF);
+  expect(isManualRef(MANUAL_REF)).toBe(true);
+  expect(due()).toEqual([]);
+});
+
+test("the poll skips a manual: company even when the due-set hands it over", async () => {
+  seedManualFiling();
+  // The in-memory guard behind the SQL one.
+  requests.listPollDueCompanyIds = () => [COMPANY_KEY];
+  now += 2 * DAY;
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(rowOf("await_ein")).toMatchObject({ state: "pending", nextPollAt: null });
+});
+
+test("advanceFormation itself never asks doola about a manual: company, whoever calls it", async () => {
+  // Defence in depth behind the sweeper's guards: a webhook wake-up or any other caller that
+  // reaches the processor for this company is answered without a provider call.
+  seedManualFiling();
+  const before = requests.stepsOf(COMPANY_KEY);
+  const outcome = await advanceFormation(
+    {
+      repo,
+      companies,
+      requests,
+      documents,
+      docStore,
+      doola: doola.api,
+      environment: "sandbox",
+      fetchImpl: doola.fetchImpl,
+      lookupImpl: doola.lookupImpl,
+      now: () => now,
+    },
+    COMPANY_KEY,
+    { requiredActions: true },
+  );
+  expect(outcome).toEqual({ fetched: false, advanced: false, skipped: "manual_record" });
+  expect(doola.calls).toEqual([]);
+  expect(requests.stepsOf(COMPANY_KEY)).toEqual(before);
+});
+
+test("a manual: company is never completed by the sandbox playground", async () => {
+  doola = fakeSandboxDoola({}, { now: () => now });
+  seedManualFiling();
+  now += 6 * 60_000;
+  await sweeper().tick();
+  now += 2 * DAY;
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(stateOf("await_ein")).toBe("pending");
+});
+
+test("a manual: company with a failed row is neither retried nor abandoned", async () => {
+  seedManualFiling();
+  // Past its backoff: an API company would be retried here.
+  fail("await_ein", 3, DAY);
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(stateOf("await_ein")).toBe("failed");
+
+  // Past the attempt bound: an API company would be abandoned here.
+  fail("await_ein", MAX_FORMATION_ATTEMPTS, 7 * DAY);
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(stateOf("await_ein")).toBe("failed");
 });
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════

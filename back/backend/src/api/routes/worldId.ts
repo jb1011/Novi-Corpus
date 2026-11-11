@@ -491,14 +491,7 @@ export function assertGuardianAllowed(
   // Both ceilings are optional: unset means a verified human may form as many legal bodies as
   // they like, which is what the law actually allows.
   if (opts.scope === "company") {
-    if (world.maxCompaniesPerHuman == null) return;
-    const used = world.store.countCompaniesForNullifier(v.nullifier, world.cfg.action);
-    if (used >= world.maxCompaniesPerHuman)
-      throw new ApiError(
-        "guardian_company_cap",
-        403,
-        `this human already controls ${used} companies (max ${world.maxCompaniesPerHuman})`,
-      );
+    assertHumanCompanyCap(world, v);
     return;
   }
   if (world.maxEntitiesPerHuman == null) return;
@@ -508,6 +501,28 @@ export function assertGuardianAllowed(
       "guardian_entity_cap",
       403,
       `this human already controls ${used} legal entities (max ${world.maxEntitiesPerHuman})`,
+    );
+}
+
+/**
+ * The per-human company cap of `assertGuardianAllowed`'s company scope, on a verification row
+ * already read. No-op when `world` is undefined or the cap (`maxCompaniesPerHuman`) is unset.
+ *
+ * Its own function because the formed door applies it after `assertRealHuman`, whatever
+ * `requireGuardian` says, while the agent door keeps `assertGuardianAllowed`'s rule: both doors
+ * count the same companies of the same human, in one place.
+ */
+export function assertHumanCompanyCap(
+  world: WorldIdDeps | undefined,
+  v: GuardianVerification,
+): void {
+  if (!world || world.maxCompaniesPerHuman == null) return;
+  const used = world.store.countCompaniesForNullifier(v.nullifier, world.cfg.action);
+  if (used >= world.maxCompaniesPerHuman)
+    throw new ApiError(
+      "guardian_company_cap",
+      403,
+      `this human already controls ${used} companies (max ${world.maxCompaniesPerHuman})`,
     );
 }
 

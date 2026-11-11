@@ -53,7 +53,7 @@ contract LegalManagerFactoryFuzzTest is Test {
         vm.assume(manager != guardian && manager != operator && guardian != operator);
         vm.assume(payout != operator);
 
-        delay = bound(delay, 1 hours, 3650 days);
+        delay = bound(delay, 1 hours, 365 days);
         uint256 per = uint256(period);
         per = bound(per, 1, 365 days); // non-zero and within AgentTreasury.MAX_POLICY_PERIOD
 

@@ -70,7 +70,10 @@ const FORMATION_PARTIES_DDL = `
       -- filing that finds the SSN gone needs to know what took it.
       ssn_erased_reason TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      deleted_at TEXT
+      deleted_at TEXT,
+      -- When the guardian consented to marketing email, in unix milliseconds; NULL = no consent.
+      -- Written at intake on a production door only, never edited, cleared by the erasure.
+      marketing_consent_at INTEGER
     );
 `;
 
@@ -2269,6 +2272,9 @@ export function migrate(db: Database.Database): void {
     // A2 shipped with), and a NULL reason means "nothing was ever erased here".
     ["ssn_captured_at", "TEXT"],
     ["ssn_erased_reason", "TEXT"],
+    // F-A-2a: the marketing consent, in unix milliseconds. NULL on every existing row: nobody
+    // consented before the box asked.
+    ["marketing_consent_at", "INTEGER"],
   ] as const)
     if (!partyColsNow.includes(col))
       db.exec(`ALTER TABLE formation_parties ADD COLUMN ${col} ${type}`);

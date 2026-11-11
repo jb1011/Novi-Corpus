@@ -11,7 +11,7 @@ import {
   withEntityEnding,
 } from "../formation/intake";
 import { POLL_BASE_MS, POLL_CAP_MS, type StepBackoff, nextInterval } from "../formation/schedule";
-import { providerRefOf } from "../formation/status";
+import { isManualRef, providerRefOf } from "../formation/status";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { CompanyRepository } from "../persistence/companyRepository";
@@ -21,7 +21,10 @@ import {
   documentStoreName,
 } from "../persistence/documentIndexRepository";
 import type { DocumentStore } from "../persistence/documentStore";
-import type { DoolaEventRepository } from "../persistence/doolaEventRepository";
+import type {
+  DoolaEventRepository,
+  DoolaWebhookEventRecord,
+} from "../persistence/doolaEventRepository";
 import type { EntityRepository } from "../persistence/entityRepository";
 import {
   type FormationRepository,
@@ -29,6 +32,7 @@ import {
   type FormationStep,
   parseDetail,
 } from "../persistence/formationRepository";
+import { parseSqliteUtc } from "../util/sqliteTime";
 import { type AnchorWiring, advanceAnchor } from "./anchorLoop";
 import { downloadDocument } from "./documentDownloader";
 import { environmentPinMismatchError } from "./formationProvider";
@@ -238,7 +242,7 @@ export interface AdvanceOutcome {
   /** Did anything change? This is what resets the poll backoff. */
   advanced: boolean;
   /** Why nothing happened, when nothing happened. */
-  skipped?: "no_company" | "environment_pin" | "no_provider_ref";
+  skipped?: "no_company" | "environment_pin" | "no_provider_ref" | "manual_record";
 }
 
 /** The step an entity is currently waiting on — where poll backoff is persisted. */
@@ -283,6 +287,11 @@ export async function advanceFormation(
   const providerRef = providerRefOf(steps);
   // Nothing has been filed yet: `create_provider` is the sweeper's job, not this one's.
   if (!providerRef) return { fetched: false, advanced: false, skipped: "no_provider_ref" };
+  // An operator recorded this filing by hand (`formation:record-filed`): its `manual:` ref names
+  // no company at doola, so nothing may be asked under it. The sweeper never hands such a company
+  // here (`manuallyRecorded`); this holds for every other caller, a webhook wake-up included.
+  if (isManualRef(providerRef))
+    return { fetched: false, advanced: false, skipped: "manual_record" };
 
   const waitingOn = currentPolledStep(steps);
 
@@ -833,6 +842,74 @@ export interface FormationEventDeps extends FormationAdvanceDeps {
 }
 
 /**
+ * How long an event that no company here owns is kept for the sweeper before it is retired.
+ *
+ * The keep exists for ONE race: doola can deliver a company's first webhook before the create's
+ * own response has written that company id onto `create_provider`. That race is usually seconds,
+ * and an hour covers it with a wide margin. It CAN outlast the hour: a create whose answer was
+ * lost is retried on a doubling backoff, and a box down mid-create re-drives its events on the
+ * boot tick before it resumes the create. Such an event is retired before its ref lands, and
+ * nothing is lost: when a retry or a resume lands the ref, the sweeper reads the company at once
+ * (`retryCreateAndRead`), which is the read the event would have triggered.
+ *
+ * Otherwise an event still unowned after the hour is not ours to place: a sandbox company created
+ * from another machine (doola sends every webhook to the one configured endpoint), or, after a
+ * frozen create confirmed with `--doola-confirmed-no-company`, a company doola may hold that we
+ * recorded as never created. Kept, it would be re-driven and re-logged every tick until the
+ * 30-day retention, and would hold a place in the re-drive's batch ahead of real events.
+ * Retiring it loses no fact: a wake-up carries none.
+ *
+ * The same hour applies to an event with NO company id. That one can never be placed (its
+ * `provider_ref` is set at receipt and never rewritten), so the hour is not a race to wait out but
+ * the operator's window to see the warning, and the retire line names it once more.
+ */
+export const UNMAPPED_EVENT_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Retire an event no company here owns, if it is past `UNMAPPED_EVENT_GRACE_MS` by its own
+ * `received_at`. Returns TRUE when it is past the grace, whichever caller's compare-and-set won
+ * the mark: either way the event is no longer owed, and the caller must not warn about it again.
+ *
+ * Exported for the sweeper, which re-drives a company's events as ONE group: the verdict "nobody
+ * here owns this id" holds for every member, but the grace is per event, so each member is judged
+ * on its own clock.
+ */
+export function retireUnmappedEvent(
+  d: Pick<FormationEventDeps, "events" | "environment" | "now">,
+  e: Pick<DoolaWebhookEventRecord, "eventId" | "eventName" | "providerRef" | "receivedAt">,
+  source: "webhook" | "sweeper",
+): boolean {
+  const now = (d.now ?? Date.now)();
+  if (now - parseSqliteUtc(e.receivedAt) < UNMAPPED_EVENT_GRACE_MS) return false;
+  // One line per retired event, written only by the caller that actually marked it. No personal
+  // data: an event id, an event name and doola's company id are all this line carries.
+  if (d.events.markProcessed(e.eventId))
+    opsLog("doola_webhook_unmapped_retired", {
+      level: "warn",
+      environment: d.environment,
+      source,
+      eventId: e.eventId,
+      eventName: e.eventName,
+      providerRef: e.providerRef,
+      reason: e.providerRef
+        ? "no company here claimed this doola company id within the grace period"
+        : "no company id in the envelope, kept for the grace period",
+    });
+  return true;
+}
+
+/** The processor's half: it holds a wake-up, so it reads the receipt time from the ledger. A row
+ *  it cannot find (already swept) is left exactly as before. */
+function retireUnmappedWakeUp(
+  d: FormationEventDeps,
+  wake: DoolaWakeUp,
+  source: "webhook" | "sweeper",
+): boolean {
+  const record = d.events.find(wake.eventId);
+  return record !== undefined && retireUnmappedEvent(d, record, source);
+}
+
+/**
  * How this wake-up should be dispatched (M2).
  *
  * There used to be TWO dispatchers: this function, and a re-implementation of it inside the
@@ -857,7 +934,8 @@ export interface ProcessEventOptions {
   requiredActions?: boolean;
 }
 
-/** What the caller learns. `fetched` is the only thing that may retire an event. */
+/** What the caller learns. `fetched` is the only thing that may retire an event, apart from the
+ *  grace retirement of one no company owns (`retired`). */
 export interface ProcessEventResult {
   fetched: boolean;
   advanced: boolean;
@@ -866,6 +944,8 @@ export interface ProcessEventResult {
   companyId?: string;
   /** Why nothing was done, when nothing was done. */
   skipped?: "webhook_disabled" | "no_provider_ref" | "unmapped" | "unknown_name";
+  /** An unmapped (or companyless) event past `UNMAPPED_EVENT_GRACE_MS`, now marked processed. */
+  retired?: boolean;
 }
 
 /**
@@ -875,8 +955,10 @@ export interface ProcessEventResult {
  * The rules for `processed_at` are the whole design of this function:
  *  - marked ONLY after a successful fetch-and-advance, because an unmarked row is the sweeper's
  *    retry queue and marking early would silently drop the work;
- *  - an unmappable company id leaves it NULL forever — until `create_provider` lands that ref,
- *    at which point a sweeper tick re-drives it (design §5/§6);
+ *  - an unmappable company id leaves it NULL — until `create_provider` lands that ref, at which
+ *    point a sweeper tick re-drives it (design §5/§6), or until it is older than
+ *    `UNMAPPED_EVENT_GRACE_MS`, at which point it is retired with one line. The same grace
+ *    applies to an event with no company id at all;
  *  - re-processing a marked event is harmless anyway: every transition is a CAS.
  */
 export async function processDoolaEvent(
@@ -903,6 +985,9 @@ export async function processDoolaEvent(
   }
 
   if (!wake.providerRef) {
+    // Nothing can ever place it, so the grace is only the operator's window to see the warning.
+    if (retireUnmappedWakeUp(d, wake, source))
+      return { fetched: false, advanced: false, skipped: "no_provider_ref", retired: true };
     opsLog("doola_webhook_unmapped", {
       level: "warn",
       environment: d.environment,
@@ -917,7 +1002,11 @@ export async function processDoolaEvent(
   const owner = d.requests.findByProviderRef(wake.providerRef);
   if (!owner) {
     // The company exists at doola but no `create_provider` row claims it yet — the create's
-    // response and its webhook can race. Kept, not dropped: a later tick will place it.
+    // response and its webhook can race. Kept, not dropped: a later tick will place it. That race
+    // is usually seconds; past the grace the event is retired, and a create whose ref lands even
+    // later is read by the sweeper the moment it lands.
+    if (retireUnmappedWakeUp(d, wake, source))
+      return { fetched: false, advanced: false, skipped: "unmapped", retired: true };
     opsLog("doola_webhook_unmapped", {
       level: "warn",
       environment: d.environment,
@@ -957,7 +1046,8 @@ export async function processDoolaEvent(
       requiredActions: opts.requiredActions || eventSuggestsRequiredActions(wake.eventName),
     }),
   );
-  // Only a real read may retire the event. A skipped or failed pass leaves it for the sweeper.
+  // Only a real read may retire the event (the grace retirement above is only for an event no
+  // company owns). A skipped or failed pass leaves it for the sweeper.
   if (outcome.fetched) d.events.markProcessed(wake.eventId);
   return { fetched: outcome.fetched, advanced: outcome.advanced, companyId: owner.companyId };
 }

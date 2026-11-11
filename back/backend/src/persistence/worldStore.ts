@@ -273,14 +273,30 @@ export class SqliteWorldStore implements WorldStore {
     // Every company, whatever its status: a draft that was abandoned still consumed a slot's
     // worth of a human's attention, and the point of this ceiling is anti-sybil, not billing.
     //
-    // One exception: a customer's own declared company ('customer') that was abandoned before the
-    // operator checked it. That is how a declaration with a typo is withdrawn, and it must not
-    // cost a lifetime slot. Once a check exists, the company counts, abandoned or not. A sandbox's
-    // automatic check is not one: it examined nothing, so a company abandoned with no check but
-    // automatic ones is exempt too. A check is automatic when its operator is
-    // SANDBOX_AUTOMATIC_OPERATOR and the company's environment is 'sandbox' (the two-part test of
-    // `isAutomaticSandboxCheck`): the operator's name alone proves nothing on production. The query
-    // reads `company_checks`, so it needs a migrated database.
+    // Two exceptions, both a company given up before anything outside Novi acted on it, so that
+    // withdrawing one never costs a lifetime slot (with a cap of 1, it would be a trap).
+    //
+    // 1. A customer's own declared company ('customer') that was abandoned before the operator
+    //    checked it. That is how a declaration with a typo is withdrawn. Once a check exists, the
+    //    company counts, abandoned or not. A sandbox's automatic check is not one: it examined
+    //    nothing, so a company abandoned with no check but automatic ones is exempt too. A check
+    //    is automatic when its operator is SANDBOX_AUTOMATIC_OPERATOR and the company's
+    //    environment is 'sandbox' (the two-part test of `isAutomaticSandboxCheck`): the
+    //    operator's name alone proves nothing on production.
+    //
+    // 2. A company formed through doola for a legal body (provider 'doola', purpose 'legal_body')
+    //    that was abandoned with nothing at doola: no formation row `confirmed` or holding a
+    //    provider ref (no create returned, nothing was filed), and no `create_provider` row whose
+    //    company body went out under its current attempt (`companySentAttempt = attempt`: the
+    //    key is live and the answer was lost, so doola may hold the company) or whose detail is
+    //    unreadable (nothing proves the filing did not start). The shape the tenant's abandon
+    //    (`abandonFormedCompany`) allows, read the same way after the abandon; a company with no
+    //    row at all was never sent. One the saga or an operator abandoned after doola held it
+    //    keeps counting. A company for agents is not exempt.
+    //
+    // The query reads `company_checks` and `formation_requests`, so it needs a migrated database.
+    // `json_valid` guards `json_extract`, as `INTAKE_FROZEN_SQL` does, so a corrupt blob counts
+    // rather than throwing.
     const row = this.db
       .prepare(
         `SELECT COUNT(*) AS n FROM companies c
@@ -292,7 +308,19 @@ export class SqliteWorldStore implements WorldStore {
                     AND NOT EXISTS (SELECT 1 FROM company_checks k
                                      WHERE k.company_id = c.company_id
                                        AND NOT (c.environment = 'sandbox'
-                                                AND k.operator = @automatic_operator)))`,
+                                                AND k.operator = @automatic_operator)))
+           AND NOT (c.provider = 'doola' AND c.purpose_kind = 'legal_body'
+                    AND c.status = 'abandoned'
+                    AND NOT EXISTS (
+                      SELECT 1 FROM formation_requests f
+                       WHERE f.company_id = c.company_id
+                         AND (   f.state = 'confirmed'
+                              OR f.provider_ref IS NOT NULL
+                              OR (f.step = 'create_provider' AND f.detail IS NOT NULL
+                                  AND (   json_valid(f.detail) = 0
+                                       OR (json_valid(f.detail) = 1
+                                           AND COALESCE(json_extract(f.detail,
+                                                 '$.companySentAttempt'), -1) = f.attempt))))))`,
       )
       .get({ nullifier, action, automatic_operator: SANDBOX_AUTOMATIC_OPERATOR }) as { n: number };
     return row.n;

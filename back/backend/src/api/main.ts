@@ -579,10 +579,18 @@ async function main() {
         sandboxSyntheticPii: formationCfg.sandboxSyntheticPii,
         maxPerTenant: formationCfg.maxPerTenant,
         dailyCeiling: formationCfg.dailyCeiling,
+        // FORMATION_MAX_TOTAL, the formed door's total cap on production. The config's formed
+        // door reads it from here too (`formation.companyDeps`), so the two cannot differ.
+        maxTotal: formationCfg.maxTotal,
         // The SSN keyring (§4.2). Absent everywhere except production doola, where it is a boot
         // invariant — and its absence makes the door REFUSE the field, never store it in clear.
         pii: formationCfg.pii,
         world: worldId,
+        // The formed door's gates (`createCompany` step 0): the guardian identity record built
+        // above, and the network's environment, which with doola's pin decides the door's own
+        // (`formedDoorEnvironment`). No `invites` until PR 2b: a production formed door refuses.
+        identity,
+        legalBodyEnvironment: legalBodyEnvironment(cfg),
         // With payment on, `createCompany` lands the company `draft` and writes its quote in the
         // same transaction. Absent = the beta shape, where every company lands `ready`.
         payment: formationPayment,
@@ -876,6 +884,11 @@ async function main() {
             transaction: <T>(fn: () => T) => repo.transaction(fn),
           }
         : undefined,
+    // The refund-overdue leg (F-A-2a): FORMATION_REFUND_DAYS, and the payment repository wired
+    // whether or not this deployment charges now, since a refund is owed on a payment already
+    // taken.
+    refundDays: formationCfg.refundDays,
+    payments: formationPayments,
     intervalMs: cfg.formation?.sweepMs ?? 60_000,
     // The anchor sub-saga (design §7). The SAME `anchors` repo the saga writes the v1 row with
     // and the SAME `arc` adapter the saga mints through — a second adapter would be a second

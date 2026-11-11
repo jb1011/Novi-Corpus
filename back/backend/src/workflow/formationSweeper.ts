@@ -17,7 +17,13 @@ import {
   retryDelayMs,
 } from "../formation/schedule";
 import { eraseSsnLogged } from "../formation/ssnErasure";
-import { deriveFormationStatus } from "../formation/status";
+import {
+  companyFiled,
+  deriveFormationStatus,
+  einIssued,
+  isManualRef,
+  manuallyRecorded,
+} from "../formation/status";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { CompanyRepository } from "../persistence/companyRepository";
@@ -26,6 +32,7 @@ import type {
   DoolaWebhookEventRecord,
 } from "../persistence/doolaEventRepository";
 import type { FormationPartyRepository } from "../persistence/formationPartyRepository";
+import type { FormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import {
   type FormationRequestRecord,
   type FormationStep,
@@ -43,6 +50,7 @@ import {
   advanceFormation,
   currentPolledStep,
   processDoolaEvent,
+  retireUnmappedEvent,
 } from "./formationProcessor";
 import { runFormationCreateProvider } from "./formationProvider";
 import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./formationStep";
@@ -68,7 +76,12 @@ import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./form
  *       `failed` so the retry pass skips it. Both used to strand the formation forever;
  *   (c) retry `failed` rows with backoff, and give up at a bounded attempt count rather than
  *       retrying a hopeless row forever;
- *   (d) poll doola for anything still in flight, with its own much slower backoff;
+ *   (d) poll doola for anything still in flight, with its own much slower backoff, never a filing
+ *       an operator recorded by hand (a `manual:` ref names nothing at doola, so the retry pass
+ *       in (c) skips it too);
+ *   (d2) on a SANDBOX deployment only, complete a legal-body company's filing, then its EIN,
+ *        through doola's playground five minutes after each opened, and advance it at once,
+ *        reading it again for half an hour until the step shows as done;
  *   (e) drive the ON-CHAIN anchor sub-saga — open the cycle a confirmed fact justifies, adopt a
  *       broadcast a crash orphaned, and execute what the timelock has released. This is the leg
  *       that makes anchoring GUARANTEED rather than merely fast: the webhook path opens a version
@@ -76,6 +89,8 @@ import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./form
  *   (f0) erase an SSN that is no longer needed or has waited out its 7-day clock (§4.6a) — a
  *        SHORTER clock than (f), over a different fact, and it never manufactures `abandoned`;
  *   (f) erase PII whose filing provably never happened;
+ *   (f2) raise a CRITICAL line, once a day, for a refund owed on an abandoned company that nobody
+ *        has recorded `FORMATION_REFUND_DAYS` after the abandon;
  *   (g) warn about formations that have been in flight far too long;
  *   (h) drop webhook rows past their retention window.
  *
@@ -154,6 +169,58 @@ export const ANCHOR_CONCURRENCY = 4;
  *  two cannot drift. */
 export const SUBMITTED_STALL_MS = DOOLA_DEFAULT_TIMEOUT_MS + SUBMITTED_STALL_SLACK_MS;
 
+/**
+ * SANDBOX ONLY (F-A-2a): how long a legal-body filing waits after `create_provider` confirmed
+ * before the sweeper completes it through doola's playground, and how long its EIN then waits
+ * after `await_filing` confirmed. Measured on each row's `facts_updated_at`.
+ */
+export const SANDBOX_AUTOCOMPLETE_DELAY_MS = 5 * 60_000;
+
+/** SANDBOX ONLY: how long after a playground call the leg keeps reading the company again while
+ *  its step does not show as done, at most once per `SANDBOX_AUTOCOMPLETE_DELAY_MS`. After it, the
+ *  ordinary poll is the backstop. */
+export const SANDBOX_READVANCE_WINDOW_MS = 30 * 60_000;
+
+/** SANDBOX ONLY: how many failed playground calls, for one company and step, before the leg gives
+ *  up on them in this process: one `sandbox_autocomplete_gave_up` error line, then no call. Six
+ *  calls spaced by `SANDBOX_AUTOCOMPLETE_DELAY_MS` are about half an hour of a sandbox that is
+ *  down. */
+export const SANDBOX_AUTOCOMPLETE_MAX_FAILURES = 6;
+
+/** What the sandbox leg writes on the `create_provider` row's `detail` (unix ms): the playground
+ *  call has been made, so it is never made twice. */
+interface SandboxAutocompleteMarks {
+  autocompletedAt?: number;
+  einAutocompletedAt?: number;
+}
+
+/**
+ * The two playground calls, a TABLE (the `drivers` reasoning): which call completes which step,
+ * the marker it leaves, its ops line, and the step whose confirmation starts its five minutes.
+ */
+const SANDBOX_PLAYGROUND = {
+  await_filing: {
+    call: "playgroundCompleteFormation",
+    mark: "autocompletedAt",
+    event: "sandbox_filing_autocompleted",
+    after: "create_provider",
+  },
+  await_ein: {
+    call: "playgroundCompleteEin",
+    mark: "einAutocompletedAt",
+    event: "sandbox_ein_autocompleted",
+    after: "await_filing",
+  },
+} as const satisfies Record<
+  "await_filing" | "await_ein",
+  {
+    call: "playgroundCompleteFormation" | "playgroundCompleteEin";
+    mark: keyof SandboxAutocompleteMarks;
+    event: string;
+    after: FormationStep;
+  }
+>;
+
 // ── deps ────────────────────────────────────────────────────────────────────────────────────
 
 export interface FormationSweeperDeps extends FormationAdvanceDeps {
@@ -173,6 +240,18 @@ export interface FormationSweeperDeps extends FormationAdvanceDeps {
    * place and re-broadcast in the other.
    */
   payment?: Omit<import("./formationPayment").FormationPaymentDeps, "companies" | "now">;
+  /**
+   * `FORMATION_REFUND_DAYS`: how many days after a paid company is abandoned its refund may wait
+   * before the refund-overdue leg writes its CRITICAL line. Absent: the leg does nothing.
+   */
+  refundDays?: number;
+  /**
+   * The payment rows the refund-overdue leg reads. Its own field rather than `payment.payments`
+   * because `payment` is wired only where this deployment charges, and a refund is owed on a
+   * payment already taken whatever the deployment does now: the composition root wires the
+   * payment repository everywhere (`formationPayment.payments`), as the abandon door reads it.
+   */
+  payments?: Pick<FormationPaymentRepository, "listSettledAwaitingRefund">;
   /** `FORMATION_SWEEP_MS`. */
   intervalMs: number;
 }
@@ -204,6 +283,23 @@ export class FormationSweeper {
   /** Written-off payments already reported as duplicate CANDIDATES (R1c) — de-duplication of a
    *  CRITICAL line, in memory, exactly like `warned`. */
   private readonly flaggedWriteOffs = new Set<string>();
+
+  /**
+   * The sandbox leg's two spacings (d2), keyed by company: when it last read a company after a
+   * playground call, and when a playground call last threw. In memory and deliberately so, like
+   * `warned`: they pace calls to a sandbox, nothing depends on them, and the database marker is
+   * what stops a second call. A restart reads or calls one tick early, which is harmless.
+   */
+  private readonly sandboxReadAt = new Map<string, number>();
+  private readonly sandboxFailedAt = new Map<string, number>();
+  /**
+   * The failed playground calls in a row, keyed `companyId:step`: at
+   * `SANDBOX_AUTOCOMPLETE_MAX_FAILURES` the leg stops calling for that company and step. In memory
+   * like the two above, and never pruned by the delay: a restart starts the count again, which
+   * costs at most six more calls, and the database is never written for a failure. A call that
+   * succeeds clears its count.
+   */
+  private readonly sandboxFailures = new Map<string, number>();
 
   /**
    * Where the last anchor batch stopped (2026-08-26 §3) — PERSISTED in `meta.anchor_cursor`.
@@ -267,8 +363,14 @@ export class FormationSweeper {
       await this.resumeStalledCreates();
       await this.retryFailedSteps();
       await this.pollInFlight();
+      // After the poll, so a company the poll just advanced is judged on its new rows. Sandbox
+      // only; on production it returns at once.
+      await this.completeSandboxFilings();
       await this.advanceAnchors();
       this.erasePii();
+      // Every tick, not amortised: a plain read of a set that is empty on a healthy deployment,
+      // and the line is de-duplicated per company per UTC day.
+      this.alertRefundsOverdue();
       if (amortised) {
         // AMORTISED, like the other backstops beside it. Both of its clauses are measured in
         // DAYS — a 7-day retention promise and a terminal-company backstop for an erase §4.4
@@ -334,11 +436,18 @@ export class FormationSweeper {
         { eventId: lead.eventId, eventName: lead.eventName, providerRef: lead.providerRef },
         { source: "sweeper", acceptUnknownNames: true, requiredActions: true },
       );
-      // Only a real read may retire an event — and it retires the whole group, because one read
-      // is exactly what all of them were asking for.
+      // Only a real read may retire an event, or the grace retirement below for one no company
+      // owns — and a read retires the whole group, because one read is exactly what all of them
+      // were asking for.
       if (result.fetched)
         for (const e of group)
           if (e.eventId !== lead.eventId) this.d.events.markProcessed(e.eventId);
+      // The lead was retired: no company here owns the id the whole group shares, and the lead
+      // (the oldest) is past the grace. The rest are judged on THEIR OWN clocks, so one still
+      // inside the grace is kept, and the old ones go on this tick instead of one per tick.
+      if (result.retired)
+        for (const e of group)
+          if (e.eventId !== lead.eventId) retireUnmappedEvent(this.d, e, "sweeper");
     } catch (err) {
       opsLog("doola_event_redrive_failed", {
         level: "warn",
@@ -407,7 +516,7 @@ export class FormationSweeper {
         environment: this.d.environment,
       });
       try {
-        await withKeyedLock(row.companyId, () => this.retryCreateProvider(row.companyId));
+        await this.retryCreateAndRead(row.companyId);
       } catch (err) {
         opsLog("formation_retry_failed", {
           level: "warn",
@@ -612,6 +721,11 @@ export class FormationSweeper {
   private async retryFailedSteps(): Promise<void> {
     const now = this.now();
     for (const row of this.d.requests.listByState("failed")) {
+      // ── RECORDED BY HAND: never the saga's. An operator recorded this company's filing
+      //    (`formation:record-filed`), so its `manual:` ref names nothing at doola: a retry could
+      //    only fail, and the abandon below would overrule the operator's record. Before
+      //    everything, the abandon verdict included.
+      if (manuallyRecorded(this.d.requests.stepsOf(row.companyId))) continue;
       // ── PARKED FOR A HUMAN, and it comes FIRST — before the attempt bound, deliberately.
       //
       //    doola REJECTED this intake. Re-sending the identical body cannot succeed, so the
@@ -693,8 +807,7 @@ export class FormationSweeper {
    * never retries.
    */
   private readonly drivers: Record<FormationStep, (companyId: string) => Promise<unknown>> = {
-    create_provider: (companyId) =>
-      withKeyedLock(companyId, () => this.retryCreateProvider(companyId)),
+    create_provider: (companyId) => this.retryCreateAndRead(companyId),
     await_filing: (companyId) => this.advance(companyId),
     fetch_documents: (companyId) => this.advance(companyId),
     await_ein: (companyId) => this.advance(companyId),
@@ -710,6 +823,44 @@ export class FormationSweeper {
     return withKeyedLock(companyId, () =>
       advanceFormation(this.d, companyId, { requiredActions: true }),
     );
+  }
+
+  /**
+   * Re-run the filing step from a RETRY or a RESUME, and read the company AT ONCE if this run is
+   * the one that landed its doola company id.
+   *
+   * A create whose answer was lost lands its ref on a later retry, on a doubling backoff, or on
+   * the resume after an outage, and either can be well past `UNMAPPED_EVENT_GRACE_MS`. By then
+   * doola's webhooks for the company may have been retired as unowned (the boot tick re-drives
+   * events BEFORE it resumes creates), and the read they would have triggered is done here
+   * instead, rather than a day later by the poll. The first create (the stranded-open leg, and
+   * onboarding) is not routed here: its webhooks are inside the grace and place themselves.
+   *
+   * Only a ref this run moved from NULL: a ref already on the row meant its events were never
+   * unowned. A `manual:` ref is skipped (no create writes one, and `advanceFormation` refuses it
+   * anyway). The read runs AFTER the create's lock is released, because the keyed lock is not
+   * re-entrant and `advance` takes the same key.
+   */
+  private async retryCreateAndRead(companyId: string): Promise<void> {
+    const refOf = () => this.d.requests.find(companyId, "create_provider")?.providerRef ?? null;
+    const { before, after } = await withKeyedLock(companyId, async () => {
+      const before = refOf();
+      await this.retryCreateProvider(companyId);
+      return { before, after: refOf() };
+    });
+    if (before !== null || after === null || isManualRef(after)) return;
+    try {
+      const outcome = await this.advance(companyId);
+      // The filing started NOW, not when its rows were claimed: restart the poll clock from this
+      // read, so a row claimed over a day ago is not read a second time by the poll leg this tick.
+      if (outcome.fetched) this.persistBackoff(companyId, true);
+    } catch (err) {
+      opsLog("formation_create_read_failed", {
+        level: "warn",
+        companyId,
+        ...describeDoolaError(err),
+      });
+    }
   }
 
   /**
@@ -791,6 +942,9 @@ export class FormationSweeper {
     );
     for (const companyId of candidates) {
       const steps = this.d.requests.stepsOf(companyId);
+      // The in-memory twin of the due-set's own exclusion: a filing recorded by hand is never
+      // polled, whatever handed it here.
+      if (manuallyRecorded(steps)) continue;
       const status = deriveFormationStatus(steps);
       // `failed` companies belong to the retry path above, not here; `complete`/`none` are done or
       // have not started. What is left is genuinely in flight.
@@ -841,6 +995,142 @@ export class FormationSweeper {
     // The same helper the processor uses, so the blob and the `next_poll_at` column are written
     // together by ONE piece of code — the column is an index over the blob, never a second truth.
     persistPollBackoff(this.d, row, { advanced });
+  }
+
+  // ── (d2) the sandbox playground, for a legal-body filing (F-A-2a) ─────────────────────────
+
+  /**
+   * Complete a legal-body company's SANDBOX filing through doola's playground, then its EIN.
+   *
+   * doola's test environment never files with the State: a sandbox filing stays `SUBMITTED` until
+   * somebody calls the playground, so a demo of the formed door would wait forever. Five minutes
+   * after `create_provider` confirmed, this calls `playgroundCompleteFormation`; five minutes
+   * after `await_filing` confirmed, `playgroundCompleteEin`. Each call is followed AT ONCE by a
+   * fetch-and-advance: a local box gets no webhook, and the next poll of a row that was never
+   * polled is `POLL_BASE_MS` away. The facts are then read back through the ordinary processor,
+   * on its own rules, exactly as a real filing's would be.
+   *
+   * Scoped to `legal_body` companies (the plan's §0 call): the full product's testnet behaviour
+   * does not change. A filing an operator recorded by hand is never touched.
+   *
+   * THE CALL COMES BEFORE THE MARKER. A throwing call writes nothing to the database, so a later
+   * tick tries again; it backs off for `SANDBOX_AUTOCOMPLETE_DELAY_MS` in memory rather than
+   * calling doola every tick, and after `SANDBOX_AUTOCOMPLETE_MAX_FAILURES` failures for one
+   * company and step it gives up on them in this process, with one `sandbox_autocomplete_gave_up`
+   * error line. A crash between the call and the marker repeats a call doola's sandbox takes
+   * harmlessly.
+   *
+   * THE MARKER STOPS A SECOND CALL, NOT A SECOND READ. A read right after the call can learn
+   * nothing (it failed, doola does not show the filing yet, or the advance threw), and the next
+   * poll is then a day away on a box with no webhook. So while the call is under
+   * `SANDBOX_READVANCE_WINDOW_MS` old and its step is still not done, the leg reads again, at most
+   * once per `SANDBOX_AUTOCOMPLETE_DELAY_MS` per company: every failed read doubles the waiting
+   * row's poll interval. After the window the poll is the backstop.
+   *
+   * A target step already `failed` or `abandoned` is never completed: the retry path or the
+   * verdict owns it, and a playground call must not bring a failed formation back.
+   *
+   * Production returns at once. The client's `assertSandbox` refuses the call on a production
+   * client as well, and is the second guard.
+   */
+  private async completeSandboxFilings(): Promise<void> {
+    if (this.d.environment !== "sandbox") return;
+    const now = this.now();
+    // Both memories are only ever read inside the delay, so an older entry is dead weight.
+    for (const memory of [this.sandboxReadAt, this.sandboxFailedAt])
+      for (const [companyId, at] of memory)
+        if (now - at >= SANDBOX_AUTOCOMPLETE_DELAY_MS) memory.delete(companyId);
+    for (const companyId of this.d.requests.listOpenCompanyIds()) {
+      const company = this.d.companies.find(companyId);
+      if (
+        company?.provider !== "doola" ||
+        company.purposeKind !== "legal_body" ||
+        company.environment !== "sandbox"
+      )
+        continue;
+      const steps = this.d.requests.stepsOf(companyId);
+      if (manuallyRecorded(steps)) continue;
+      const create = steps.find((s) => s.step === "create_provider");
+      if (create?.state !== "confirmed" || !create.providerRef) continue;
+
+      const step = !companyFiled(steps) ? "await_filing" : !einIssued(steps) ? "await_ein" : null;
+      if (!step) continue;
+      const target = steps.find((s) => s.step === step);
+      if (!target || target.state === "failed" || target.state === "abandoned") continue;
+      const leg = SANDBOX_PLAYGROUND[step];
+
+      const calledAt = parseDetail<SandboxAutocompleteMarks>(create.detail)[leg.mark];
+      if (calledAt !== undefined) {
+        // Called already: read again, never call again.
+        if (now - calledAt >= SANDBOX_READVANCE_WINDOW_MS) continue;
+        if (this.sandboxReadAt.has(companyId)) continue;
+        this.sandboxReadAt.set(companyId, now);
+        await this.advanceAfterPlayground(companyId, step);
+        continue;
+      }
+      const since = steps.find((s) => s.step === leg.after)?.factsUpdatedAt;
+      if (!since || now - parseSqliteUtc(since) < SANDBOX_AUTOCOMPLETE_DELAY_MS) continue;
+      if (this.sandboxFailedAt.has(companyId)) continue;
+      const failureKey = `${companyId}:${step}`;
+      const failedBefore = this.sandboxFailures.get(failureKey) ?? 0;
+      if (failedBefore >= SANDBOX_AUTOCOMPLETE_MAX_FAILURES) continue;
+
+      try {
+        await this.d.doola[leg.call](create.providerRef);
+      } catch (err) {
+        const failures = failedBefore + 1;
+        this.sandboxFailures.set(failureKey, failures);
+        this.sandboxFailedAt.set(companyId, now);
+        opsLog("sandbox_autocomplete_failed", {
+          level: "warn",
+          companyId,
+          step,
+          ...describeDoolaError(err),
+        });
+        // Once, at the bound: the leg makes no further call for this company and step in this
+        // process. doola's sandbox files nothing without the call, so the filing stays open until
+        // someone reads this line (a restart tries six more times). Ids and a count only.
+        if (failures === SANDBOX_AUTOCOMPLETE_MAX_FAILURES)
+          opsLog("sandbox_autocomplete_gave_up", { level: "error", companyId, step, failures });
+        continue;
+      }
+      this.sandboxFailedAt.delete(companyId);
+      this.sandboxFailures.delete(failureKey);
+      // Merged into the row as it is NOW, not as the loop read it: the marker adds one field and
+      // must not put back an older detail.
+      const current = this.d.requests.find(companyId, "create_provider");
+      this.d.requests.transition(companyId, "create_provider", "confirmed", "confirmed", {
+        detail: JSON.stringify({
+          ...parseDetail<Record<string, unknown>>(current?.detail ?? null),
+          [leg.mark]: now,
+        }),
+        // A marker is not a fact: the anchor gate must not re-derive a manifest for it.
+        touchFacts: false,
+      });
+      opsLog(leg.event, { companyId, providerRef: create.providerRef });
+      // The read right after the call opens the spacing, so the first read again is five minutes
+      // later, not one tick later.
+      this.sandboxReadAt.set(companyId, now);
+      await this.advanceAfterPlayground(companyId, step);
+    }
+  }
+
+  /** The fetch-and-advance after a playground call. Never throws: the marker stands, and the
+   *  next read is the leg's again (inside its window) or the poll's. */
+  private async advanceAfterPlayground(
+    companyId: string,
+    step: keyof typeof SANDBOX_PLAYGROUND,
+  ): Promise<void> {
+    try {
+      await this.advance(companyId);
+    } catch (err) {
+      opsLog("sandbox_autocomplete_advance_failed", {
+        level: "warn",
+        companyId,
+        step,
+        ...describeDoolaError(err),
+      });
+    }
   }
 
   // ── (e) the on-chain anchor sub-saga (design §7) ──────────────────────────────────────────
@@ -1018,6 +1308,40 @@ export class FormationSweeper {
       // The party id and the reason, and nothing else — an erasure log that named the person
       // would be the one place their data outlived the erasure.
       opsLog("formation_party_erased", { partyId, reason });
+    }
+  }
+
+  // ── (f2) refunds owed and overdue (F-A-2a Task 14b) ───────────────────────────────────────
+
+  /**
+   * A CRITICAL line, once per company per UTC day, for each settled payment of an abandoned
+   * company whose refund `formation:refund` has not recorded `refundDays` days after the abandon.
+   *
+   * The refund is a transfer a human signs from the revenue wallet; nothing in the software makes
+   * it, so nothing else would notice it was never made. The age counts from the abandon's stamp
+   * (`companies.updated_at`), in whole days; `daysOverdue` is how many whole days past
+   * `refundDays` it is, so the first line reads 0. De-duplicated as `warnStale` is, in `warned`,
+   * keyed by the company and the day, and pruned with it: a restart re-warns. The line carries
+   * the two ids and the count only: no amount, no address, no person.
+   */
+  private alertRefundsOverdue(): void {
+    const refundDays = this.d.refundDays;
+    if (refundDays === undefined || this.d.payments === undefined) return;
+    const now = this.now();
+    const day = new Date(now).toISOString().slice(0, 10);
+    for (const row of this.d.payments.listSettledAwaitingRefund()) {
+      const ageDays = Math.floor((now - parseSqliteUtc(row.abandonedAt)) / (24 * 60 * 60 * 1000));
+      if (ageDays < refundDays) continue;
+      const key = `${row.companyId}:refund:${day}`;
+      if (this.warned.has(key)) continue;
+      this.warned.add(key);
+      opsLog("formation_refund_overdue", {
+        level: "error",
+        severity: "CRITICAL",
+        companyId: row.companyId,
+        paymentId: row.paymentId,
+        daysOverdue: ageDays - refundDays,
+      });
     }
   }
 

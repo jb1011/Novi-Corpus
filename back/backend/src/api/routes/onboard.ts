@@ -5,13 +5,18 @@ import type { AuthVars } from "../../auth/middleware";
 import { custodyUnavailableMessage } from "../../custody";
 import {
   companyNamesRequiredMessage,
-  createFormationParty,
   formationDoorRefusal,
   formationUnavailableMessage,
   partyFieldsOf,
   truncateTenant,
 } from "../../formation";
-import { createCompany, updateCompanyIntake, updateCompanyParty } from "../../formation/company";
+import {
+  createCompany,
+  createFormationParty,
+  refuseTypedPartyNames,
+  updateCompanyIntake,
+  updateCompanyParty,
+} from "../../formation/company";
 import { FORMATION_PRODUCT, guardianOf, paymentView } from "../../formation/payment";
 import { deriveFormationStatus, hasLivePayment } from "../../formation/status";
 import { opsLog } from "../../observability/opsLog";
@@ -19,6 +24,7 @@ import { withKeyedLock } from "../../payments/keyedMutex";
 import {
   AgentSpecSchema,
   CreateCompanyBodySchema,
+  FormationPartyEditSchema,
   FormationPartySchema,
   UpdateCompanyIntakeBodySchema,
   firstIssueMessage,
@@ -144,8 +150,10 @@ export function mountProtectedRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     if (!body.success) throw new ApiError("validation_error", 400, firstIssueMessage(body.error));
 
     const result = createCompany(
-      // The composition root's ONE dependency set; this door supplies only its transaction.
-      { ...deps.formation.companyDeps, transaction: (fn) => deps.repo.transaction(fn) },
+      // The composition root's ONE dependency set; this door supplies only its transaction, an
+      // IMMEDIATE one: the mint reads (the total cap's re-check) before it writes, and a deferred
+      // transaction that reads first cannot wait for another connection's write lock.
+      { ...deps.formation.companyDeps, transaction: (fn) => deps.repo.immediateTransaction(fn) },
       tenantId,
       {
         partyId: body.data.partyId,
@@ -364,10 +372,15 @@ export function mountProtectedRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
    *
    * The response carries the partyId and nothing else — echoing the stored identity back would
    * put PII in a response body, a log, and any client that persists API responses.
+   *
+   * On a production door the names are written from the guardian's identity record: a body that
+   * carries either one is refused first, `party_name_is_written_by_novi`, as the MCP tool refuses
+   * it; then `createFormationParty` runs the World and identity gates before it reads the body.
    */
   app.post("/formation-party", async (c) => {
     const tenantId = c.get("tenantId");
     if (!deps.formation) throw new ApiError("unavailable", 503, formationUnavailableMessage());
+    const companyDeps = deps.formation.companyDeps;
 
     let body: { synthetic?: unknown };
     try {
@@ -375,14 +388,16 @@ export function mountProtectedRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     } catch {
       throw new ApiError("validation_error", 400, "invalid JSON body");
     }
+    refuseTypedPartyNames(companyDeps, body);
 
     // The synthetic shortcut carries no PII at all, so it is never parsed as a party body.
     const parsed = body.synthetic === true ? undefined : FormationPartySchema.parse(body); // ZodError -> 400
-    const result = createFormationParty(
-      { parties: deps.formation.parties, sandboxSyntheticPii: deps.formation.sandboxSyntheticPii },
-      tenantId,
-      { synthetic: body.synthetic, parsed },
-    );
+    // The composition root's one dependency set: the party store, the synthetic rule, the door's
+    // environment and its two gates.
+    const result = createFormationParty(companyDeps, tenantId, {
+      synthetic: body.synthetic,
+      parsed,
+    });
     if ("error" in result) throw new ApiError("validation_error", 400, result.error);
 
     // The ONLY trail this leaves: which tenant created which handle. No name, no address, no
@@ -408,20 +423,23 @@ export function mountProtectedRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
    * also removes the uuid the form had to ask a human to paste, which no surface in this system
    * serves back.
    *
-   * It takes the SAME body as `POST /formation-party`, parsed by the SAME `.strict()` schema, so
-   * a field the create refuses is not quietly accepted by the edit. It takes NO `ssn` — there is
-   * no field for one — and the response is the handle and nothing else, for the reason the create
-   * gives: echoing a stored identity back puts it in a response body and in every client that
-   * caches one.
+   * It takes the create's body without the names and the marketing consent, parsed by the same
+   * `.strict()` schema less those keys (`FormationPartyEditSchema`), so a field the create refuses
+   * is not quietly accepted by the edit and neither key is quietly dropped. On a production door a
+   * name is refused first, `party_name_is_written_by_novi`. It takes NO `ssn` — there is no field
+   * for one — and the response is the handle and nothing else, for the reason the create gives:
+   * echoing a stored identity back puts it in a response body and in every client that caches one.
    */
   app.patch("/companies/:companyId/party", async (c) => {
     const tenantId = c.get("tenantId");
     if (!deps.formation) throw new ApiError("unavailable", 503, formationUnavailableMessage());
 
+    const raw = await readJson(c);
+    refuseTypedPartyNames(deps.formation.companyDeps, raw);
     // ZodError -> 400, exactly as the create does. There is deliberately no `synthetic` shortcut:
     // the labeled sandbox fixture is ours, not a caller's, and re-typing it would be a caller
     // writing a fixture we generate.
-    const body = FormationPartySchema.parse(await readJson(c));
+    const body = FormationPartyEditSchema.parse(raw);
     const result = updateCompanyParty(
       { ...deps.formation.companyDeps, transaction: (fn) => deps.repo.transaction(fn) },
       tenantId,

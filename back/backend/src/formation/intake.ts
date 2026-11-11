@@ -94,14 +94,24 @@ export function normalizeCompanyName(raw: string): string {
     .toLowerCase();
 }
 
-/** A trailing limited-liability ending, after a space or a comma: LLC or L.L.C. (dots optional),
- *  or the words, with "Limited" or "Ltd." and "Company" or "Co.", in any case. */
-const LLC_ENDING = /[\s,](l\.?l\.?c\.?|(limited|ltd\.?)\s+liability\s+(company|co\.?))$/i;
+/**
+ * Every Wyoming LLC ending (W.S. 17-29-108(a)) as the last token or phrase of a name, at its start
+ * or after a space or a comma, in any case: the abbreviations LLC, L.L.C., LC and L.C., with any
+ * periods and spacing between the letters ("L. L. C."); and the phrases "limited liability
+ * company" and "limited company", with "Limited" as "Ltd." and "Company" as "Co.", with any
+ * spacing. A word that only ends in those letters ("Kalc") is not an ending.
+ */
+const LLC_ENDING =
+  /(^|[\s,])(l\.?\s*(?:l\.?\s*)?c\.?|(?:limited|ltd\.?)\s*(?:liability\s*)?(?:company|co\.?))$/i;
 
 /**
- * Whether a full legal name ends in a limited-liability ending, as the State's record of an LLC
- * does. Advice only (`company:filed-name` warns on a name without one): it never decides a match,
- * which is `normalizeCompanyName`'s, so it may admit the abbreviated spellings that one keeps.
+ * Whether a name ends in a Wyoming LLC ending (`LLC_ENDING`), as the State's record of an LLC does.
+ * Two readers, which therefore agree: advice to an operator (`company:filed-name` warns on a full
+ * legal name without one), and a refusal at the formed door (`validateIntake` refuses a name option
+ * of a legal-body company that carries one, since the filing adds the ending itself). It never
+ * decides a match, which is `normalizeCompanyName`'s, nor strips one, which is
+ * `stripEntityEnding`'s (the agent door and `withEntityEnding`), so it may admit spellings those
+ * two keep.
  */
 export function hasEntityEnding(name: string): boolean {
   return LLC_ENDING.test(name.normalize("NFC").trim());
