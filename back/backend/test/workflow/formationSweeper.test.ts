@@ -136,6 +136,16 @@ function fail(step: string, attempt: number, updatedMsAgo = 0) {
   ).run(attempt, sqliteUtcTimestamp(now - updatedMsAgo), COMPANY_KEY, step);
 }
 
+/** Record a doola event whose receipt time is pinned to the INJECTED clock, `ageMs` ago. SQLite
+ *  stamps `received_at` from the real wall clock, and the grace is measured against `now`. */
+function recordEventAged(eventId: string, ageMs: number, providerRef: string | null = COMPANY_ID) {
+  events.record({ eventId, eventName: "company_formation_completed", providerRef, payload: "{}" });
+  db.prepare("UPDATE doola_webhook_events SET received_at = ? WHERE event_id = ?").run(
+    sqliteUtcTimestamp(now - ageMs),
+    eventId,
+  );
+}
+
 beforeEach(() => {
   now = Date.parse("2026-08-21T12:00:00Z");
   db = openDatabase(":memory:");
@@ -387,13 +397,9 @@ test("C3: an await_ein row's poll cadence GROWS instead of asking every tick for
 // ── (a) re-driving events that arrived too early ───────────────────────────────────────────
 
 test("an unmappable event is re-driven once create_provider lands the company id", async () => {
-  // The webhook beat the create's own response — a real race, not a hypothetical one.
-  events.record({
-    eventId: "evt-1",
-    eventName: "company_formation_completed",
-    providerRef: COMPANY_ID,
-    payload: "{}",
-  });
+  // The webhook beat the create's own response — a real race, not a hypothetical one. A minute
+  // old, so it is inside the grace by the injected clock rather than by the wall clock's lead.
+  recordEventAged("evt-1", 60_000);
   doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
 
   await sweeper().tick();
@@ -407,16 +413,6 @@ test("an unmappable event is re-driven once create_provider lands the company id
 });
 
 // ── (a') events no company here owns: kept for the race, retired after the grace ──────────
-
-/** Record a doola event whose receipt time is pinned to the INJECTED clock, `ageMs` ago. SQLite
- *  stamps `received_at` from the real wall clock, and the grace is measured against `now`. */
-function recordEventAged(eventId: string, ageMs: number, providerRef: string | null = COMPANY_ID) {
-  events.record({ eventId, eventName: "company_formation_completed", providerRef, payload: "{}" });
-  db.prepare("UPDATE doola_webhook_events SET received_at = ? WHERE event_id = ?").run(
-    sqliteUtcTimestamp(now - ageMs),
-    eventId,
-  );
-}
 
 /** One tick, and the ops lines it wrote, parsed. */
 async function tickLines(s: FormationSweeper): Promise<Array<Record<string, unknown>>> {

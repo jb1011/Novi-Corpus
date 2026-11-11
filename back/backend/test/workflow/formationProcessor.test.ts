@@ -26,6 +26,7 @@ import { SqliteDocumentIndexRepository } from "../../src/persistence/documentInd
 import { SqliteDoolaEventRepository } from "../../src/persistence/doolaEventRepository";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { sqliteUtcTimestamp } from "../../src/util/sqliteTime";
 import { TaskTracker } from "../../src/util/taskTracker";
 import {
   type FormationEventDeps,
@@ -105,6 +106,19 @@ const wake = (over: Partial<DoolaWakeUp> = {}): DoolaWakeUp => ({
   providerRef: COMPANY_ID,
   ...over,
 });
+
+/**
+ * Pin an event's `received_at` to the INJECTED clock. SQLite stamps it from the real wall clock,
+ * and an unmapped event is kept only inside `UNMAPPED_EVENT_GRACE_MS` of it measured against
+ * `NOW`, so a test that expects one kept must say how old it is rather than inherit the gap
+ * between today and `NOW`.
+ */
+function pinReceivedAt(eventId: string, at: number): void {
+  db.prepare("UPDATE doola_webhook_events SET received_at = ? WHERE event_id = ?").run(
+    sqliteUtcTimestamp(at),
+    eventId,
+  );
+}
 
 beforeEach(() => {
   db = openDatabase(":memory:");
@@ -536,6 +550,8 @@ test("an event whose company id maps to nothing stays UNPROCESSED for the sweepe
     providerRef: "cmp-unknown",
     payload: "{}",
   });
+  // A minute old: inside the grace, where the create/webhook race is still possible.
+  pinReceivedAt("evt-1", NOW - 60_000);
   await processDoolaEvent(deps(), wake({ providerRef: "cmp-unknown" }));
   expect(events.find("evt-1")?.processedAt).toBeNull();
   expect(doola.calls).toHaveLength(0);
@@ -548,6 +564,8 @@ test("an event with NO company id stays unprocessed too", async () => {
     providerRef: null,
     payload: "{}",
   });
+  // A minute old: inside the grace, the operator's window to see the warning.
+  pinReceivedAt("evt-1", NOW - 60_000);
   await processDoolaEvent(deps(), wake({ providerRef: null, eventName: "company_ein_issued" }));
   expect(events.find("evt-1")?.processedAt).toBeNull();
 });
