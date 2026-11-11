@@ -114,3 +114,11 @@ describe("SqliteEntityRepository.transaction takes the write lock at BEGIN", () 
     expect(probes()).toEqual([1, 3, 4, 5]);
   });
 });
+
+describe("openDatabase's busy timeout", () => {
+  test("is set explicitly to 5000 ms, the wait the IMMEDIATE transactions rely on", () => {
+    const db = openDatabase(":memory:");
+    expect(db.pragma("busy_timeout", { simple: true })).toBe(5000);
+    db.close();
+  });
+});
