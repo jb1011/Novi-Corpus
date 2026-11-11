@@ -1,5 +1,6 @@
 import type { Context, Hono } from "hono";
 import type { AuthVars } from "../../auth/middleware";
+import { verifySession } from "../../auth/session";
 import type { SignedStatementJson } from "../../legalBody/publicStatement";
 import type { Standing } from "../../legalBody/standing";
 import {
@@ -9,7 +10,14 @@ import {
 } from "../../legalBody/statements";
 import { type TreasuryBlock, treasuryOfStatement } from "../../legalBody/treasury";
 import { opsLog } from "../../observability/opsLog";
+import {
+  type StatementRead,
+  type StatementReadCaller,
+  callerDayHash,
+  utcDay,
+} from "../../persistence/statementReadRepository";
 import type { ApiDeps } from "../app";
+import { TokenBucket } from "./agentBook";
 import {
   AnswerMemo,
   FRESH_CACHE_CONTROL,
@@ -19,6 +27,7 @@ import {
   RATE_LIMITED_BODY,
   THROTTLE_LOG_WINDOW_MS,
   UNAVAILABLE_BODY,
+  clientKeyOf,
   createClientLimiter,
   errorNameOf,
 } from "./legalBodies";
@@ -42,11 +51,130 @@ import {
  * On production a body answer also carries `guardianIdentityVerified`, beside the statement and
  * outside it: the signed statement is untouched (statement v3 signs the fact).
  *
+ * EVERY ANSWER THAT IS A BODY'S SIGNED STATEMENT IS A READ (the funnel's last stage), the memo's
+ * replays included, recorded in `statement_reads` where FUNNEL_SALT is set (`deps.statementReads`)
+ * and nowhere else: once per body, UTC day, caller kind and caller. The caller is the per-client
+ * limiter's key, kept only as sha256 of the key, the day and the salt. It is `owner` when the
+ * request carries a valid session of the body's own tenant, else `anonymous`. The route stays
+ * public: a bearer is read when present, never required, and one that is missing, malformed,
+ * expired or signed with another secret is no session, so the caller reads as anonymous and
+ * nothing else changes. The record changes nothing in the answer, for any caller, and a record
+ * that fails is an ops line naming the error, never the answer's failure.
+ *
+ * THE ROW IS WRITTEN AFTER THE ANSWER IS HANDED BACK (`setImmediate`), so a busy database never
+ * delays a public read; the caller kind and the hash are decided before, while the request is in
+ * hand. A memo replay takes no token, so the writes are bounded on their own:
+ *  - a repeat of a recent (body, day, kind, caller) is skipped before the database and the budget
+ *    (the last 4096 keys, least recently seen evicted first);
+ *  - every other write takes one token from the route's own budget, 600 at once and 1 a second
+ *    for all callers together, so a caller who changes its key on every request (a new last
+ *    X-Forwarded-For entry) cannot write without bound, while a burst of real readers (a page
+ *    shared to an audience) is counted. A write the budget refuses is dropped and counted; the
+ *    answer is the same either way.
+ * A failed write and a dropped one each have one ops line per minute at most, counting how many
+ * since the last: `legal_body_statement_read_failed` (with the error's name) and
+ * `legal_body_statement_read_dropped`. Neither names a caller. A count held back is printed when
+ * its minute ends, with no further event needed (`StatementReadLines`), and at the API's shutdown.
+ *
  * Every body answer carries `treasury` after the statement, outside it and unsigned, on both
  * environments: the treasury of record its guardian declared (`legalBody/treasury.ts`), only while
  * its address is the agent's wallet the statement signs (Ruling 3) and that statement is in force
  * (`active` or `pending`); null otherwise, and null on the unsigned `unknown`.
  */
+
+/** The read rows the route may write, for all callers together: 600 at once, then 1 a second. */
+const READ_ROW_BURST = 600;
+const READ_ROW_REFILL_PER_SECOND = 1;
+/** How many recent read keys are remembered, so a repeat never reaches the database. */
+const RECENT_READ_KEYS = 4096;
+
+/** A bounded set of keys, the least recently seen evicted first. */
+class RecentKeys {
+  private readonly keys = new Set<string>();
+
+  constructor(private readonly max: number) {}
+
+  /** Whether `key` was seen; a key seen again becomes the most recent. */
+  has(key: string): boolean {
+    if (!this.keys.has(key)) return false;
+    this.keys.delete(key);
+    this.keys.add(key);
+    return true;
+  }
+
+  add(key: string): void {
+    this.keys.delete(key);
+    this.keys.add(key);
+    while (this.keys.size > this.max) {
+      const oldest = this.keys.values().next().value;
+      if (oldest === undefined) break;
+      this.keys.delete(oldest);
+    }
+  }
+}
+
+/**
+ * At most one `event` ops line per window, carrying how many happened since the last line, the
+ * held ones with the fields of the last of them. A count held back is printed when its window
+ * closes, by a timer that never keeps the process alive, or at once by `flush`: never left waiting
+ * for a next event that may not come.
+ */
+function windowedLine(event: string, now: () => number) {
+  let loggedAt: number | undefined;
+  let count = 0;
+  let held: Record<string, unknown> = {};
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const print = (fields: Record<string, unknown>): void => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    loggedAt = now();
+    opsLog(event, { ...fields, count });
+    count = 0;
+  };
+  const note = (fields: Record<string, unknown> = {}): void => {
+    count += 1;
+    const at = now();
+    if (loggedAt === undefined || at - loggedAt >= THROTTLE_LOG_WINDOW_MS) {
+      print(fields);
+      return;
+    }
+    held = fields;
+    if (timer !== undefined) return;
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+        if (count > 0) print(held);
+      },
+      loggedAt + THROTTLE_LOG_WINDOW_MS - at,
+    );
+    timer.unref?.();
+  };
+  const flush = (): void => {
+    if (count > 0) print(held);
+  };
+  return { note, flush };
+}
+
+/**
+ * The route's two once-a-minute lines, a failed read write and a dropped one. The composition root
+ * builds them and hands the same object to the API's shutdown, which flushes what they hold before
+ * the process exits; a route given none makes its own.
+ */
+export class StatementReadLines {
+  readonly failed;
+  readonly dropped;
+
+  constructor(now: () => number = Date.now) {
+    this.failed = windowedLine("legal_body_statement_read_failed", now);
+    this.dropped = windowedLine("legal_body_statement_read_dropped", now);
+  }
+
+  /** Prints every count held back, now. */
+  flush(): void {
+    this.failed.flush();
+    this.dropped.flush();
+  }
+}
 
 /** The three answers. The agent id is the canonical decimal the caller supplied. */
 export type ByAgentAnswer =
@@ -84,6 +212,30 @@ export type ByAgentAnswer =
       treasury?: TreasuryBlock | null;
     };
 
+/** What the memo keeps for an agent: the answer, and the legal body it states when it states one,
+ *  so that a replay is recorded as a read like the answer it replays. */
+interface Memoised {
+  answer: ByAgentAnswer;
+  legalBodyId: string | null;
+}
+
+/**
+ * The tenant of the request's session, when it carries a valid one: read, never required. The
+ * header is parsed as `requireAuth` parses it. A missing, malformed, expired or foreign bearer is
+ * no session at all, and fails nothing.
+ */
+async function sessionTenantOf(c: Context, secret: string): Promise<string | undefined> {
+  const header = c.req.header("authorization");
+  if (header === undefined) return undefined;
+  const [scheme, token] = header.split(" ");
+  if (scheme !== "Bearer" || !token) return undefined;
+  try {
+    return (await verifySession(token, secret)).tenantId;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Mounts nothing without `deps.legalBodyStatements`: the route is then a 404. */
 export function mountLegalBodyStatementRoutes(
   app: Hono<{ Variables: AuthVars }>,
@@ -93,7 +245,57 @@ export function mountLegalBodyStatementRoutes(
   if (!st) return;
   const now = () => (deps.now ?? Date.now)();
   /** Keyed by the canonical agent id. */
-  const memo = new AnswerMemo<ByAgentAnswer>(MEMO_TTL_MS, MEMO_MAX_ENTRIES, now);
+  const memo = new AnswerMemo<Memoised>(MEMO_TTL_MS, MEMO_MAX_ENTRIES, now);
+  const reads = deps.statementReads;
+  const readBudget = new TokenBucket(READ_ROW_BURST, READ_ROW_REFILL_PER_SECOND);
+  const recentReads = new RecentKeys(RECENT_READ_KEYS);
+  const lines = reads?.lines ?? new StatementReadLines(now);
+
+  /** Writes one read row, after the answer: a recent repeat is skipped, then the budget decides.
+   *  Never throws. */
+  const writeRead = (read: StatementRead): void => {
+    if (reads === undefined) return;
+    const key = `${read.legalBodyId}|${read.day}|${read.callerKind}|${read.callerDayHash}`;
+    if (recentReads.has(key)) return;
+    if (!readBudget.take()) {
+      lines.dropped.note();
+      return;
+    }
+    try {
+      reads.repo.record(read);
+      recentReads.add(key);
+    } catch (e) {
+      lines.failed.note({ errorName: errorNameOf(e) });
+    }
+  };
+
+  /** Decides the read of the body's statement where FUNNEL_SALT is set (the caller kind and the
+   *  caller's hash, while the request is in hand) and defers its write past the answer. Never
+   *  throws: the answer is served whatever happens here. */
+  const recordRead = async (c: Context, legalBodyId: string): Promise<void> => {
+    if (reads === undefined) return;
+    let read: StatementRead;
+    try {
+      const at = now();
+      const day = utcDay(at);
+      const tenant = await sessionTenantOf(c, deps.jwtSecret);
+      const callerKind: StatementReadCaller =
+        tenant !== undefined && st.repo.findOwned(tenant, legalBodyId) !== undefined
+          ? "owner"
+          : "anonymous";
+      read = {
+        legalBodyId,
+        day,
+        callerKind,
+        callerDayHash: callerDayHash(clientKeyOf(c), day, reads.salt),
+        firstReadAt: at,
+      };
+    } catch (e) {
+      lines.failed.note({ errorName: errorNameOf(e) });
+      return;
+    }
+    setImmediate(() => writeRead(read));
+  };
   const clientBucket = createClientLimiter(deps);
   /** When the last throttle line was written, so a sustained drain costs one line per minute. */
   let throttleLoggedAt: number | undefined;
@@ -126,9 +328,11 @@ export function mountLegalBodyStatementRoutes(
 
     const hit = memo.get(agentId);
     if (hit !== undefined) {
-      // Definitive by construction: replayed as checked, with no token and no read.
+      // Definitive by construction: replayed as checked, with no token and no chain read. A
+      // replayed statement is a read of it all the same.
+      if (hit.legalBodyId !== null) await recordRead(c, hit.legalBodyId);
       c.header("Cache-Control", FRESH_CACHE_CONTROL);
-      return c.json(hit);
+      return c.json(hit.answer);
     }
     // The caller's own allowance first, so a scanner runs itself out before the shared one.
     if (!clientBucket(c).take()) return throttled(c, "client");
@@ -188,7 +392,9 @@ export function mountLegalBodyStatementRoutes(
             statement: outcome.statement,
             treasury,
           };
-    memo.set(agentId, answer);
+    const legalBodyId = outcome.kind === "statement" ? outcome.legalBodyId : null;
+    memo.set(agentId, { answer, legalBodyId });
+    if (legalBodyId !== null) await recordRead(c, legalBodyId);
     c.header("Cache-Control", FRESH_CACHE_CONTROL);
     return c.json(answer);
   });

@@ -49,6 +49,7 @@ import {
   LINK_HEAD,
   type LegalBodyStores,
   TransportFailure,
+  adoptFor,
   answerOf,
   asChainPort,
   call,
@@ -184,7 +185,7 @@ function rowIn(w: World, id: string): LegalBodyRecord {
 
 let filings = 0;
 /** A draft of `who` for a checked company of its own, placed through the order door, as the
- *  browser places one. */
+ *  browser places one, its agreement adopted by its guardian, as every link requires. */
 async function ordered(w: World, who = guardian): Promise<LegalBodyRecord> {
   const companyId = customerCompany(w.s, who.address, {
     filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
@@ -193,6 +194,7 @@ async function ordered(w: World, who = guardian): Promise<LegalBodyRecord> {
     await call(w.app, "POST", "/legal-body-orders", await sessionOf(who), { companyId }),
   );
   expect(res.status).toBe(201);
+  adoptFor(w.s, rowIn(w, res.body.id));
   return rowIn(w, res.body.id);
 }
 
@@ -379,6 +381,7 @@ describe("each tool answers what its door answers for the same input", () => {
       orderViewOf(
         {
           repo: reserved.tool.s.repo,
+          adoptions: reserved.tool.s.adoptions,
           declarations: reserved.tool.s.declarations,
           companies: reserved.tool.s.companies,
         },

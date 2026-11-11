@@ -60,6 +60,7 @@ import {
   OTHER_FACTORY,
   REGISTRY,
   TransportFailure,
+  adoptFor,
   appendCheck,
   asChainPort,
   customerCompany,
@@ -117,7 +118,8 @@ function rowOf(id: string): LegalBodyRecord {
   return row;
 }
 
-/** A draft of `who`, placed through the order door for a company of its own. */
+/** A draft of `who`, placed through the order door for a company of its own, its agreement
+ *  adopted by its guardian, as every link requires. */
 function draft(who: Address = tenant): LegalBodyRecord {
   const companyId = customerCompany(s, who, {
     filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
@@ -125,6 +127,7 @@ function draft(who: Address = tenant): LegalBodyRecord {
   const view = createOrder(deps({ maxOpenPerTenant: 50, maxOrdersPerTenantPerDay: 50 }), who, {
     companyId,
   });
+  adoptFor(s, rowOf(view.id));
   return rowOf(view.id);
 }
 
@@ -255,7 +258,8 @@ function predictedBody(link: LegalBodyLink): Address {
   );
 }
 
-/** A draft whose agreement was built on `text`, stored and frozen, as an order made under it. */
+/** A draft whose agreement was built on `text`, stored, frozen and adopted, as an order made under
+ *  it. */
 function draftOnText(text: LegalText<AgreementFields>): LegalBodyRecord {
   const companyId = customerCompany(s, tenant, {
     filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
@@ -285,6 +289,7 @@ function draftOnText(text: LegalText<AgreementFields>): LegalBodyRecord {
   expect(
     s.repo.freezeAgreement(created.legalBodyId, { hash: built.manifestHash, version: 1 }),
   ).toBe(true);
+  adoptFor(s, created);
   return rowOf(created.legalBodyId);
 }
 

@@ -62,6 +62,7 @@ import {
   type LegalBodyStores,
   REGISTRY,
   TransportFailure,
+  adoptFor,
   answerOf,
   asChainPort,
   call,
@@ -154,7 +155,8 @@ function rowOf(id: string): LegalBodyRecord {
   return row;
 }
 
-/** A draft of `who`, placed through the order door for a company of its own. */
+/** A draft of `who`, placed through the order door for a company of its own, its agreement
+ *  adopted by its guardian, as every link requires. */
 function draft(who: Address = tenant): LegalBodyRecord {
   const companyId = customerCompany(s, who, {
     filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
@@ -162,6 +164,7 @@ function draft(who: Address = tenant): LegalBodyRecord {
   const view = createOrder(deps({ maxOpenPerTenant: 50, maxOrdersPerTenantPerDay: 50 }), who, {
     companyId,
   });
+  adoptFor(s, rowOf(view.id));
   return rowOf(view.id);
 }
 

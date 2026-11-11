@@ -11,6 +11,7 @@ import type { CompanyDeclarationRepository } from "../persistence/companyDeclara
 import type { CompanyRepository } from "../persistence/companyRepository";
 import type { DocumentStore } from "../persistence/documentStore";
 import type { FormationRequestRecord } from "../persistence/formationRepository";
+import type { LegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
 import type {
   BindingState,
   BrokenReason,
@@ -49,6 +50,8 @@ import { LEGAL_BODY_OPERATING_AGREEMENT } from "./texts/operatingAgreement";
 
 export interface LegalBodyOrderDeps {
   repo: LegalBodyRepository & LegalBodyReasonReads;
+  /** The guardians' adoptions of their orders' agreements: the link doors require one. */
+  adoptions: LegalBodyAdoptionRepository;
   companies: CompanyRepository;
   declarations: CompanyDeclarationRepository;
   checks: CompanyCheckRepository;
@@ -73,6 +76,8 @@ export interface LegalBodyOrderDeps {
   maxOrdersPerTenantPerDay: number;
   maxCreatesPerTenantPerDay: number;
   maxCreatesPerDay: number;
+  /** Seconds: how long after it was issued a signed adoption is still accepted. */
+  adoptionMaxAgeSeconds: number;
   /** The legal-body doors' own budget, shared with nothing else. */
   doorBudget: { take(): boolean };
   tenantBucket: (tenantId: string) => { take(): boolean };
@@ -148,19 +153,24 @@ export interface OrderViewFacts {
    *  company Novi formed, the filed name its row holds. Null when there is none (no declaration, or
    *  no filed name written yet). */
   companyName: string | null;
+  /** When the guardian adopted the order's agreement, in unix seconds; null until then. The link
+   *  doors require it. */
+  adoptedAt: number | null;
 }
 
 /**
  * The facts of `row`, read by state: the lapse only for `lapsed`, the latest break for `broken`
  * and `superseded` (a superseded body that never broke has no break to read), the superseding
- * order only for `superseded`; the revocation and the declaration always, and the company only
- * when there is no declaration (only a customer's own company has one). So at most three reads of
- * the event log, one of the declarations and one of the companies per row, and a declared
- * company's row reads no company at all, which keeps a tenant's list cheap.
+ * order only for `superseded`; the revocation, the declaration and the adoption always, and the
+ * company only when there is no declaration (only a customer's own company has one). So at most
+ * three reads of the event log, one of the declarations, one of the adoptions and one of the
+ * companies per row, and a declared company's row reads no company at all, which keeps a tenant's
+ * list cheap.
  */
 export function orderViewFacts(
   deps: {
     repo: LegalBodyRepository & LegalBodyReasonReads;
+    adoptions: LegalBodyAdoptionRepository;
     declarations: CompanyDeclarationRepository;
     companies: CompanyRepository;
   },
@@ -179,6 +189,7 @@ export function orderViewFacts(
     supersededBy: state === "superseded" ? deps.repo.supersededBy(id) : null,
     replacedBy: lastBreak?.reason === "replaced" ? lastBreak.by : null,
     companyName: companyNameOf(deps, row.companyId),
+    adoptedAt: deps.adoptions.find(id)?.adoptedAt ?? null,
   };
 }
 
@@ -255,6 +266,7 @@ export function toOrderView(row: LegalBodyRecord, facts: OrderViewFacts): LegalB
     supersededBy: facts.supersededBy,
     replacedBy: facts.replacedBy,
     companyName: facts.companyName,
+    adoptedAt: facts.adoptedAt,
   };
 }
 

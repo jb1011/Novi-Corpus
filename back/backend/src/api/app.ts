@@ -122,6 +122,24 @@ export interface ApiDeps extends EntityViewDeps {
   legalBodyTreasury?: LegalBodyTreasuryDeps;
   webOrigin: string;
   nonceStore: import("../auth/nonceStore").NonceStore;
+  /**
+   * The funnel's "signed in" stage: `POST /auth/verify` records an account's first sign-in here.
+   * Wired on every box with a database; absent (a test app), a sign-in records nothing.
+   */
+  tenantFirstSeen?: import("../persistence/tenantFirstSeenRepository").TenantFirstSeenRepository;
+  /**
+   * The funnel's "statement reads" stage: the by-agent route records each read of a body's
+   * statement here, its caller kept only as a hash salted with `salt` (FUNNEL_SALT). Present only
+   * where FUNNEL_SALT is set: without the salt no read is recorded at all.
+   */
+  statementReads?: {
+    repo: import("../persistence/statementReadRepository").StatementReadRepository;
+    salt: string;
+    /** The route's once-a-minute lines (a failed write, a dropped one). The composition root
+     *  hands the same object to the shutdown, which prints any count they still hold; absent, the
+     *  route makes its own. */
+    lines?: import("./routes/legalBodyStatements").StatementReadLines;
+  };
   siweDomain: string;
   chainId: number;
   /**

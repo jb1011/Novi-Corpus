@@ -27,6 +27,7 @@ const SRC = join(import.meta.dirname, "..", "..", "src");
  *  check, the doors' route file and the MCP server, whose tools answer the same codes. */
 const ANSWERING_MODULES = [
   "legalBody/orders.ts",
+  "legalBody/adoption.ts",
   "legalBody/linkDoor.ts",
   "legalBody/create.ts",
   "legalBody/resolver.ts",
@@ -72,6 +73,9 @@ const NAMED_CODES = [
   "order_lapsed",
   "link_already_used",
   "agreement_outdated",
+  "agreement_not_adopted",
+  "adoption_stale",
+  "adoption_not_valid",
   "agreement_unreadable",
   "other_deployment",
   "chain_unavailable",
