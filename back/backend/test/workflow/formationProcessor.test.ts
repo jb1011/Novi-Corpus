@@ -922,9 +922,12 @@ test("a legal-body company's name healed after the confirmation takes the same f
 test("a reported name that matches no candidate writes no name, whatever the company is for", async () => {
   seedCompanyFiling("legal_body");
   filedAs("Formation Agent Holdings");
-  await advanceFormation(deps(), COMPANY_KEY);
+  const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
   expect(stateOf("await_filing")).toBe("confirmed");
   expect(company()?.legalNameFiled).toBeNull();
+  // A name that is there and matches nothing is the unmatched warning, not the missing one.
+  expect(lines.filter((l) => l.opslog === "formation_filed_name_unmatched")).toHaveLength(1);
+  expect(lines.filter((l) => l.opslog === "formation_filed_name_missing")).toEqual([]);
 });
 
 test("a legal-body company's held name is never rewritten by a later poll: an operator's correction from the State's record stands", async () => {
@@ -974,6 +977,193 @@ test("an agent company's held name is left as it is: no name is read for it", as
   await advanceFormation(deps(), COMPANY_KEY);
   expect(company()?.legalNameFiled).toBe("Formation Agent");
   expect(doola.calls.filter((c) => c.startsWith("listCompanies"))).toEqual([]);
+});
+
+// ── where the filed name is read: doola's list, for a filed legal-body company holding none ─────
+
+/** What `formation_filed_name_missing` says, whatever its reason. */
+const FILED_NAME_MISSING =
+  "the company is filed and doola reports no name for it: legal_name_filed stays NULL and the company cannot be ordered until a name is found or an operator runs company:filed-name";
+
+const listCalls = () => doola.calls.filter((c) => c.startsWith("listCompanies"));
+
+test("the name is read from the list at the confirmation, under the customer doola's full answer names", async () => {
+  seedCompanyFiling("legal_body");
+  filedAs("Formation Agent LLC");
+  const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()).toMatchObject({
+    legalNameFiled: "Formation Agent LLC",
+    filingNumber: "2026-001234567",
+    filedAt: filingDateToUnix("2026-08-19"),
+  });
+  expect(listCalls()).toEqual([`listCompanies:${CUSTOMER_ID}`]);
+  expect(lines.filter((l) => l.opslog === "formation_filed_name_missing")).toEqual([]);
+});
+
+test("with no customer on doola's answer, the list is read under the customer the create recorded", async () => {
+  seedCompanyFiling("legal_body");
+  requests.transition(COMPANY_KEY, "create_provider", "confirmed", "confirmed", {
+    detail: JSON.stringify({ companyId: COMPANY_ID, customerId: "cus-recorded" }),
+  });
+  doola.state.company = {
+    doolaCompanyId: COMPANY_ID,
+    formationFilingDate: "2026-08-19",
+    formationFilingNumber: "2026-001234567",
+  };
+  doola.state.listed = [listItem("Formation Agent", { doolaCustomerId: "cus-recorded" })];
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(listCalls()).toEqual(["listCompanies:cus-recorded"]);
+  expect(company()?.legalNameFiled).toBe("Formation Agent LLC");
+});
+
+test("the list item is chosen by doola's company id, never by name, when the customer has two companies", async () => {
+  seedCompanyFiling("legal_body");
+  filedAs(undefined);
+  // The same guardian formed another company first, and doola answered its email with the same
+  // customer. That company's name is OUR first option; ours was filed under the second.
+  doola.state.listed = [
+    listItem("Formation Agent LLC", { doolaCompanyId: "cmp-other" }),
+    listItem("Formation Agent Two LLC"),
+  ];
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBe("Formation Agent Two LLC");
+});
+
+test("a list read that throws never holds up the confirmation, and the next pass heals the name", async () => {
+  seedCompanyFiling("legal_body");
+  filedAs("Formation Agent");
+  doola.state.failNext = { listCompanies: true };
+  const before = requests.find(COMPANY_KEY, "await_filing")!;
+
+  const first = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  // Confirmed with its date and number: not parked, no attempt burned, no error recorded.
+  const row = requests.find(COMPANY_KEY, "await_filing")!;
+  expect(row).toMatchObject({ state: "confirmed", attempt: before.attempt, error: null });
+  expect(company()).toMatchObject({
+    legalNameFiled: null,
+    filingNumber: "2026-001234567",
+    filedAt: filingDateToUnix("2026-08-19"),
+  });
+  expect(first.filter((l) => l.opslog === "formation_filed_name_missing")).toEqual([
+    expect.objectContaining({
+      level: "warn",
+      companyId: COMPANY_KEY,
+      providerRef: COMPANY_ID,
+      reason: "list_failed",
+      error: "doola listCompanies is down",
+      message: FILED_NAME_MISSING,
+    }),
+  ]);
+
+  // The next poll: the list answers, and the heal stores the name, saying where it came from.
+  const second = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  expect(company()?.legalNameFiled).toBe("Formation Agent LLC");
+  expect(second.find((l) => l.opslog === "formation_filing_healed")).toMatchObject({
+    companyId: COMPANY_KEY,
+    legalNameFiled: "Formation Agent LLC",
+    nameSource: "list",
+  });
+  expect(second.filter((l) => l.opslog === "formation_filed_name_missing")).toEqual([]);
+});
+
+describe("each way the list has no name logs one formation_filed_name_missing, and the filing still confirms", () => {
+  test.each([
+    [
+      "no customer id on the answer or the create",
+      "no_customer_id",
+      () => {
+        doola.state.company = {
+          doolaCompanyId: COMPANY_ID,
+          formationFilingDate: "2026-08-19",
+          formationFilingNumber: "2026-001234567",
+        };
+      },
+    ],
+    [
+      "the list read fails",
+      "list_failed",
+      () => {
+        doola.state.failNext = { listCompanies: true };
+      },
+    ],
+    [
+      "the company is not in its customer's list",
+      "not_in_list",
+      () => {
+        doola.state.listed = [listItem("Formation Agent", { doolaCompanyId: "cmp-other" })];
+      },
+    ],
+    [
+      "its item has no name",
+      "no_name",
+      () => {
+        doola.state.listed = [listItem(undefined)];
+      },
+    ],
+    [
+      "its item's name is blank",
+      "no_name",
+      () => {
+        doola.state.listed = [listItem("   ")];
+      },
+    ],
+  ] as const)("%s: %s", async (_label, reason, setUp) => {
+    seedCompanyFiling("legal_body");
+    filedAs("Formation Agent");
+    setUp();
+    const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+    expect(stateOf("await_filing")).toBe("confirmed");
+    expect(company()).toMatchObject({ legalNameFiled: null, filingNumber: "2026-001234567" });
+    const missing = lines.filter((l) => l.opslog === "formation_filed_name_missing");
+    expect(missing).toHaveLength(1);
+    const { opslog: _event, at: _at, ...fields } = missing[0]!;
+    // Ids, a reason and the sentence: no name, no person. A failed list adds doola's description.
+    if (reason === "list_failed")
+      expect(fields).toMatchObject({ reason, error: "doola listCompanies is down" });
+    else
+      expect(fields).toEqual({
+        level: "warn",
+        companyId: COMPANY_KEY,
+        providerRef: COMPANY_ID,
+        reason,
+        message: FILED_NAME_MISSING,
+      });
+    if (reason === "no_customer_id") expect(listCalls()).toEqual([]);
+  });
+});
+
+test("no list read before the State files: the list name is only our first choice then", async () => {
+  seedCompanyFiling("legal_body");
+  doola.state.company = {
+    doolaCompanyId: COMPANY_ID,
+    doolaCustomerId: CUSTOMER_ID,
+    formationSubmissionStatus: "SUBMITTED",
+  };
+  doola.state.listed = [listItem("Formation Agent LLC")];
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(stateOf("await_filing")).toBe("pending");
+  expect(listCalls()).toEqual([]);
+  expect(company()?.legalNameFiled).toBeNull();
+});
+
+test("no list read once a name is held, and an operator's name is never rewritten", async () => {
+  seedCompanyFiling("legal_body");
+  filedAs("Formation Agent");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBe("Formation Agent LLC");
+  expect(listCalls()).toHaveLength(1);
+
+  // A later pass, then the operator's correction from the State's record, then another pass that
+  // lists the other option: the list is never read again, and the operator's name stands.
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(companies.recordFilingFacts(COMPANY_KEY, { legalNameFiled: "Formation Agent, LLC" })).toBe(
+    true,
+  );
+  filedAs("Formation Agent Two");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(listCalls()).toHaveLength(1);
+  expect(company()?.legalNameFiled).toBe("Formation Agent, LLC");
 });
 
 // ── matchFiledNameAgainst: the one rule a reported name is held to, wherever it is reported ─────

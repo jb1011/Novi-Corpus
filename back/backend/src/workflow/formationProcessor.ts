@@ -1,6 +1,7 @@
 import { type DoolaApi, describeDoolaError } from "../adapters/doola/doolaClient";
 import type {
   DoolaCompany,
+  DoolaCompanyListItem,
   DoolaDocument,
   DoolaEnvironment,
   DoolaRequiredAction,
@@ -121,7 +122,8 @@ export type PollBackoff = StepBackoff;
 
 /** `formation_requests.await_filing.detail`. NEVER PII. */
 export interface AwaitFilingDetail extends PollBackoff {
-  /** doola's intake status at the last fetch (PENDING | SUBMITTED | FAILED) — not "filed". */
+  /** doola's intake status at the last fetch (one of the six `formationSubmissionStatus` values)
+   *  — not "filed". */
   submissionStatus?: string;
   /** doola's `formationFilingDate`, verbatim (yyyy-MM-dd). The parsed unix value goes on the
    *  ENTITY; this keeps the string we parsed, so a bad parse is diagnosable. */
@@ -358,8 +360,15 @@ export async function advanceFormation(
   // treating a healthy row as a retry candidate.
   unparkAfterSuccessfulRead(d, companyId, steps);
 
+  // The name doola files the company under is on its LIST item only (design 2026-11-11 §1). Read
+  // here, before the advance, so the confirmation and the heal stay synchronous inside their
+  // transactions; it never fails, parks or delays them.
+  const reportedName = await listedFiledName(d, companyId, steps, doolaCompany, providerRef);
+
   let advanced = false;
-  advanced = advanceFiling(d, companyId, doolaCompany, requiredActions, providerRef) || advanced;
+  advanced =
+    advanceFiling(d, companyId, doolaCompany, reportedName, requiredActions, providerRef) ||
+    advanced;
   advanced = (await advanceDocuments(d, companyId, providerRef, documents)) || advanced;
   advanced = advanceEin(d, companyId, doolaCompany, providerRef) || advanced;
 
@@ -411,11 +420,90 @@ function unparkAfterSuccessfulRead(
   }
 }
 
-/** `await_filing`: the STATE has filed the company. Writes the legal facts onto the COMPANY. */
+/** What `formation_filed_name_missing` says, whatever its reason. */
+const FILED_NAME_MISSING_MESSAGE =
+  "the company is filed and doola reports no name for it: legal_name_filed stays NULL and the company cannot be ordered until a name is found or an operator runs company:filed-name";
+
+/**
+ * The name doola LISTS the company under, for a legal-body company that is filed and holds no name
+ * yet (design 2026-11-11 §1), or undefined.
+ *
+ * doola's full answer carries no name; only the list item does, so this is one extra GET, made
+ * only when all of these hold: the company is for a legal body, its row holds no filed name, and
+ * doola's answer says it is filed. Before the State files, the list name is only our first choice.
+ * Once a name is held, the call stops. The same rule covers the confirmation and the heal, so a
+ * company confirmed during a list outage still gets its name on a later poll.
+ *
+ * AGENT COMPANIES NEVER READ IT. Their filed name feeds a manifest that is anchored on chain, and
+ * a name landing now would schedule an amendment for every attached agent: that roll-out is its own
+ * decision.
+ *
+ * The item is chosen by doola's company id, never by name and never as "the only one": doola
+ * answers a known email with its existing customer, so one guardian's two companies can share a
+ * customer. The customer id is the one the full answer names, else the one the create recorded.
+ *
+ * NEVER THROWS, AND NEVER HOLDS UP THE CONFIRMATION. A failed list, a missing item or a blank
+ * name is "no name this time": one `formation_filed_name_missing` warning, and the filing still
+ * confirms with its date and number; nothing is parked, no attempt is burned and no backoff moves.
+ * The next poll asks again. What the name is then held to is `matchFiledName`'s.
+ */
+async function listedFiledName(
+  d: FormationAdvanceDeps,
+  companyId: string,
+  steps: FormationRequestRecord[],
+  doolaCompany: DoolaCompany,
+  providerRef: string,
+): Promise<string | undefined> {
+  const row = d.companies.find(companyId);
+  if (row?.purposeKind !== "legal_body" || row.legalNameFiled !== null) return undefined;
+  if (!isFormationFiled(doolaCompany)) return undefined;
+  // Nothing could store a name for a filing step that is gone or given up on.
+  const filing = steps.find((s) => s.step === "await_filing");
+  if (!filing || filing.state === "abandoned") return undefined;
+
+  const missing = (
+    reason: "no_customer_id" | "list_failed" | "not_in_list" | "no_name",
+    extra: Record<string, unknown> = {},
+  ): undefined => {
+    opsLog("formation_filed_name_missing", {
+      level: "warn",
+      companyId,
+      providerRef,
+      reason,
+      ...extra,
+      message: FILED_NAME_MISSING_MESSAGE,
+    });
+    return undefined;
+  };
+
+  const created = steps.find((s) => s.step === "create_provider");
+  const customerId =
+    doolaCompany.doolaCustomerId?.trim() ||
+    parseDetail<{ customerId?: string }>(created?.detail ?? null).customerId?.trim();
+  if (!customerId) return missing("no_customer_id");
+
+  let items: DoolaCompanyListItem[];
+  try {
+    items = await d.doola.listCompanies(customerId);
+  } catch (e) {
+    // doola's own description, under `error`: `message` is this line's sentence.
+    const { message: error, ...described } = describeDoolaError(e);
+    return missing("list_failed", { ...described, error });
+  }
+  const item = items.find((i) => i.doolaCompanyId === providerRef);
+  if (!item) return missing("not_in_list");
+  const name = item.name?.trim();
+  if (!name) return missing("no_name");
+  return name;
+}
+
+/** `await_filing`: the STATE has filed the company. Writes the legal facts onto the COMPANY.
+ *  `reportedName` is the name doola lists the company under, when it was read. */
 function advanceFiling(
   d: FormationAdvanceDeps,
   companyId: string,
   company: DoolaCompany,
+  reportedName: string | undefined,
   requiredActions: DoolaRequiredAction[] | undefined,
   providerRef: string,
 ): boolean {
@@ -461,7 +549,7 @@ function advanceFiling(
   if (row.state === "confirmed") {
     let healed = false;
     d.repo.transaction(() => {
-      healed = healFilingFacts(d, companyId, company);
+      healed = healFilingFacts(d, companyId, company, reportedName);
       d.requests.transition(companyId, "await_filing", "confirmed", "confirmed", {
         detail: JSON.stringify(next),
         touchFacts: healed,
@@ -491,7 +579,7 @@ function advanceFiling(
     d.companies.recordFilingFacts(companyId, {
       filedAt,
       filingNumber: company.formationFilingNumber ?? null,
-      legalNameFiled: matchFiledName(d, companyId, company),
+      legalNameFiled: matchFiledName(d, companyId, reportedName),
     });
     recordCompanyEvent(
       d.repo,
@@ -533,6 +621,11 @@ export function matchFiledNameAgainst(
 /**
  * Which of OUR name candidates the state actually accepted (design §5).
  *
+ * `reportedName` is the name doola lists the company under (`listedFiledName`): doola's full
+ * answer carries none, so nothing else can supply it, and it is read for legal-body companies
+ * only. An agent company is therefore never given one today; the agent rules below stay for the
+ * day that roll-out is decided.
+ *
  * doola reports the accepted name as free text, and free text is exactly what must never reach
  * `legal_name_filed`: the manifest hashes that field onto a public chain, so what is stored is
  * ALWAYS our own candidate string — the one whose normalized form matches. No match means no
@@ -554,11 +647,9 @@ export function matchFiledNameAgainst(
 function matchFiledName(
   d: FormationAdvanceDeps,
   companyId: string,
-  company: DoolaCompany,
+  reportedName: string | undefined,
 ): string | null {
-  // BRIDGE, until the name is read from the list: the full answer has no `name` (its type says
-  // so), and this widened read is the old behaviour, kept so the type split changes nothing.
-  const reported = (company as DoolaCompany & { name?: string }).name?.trim();
+  const reported = reportedName?.trim();
   if (!reported) return null;
   const row = d.companies.find(companyId);
   if (row?.purposeKind === "legal_body" && row.legalNameFiled !== null) return null;
@@ -600,12 +691,14 @@ function healFilingFacts(
   d: FormationAdvanceDeps,
   companyId: string,
   company: DoolaCompany,
+  reportedName: string | undefined,
 ): boolean {
   const number = company.formationFilingNumber?.trim() || null;
   const filedAt = filingDateToUnix(company.formationFilingDate);
   // The FILED NAME heals too, and for the same reason: doola may report a name only after the
-  // state assigns one, and `legal.companyName` cannot bootstrap itself from a manifest.
-  const name = matchFiledName(d, companyId, company);
+  // state assigns one, and `legal.companyName` cannot bootstrap itself from a manifest. It comes
+  // from the list (`listedFiledName`), so a confirmation during a list outage is healed here.
+  const name = matchFiledName(d, companyId, reportedName);
   if (number === null && filedAt === null && name === null) return false;
   // The repository refuses to downgrade and reports whether anything actually moved, so "did we
   // learn something?" is one statement rather than a read, three comparisons and a write.
@@ -623,6 +716,8 @@ function healFilingFacts(
     filingNumber: number ?? undefined,
     filedAt: filedAt ?? undefined,
     legalNameFiled: name ?? undefined,
+    // The only source of a name since 2026-11-11: doola's list item.
+    ...(name !== null ? { nameSource: "list" } : {}),
     message: "a confirmed filing gained facts doola had not reported when the step confirmed",
   });
   return true;
