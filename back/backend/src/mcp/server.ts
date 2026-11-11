@@ -27,6 +27,7 @@ import {
   typedPartyNamesRefused,
   updateCompanyParty,
 } from "../formation/company";
+import { PURPOSE_MAX_LENGTH } from "../formation/intake";
 import { describeIndustryLabels } from "../formation/naicsLabels";
 import { FORMATION_PRODUCT, guardianOf, paymentView } from "../formation/payment";
 import { deriveFormationStatus, hasLivePayment } from "../formation/status";
@@ -243,7 +244,7 @@ const CREATE_COMPANY_DESCRIPTION =
   " %CAPABILITY%" +
   " partyId is the handle from create_formation_party — the natural person legally answerable for the filing." +
   " names is THREE candidates in order of preference: Wyoming refuses a name that is already taken, and the alternates are what let the filing proceed without a second fee." +
-  " businessPurpose is a short description of what the COMPANY does, filed with it." +
+  " businessPurpose is a short description of what the COMPANY does, filed with it: at most %PURPOSE_MAX% characters, the filing agent's own limit." +
   " industryLabel must be one of the industries we can file under (%INDUSTRIES%)." +
   " This call SPENDS: it is subject to your tenant's formation quota and the platform's daily ceiling." +
   " %PAYMENT%" +
@@ -252,9 +253,12 @@ const CREATE_COMPANY_DESCRIPTION =
   " Agents attached to an existing company are free: pass its companyId to onboard_agent instead of creating a second one.";
 
 function createCompanyDescription(deps: Pick<McpToolDeps, "formation">): string {
+  // `%PURPOSE_MAX%` is the intake's own bound, never a second copy of the number: it is doola's
+  // `description` limit, and this sentence is an agent's only way to learn it before a refusal.
   return CREATE_COMPANY_DESCRIPTION.replace("%CAPABILITY%", formationCapabilityNote(deps))
     .replace("%PAYMENT%", formationPaymentNote(deps))
-    .replace("%INDUSTRIES%", describeIndustryLabels());
+    .replace("%INDUSTRIES%", describeIndustryLabels())
+    .replace("%PURPOSE_MAX%", String(PURPOSE_MAX_LENGTH));
 }
 
 /**
@@ -1190,7 +1194,10 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
           partyId: z.string(),
           /** THREE ranked candidates (§5). */
           names: z.array(z.string()).length(3),
-          /** The COMPANY's own purpose — the agent's description is no longer doola-visible. */
+          /** The COMPANY's own purpose — the agent's description is no longer doola-visible.
+           *  No `.max()` here: the length rule (`PURPOSE_MAX_LENGTH`, stated in the description
+           *  above) is `createCompany`'s, so this door refuses a long one in the REST door's
+           *  own sentence rather than in a schema's. */
           businessPurpose: z.string(),
           /** One of the shipped NAICS labels. */
           industryLabel: z.string(),

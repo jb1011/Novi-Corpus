@@ -15,6 +15,8 @@ import { NAICS_LABELS } from "../../formation/naicsLabels";
  * hard-coded. The four rules beside it were hard-coded anyway: the interface carried its own
  * `NAME_OPTION_COUNT = 3`, `NAME_MAX_LENGTH = 120`, `PURPOSE_MAX_LENGTH = 500` and a re-typed
  * character class, each with a `/** Mirrors … *\/` comment naming the constant it mirrored.
+ * (`PURPOSE_MAX_LENGTH` is now 50, doola's documented `description` limit, which is the case for
+ * serving it: a mirror would have kept promising 500.)
  *
  * A mirror is a second copy with a promise attached. The day one moves, the form either refuses a
  * name the door would take — an annoyance — or PROMISES one the door refuses, after the founder

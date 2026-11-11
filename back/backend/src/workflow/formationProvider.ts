@@ -792,6 +792,13 @@ function buildCompanyInput(
     // The company's OWN intake, not the agent's description: the purpose describes the legal
     // body, and from A2 it is a required field on the create form.
     industry: d.company.industryLabel || DEFAULT_INDUSTRY,
+    // Sent as stored, NEVER shortened here. doola takes at most `DOOLA_DESCRIPTION_MAX_LENGTH`
+    // (50) characters and every door now refuses a longer purpose, but a company stored before
+    // that limit (or by the migration, from an agent's description) can still hold one. Cutting
+    // it at send time would file a legal description nobody wrote or read. So the long purpose
+    // goes out, doola refuses it (`E_VALIDATION_FAILED`, the field named `description`), the
+    // filing parks under `awaitingIntakeEdit`, and the owner's edit, held to the same 50
+    // characters, re-arms exactly one retry.
     description: d.company.businessPurpose || DEFAULT_DESCRIPTION,
     responsibleParty: {
       legalFirstName: party.legalFirstName,

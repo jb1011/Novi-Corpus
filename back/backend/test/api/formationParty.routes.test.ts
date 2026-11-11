@@ -19,6 +19,7 @@ import { ApiError } from "../../src/api/errors";
 import type { WorldIdDeps } from "../../src/api/routes/worldId";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
 import { createCompany } from "../../src/formation/company";
+import { PURPOSE_MAX_LENGTH } from "../../src/formation/intake";
 import type { IdentityDeps } from "../../src/identity/state";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
@@ -792,6 +793,50 @@ test("PATCH /companies/:id re-opens a rejected intake, and REQUIRES a session", 
   const frozen = await patch(COMPANY_INTAKE);
   expect(frozen.status).toBe(400);
   expect((await frozen.json()).error.message).toMatch(/can no longer be changed/);
+});
+
+test("POST and PATCH /companies hold the purpose to doola's 50-character limit, in the door's own sentence", async () => {
+  // The purpose is filed verbatim as doola's `description` (documented maximum 50). Both REST
+  // doors refuse a longer one BEFORE anything is stored or sent, with the sentence that names
+  // the field and the number, rather than letting doola refuse it after the customer exists.
+  const app = makeApp({ required: true });
+  const token = await login(app);
+  const tooLong = "x".repeat(PURPOSE_MAX_LENGTH + 1);
+  const exactly = "y".repeat(PURPOSE_MAX_LENGTH);
+
+  const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();
+  const refused = await post(app, "/companies", token, {
+    partyId,
+    ...COMPANY_INTAKE,
+    businessPurpose: tooLong,
+  });
+  expect(refused.status).toBe(400);
+  expect((await refused.json()).error.message).toBe("businessPurpose is longer than 50 characters");
+  const none = await (
+    await app.request("/companies", { headers: { authorization: `Bearer ${token}` } })
+  ).json();
+  expect(none.companies).toHaveLength(0);
+
+  // Exactly 50 is doola's own maximum, and is taken.
+  const created = await post(app, "/companies", token, {
+    partyId,
+    ...COMPANY_INTAKE,
+    businessPurpose: exactly,
+  });
+  expect(created.status).toBe(201);
+  const { companyId } = await created.json();
+
+  // The edit door: the same rule, the same sentence, and the stored purpose untouched.
+  const edit = await patch(app, `/companies/${companyId}`, token, {
+    ...COMPANY_INTAKE,
+    businessPurpose: tooLong,
+  });
+  expect(edit.status).toBe(400);
+  expect((await edit.json()).error.message).toBe("businessPurpose is longer than 50 characters");
+  const list = await (
+    await app.request("/companies", { headers: { authorization: `Bearer ${token}` } })
+  ).json();
+  expect(list.companies[0].businessPurpose).toBe(exactly);
 });
 
 test("a deployment that forms nothing answers 503 on POST and an empty list on GET", async () => {

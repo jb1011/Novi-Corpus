@@ -11,6 +11,7 @@
  */
 import type DatabaseType from "better-sqlite3";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { DOOLA_DESCRIPTION_MAX_LENGTH } from "../../src/adapters/doola/types";
 import { ApiError } from "../../src/api/errors";
 import { type WorldIdDeps, buildWorldIdDeps } from "../../src/api/routes/worldId";
 import { loadConfig } from "../../src/config/env";
@@ -588,6 +589,39 @@ test("purpose and industry are required, bounded, and the industry must be a LIS
   expect(
     createCompany(deps(), TENANT, intake(newParty(), { industryLabel: "Interpretive Dance" })),
   ).toEqual({ error: industryLabelUnknownMessage("Interpretive Dance") });
+});
+
+test("the purpose is held to doola's 50-character `description` limit, at the boundary", () => {
+  // The purpose is filed verbatim as doola's `description`, whose published maximum is 50. The
+  // door used to allow 500, so a 109-character purpose passed it and was refused by doola after
+  // the customer was created, parking the filing. Refused HERE now, in the door's own sentence.
+  expect(PURPOSE_MAX_LENGTH).toBe(DOOLA_DESCRIPTION_MAX_LENGTH);
+  expect(businessPurposeTooLongMessage(PURPOSE_MAX_LENGTH)).toBe(
+    "businessPurpose is longer than 50 characters",
+  );
+
+  const over = "Operates software agents for the owner's own sales."; // 51
+  expect(over).toHaveLength(51);
+  expect(createCompany(deps(), TENANT, intake(newParty(), { businessPurpose: over }))).toEqual({
+    error: businessPurposeTooLongMessage(PURPOSE_MAX_LENGTH),
+  });
+  expect(companies.listByTenant(TENANT)).toHaveLength(0);
+
+  // Exactly 50 is doola's own maximum, and is accepted.
+  const max = "Operates software agents for the owner's own sales"; // 50
+  expect(max).toHaveLength(50);
+  const ok = createCompany(deps(), TENANT, intake(newParty(), { businessPurpose: max }));
+  expect("companyId" in ok).toBe(true);
+  expect(companies.find((ok as { companyId: string }).companyId)!.businessPurpose).toBe(max);
+
+  // The length is judged AFTER canonicalization, so padding around a purpose that fits is not
+  // what refuses it: the stored (and sent) value is the trimmed one.
+  const padded = createCompany(
+    deps(),
+    TENANT,
+    intake(newParty(), { businessPurpose: `   ${max}   `, names: SECOND_NAMES }),
+  );
+  expect("companyId" in padded).toBe(true);
 });
 
 test("values are CANONICALIZED (NFC + trim) at intake and stored canonical", () => {

@@ -12,6 +12,7 @@
  * would produce a client check that disagrees with the server's in both directions.
  */
 import { expect, test } from "vitest";
+import { DOOLA_DESCRIPTION_MAX_LENGTH } from "../../src/adapters/doola/types";
 import { buildApiApp } from "../../src/api/app";
 import { FORMATION_RULES_ETAG } from "../../src/api/routes/formationRules";
 import {
@@ -111,6 +112,10 @@ test("the four INTAKE RULES are served, and they are the door's own constants", 
   expect(body.nameOptionCount).toBe(NAME_OPTION_COUNT);
   expect(body.nameMaxLength).toBe(NAME_MAX_LENGTH);
   expect(body.purposeMaxLength).toBe(PURPOSE_MAX_LENGTH);
+  // …and that constant is doola's own `description` limit, as a literal: the form must never be
+  // told 500 again while doola refuses anything over 50.
+  expect(body.purposeMaxLength).toBe(DOOLA_DESCRIPTION_MAX_LENGTH);
+  expect(body.purposeMaxLength).toBe(50);
 
   // The charset is a class BODY, so a client compiles `^[…]$` around it — and the result must
   // agree with `firstIllegalNameChar`, character for character.
