@@ -12,6 +12,7 @@ import type {
   CreateCompanyInput,
   CreateCustomerInput,
   DoolaCompany,
+  DoolaCompanyListItem,
   DoolaCompanyPage,
   DoolaComplianceEvent,
   DoolaCustomer,
@@ -220,8 +221,9 @@ export interface DoolaApi {
   getCompany(companyId: string): Promise<DoolaCompany>;
   /** Pre-create lookup fallback (completeness 9): "did a create we lost the answer to actually
    *  land?". Scoped to OUR customer id, which we mint one-per-entity, so anything it returns
-   *  belongs to the entity that is asking. */
-  listCompanies(customerId: string): Promise<DoolaCompany[]>;
+   *  belongs to the entity that is asking. It answers LIST ITEMS, the only place doola reports a
+   *  company's name, and never a filing date, number or EIN. */
+  listCompanies(customerId: string): Promise<DoolaCompanyListItem[]>;
   listDocuments(companyId: string): Promise<DoolaDocument[]>;
   getDocumentDownloadUrl(companyId: string, documentId: string): Promise<DoolaDocumentDownload>;
   listRequiredActions(companyId: string): Promise<DoolaRequiredAction[]>;

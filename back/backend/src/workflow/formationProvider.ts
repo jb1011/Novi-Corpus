@@ -8,6 +8,7 @@ import type {
   CreateCompanyInput,
   DoolaAddress,
   DoolaCompany,
+  DoolaCompanyListItem,
   DoolaEnvironment,
 } from "../adapters/doola/types";
 import { awaitsSsnDecision, isIntakeFrozen } from "../formation/freeze";
@@ -868,7 +869,7 @@ async function lookupExistingCompany(
   d: FormationCreateDeps,
   customerId: string,
   wantedName: string,
-): Promise<DoolaCompany | undefined> {
+): Promise<DoolaCompanyListItem | undefined> {
   try {
     const companies = await d.doola.listCompanies(customerId);
     if (companies.length === 0) return undefined;
@@ -896,13 +897,15 @@ async function lookupExistingCompany(
   }
 }
 
-/** Adopt a company doola already has: read its current state, then confirm. No create, ever. */
+/** Adopt a company doola already has: read its current state, then confirm. No create, ever.
+ *  `known` is the list item the lookup found, when it found one: adoption reads only its intake
+ *  status, which the list item and the full answer both carry. */
 async function adopt(
   d: FormationCreateDeps,
   row: FormationRequestRecord,
   doolaCompanyId: string,
   detail: CreateProviderDetail,
-  known?: DoolaCompany,
+  known?: Pick<DoolaCompanyListItem, "formationSubmissionStatus">,
 ): Promise<void> {
   let company = known;
   if (!company) {

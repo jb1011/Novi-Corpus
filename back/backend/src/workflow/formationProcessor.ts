@@ -556,7 +556,9 @@ function matchFiledName(
   companyId: string,
   company: DoolaCompany,
 ): string | null {
-  const reported = company.name?.trim();
+  // BRIDGE, until the name is read from the list: the full answer has no `name` (its type says
+  // so), and this widened read is the old behaviour, kept so the type split changes nothing.
+  const reported = (company as DoolaCompany & { name?: string }).name?.trim();
   if (!reported) return null;
   const row = d.companies.find(companyId);
   if (row?.purposeKind === "legal_body" && row.legalNameFiled !== null) return null;

@@ -84,7 +84,8 @@ export function seedCompany(
 }
 
 export interface FakeDoolaState {
-  company: DoolaCompany;
+  /** Widened with the `name` the real full answer does not carry, until the fake is made faithful. */
+  company: DoolaCompany & { name?: string };
   documents: DoolaDocument[];
   requiredActions: DoolaRequiredAction[];
   /** Bytes served for each document id by the fake download URL. */
