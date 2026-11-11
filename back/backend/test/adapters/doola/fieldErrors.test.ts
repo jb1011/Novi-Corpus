@@ -5,7 +5,8 @@
  * The properties pinned here are the ones a looser reader would lose quietly:
  *  - a field path is repeated only when it passes the allowlist (letters, digits, `_`, `.`, `[`,
  *    `]`, at most 100 characters, nothing SSN-shaped);
- *  - doola's per-field message is redacted, then capped;
+ *  - doola's per-field message is kept only for the company's own fields (`DOOLA_MESSAGE_FIELDS`),
+ *    never for any field of a refused customer, and is redacted, then capped;
  *  - a submitted value is NEVER read, whatever key doola echoes it under;
  *  - the result is bounded, and a malformed map is `[]`, never a throw.
  *
@@ -18,6 +19,7 @@ import {
   DOOLA_FIELD_MESSAGE_MAX,
   fieldErrorsClause,
   isDoolaFieldPath,
+  keepsDoolaFieldMessage,
   summarizeDoolaFields,
 } from "../../../src/adapters/doola/fieldErrors";
 
@@ -79,9 +81,9 @@ test("a per-field CODE is kept only when it reads as an identifier", () => {
   expect(digits).toEqual({ field: "description" });
 });
 
-test("REDACTION: a nine-digit run in a field's message never survives", () => {
+test("REDACTION: a nine-digit run in a kept field's message never survives", () => {
   const [entry] = summarizeDoolaFields({
-    "responsibleParty.ssn": { code: "E_INVALID", message: `ssn ${NINE_DIGITS} is not valid` },
+    description: { code: "E_INVALID", message: `reference ${NINE_DIGITS} is not valid` },
   });
   expect(entry!.message).toContain("[redacted]");
   expect(entry!.message).not.toContain(NINE_DIGITS);
@@ -140,6 +142,110 @@ test("a malformed map is `[]`, never a throw: this runs on a filing's error path
   expect(summarizeDoolaFields({ description: null })).toEqual([{ field: "description" }]);
 });
 
+test("MESSAGES: kept for the company's own fields, dropped (path and code kept) for a person's", () => {
+  const summary = summarizeDoolaFields({
+    description: { code: "E_FIELD_TOO_LONG", message: "size must be between 1 and 50" },
+    "nameOptions[0].name": { code: "E_NAME", message: "name is not available" },
+    "addresses[1].provider": { code: "E_PROVIDER", message: "provider must be registeredAgent" },
+    "requestedServices[0].variant": { code: "E_VARIANT", message: "variant is not offered" },
+    "responsibleParty.email": { code: "E_EMAIL", message: "ada@example.com is not a valid email" },
+    "members[0].legalFirstName": { code: "E_NAME", message: "Ada contains invalid characters" },
+    "addresses[0].address.line1": {
+      code: "E_LINE",
+      message: "1 Analytical Way is not deliverable",
+    },
+    "responsibleParty.ssn": { code: "E_INVALID", message: `ssn ${NINE_DIGITS} is not valid` },
+  });
+  expect(summary).toEqual([
+    { field: "description", code: "E_FIELD_TOO_LONG", message: "size must be between 1 and 50" },
+    { field: "nameOptions[0].name", code: "E_NAME", message: "name is not available" },
+    {
+      field: "addresses[1].provider",
+      code: "E_PROVIDER",
+      message: "provider must be registeredAgent",
+    },
+    { field: "requestedServices[0].variant", code: "E_VARIANT", message: "variant is not offered" },
+    { field: "responsibleParty.email", code: "E_EMAIL" },
+    { field: "members[0].legalFirstName", code: "E_NAME" },
+    { field: "addresses[0].address.line1", code: "E_LINE" },
+    { field: "responsibleParty.ssn", code: "E_INVALID" },
+  ]);
+  const printed = JSON.stringify(summary);
+  for (const quoted of ["ada@example.com", "Ada contains", "Analytical", NINE_DIGITS])
+    expect(printed, quoted).not.toContain(quoted);
+});
+
+test("the message allowlist: exactly the company's own paths, and nothing that merely looks close", () => {
+  for (const kept of [
+    "description",
+    "industry",
+    "state",
+    "entityType",
+    "nameOptions",
+    "nameOptions[2]",
+    "nameOptions[0].name",
+    "nameOptions[1].entityTypeEnding",
+    "nameOptions[0].position",
+    "requestedServices",
+    "requestedServices[0]",
+    "requestedServices[0].service",
+    "services",
+    "services[0].status",
+    "addresses[0].provider",
+    "addresses[1].type",
+  ])
+    expect(keepsDoolaFieldMessage(kept), kept).toBe(true);
+  for (const dropped of [
+    "responsibleParty",
+    "responsibleParty.email",
+    "responsibleParty.address.phone",
+    "members",
+    "members[0].legalLastName",
+    "addresses",
+    "addresses[0]",
+    "addresses[0].address",
+    "addresses[0].address.line1",
+    "addresses[0].address.phone",
+    "nameOptions[0].other",
+    "descriptionX",
+    "servicesX",
+    "email",
+    "phone",
+    "ssn",
+    "doolaCustomerId",
+  ])
+    expect(keepsDoolaFieldMessage(dropped), dropped).toBe(false);
+});
+
+test("a refused CUSTOMER keeps no message at all, even on a path the company list allows", () => {
+  const fields = {
+    email: { code: "E_EMAIL", message: "ada@example.com is not a valid email" },
+    phoneNumber: { code: "E_PHONE", message: "+12125550100 is not a phone number" },
+    // The customer body has no such field; if doola ever named one, the body still wins.
+    description: { code: "E_X", message: "whatever doola said" },
+  };
+  expect(summarizeDoolaFields(fields, { body: "customer" })).toEqual([
+    { field: "email", code: "E_EMAIL" },
+    { field: "phoneNumber", code: "E_PHONE" },
+    { field: "description", code: "E_X" },
+  ]);
+  const described = describeDoolaError(
+    new DoolaApiError(
+      "E_VALIDATION_FAILED",
+      400,
+      "one or more fields are invalid",
+      "req_c",
+      fields,
+    ),
+    { body: "customer" },
+  );
+  expect(described.fieldErrors!.every((f) => f.message === undefined)).toBe(true);
+  expect(described.message).toBe(
+    "E_VALIDATION_FAILED: one or more fields are invalid (email: E_EMAIL, phoneNumber: E_PHONE, description: E_X)",
+  );
+  expect(JSON.stringify(described)).not.toContain("ada@example.com");
+});
+
 test("describeDoolaError names the fields in `message` and carries them as `fieldErrors`", () => {
   const described = describeDoolaError(
     new DoolaApiError("E_VALIDATION_FAILED", 400, "one or more fields are invalid", "req_1", {
@@ -155,7 +261,8 @@ test("describeDoolaError names the fields in `message` and carries them as `fiel
   expect(described.requestId).toBe("req_1");
   expect(described.fieldErrors).toEqual([
     { field: "description", code: "E_FIELD_TOO_LONG", message: "size must be between 1 and 50" },
-    { field: "members[0].address.phone", message: "bad number [redacted]" },
+    // A person's field: the path survives, doola's sentence about it does not.
+    { field: "members[0].address.phone" },
   ]);
   // doola's per-field SENTENCES stay out of the message: the ops line carries them, not the trail.
   expect(described.message).not.toContain("size must be");

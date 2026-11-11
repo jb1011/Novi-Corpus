@@ -274,7 +274,7 @@ test("the owner's edit is held to 50, clears the park and its fields together, a
   expect(rowOf(companyId).providerRef).toBe("cmp_1");
 });
 
-test("a refused PARTY names its field too: redacted on the ops line, by path in the view, never the value", async () => {
+test("a refused PARTY names its field by path and code only: no doola message, no value, anywhere", async () => {
   const companyId = mint();
   const doola = doolaAsDocumented({
     createCustomer: async () => {
@@ -286,7 +286,8 @@ test("a refused PARTY names its field too: redacted on the ops line, by path in 
         {
           phoneNumber: {
             code: "E_INVALID_PHONE",
-            message: `the number ${NINE_DIGITS} is not a phone number`,
+            // doola's sentence quoting the person's own data: never kept for the person's body.
+            message: `${PARTY_PHONE} (ref ${NINE_DIGITS}) is not a phone number`,
             // doola echoing the submitted value back: never read, never repeated.
             value: PARTY_PHONE,
           },
@@ -303,16 +304,17 @@ test("a refused PARTY names its field too: redacted on the ops line, by path in 
   expect(line("formation_party_rejected")).toMatchObject({
     companyId,
     reason: "customer_rejected_awaiting_party_edit",
-    fieldErrors: [
-      {
-        field: "phoneNumber",
-        code: "E_INVALID_PHONE",
-        message: "the number [redacted] is not a phone number",
-      },
-    ],
   });
-  // Nothing printed carries the nine-digit run or the value doola echoed.
+  // Path and code, and NO message: the customer body is the person.
+  expect(line("formation_party_rejected")!.fieldErrors).toEqual([
+    { field: "phoneNumber", code: "E_INVALID_PHONE" },
+  ]);
+  expect(line("formation_create_failed")!.fieldErrors).toEqual([
+    { field: "phoneNumber", code: "E_INVALID_PHONE" },
+  ]);
+  // Nothing printed carries doola's sentence, the nine-digit run or the value doola echoed.
   for (const l of stdout) {
+    expect(l).not.toContain("is not a phone number");
     expect(l).not.toContain(NINE_DIGITS);
     expect(l).not.toContain(PARTY_PHONE);
   }
@@ -350,6 +352,51 @@ test("a refused PARTY names its field too: redacted on the ops line, by path in 
     ),
   ).toHaveProperty("partyId");
   expect(view(companyId).park).toMatchObject({ awaitingPartyEdit: false, refusedFields: [] });
+});
+
+test("a refused COMPANY body keeps doola's message for its own fields and drops it for the person's", async () => {
+  const companyId = mint();
+  await file(
+    companyId,
+    doolaAsDocumented({
+      createCompany: async () => {
+        throw new DoolaApiError(
+          "E_VALIDATION_FAILED",
+          400,
+          "one or more fields are invalid",
+          "req_c",
+          {
+            description: { code: "E_FIELD_TOO_LONG", message: "size must be between 1 and 50" },
+            "responsibleParty.email": {
+              code: "E_EMAIL",
+              message: "ada@example.com is not a valid email",
+            },
+            "members[0].legalLastName": {
+              code: "E_NAME",
+              message: "Lovelace contains invalid characters",
+            },
+          },
+        );
+      },
+    }),
+  );
+  const kept = [
+    { field: "description", code: "E_FIELD_TOO_LONG", message: "size must be between 1 and 50" },
+    { field: "responsibleParty.email", code: "E_EMAIL" },
+    { field: "members[0].legalLastName", code: "E_NAME" },
+  ];
+  expect(line("formation_stale")!.fieldErrors).toEqual(kept);
+  expect(line("formation_create_failed")!.fieldErrors).toEqual(kept);
+  for (const l of stdout) {
+    expect(l).not.toContain("ada@example.com");
+    expect(l).not.toContain("Lovelace contains");
+  }
+  // The view, as ever, names the three by path and nothing else.
+  expect(view(companyId).park.refusedFields).toEqual([
+    "description",
+    "responsibleParty.email",
+    "members[0].legalLastName",
+  ]);
 });
 
 test("a refusal that names NO field still parks, and adds no field keys anywhere", async () => {

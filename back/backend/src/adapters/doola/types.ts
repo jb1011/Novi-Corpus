@@ -130,6 +130,9 @@ export interface DoolaRequestedService {
  * which parks the filing for a human: that is how a 109-character purpose stopped a sandbox
  * filing on 2026-11-11. The intake's `PURPOSE_MAX_LENGTH` is this constant, so the door refuses
  * what doola would refuse, before anything is sent.
+ *
+ * doola's wording ("size must be between 1 and 50") is Jakarta Bean Validation's `@Size`, which
+ * counts UTF-16 code units, as JavaScript's `length` does: the door and doola agree on what 50 is.
  */
 export const DOOLA_DESCRIPTION_MAX_LENGTH = 50;
 

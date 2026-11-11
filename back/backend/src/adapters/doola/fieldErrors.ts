@@ -17,14 +17,16 @@ import { redactPii } from "../../formation/pii";
  *    it is dropped rather than repaired: a key we cannot read as a field name is not one we
  *    repeat;
  *  - doola's per-field `code`, only when it reads as a machine code (`DOOLA_FIELD_CODE`);
- *  - doola's per-field `message`, through `redactPii` and cut to `DOOLA_FIELD_MESSAGE_MAX`.
+ *  - doola's per-field `message`, ONLY for a field of the company's own (`DOOLA_MESSAGE_FIELDS`)
+ *    and never for any field of a refused customer (the responsible person's body), through
+ *    `redactPii` and cut to `DOOLA_FIELD_MESSAGE_MAX`. Every other field keeps its path and code.
  *
  * NEVER a submitted value. doola may echo the value it refused under a key of its own (`value`,
  * `rejectedValue`, anything), and none of those is read: only `code` and `message` are. A field
  * whose detail is a bare string rather than an object is listed by its path alone, for the same
  * reason: a bare string beside a field name is as likely to be the value as a reason.
  *
- * Where each part may go is decided by the readers, not here: the ops line carries all three
+ * Where each part may go is decided by the readers, not here: the ops line carries what is kept
  * (`fieldErrors`), the step's stored error names the path and the code, and the company view
  * carries the paths only (`park.refusedFields`).
  */
@@ -47,6 +49,46 @@ const DOOLA_FIELD_CODE = /^[A-Za-z0-9_.-]{1,64}$/;
 export const DOOLA_FIELD_MESSAGE_MAX = 160;
 /** At most this many fields per refusal. doola's create body has about a dozen top-level fields. */
 export const DOOLA_FIELD_LIMIT = 10;
+
+/**
+ * The fields whose doola MESSAGE we keep: the company's own, which carry no personal data.
+ *
+ * doola's per-field text can quote what was submitted, and for most of the create body that is
+ * the responsible person: a name, an email, a phone number, an address line. `redactPii` removes
+ * SSN shapes and nothing else, so it cannot make such a sentence safe for a log line. These
+ * paths, and only these, describe the company itself:
+ *
+ *  - `description`, `industry`, `state`, `entityType`;
+ *  - `nameOptions`, `nameOptions[i]`, and `nameOptions[i].name`, `.entityTypeEnding`, `.position`
+ *    (the company's name candidates, never a person's name);
+ *  - `requestedServices` and `services`, with any sub-path;
+ *  - `addresses[i].provider` and `addresses[i].type`, and NOT `addresses[i].address.*`, whose
+ *    lines can be a person's.
+ *
+ * Every other path (`responsibleParty.*`, `members.*`, any address line, email, phone, names,
+ * ssn) keeps its path and code and loses the message. So does every field of a `createCustomer`
+ * refusal, whatever its path: that whole body is the person (`summarizeDoolaFields`'s `body`).
+ * A path missing from this list costs an operator one sentence; a path wrongly on it puts
+ * somebody's data in journald, so it is narrow on purpose.
+ */
+export const DOOLA_MESSAGE_FIELDS: readonly RegExp[] = [
+  /^(description|industry|state|entityType)$/,
+  /^nameOptions(\[\d+\](\.(name|entityTypeEnding|position))?)?$/,
+  /^(requestedServices|services)([.[][A-Za-z0-9_.[\]]*)?$/,
+  /^addresses\[\d+\]\.(provider|type)$/,
+];
+
+/** Whether doola's message for this path may be kept (see `DOOLA_MESSAGE_FIELDS`). */
+export function keepsDoolaFieldMessage(path: string): boolean {
+  return DOOLA_MESSAGE_FIELDS.some((rule) => rule.test(path));
+}
+
+/**
+ * Which body doola refused. `company` is the create body (and the default, for the reads that
+ * share this reader): messages are kept for `DOOLA_MESSAGE_FIELDS` only. `customer` is the
+ * responsible person's own body: no message is kept for any of its fields.
+ */
+export type DoolaRefusedBody = "company" | "customer";
 
 /**
  * Whether a string may be repeated as a field path: the allowlist, and nothing `redactPii` would
@@ -80,7 +122,11 @@ function boundedMessage(raw: string): string | undefined {
  * a plain object of field entries yields `[]`, never a throw, since this runs on the error path
  * of a filing and must not become the reason that path fails.
  */
-export function summarizeDoolaFields(fields: unknown): DoolaFieldError[] {
+export function summarizeDoolaFields(
+  fields: unknown,
+  opts: { body?: DoolaRefusedBody } = {},
+): DoolaFieldError[] {
+  const personBody = opts.body === "customer";
   if (!fields || typeof fields !== "object" || Array.isArray(fields)) return [];
   const out: DoolaFieldError[] = [];
   for (const [path, detail] of Object.entries(fields as Record<string, unknown>)) {
@@ -91,8 +137,11 @@ export function summarizeDoolaFields(fields: unknown): DoolaFieldError[] {
       // `code` and `message` ONLY. Any other key, a `value` above all, is never read.
       const { code, message } = detail as { code?: unknown; message?: unknown };
       if (isFieldCode(code)) entry.code = code;
-      const bounded = typeof message === "string" ? boundedMessage(message) : undefined;
-      if (bounded) entry.message = bounded;
+      // The message only for the company's own fields, and never from the person's body.
+      if (!personBody && keepsDoolaFieldMessage(path)) {
+        const bounded = typeof message === "string" ? boundedMessage(message) : undefined;
+        if (bounded) entry.message = bounded;
+      }
     }
     out.push(entry);
   }

@@ -2,7 +2,12 @@ import { redactPii } from "../../formation/pii";
 import { opsLog } from "../../observability/opsLog";
 import { withDeadline } from "../../util/deadline";
 import { readCappedText } from "../../util/readStreamCapped";
-import { type DoolaFieldError, fieldErrorsClause, summarizeDoolaFields } from "./fieldErrors";
+import {
+  type DoolaFieldError,
+  type DoolaRefusedBody,
+  fieldErrorsClause,
+  summarizeDoolaFields,
+} from "./fieldErrors";
 import type {
   CreateCompanyInput,
   CreateCustomerInput,
@@ -114,19 +119,26 @@ export class DoolaTimeoutError extends Error {
  * request may have COMMITTED at doola and the answer was lost.
  *
  * A validation failure also carries WHICH fields doola refused (2026-11-11): `fieldErrors`, read
- * by `summarizeDoolaFields` (paths through an allowlist, doola's per-field code and redacted,
- * capped message, never a submitted value), and the paths and codes appended to `message`, so the
- * step's stored error and the company's event trail name the field too. Present only when doola
- * named at least one field, so every ops line that spreads this result carries it exactly then.
+ * by `summarizeDoolaFields` (paths through an allowlist, doola's per-field code, a redacted and
+ * capped message for the company's own fields only, never a submitted value), and the paths and
+ * codes appended to `message`, so the step's stored error and the company's event trail name the
+ * field too. Present only when doola named at least one field, so every ops line that spreads
+ * this result carries it exactly then.
+ *
+ * `body` says which body was refused: `customer` (the responsible person's) keeps no per-field
+ * message at all. The default is the company's.
  */
-export function describeDoolaError(e: unknown): {
+export function describeDoolaError(
+  e: unknown,
+  opts: { body?: DoolaRefusedBody } = {},
+): {
   message: string;
   code?: string;
   requestId?: string;
   fieldErrors?: DoolaFieldError[];
 } {
   if (e instanceof DoolaApiError) {
-    const fieldErrors = summarizeDoolaFields(e.fields);
+    const fieldErrors = summarizeDoolaFields(e.fields, opts);
     return {
       message: redactPii(`${e.code}: ${e.message}${fieldErrorsClause(fieldErrors)}`),
       code: e.code,

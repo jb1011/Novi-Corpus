@@ -740,7 +740,11 @@ function onCallFailure(
   endpoint: "createCustomer" | "createCompany",
 ): void {
   const kind: DoolaFailureKind = classifyDoolaFailure(e);
-  const described = describeDoolaError(e);
+  // The customer body IS the responsible person, so a refusal of it keeps no per-field message:
+  // doola's text there can quote their name, email, phone or address (`DOOLA_MESSAGE_FIELDS`).
+  const described = describeDoolaError(e, {
+    body: endpoint === "createCustomer" ? "customer" : "company",
+  });
   if (kind === "rejected") {
     // The field PATHS doola named, beside the flag, in the same transaction: the company view
     // serves them so the owner's form can point at the field. `undefined` when doola named none,
@@ -750,11 +754,11 @@ function onCallFailure(
     // (review 5b). Both park identically — the attempt is burned once and never again, nothing
     // is re-sent unchanged — but only the company's has a door that can clear it today.
     if (endpoint === "createCustomer") {
-      failStep(d, row, described.message, e, { awaitingPartyEdit: true, refusedFields });
+      failStep(d, row, described.message, described, { awaitingPartyEdit: true, refusedFields });
       parkedForPartyEdit(d, described);
       return;
     }
-    failStep(d, row, described.message, e, { awaitingIntakeEdit: true, refusedFields });
+    failStep(d, row, described.message, described, { awaitingIntakeEdit: true, refusedFields });
     parkedForIntakeEdit(d, described);
     return;
   }
@@ -1002,11 +1006,12 @@ function failStep(
   d: FormationCreateDeps,
   row: FormationRequestRecord,
   error: string,
-  cause?: unknown,
+  // The doola failure as the caller ALREADY described it, never re-described here: the caller
+  // knows which body was refused, and so which per-field messages may be kept.
+  described: Partial<DoolaFailure> = {},
   detailPatch?: Partial<CreateProviderDetail>,
 ): void {
   const companyId = d.company.companyId;
-  const described: Partial<DoolaFailure> = cause ? describeDoolaError(cause) : {};
   // The bump-then-park sequence itself lives in `formationStep.ts`: the webhook processor and the
   // sweeper park rows too, and three copies of that contract would be three chances to burn an
   // attempt without parking the row (or the reverse). What stays HERE is what is specific to the
@@ -1034,9 +1039,9 @@ function failStep(
     level: "warn",
     code: described.code,
     requestId: described.requestId,
-    // WHICH fields, when doola named any: path, code and a redacted, capped message, never a
-    // value (`summarizeDoolaFields`). opsLog redacts only top-level strings, which is why the
-    // summary arrives already redacted.
+    // WHICH fields, when doola named any: path and code, plus a redacted, capped message for the
+    // company's own fields only, never a value (`summarizeDoolaFields`). opsLog redacts only
+    // top-level strings, which is why the summary arrives already redacted.
     fieldErrors: described.fieldErrors,
   });
 }
@@ -1065,7 +1070,8 @@ function parkedForIntakeEdit(d: FormationCreateDeps, described: DoolaFailure): v
     // names the refused fields and their codes when doola gave any.
     message: described.message,
     // …and doola's own per-field reasons, so the operator reads WHICH field without a support
-    // ticket. Already redacted and capped (`summarizeDoolaFields`); never a value.
+    // ticket: a message only for the company's own fields (`DOOLA_MESSAGE_FIELDS`), redacted and
+    // capped; path and code for the rest; never a value.
     fieldErrors: described.fieldErrors,
     environment: d.environment,
   });
@@ -1100,9 +1106,8 @@ function parkedForPartyEdit(d: FormationCreateDeps, described: DoolaFailure): vo
     // Third-party text: redacted at the choke point in `opsLog`, like every other `message`. It
     // names the refused fields and their codes when doola gave any.
     message: described.message,
-    // The per-field reasons, as on `formation_stale`. A party field's message is the likeliest
-    // to quote the person: it gets what doola's top-level `message` gets (SSN shapes redacted)
-    // plus a length cap, and no submitted value is ever read out of the map.
+    // The refused fields by path and code ONLY: this body is the person, so no per-field message
+    // of doola's is kept (`describeDoolaError(e, { body: "customer" })`), and no value is read.
     fieldErrors: described.fieldErrors,
     environment: d.environment,
   });
