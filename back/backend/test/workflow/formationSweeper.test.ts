@@ -21,7 +21,11 @@ import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import { SqliteOaAnchorRepository } from "../../src/persistence/oaAnchorRepository";
-import { advanceFormation, parseDetail } from "../../src/workflow/formationProcessor";
+import {
+  UNMAPPED_EVENT_GRACE_MS,
+  advanceFormation,
+  parseDetail,
+} from "../../src/workflow/formationProcessor";
 import {
   ANCHOR_BATCH,
   ANCHOR_CONCURRENCY,
@@ -400,6 +404,163 @@ test("an unmappable event is re-driven once create_provider lands the company id
   await sweeper().tick();
   expect(events.find("evt-1")?.processedAt).not.toBeNull();
   expect(stateOf("await_filing")).toBe("confirmed");
+});
+
+// ── (a') events no company here owns: kept for the race, retired after the grace ──────────
+
+/** Record a doola event whose receipt time is pinned to the INJECTED clock, `ageMs` ago. SQLite
+ *  stamps `received_at` from the real wall clock, and the grace is measured against `now`. */
+function recordEventAged(eventId: string, ageMs: number, providerRef: string | null = COMPANY_ID) {
+  events.record({ eventId, eventName: "company_formation_completed", providerRef, payload: "{}" });
+  db.prepare("UPDATE doola_webhook_events SET received_at = ? WHERE event_id = ?").run(
+    sqliteUtcTimestamp(now - ageMs),
+    eventId,
+  );
+}
+
+/** One tick, and the ops lines it wrote, parsed. */
+async function tickLines(s: FormationSweeper): Promise<Array<Record<string, unknown>>> {
+  const lines: string[] = [];
+  const orig = console.log;
+  console.log = (l: string) => lines.push(l);
+  try {
+    await s.tick();
+  } finally {
+    console.log = orig;
+  }
+  return lines.map((l) => JSON.parse(l));
+}
+const named = (lines: Array<Record<string, unknown>>, opslog: string) =>
+  lines.filter((l) => l.opslog === opslog);
+
+test("the unmapped-event grace is one hour", () => {
+  expect(UNMAPPED_EVENT_GRACE_MS).toBe(60 * 60 * 1000);
+});
+
+test("an unmapped event UNDER an hour old is kept, and re-driven on every tick", async () => {
+  // No `create_provider` row claims COMPANY_ID: the create's response may still be on its way.
+  recordEventAged("evt-young", UNMAPPED_EVENT_GRACE_MS - 60_000);
+  const s = sweeper();
+
+  const first = await tickLines(s);
+  expect(events.find("evt-young")?.processedAt).toBeNull();
+  expect(named(first, "doola_webhook_unmapped")).toHaveLength(1);
+  expect(named(first, "doola_webhook_unmapped_retired")).toHaveLength(0);
+
+  // Still inside the grace on the next tick: re-driven again, still kept.
+  now += 30_000;
+  const second = await tickLines(s);
+  expect(events.find("evt-young")?.processedAt).toBeNull();
+  expect(named(second, "doola_webhook_unmapped")).toHaveLength(1);
+  expect(named(second, "doola_webhook_unmapped_retired")).toHaveLength(0);
+  expect(doola.calls).toHaveLength(0);
+});
+
+test("an unmapped event OVER an hour old is retired with ONE line, and is not re-driven again", async () => {
+  // A sandbox company another machine created: doola sends every webhook to the one endpoint.
+  recordEventAged("evt-old", UNMAPPED_EVENT_GRACE_MS + 1000);
+  const s = sweeper();
+
+  const first = await tickLines(s);
+  expect(events.find("evt-old")?.processedAt).not.toBeNull();
+  const retired = named(first, "doola_webhook_unmapped_retired");
+  expect(retired).toHaveLength(1);
+  expect(retired[0]).toMatchObject({
+    level: "warn",
+    eventId: "evt-old",
+    eventName: "company_formation_completed",
+    providerRef: COMPANY_ID,
+  });
+  // The retire line REPLACES the per-tick warning; it is not one more line beside it.
+  expect(named(first, "doola_webhook_unmapped")).toHaveLength(0);
+
+  // Not owed any more: the next tick neither re-drives nor re-logs it.
+  now += 60_000;
+  const second = await tickLines(s);
+  expect(second.filter((l) => l.eventId === "evt-old")).toHaveLength(0);
+  expect(events.listUnprocessed()).toHaveLength(0);
+  expect(doola.calls).toHaveLength(0);
+});
+
+test("the SAME event ages out across ticks: kept at 59 minutes, retired past the hour", async () => {
+  recordEventAged("evt-1", 0);
+  const s = sweeper();
+  await tickLines(s);
+  now += UNMAPPED_EVENT_GRACE_MS - 60_000;
+  await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).toBeNull();
+
+  now += 2 * 60_000;
+  const lines = await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(1);
+});
+
+test("a coalesced group: each member is retired on ITS OWN clock, all the old ones on one tick", async () => {
+  // Three events for one unowned company, two past the grace and one inside it. The group is one
+  // re-drive (M5), and the lead is the oldest; the verdict "nobody here owns this id" holds for
+  // every member, but the grace is per event.
+  recordEventAged("evt-a", UNMAPPED_EVENT_GRACE_MS + 3 * 60_000);
+  recordEventAged("evt-b", UNMAPPED_EVENT_GRACE_MS + 2 * 60_000);
+  recordEventAged("evt-c", UNMAPPED_EVENT_GRACE_MS - 10 * 60_000);
+
+  const lines = await tickLines(sweeper());
+  expect(events.find("evt-a")?.processedAt).not.toBeNull();
+  expect(events.find("evt-b")?.processedAt).not.toBeNull();
+  expect(events.find("evt-c")?.processedAt).toBeNull();
+  // One line per event retired, and none for the one kept: it is not the lead on this tick.
+  expect(named(lines, "doola_webhook_unmapped_retired").map((l) => l.eventId)).toEqual([
+    "evt-a",
+    "evt-b",
+  ]);
+  expect(named(lines, "doola_webhook_unmapped")).toHaveLength(0);
+});
+
+test("an event with NO company id falls under the same grace: kept inside it, retired past it", async () => {
+  // A NULL provider_ref is set at receipt and never rewritten, so no later tick can ever place
+  // it; the hour is the operator's window to see it, not a race to wait out.
+  recordEventAged("evt-young", UNMAPPED_EVENT_GRACE_MS - 60_000, null);
+  recordEventAged("evt-old", UNMAPPED_EVENT_GRACE_MS + 1000, null);
+
+  const lines = await tickLines(sweeper());
+  expect(events.find("evt-young")?.processedAt).toBeNull();
+  expect(events.find("evt-old")?.processedAt).not.toBeNull();
+  expect(named(lines, "doola_webhook_unmapped").map((l) => l.eventId)).toEqual(["evt-young"]);
+  const retired = named(lines, "doola_webhook_unmapped_retired");
+  expect(retired).toHaveLength(1);
+  expect(retired[0]).toMatchObject({ level: "warn", eventId: "evt-old", providerRef: null });
+});
+
+test("a MAPPED event is unaffected by its age: an old one is fetched and advanced, not retired", async () => {
+  seedFormation();
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
+  // Older than the grace — e.g. it waited out a doola outage. Age is no reason to drop real work.
+  recordEventAged("evt-1", 2 * UNMAPPED_EVENT_GRACE_MS);
+
+  const lines = await tickLines(sweeper());
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(0);
+});
+
+test("an event that becomes mapped INSIDE the grace is processed normally, not retired", async () => {
+  // The race the grace exists for: the webhook beat the create's own response.
+  recordEventAged("evt-1", 0);
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
+  const s = sweeper();
+  await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).toBeNull();
+
+  // 59 minutes later the company's `create_provider` gains the ref.
+  now += UNMAPPED_EVENT_GRACE_MS - 60_000;
+  seedFormation();
+  const lines = await tickLines(s);
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(doola.calls.filter((c) => c.startsWith("getCompany")).length).toBeGreaterThan(0);
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(0);
+  expect(named(lines, "doola_webhook_unmapped")).toHaveLength(0);
 });
 
 test("an event with an UNKNOWN name is retired by the sweeper's ordinary fetch-and-advance", async () => {

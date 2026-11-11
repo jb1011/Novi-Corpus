@@ -199,7 +199,8 @@ Every line is one JSON object on stdout → journald.
 | `doola_webhook_oversize` | Body over 256 KiB |
 | `doola_webhook_stale` | Older than 48h; ignored, not failed |
 | `doola_webhook_unparsable` | Verified but not a readable envelope |
-| `doola_webhook_unmapped` | No entity owns that company id **yet**; kept for the sweeper |
+| `doola_webhook_unmapped` | No entity owns that company id **yet** (or the envelope has none); kept for the sweeper, for up to an hour |
+| `doola_webhook_unmapped_retired` | Still unowned an hour after receipt: marked processed, once, and never re-driven. Usually a sandbox company created from another machine, or a frozen create confirmed with `--doola-confirmed-no-company` |
 | `doola_webhook_unknown_event` | An event name we have no route for; the sweeper drives it |
 | `doola_webhook_disabled` | **CRITICAL** — see above |
 | `formation_step` | A step changed state |

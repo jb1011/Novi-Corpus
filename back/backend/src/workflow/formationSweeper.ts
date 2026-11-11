@@ -49,6 +49,7 @@ import {
   advanceFormation,
   currentPolledStep,
   processDoolaEvent,
+  retireUnmappedEvent,
 } from "./formationProcessor";
 import { runFormationCreateProvider } from "./formationProvider";
 import { abandonFormation, persistPollBackoff, recordCompanyEvent } from "./formationStep";
@@ -439,6 +440,12 @@ export class FormationSweeper {
       if (result.fetched)
         for (const e of group)
           if (e.eventId !== lead.eventId) this.d.events.markProcessed(e.eventId);
+      // The lead was retired: no company here owns the id the whole group shares, and the lead
+      // (the oldest) is past the grace. The rest are judged on THEIR OWN clocks, so one still
+      // inside the grace is kept, and the old ones go on this tick instead of one per tick.
+      if (result.retired)
+        for (const e of group)
+          if (e.eventId !== lead.eventId) retireUnmappedEvent(this.d, e, "sweeper");
     } catch (err) {
       opsLog("doola_event_redrive_failed", {
         level: "warn",
