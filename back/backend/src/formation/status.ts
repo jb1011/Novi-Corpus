@@ -75,6 +75,35 @@ export function providerRefOf(steps: FormationRequestRecord[]): string | null {
 }
 
 /**
+ * The provider ref an operator's record of a filing carries (`formation:record-filed`):
+ * `manual:<operator>`. It names no company at doola, so nothing may ever be asked of doola under
+ * it. The poll due-set (`listPollDue` in `persistence/formationRepository.ts`) spells the same
+ * prefix in SQL.
+ */
+export const MANUAL_REF_PREFIX = "manual:";
+
+export function isManualRef(ref: string | null): boolean {
+  return ref?.startsWith(MANUAL_REF_PREFIX) ?? false;
+}
+
+/** Any step of the company carries a `manual:` provider ref: an operator recorded its filing; the
+ *  saga never polls it. */
+export function manuallyRecorded(steps: FormationRequestRecord[]): boolean {
+  return steps.some((s) => isManualRef(s.providerRef));
+}
+
+/**
+ * The provider ref as a view serves it: doola's company id, or null. A `manual:` ref is served as
+ * null: it names no company at doola, and the operator handle it carries is internal. Every
+ * surface that hands a ref to a tenant or to the public reads it through this; the saga and the
+ * operator's commands read `providerRefOf`.
+ */
+export function servedProviderRefOf(steps: FormationRequestRecord[]): string | null {
+  const ref = providerRefOf(steps);
+  return isManualRef(ref) ? null : ref;
+}
+
+/**
  * The projection, in the ONE order that keeps it honest.
  *
  * `filed` and `complete` are checked BEFORE `failed`, deliberately: an entity whose company was
@@ -124,7 +153,8 @@ export interface FormationSummary {
    *  render as a real one by omission. */
   environment: DoolaEnvironment;
   status: FormationStatus;
-  /** doola's company id. An opaque provider reference — not PII. */
+  /** doola's company id. An opaque provider reference — not PII. Null for a filing an operator
+   *  recorded by hand (`servedProviderRefOf`). */
   providerRef: string | null;
   /** Unix seconds the STATE filed the company. Null until it has. */
   filedAt: number | null;
@@ -151,7 +181,7 @@ export function formationSummary(
     provider: company.provider,
     environment: company.environment,
     status: deriveFormationStatus(steps),
-    providerRef: providerRefOf(steps),
+    providerRef: servedProviderRefOf(steps),
     filedAt: company.filedAt ?? null,
     filingNumber: company.filingNumber ?? null,
     requiredActions: requiredActionCodesOf(steps),

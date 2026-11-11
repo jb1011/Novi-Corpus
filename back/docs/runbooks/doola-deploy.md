@@ -234,6 +234,21 @@ Since A1 the two count different things, on purpose:
   including FAILED ones, deliberately: a create that failed after doola committed has already cost
   a real company and a real fee.
 
+`FORMATION_MAX_TOTAL` (default 10, a whole number from 1) is the formed door's lifetime cap: how
+many formed legal-body companies (`POST /companies` with `for: "legal_body"`) the deployment takes
+in all, over every tenant. It applies **on production only**: a box where both doola's pin and the
+network are sandbox forms demo companies without a limit. It counts companies with provider doola and
+purpose `legal_body` that are `ready`, plus drafts with a live quote (`quoted` or `settling`). A
+draft nobody pays for and an `abandoned` company take no place, so abandoning one frees it.
+Companies for agents are never counted. A create past the cap answers 409
+`formation_cap_reached`, and `/config.legalBodies.formedDoor` reads `cap_reached` (when every
+other gate of the door holds). Both read the same figure from the create door's deps. The cap is
+checked after the per-tenant quota and again inside the mint transaction, so two people creating
+at once cannot both take the last place. Each refusal writes one ops line,
+`formation_cap_reached`, with `level: "warn"`, `check` (`count` or `mint`, the check that
+refused), `maxTotal` and `counted`, and no tenant or name. The mainnet box's figure is set when
+the box is configured.
+
 `FORMATION_MAX_AGENTS_PER_COMPANY` (default 10) bounds how many agents may share one filing. Each
 attached agent is its own anchor sequence per late fact — two sponsored on-chain writes through
 its own timelock, plus a guardian notification — so an EIN arriving on a ten-agent company is
@@ -529,6 +544,16 @@ There is **no fund-moving refund path in the software, by design.** To refund a 
    env invariant that `PLATFORM_OUTFLOW_CEILING_USDC >= FORMATION_FEE_USDC`.
 6. The company stays `ready` and its filing is untouched. Refunding does not un-file a Wyoming
    LLC, and pretending otherwise in the data would be the dishonest part.
+
+**A refund owed and overdue.** A paid company that is `abandoned` (by its tenant before anything
+reached doola, by the sweeper when its create gave up, or by `formation:abandon`) keeps its payment
+`settled`: only the procedure above refunds it. `FORMATION_REFUND_DAYS` (default 14, a whole number
+from 1 to 60) is the delay the terms promise. When a settled payment of an `abandoned` company has
+no refund recorded that many days after the abandon (counted from the company's `updated_at`, which
+the abandon stamps), the sweeper writes a CRITICAL `formation_refund_overdue` line `{ companyId,
+paymentId, daysOverdue }`, once per company per UTC day (again after a restart) until
+`formation:refund` records the transfer. `daysOverdue` is 0 on the first day. The line carries no
+amount and no address: read them from the payment as in step 2.
 
 ### Reconciling ONE payment against the chain
 

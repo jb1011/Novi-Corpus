@@ -152,11 +152,17 @@ export function parseAgentSpec(input: unknown): AgentSpec {
  *
  * `.strict()` for the same reason the spec is: an unknown key is a caller's misunderstanding of
  * where their data is going, and it must be named rather than silently dropped.
+ *
+ * THE NAMES are optional in the shape and decided by the door (`createFormationParty`): on a
+ * production door they are written from the guardian's verified identity record, and a body that
+ * carries either one is refused (`party_name_is_written_by_novi`); on a sandbox door that takes
+ * test bodies both are required, as before. The edit door takes neither
+ * (`FormationPartyEditSchema`).
  */
 export const FormationPartySchema = z
   .object({
-    legalFirstName: z.string().min(1),
-    legalLastName: z.string().min(1),
+    legalFirstName: z.string().min(1).optional(),
+    legalLastName: z.string().min(1).optional(),
     email: z.string().email(),
     /**
      * REQUIRED (C6). doola refuses a company create whose responsible party has no phone (live
@@ -191,10 +197,33 @@ export const FormationPartySchema = z
           }),
       })
       .strict(),
+    /**
+     * The guardian's consent to marketing email: a box left unticked unless they tick it. `true`
+     * stores `marketing_consent_at` on a production door; false or absent stores nothing. The
+     * filing email is sent whatever this says: it confirms a service the customer paid for. It is
+     * the person's own act, so only the web app's door (`POST /formation-party`) takes it: the MCP
+     * tools refuse it, whatever its value (`marketing_consent_is_given_in_the_web_app`).
+     */
+    marketingConsent: z.boolean().optional(),
   })
   .strict();
 
 export type FormationPartyInput = z.infer<typeof FormationPartySchema>;
+
+/**
+ * The PARTY-EDIT body (`PATCH /companies/:companyId/party`, MCP `update_company_party`): the
+ * intake's shape without the names, which the edit door never rewrites, and without the marketing
+ * consent, which is given once, at intake. Still `.strict()`, so either key is refused by name
+ * rather than dropped; on a production door the route and the tool refuse a name first, with
+ * `party_name_is_written_by_novi`.
+ */
+export const FormationPartyEditSchema = FormationPartySchema.omit({
+  legalFirstName: true,
+  legalLastName: true,
+  marketingConsent: true,
+});
+
+export type FormationPartyEditInput = z.infer<typeof FormationPartyEditSchema>;
 
 /**
  * The COMPANY INTAKE, as one schema for the two REST doors that carry it (design §5, A2).

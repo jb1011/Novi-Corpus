@@ -268,6 +268,18 @@ export interface FormationPaymentRepository {
    * gain a spent nonce.
    */
   listMineableTerminal(nowSec: number, limit?: number): FormationPaymentRecord[];
+  /**
+   * Settled payments of abandoned companies whose refund is not recorded: status `settled`,
+   * `refund_tx_hash` null, `companies.status` `abandoned`; `abandonedAt` is `companies.updated_at`
+   * (the abandon's stamp, which `setStatus` writes: a company abandoned before any formation row
+   * has no row stamp to read; a later write to the company would move it, and the alert would then
+   * count from later, never from earlier). Oldest abandon first. The refund-overdue alert's
+   * reader: `formation:refund` takes a row off it.
+   *
+   * Every settled row is a transfer today; Task 11's complimentary settlement moved nothing and
+   * owes nothing back, and adds `AND settlement_kind = 'transfer'` here when it lands.
+   */
+  listSettledAwaitingRefund(): { paymentId: string; companyId: string; abandonedAt: string }[];
 }
 
 export class SqliteFormationPaymentRepository implements FormationPaymentRepository {
@@ -355,6 +367,15 @@ export class SqliteFormationPaymentRepository implements FormationPaymentReposit
           WHERE status IN ('settled','refunded')
           GROUP BY company_id HAVING COUNT(*) > 1
           ORDER BY company_id LIMIT ?`,
+      ),
+      // Reads idx_formation_payments_status_window on `status`: the settled rows, then each
+      // one's company by its primary key.
+      settledAwaitingRefund: db.prepare(
+        `SELECT p.payment_id, p.company_id, c.updated_at AS abandoned_at
+           FROM formation_payments p
+           JOIN companies c ON c.company_id = p.company_id
+          WHERE p.status = 'settled' AND p.refund_tx_hash IS NULL AND c.status = 'abandoned'
+          ORDER BY c.updated_at, p.payment_id`,
       ),
       bump: db.prepare(
         `UPDATE formation_payments SET attempt = attempt + 1, updated_at = CURRENT_TIMESTAMP
@@ -463,6 +484,20 @@ export class SqliteFormationPaymentRepository implements FormationPaymentReposit
 
   listDoublePaidCompanies(limit = 50): string[] {
     return (this.stmts.doublePaid.all(limit) as { company_id: string }[]).map((r) => r.company_id);
+  }
+
+  listSettledAwaitingRefund(): { paymentId: string; companyId: string; abandonedAt: string }[] {
+    return (
+      this.stmts.settledAwaitingRefund.all() as {
+        payment_id: string;
+        company_id: string;
+        abandoned_at: string;
+      }[]
+    ).map((r) => ({
+      paymentId: r.payment_id,
+      companyId: r.company_id,
+      abandonedAt: r.abandoned_at,
+    }));
   }
 
   bumpAttempt(paymentId: string): number {

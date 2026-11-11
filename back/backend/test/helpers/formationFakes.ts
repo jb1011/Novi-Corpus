@@ -17,6 +17,7 @@ import type { HostLookup } from "../../src/payments/ssrfGuard";
 import type { CompanyRepository } from "../../src/persistence/companyRepository";
 import type { DocumentStore, PutResult } from "../../src/persistence/documentStore";
 import type { EntityRecord } from "../../src/types";
+import { wyomingDate } from "../../src/util/wyomingCalendar";
 
 export const ENTITY_KEY = "tenant-a:agent-1";
 export const TENANT = "tenant-a";
@@ -181,6 +182,83 @@ function notImplemented(name: string) {
 /** doola document fixtures, spelled the way the wire spells them (`documentType`, not `type`). */
 export function doolaDoc(id: string, documentType: string): DoolaDocument {
   return { id, companyId: COMPANY_ID, name: `${documentType}.pdf`, documentType };
+}
+
+/**
+ * `fakeDoola` plus the saga's and the sandbox's calls: createCustomer, createCompany,
+ * listCompanies, playgroundCompleteFormation, playgroundCompleteEin.
+ *
+ * A doola test environment as the sweeper meets it: the filing step can open a company, and the
+ * two playground calls make doola's own state say what a real filing and a real EIN would. The
+ * filing then reads back through the ordinary `getCompany` and `listDocuments`, so the processor
+ * confirms it on its own rules, never on the fake's say-so.
+ *
+ * - `createCustomer` answers `cus-<n>`; `createCompany` answers `cmp-<n>` (the first is
+ *   `COMPANY_ID`), `SUBMITTED`, becomes `state.company`, and remembers the first name option's
+ *   bare `name`, which is what the playground's filing reports back;
+ * - `listCompanies` answers `[]` (the pre-create lookup finds nothing);
+ * - `playgroundCompleteFormation` files the company: the remembered name (the company's own name
+ *   when no create was made), the filing date Wyoming's calendar date of `opts.now()` (doola
+ *   reports the State's date: at 03:00 UTC it is still the day before), the filing number
+ *   `PLAYGROUND-FILING`, the formation service `completed`, and the Articles and the Operating
+ *   Agreement as its documents;
+ * - `playgroundCompleteEin` issues the EIN `12-3456789`.
+ *
+ * Each pushes `<method>:<id>` to `calls`. The other callers of `fakeDoola` keep its throwing
+ * stubs: a code path that files must say so by using this one.
+ */
+export function fakeSandboxDoola(
+  over: Partial<FakeDoolaState> = {},
+  opts: { now?: () => number } = {},
+): FakeDoola {
+  const fake = fakeDoola(over);
+  const { state, calls } = fake;
+  const now = opts.now ?? Date.now;
+  let customers = 0;
+  let created = 0;
+  let bareName: string | undefined;
+
+  const api: DoolaApi = {
+    ...fake.api,
+    async createCustomer() {
+      const doolaCustomerId = `cus-${++customers}`;
+      calls.push(`createCustomer:${doolaCustomerId}`);
+      return { doolaCustomerId };
+    },
+    async createCompany(input) {
+      const doolaCompanyId = `cmp-${++created}`;
+      calls.push(`createCompany:${doolaCompanyId}`);
+      bareName = input.nameOptions[0]?.name;
+      state.company = { doolaCompanyId, formationSubmissionStatus: "SUBMITTED" };
+      return { ...state.company };
+    },
+    async listCompanies(customerId) {
+      calls.push(`listCompanies:${customerId}`);
+      return [];
+    },
+    async playgroundCompleteFormation(id) {
+      calls.push(`playgroundCompleteFormation:${id}`);
+      state.company = {
+        ...state.company,
+        name: bareName ?? state.company.name,
+        formationFilingDate: wyomingDate(Math.floor(now() / 1000)),
+        formationFilingNumber: "PLAYGROUND-FILING",
+        services: [{ name: "Formation", status: "completed" }],
+      };
+      state.documents = [
+        doolaDoc("doc-articles", "ArticlesOfOrganization"),
+        doolaDoc("doc-oa", "OperatingAgreement"),
+      ];
+      return { triggeredEvents: [] };
+    },
+    async playgroundCompleteEin(id) {
+      calls.push(`playgroundCompleteEin:${id}`);
+      state.company = { ...state.company, ein: "12-3456789" };
+      return { triggeredEvents: [] };
+    },
+  };
+
+  return { ...fake, api };
 }
 
 /** An in-memory DocumentStore: the atomic-write ceremony has its own tests; this one only needs

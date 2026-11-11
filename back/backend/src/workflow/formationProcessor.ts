@@ -11,7 +11,7 @@ import {
   withEntityEnding,
 } from "../formation/intake";
 import { POLL_BASE_MS, POLL_CAP_MS, type StepBackoff, nextInterval } from "../formation/schedule";
-import { providerRefOf } from "../formation/status";
+import { isManualRef, providerRefOf } from "../formation/status";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { CompanyRepository } from "../persistence/companyRepository";
@@ -238,7 +238,7 @@ export interface AdvanceOutcome {
   /** Did anything change? This is what resets the poll backoff. */
   advanced: boolean;
   /** Why nothing happened, when nothing happened. */
-  skipped?: "no_company" | "environment_pin" | "no_provider_ref";
+  skipped?: "no_company" | "environment_pin" | "no_provider_ref" | "manual_record";
 }
 
 /** The step an entity is currently waiting on — where poll backoff is persisted. */
@@ -283,6 +283,11 @@ export async function advanceFormation(
   const providerRef = providerRefOf(steps);
   // Nothing has been filed yet: `create_provider` is the sweeper's job, not this one's.
   if (!providerRef) return { fetched: false, advanced: false, skipped: "no_provider_ref" };
+  // An operator recorded this filing by hand (`formation:record-filed`): its `manual:` ref names
+  // no company at doola, so nothing may be asked under it. The sweeper never hands such a company
+  // here (`manuallyRecorded`); this holds for every other caller, a webhook wake-up included.
+  if (isManualRef(providerRef))
+    return { fetched: false, advanced: false, skipped: "manual_record" };
 
   const waitingOn = currentPolledStep(steps);
 

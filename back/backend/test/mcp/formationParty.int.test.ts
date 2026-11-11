@@ -70,6 +70,9 @@ const REAL_PARTY = {
   },
 };
 
+/** The edit door's body: the contact and the address. It never takes the names. */
+const { legalFirstName: _first, legalLastName: _last, ...PARTY_WITHOUT_NAMES } = REAL_PARTY;
+
 let db: Database.Database;
 let repo: SqliteEntityRepository;
 let parties: SqliteFormationPartyRepository;
@@ -756,6 +759,8 @@ test("the party-edit door exists on MCP too, takes no ssn, and is gated on forma
     "email",
     "phone",
     "address",
+    // Declared to be refused too: a marketing consent is the person's, given in the web app.
+    "marketingConsent",
     "ssn",
   ]);
   expect(tool!.description).toMatch(/NEVER an ssn/);
@@ -776,19 +781,23 @@ test("MCP and REST edit through ONE function: same refusals, same strictness, sa
 
   await withClient(app, key, async (c) => {
     const { partyId, companyId } = await mcpCompanyWithParty(c);
-    const corrected = {
-      ...REAL_PARTY,
-      legalFirstName: "Grace",
-      legalLastName: "Hopper",
-      email: "grace@example.com",
-    };
+    const corrected = { ...PARTY_WITHOUT_NAMES, email: "grace@example.com" };
 
     const ok = await c.callTool({
       name: "update_company_party",
       arguments: { companyId, ...corrected },
     });
     expect(JSON.parse(textOf(ok))).toEqual({ partyId });
-    expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Grace");
+    expect(parties.findOwned(TENANT, partyId)!.email).toBe("grace@example.com");
+
+    // A name is never edited: the edit schema REST parses refuses it by name, here too.
+    const named = await c.callTool({
+      name: "update_company_party",
+      arguments: { companyId, ...corrected, legalFirstName: "Grace" },
+    });
+    expect((named as { isError?: boolean }).isError).toBe(true);
+    expect(textOf(named)).toContain("legalFirstName");
+    expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
 
     // The SAME `.strict()` schema REST parses: an `ssn` key is refused by the schema itself
     // rather than by a check somebody has to remember to write on each surface.
@@ -800,7 +809,7 @@ test("MCP and REST edit through ONE function: same refusals, same strictness, sa
     expect(textOf(withSsn)).toBe(ssnNotOnThisDoorMessage());
     expect(textOf(withSsn)).not.toMatch(/\d{3}-\d{2}-\d{4}/);
     // The refusal is the WHOLE answer: the identity is untouched.
-    expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Grace");
+    expect(parties.findOwned(TENANT, partyId)!.email).toBe("grace@example.com");
 
     // …and the ownership refusal is the same sentence every other company door gives.
     const foreign = await c.callTool({
@@ -832,7 +841,7 @@ test("MCP and REST edit through ONE function: same refusals, same strictness, sa
   const res = await app.request(`/companies/${companyId}/party`, {
     method: "PATCH",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
-    body: JSON.stringify({ ...REAL_PARTY, legalFirstName: "Grace" }),
+    body: JSON.stringify({ ...PARTY_WITHOUT_NAMES, email: "grace@example.com" }),
   });
   expect(res.status).toBe(200);
   expect(await res.json()).toEqual({ partyId });
@@ -850,11 +859,11 @@ test("ADDRESSING: two parked companies, one tenant — the edit cannot reach the
 
     const ok = await c.callTool({
       name: "update_company_party",
-      arguments: { companyId: a.companyId, ...REAL_PARTY, legalFirstName: "Grace" },
+      arguments: { companyId: a.companyId, ...PARTY_WITHOUT_NAMES, email: "grace@example.com" },
     });
     expect(JSON.parse(textOf(ok))).toEqual({ partyId: a.partyId });
-    expect(parties.findOwned(TENANT, a.partyId)!.legalFirstName).toBe("Grace");
-    expect(parties.findOwned(TENANT, b.partyId)!.legalFirstName).toBe("Ada");
+    expect(parties.findOwned(TENANT, a.partyId)!.email).toBe("grace@example.com");
+    expect(parties.findOwned(TENANT, b.partyId)!.email).toBe(REAL_PARTY.email);
   });
 });
 
@@ -891,11 +900,11 @@ test("SYNTHETIC GATE: update_company_party refuses both directions, in the creat
     );
     const refused = await c.callTool({
       name: "update_company_party",
-      arguments: { companyId, ...REAL_PARTY },
+      arguments: { companyId, ...PARTY_WITHOUT_NAMES },
     });
     expect((refused as { isError?: boolean }).isError).toBe(true);
     expect(textOf(refused)).toMatch(/FORMATION_SANDBOX_SYNTHETIC_PII/);
-    expect(parties.findOwned(TENANT, partyId)!.legalFirstName).not.toBe("Ada");
+    expect(parties.findOwned(TENANT, partyId)!.email).not.toBe(REAL_PARTY.email);
   });
 
   const prod = buildTestApp({ required: true, syntheticPii: false });
@@ -905,10 +914,10 @@ test("SYNTHETIC GATE: update_company_party refuses both directions, in the creat
     db.prepare("UPDATE formation_parties SET synthetic = 1 WHERE party_id = ?").run(partyId);
     const refused = await c.callTool({
       name: "update_company_party",
-      arguments: { companyId, ...REAL_PARTY, legalFirstName: "Grace" },
+      arguments: { companyId, ...PARTY_WITHOUT_NAMES, email: "grace@example.com" },
     });
     expect((refused as { isError?: boolean }).isError).toBe(true);
     expect(textOf(refused)).toMatch(/synthetic formation parties are refused/);
-    expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
+    expect(parties.findOwned(TENANT, partyId)!.email).toBe(REAL_PARTY.email);
   });
 });

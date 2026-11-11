@@ -11,7 +11,7 @@ import { join } from "node:path";
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { sqliteUtcTimestamp } from "../../src/formation";
-import { deriveFormationStatus } from "../../src/formation/status";
+import { deriveFormationStatus, isManualRef } from "../../src/formation/status";
 import { withKeyedLock } from "../../src/payments/keyedMutex";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -44,6 +44,7 @@ import {
   doolaDoc,
   fakeAnchorChain,
   fakeDoola,
+  fakeSandboxDoola,
   formedEntity,
   seedCompany,
 } from "../helpers/formationFakes";
@@ -835,6 +836,139 @@ test("M5: the poll due-set is filtered in SQL — an entity that is not due is n
   expect(
     requests.listPollDueCompanyIds(later, sqliteUtcTimestamp(later - POLL_BASE_MS), 100),
   ).toEqual([COMPANY_KEY]);
+});
+
+// ── a filing an operator recorded by hand: the saga never polls it (F-A-2a, Task 13) ─────────
+//
+// `formation:record-filed` writes a `manual:<operator>` provider ref. That ref names no company at
+// doola, so a poll of it could only fail, and a retry or an abandon would overrule the operator's
+// record. The exclusion is by COMPANY: the ref sits on `create_provider` and `await_ein`, while
+// the rows the due-set would pick are the polled steps beside them.
+
+const MANUAL_REF = "manual:ops-a";
+
+/** The rows `formation:record-filed` leaves: the filing and its documents confirmed, the EIN
+ *  pending under the same `manual:` ref and never polled. */
+function seedManualFiling() {
+  seedCompany(companies, { purposeKind: "legal_body" });
+  requests.claimAllSteps(COMPANY_KEY);
+  requests.transition(COMPANY_KEY, "create_provider", "pending", "confirmed", {
+    providerRef: MANUAL_REF,
+    detail: JSON.stringify({ recordedBy: "ops-a", recordedAt: now }),
+  });
+  requests.transition(COMPANY_KEY, "await_filing", "pending", "confirmed", {
+    detail: JSON.stringify({
+      filingNumber: "2026-001234567",
+      filingDate: "2026-08-19",
+      filedAt: Date.parse("2026-08-19T00:00:00Z") / 1000,
+      recordedBy: "ops-a",
+    }),
+  });
+  requests.transition(COMPANY_KEY, "fetch_documents", "pending", "confirmed", {
+    detail: JSON.stringify({
+      stored: [
+        {
+          docId: `operator:ArticlesOfOrganization:0x${"ab".repeat(32)}`,
+          type: "ArticlesOfOrganization",
+          sha256: `0x${"ab".repeat(32)}`,
+        },
+      ],
+      missing: [],
+      recordedBy: "ops-a",
+    }),
+  });
+  requests.transition(COMPANY_KEY, "await_ein", "pending", "pending", {
+    providerRef: MANUAL_REF,
+    touchFacts: false,
+  });
+  stampRows(now);
+}
+
+test("a manual: company is never in the poll due-set, whichever of its rows is due", () => {
+  seedFormation();
+  const later = now + POLL_BASE_MS + 1000;
+  const due = () =>
+    requests.listPollDueCompanyIds(later, sqliteUtcTimestamp(later - POLL_BASE_MS), 100);
+  const setCreateRef = (ref: string) =>
+    db
+      .prepare(
+        "UPDATE formation_requests SET provider_ref = ? WHERE company_id = ? AND step = 'create_provider'",
+      )
+      .run(ref, COMPANY_KEY);
+  // Due by age as an API filing...
+  expect(due()).toEqual([COMPANY_KEY]);
+  // ...and still due under a ref that only LOOKS manual: the SQL spells the prefix exactly as
+  // `isManualRef` does, case included...
+  setCreateRef("Manual:ops-a");
+  expect(isManualRef("Manual:ops-a")).toBe(false);
+  expect(due()).toEqual([COMPANY_KEY]);
+  // ...and out of the set once any step of the company carries a manual ref, though the due rows
+  // themselves carry none.
+  setCreateRef(MANUAL_REF);
+  expect(isManualRef(MANUAL_REF)).toBe(true);
+  expect(due()).toEqual([]);
+});
+
+test("the poll skips a manual: company even when the due-set hands it over", async () => {
+  seedManualFiling();
+  // The in-memory guard behind the SQL one.
+  requests.listPollDueCompanyIds = () => [COMPANY_KEY];
+  now += 2 * DAY;
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(rowOf("await_ein")).toMatchObject({ state: "pending", nextPollAt: null });
+});
+
+test("advanceFormation itself never asks doola about a manual: company, whoever calls it", async () => {
+  // Defence in depth behind the sweeper's guards: a webhook wake-up or any other caller that
+  // reaches the processor for this company is answered without a provider call.
+  seedManualFiling();
+  const before = requests.stepsOf(COMPANY_KEY);
+  const outcome = await advanceFormation(
+    {
+      repo,
+      companies,
+      requests,
+      documents,
+      docStore,
+      doola: doola.api,
+      environment: "sandbox",
+      fetchImpl: doola.fetchImpl,
+      lookupImpl: doola.lookupImpl,
+      now: () => now,
+    },
+    COMPANY_KEY,
+    { requiredActions: true },
+  );
+  expect(outcome).toEqual({ fetched: false, advanced: false, skipped: "manual_record" });
+  expect(doola.calls).toEqual([]);
+  expect(requests.stepsOf(COMPANY_KEY)).toEqual(before);
+});
+
+test("a manual: company is never completed by the sandbox playground", async () => {
+  doola = fakeSandboxDoola({}, { now: () => now });
+  seedManualFiling();
+  now += 6 * 60_000;
+  await sweeper().tick();
+  now += 2 * DAY;
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(stateOf("await_ein")).toBe("pending");
+});
+
+test("a manual: company with a failed row is neither retried nor abandoned", async () => {
+  seedManualFiling();
+  // Past its backoff: an API company would be retried here.
+  fail("await_ein", 3, DAY);
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(stateOf("await_ein")).toBe("failed");
+
+  // Past the attempt bound: an API company would be abandoned here.
+  fail("await_ein", MAX_FORMATION_ATTEMPTS, 7 * DAY);
+  await sweeper().tick();
+  expect(doola.calls).toEqual([]);
+  expect(stateOf("await_ein")).toBe("failed");
 });
 
 // ══════════════════════════════════════════════════════════════════════════════════════════════

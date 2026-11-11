@@ -35,6 +35,7 @@ const ANSWERING_MODULES = [
   "legalBody/gasSeed.ts",
   "legalBody/treasury.ts",
   "formation/company.ts",
+  "workflow/formationPayment.ts",
   "api/routes/legalBodyOrders.ts",
   "mcp/server.ts",
 ];

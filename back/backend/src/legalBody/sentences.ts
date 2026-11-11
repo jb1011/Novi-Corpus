@@ -94,6 +94,21 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // `POST /companies` with `for: "legal_body"` on a production deployment, until the gates of the
   // formed door are wired (F-A-2).
   formed_door_not_offered: "This deployment does not create a company for a legal body yet.",
+  // `POST /companies` with `for: "legal_body"` on production once the formed door has taken every
+  // company it takes (FORMATION_MAX_TOTAL): answered before anything is written, or by the re-check
+  // inside the mint, which rolls back. A re-quote of a formed draft answers it too, before its
+  // quote is written.
+  formation_cap_reached:
+    "The early-access formations are all taken: join the waitlist and we will write to you when a place opens.",
+  // The two party doors on production (`POST /formation-party`, `PATCH /companies/:id/party` and
+  // their MCP tools), for a body that carries `legalFirstName` or `legalLastName`, whatever its
+  // value: the names of the responsible person are written from the guardian's identity record.
+  party_name_is_written_by_novi:
+    "The responsible party's names are written from the verified identity record: leave out legalFirstName and legalLastName.",
+  // MCP `create_formation_party` or `update_company_party` with a `marketingConsent` argument,
+  // whatever its value: the consent is the person's own act, given in the web app, never an agent's.
+  marketing_consent_is_given_in_the_web_app:
+    "The marketing consent is given by the person in the web app: leave out marketingConsent.",
   // MCP `create_company` with a `for` argument: the tool creates companies for agents only.
   create_company_agents_only:
     "This tool creates companies for agents only: a company to stand behind a legal body is created from the legal-body page of the web app.",

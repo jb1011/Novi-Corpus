@@ -175,6 +175,36 @@ test("a company with no filing opened answers EMPTY without calling the provider
   expect(body.annualReport).toEqual(COMPLIANCE_ANNUAL_REPORT);
 });
 
+test("a filing recorded by hand is never asked of doola: 200, no events, no fetch, the placeholder, and the marker", async () => {
+  // `formation:record-filed` writes `manual:<operator>`, which names no company at doola: asking
+  // for its calendar could only fail, and the page would refuse forever.
+  const id = newCompany("manual:ops.example");
+  for (const withProvider of [true, false]) {
+    const res = await get(app(withProvider), id);
+    expect(res.status, String(withProvider)).toBe(200);
+    expect(await res.json()).toEqual({
+      companyId: id,
+      // The operator's handle is internal: never served.
+      providerRef: null,
+      fetchedAt: null,
+      events: [],
+      annualReport: COMPLIANCE_ANNUAL_REPORT,
+      recordedByHand: true,
+    });
+  }
+  expect(calls).toEqual([]);
+  // A ref that only LOOKS manual is doola's, and is asked as ever.
+  await get(app(), newCompany("Manual:ops.example"));
+  expect(calls).toEqual(["Manual:ops.example"]);
+});
+
+test("every other answer says it was not recorded by hand", async () => {
+  const fetched = (await (await get(app(), newCompany("cmp-1"))).json()) as Record<string, unknown>;
+  const unopened = (await (await get(app(), newCompany())).json()) as Record<string, unknown>;
+  expect(fetched.recordedByHand).toBe(false);
+  expect(unopened.recordedByHand).toBe(false);
+});
+
 // ── the cache ───────────────────────────────────────────────────────────────────────────────
 
 test("CACHE: a second view inside 24h reuses the answer; past it, the provider is asked again", async () => {

@@ -131,6 +131,9 @@ export interface FormationRepository {
    * A row that has never been polled has a NULL `next_poll_at`; its clock is its own
    * `updated_at`, which is why the caller passes the age cutoff as well as the instant. Ordered
    * oldest-due first so a `limit` throttles a backlog instead of starving the tail of it.
+   *
+   * A company any of whose steps carries a `manual:` provider ref (an operator recorded its
+   * filing) is never in the set: the saga never polls it.
    */
   listPollDueCompanyIds(nowMs: number, neverPolledCutoffUtc: string, limit: number): string[];
   /**
@@ -253,6 +256,12 @@ export class SqliteFormationRepository implements FormationRepository {
       // Superset by design — see `listPollDueEntityKeys`. GROUP BY + MIN so the ordering is by
       // the EARLIEST due step of each entity, which is what makes `limit` a throttle rather than
       // a starvation hazard.
+      // ⚠ NEVER A COMPANY AN OPERATOR RECORDED BY HAND. `formation:record-filed` writes a
+      // `manual:<operator>` ref (`MANUAL_REF_PREFIX`, `formation/status.ts`), which names no
+      // company at doola: a poll of it could only fail. Excluded by COMPANY, not by row, because
+      // the ref sits on `create_provider` and `await_ein` while the due rows may be any polled
+      // step beside them. The sweeper keeps an in-memory twin of this (`manuallyRecorded`). GLOB,
+      // not LIKE: it is case-sensitive, so the SQL and `isManualRef` agree on every string.
       listPollDue: db.prepare(
         `SELECT company_id AS k, MIN(COALESCE(next_poll_at, 0)) AS due
            FROM formation_requests
@@ -260,6 +269,8 @@ export class SqliteFormationRepository implements FormationRepository {
             AND step IN ('await_filing','fetch_documents','await_ein')
             AND ((next_poll_at IS NOT NULL AND next_poll_at <= @now)
                  OR (next_poll_at IS NULL AND updated_at <= @cutoff))
+            AND company_id NOT IN (
+                  SELECT company_id FROM formation_requests WHERE provider_ref GLOB 'manual:*')
           GROUP BY company_id
           ORDER BY due, company_id
           LIMIT @limit`,

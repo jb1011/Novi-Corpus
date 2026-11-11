@@ -8,8 +8,8 @@ import {
   formationSummary,
   hasLivePayment,
   livePaymentLookup,
-  providerRefOf,
   requiredActionCodesOf,
+  servedProviderRefOf,
 } from "../formation/status";
 import { type VerificationState, verificationStateOf } from "../legalBody/attestation";
 import { CUSTOMER_PROVIDER } from "../legalBody/provider";
@@ -759,7 +759,8 @@ export function toCompanyDetailView(
     formationStatus: deriveFormationStatus(steps),
     paying,
     intakeSynthesized: company.intakeSynthesized,
-    providerRef: providerRefOf(steps),
+    // Never a `manual:` ref: the operator's handle is internal (`servedProviderRefOf`).
+    providerRef: servedProviderRefOf(steps),
     ein: company.ein,
     requiredActions: requiredActionCodesOf(steps),
     documents: (deps.documents?.listByCompany(company.companyId) ?? []).map(toDocumentView),

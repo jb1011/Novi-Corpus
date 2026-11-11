@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import type { DoolaComplianceEvent } from "../../adapters/doola/types";
 import type { AuthVars } from "../../auth/middleware";
 import { COMPLIANCE_ANNUAL_REPORT, formationUnavailableMessage } from "../../formation";
-import { providerRefOf } from "../../formation/status";
+import { isManualRef, providerRefOf } from "../../formation/status";
 import type { ApiDeps } from "../app";
 import { ApiError, requireOwnedCompany } from "../errors";
 
@@ -57,6 +57,12 @@ export interface ComplianceView {
    * would make an open question look like partner data. See `COMPLIANCE_ANNUAL_REPORT`.
    */
   annualReport: typeof COMPLIANCE_ANNUAL_REPORT;
+  /**
+   * The company's filing was recorded by hand (`formation:record-filed`): doola filed it outside
+   * its API, so it holds no company under our ref and was not asked. `events` is then empty
+   * because nobody asked, not because nothing is due; the placeholder stands as ever.
+   */
+  recordedByHand: boolean;
 }
 
 /** What the route reads from the provider. ONE method, narrowed at the seam. */
@@ -121,11 +127,24 @@ export function mountComplianceRoutes(app: Hono<{ Variables: AuthVars }>, deps: 
     // Ownership FIRST, before any cache read: a cached answer must not be reachable by a tenant
     // who cannot reach the company it belongs to.
     const company = requireOwnedCompany(deps, c);
+    const providerRef = providerRefOf(deps.formationSteps?.(company.companyId) ?? []);
+    // A filing recorded by hand: its `manual:` ref names no company at doola, so a call could
+    // only fail, and the page would refuse forever. Answered before the provider is even looked
+    // for: the box that records filings by hand is often the one with no doola credentials. The
+    // ref is the operator's handle, which is internal, so it is not served.
+    if (isManualRef(providerRef))
+      return c.json({
+        companyId: company.companyId,
+        providerRef: null,
+        fetchedAt: null,
+        events: [],
+        annualReport: COMPLIANCE_ANNUAL_REPORT,
+        recordedByHand: true,
+      } satisfies ComplianceView);
     const reader = deps.formation?.compliance;
     if (!reader) throw new ApiError("unavailable", 503, formationUnavailableMessage());
 
     const now = (deps.now ?? Date.now)();
-    const providerRef = providerRefOf(deps.formationSteps?.(company.companyId) ?? []);
     if (!providerRef)
       return c.json({
         companyId: company.companyId,
@@ -133,6 +152,7 @@ export function mountComplianceRoutes(app: Hono<{ Variables: AuthVars }>, deps: 
         fetchedAt: null,
         events: [],
         annualReport: COMPLIANCE_ANNUAL_REPORT,
+        recordedByHand: false,
       } satisfies ComplianceView);
 
     const hit = cache.get(company.companyId);
@@ -147,6 +167,7 @@ export function mountComplianceRoutes(app: Hono<{ Variables: AuthVars }>, deps: 
         fetchedAt: hit.at,
         events: hit.events,
         annualReport: COMPLIANCE_ANNUAL_REPORT,
+        recordedByHand: false,
       } satisfies ComplianceView);
     }
 
@@ -183,6 +204,7 @@ export function mountComplianceRoutes(app: Hono<{ Variables: AuthVars }>, deps: 
       fetchedAt: now,
       events,
       annualReport: COMPLIANCE_ANNUAL_REPORT,
+      recordedByHand: false,
     } satisfies ComplianceView);
   });
 }
