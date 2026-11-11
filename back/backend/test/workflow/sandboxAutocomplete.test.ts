@@ -43,6 +43,8 @@ import {
 } from "../helpers/formationFakes";
 
 const MINUTE = 60_000;
+/** The stand-in filing number of doola's company `cmp-1`: doola's sandbox files with none. */
+const STAND_IN = "TEST-STANDIN-D36A9A6177333DB7";
 let now = Date.parse("2026-08-21T12:00:00Z");
 
 let db: Database.Database;
@@ -163,7 +165,7 @@ test("six minutes after: one playground call, and the filing, documents and name
   expect(rowOf("fetch_documents")?.state).toBe("confirmed");
   const company = companies.find(COMPANY_KEY)!;
   expect(company.legalNameFiled).toBe(withEntityEnding(company.nameOptions[0]!.name));
-  expect(company.filingNumber).toBe("PLAYGROUND-FILING");
+  expect(company.filingNumber).toBe(STAND_IN);
   expect(company.filedAt).toBe(filingDateToUnix(wyomingDate(Math.floor(now / 1000))));
   // The EIN waits for its own five minutes.
   expect(callsOf("playgroundCompleteEin")).toEqual([]);

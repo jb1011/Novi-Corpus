@@ -44,12 +44,14 @@ import {
 import {
   COMPANY_ID,
   COMPANY_KEY,
+  CUSTOMER_ID,
   ENTITY_KEY,
   type FakeDoola,
   MemoryDocumentStore,
   doolaDoc,
   fakeDoola,
   formedEntity,
+  listItem,
   seedCompany,
 } from "../helpers/formationFakes";
 
@@ -841,7 +843,8 @@ test("F12: a filing confirmed WITHOUT a number gains it on a later poll", async 
   expect(company()?.filingNumber).toBe("2026-001234567");
 });
 
-// ── the filed name: the full legal name for a legal-body company, the bare candidate otherwise ──
+// ── the filed name, from doola's list: the full legal name for a legal-body company, none for an
+//    agent company ──
 
 /** A company for `purposeKind` with the name options given, its `create_provider` confirmed and no
  *  agent attached (a legal-body company never takes one). */
@@ -857,14 +860,16 @@ function seedCompanyFiling(
   });
 }
 
-/** doola filing the company under `name`, as its list item reports it (without the ending). */
+/** doola filing the company, its LIST item naming it `name` (an item with no name when
+ *  undefined). The full answer carries no name, as doola's carries none. */
 const filedAs = (name: string | undefined) => {
   doola.state.company = {
     doolaCompanyId: COMPANY_ID,
-    name,
+    doolaCustomerId: CUSTOMER_ID,
     formationFilingDate: "2026-08-19",
     formationFilingNumber: "2026-001234567",
   };
+  doola.state.listed = [listItem(name)];
 };
 
 test("a legal-body company's filed name is its candidate followed by the entity ending: its full legal name", async () => {
@@ -876,12 +881,18 @@ test("a legal-body company's filed name is its candidate followed by the entity 
   expect(company()?.legalNameFiled).toBe("Formation Agent Two LLC");
 });
 
-test("an agent company's filed name stays the bare candidate, as its published manifests commit to", async () => {
+test("an agent company records no name, and listCompanies is never called for it", async () => {
   seedCompanyFiling("agent");
-  filedAs("Formation Agent");
+  // doola lists the company under its first option: an agent company never reads the list, so its
+  // published manifests are not re-hashed (design 2026-11-11 §1).
+  filedAs("Formation Agent LLC");
   await advanceFormation(deps(), COMPANY_KEY);
   expect(stateOf("await_filing")).toBe("confirmed");
-  expect(company()?.legalNameFiled).toBe("Formation Agent");
+  expect(company()?.legalNameFiled).toBeNull();
+  // The next pass, the heal's, reads no name either.
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.legalNameFiled).toBeNull();
+  expect(doola.calls.filter((c) => c.startsWith("listCompanies"))).toEqual([]);
 });
 
 test("a candidate that already ends in an entity ending keeps it once, never twice", async () => {
@@ -930,10 +941,11 @@ test("a legal-body company's held name is never rewritten by a later poll: an op
   // the name stays the operator's.
   doola.state.company = {
     doolaCompanyId: COMPANY_ID,
-    name: "Formation Agent",
+    doolaCustomerId: CUSTOMER_ID,
     formationFilingDate: "2026-08-19",
     formationFilingNumber: "2026-007654321",
   };
+  doola.state.listed = [listItem("Formation Agent")];
   await advanceFormation(deps(), COMPANY_KEY);
   expect(company()?.filingNumber).toBe("2026-007654321");
   expect(company()?.legalNameFiled).toBe("Formation Agent, LLC");
@@ -954,15 +966,14 @@ test("a legal-body company holding a name when its filing is confirmed keeps it"
   expect(company()?.legalNameFiled).toBe("Formation Agent Two, LLC");
 });
 
-test("an agent company's held name is matched on every poll, exactly as before", async () => {
+test("an agent company's held name is left as it is: no name is read for it", async () => {
   seedCompanyFiling("agent");
-  filedAs("Formation Agent");
+  companies.recordFilingFacts(COMPANY_KEY, { legalNameFiled: "Formation Agent" });
+  filedAs("Formation Agent Two LLC");
+  await advanceFormation(deps(), COMPANY_KEY);
   await advanceFormation(deps(), COMPANY_KEY);
   expect(company()?.legalNameFiled).toBe("Formation Agent");
-  companies.recordFilingFacts(COMPANY_KEY, { legalNameFiled: "Something Else" });
-  filedAs("Formation Agent Two");
-  await advanceFormation(deps(), COMPANY_KEY);
-  expect(company()?.legalNameFiled).toBe("Formation Agent Two");
+  expect(doola.calls.filter((c) => c.startsWith("listCompanies"))).toEqual([]);
 });
 
 // ── matchFiledNameAgainst: the one rule a reported name is held to, wherever it is reported ─────

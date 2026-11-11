@@ -138,7 +138,9 @@ const PURPOSE = "Software services for the company's own customers.";
 /** The company the saga files, and what the fake doola's playground reports for it. */
 const LANTERN = ["Lantern Works", "Lantern Labs", "Lantern Foundry"] as const;
 const LANTERN_FILED = "Lantern Works LLC";
-const PLAYGROUND_FILING = "PLAYGROUND-FILING";
+/** The stand-in filing number of doola's company `cmp-1`, the fake's first: doola's sandbox files
+ *  with none. */
+const LANTERN_STAND_IN = "TEST-STANDIN-D36A9A6177333DB7";
 /** The EIN the fake doola's playground issues. */
 const PLAYGROUND_EIN = "12-3456789";
 /** The company the operator records by hand, and what the State's record says of it. */
@@ -786,7 +788,7 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
   expect(await companyView(g, lantern)).toMatchObject({
     state: "filed",
     legalNameFiled: LANTERN_FILED,
-    filingNumber: PLAYGROUND_FILING,
+    filingNumber: LANTERN_STAND_IN,
     filedAt: filingDateToUnix(lanternFiledOn),
   });
   const indexed = d.documents.listByCompany(lantern);
@@ -805,7 +807,7 @@ test("the formed door end to end: a company filed by the saga on the fake doola 
   // 9 to 12. The order, the link, the binding and the statement.
   await standBehindLegalBody(g, lantern, {
     legalName: LANTERN_FILED,
-    filingNumber: PLAYGROUND_FILING,
+    filingNumber: LANTERN_STAND_IN,
     filedOn: lanternFiledOn,
   });
 
