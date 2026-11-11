@@ -845,14 +845,19 @@ export interface FormationEventDeps extends FormationAdvanceDeps {
  * How long an event that no company here owns is kept for the sweeper before it is retired.
  *
  * The keep exists for ONE race: doola can deliver a company's first webhook before the create's
- * own response has written that company id onto `create_provider`. That race lasts seconds, a few
- * minutes at worst (a slow create, a create resumed by the next tick), and an hour covers it with
- * a wide margin. An event still unowned after that is not ours to place: a sandbox company
- * created from another machine (doola sends every webhook to the one configured endpoint), or a
- * frozen create confirmed with `--doola-confirmed-no-company`. Kept, it would be re-driven and
- * re-logged every tick until the 30-day retention, and would hold a place in the re-drive's batch
- * ahead of real events. Retiring it loses no fact: a wake-up carries none, and a company that
- * does become ours later is still read by the sweeper's ordinary poll.
+ * own response has written that company id onto `create_provider`. That race is usually seconds,
+ * and an hour covers it with a wide margin. It CAN outlast the hour: a create whose answer was
+ * lost is retried on a doubling backoff, and a box down mid-create re-drives its events on the
+ * boot tick before it resumes the create. Such an event is retired before its ref lands, and
+ * nothing is lost: when a retry or a resume lands the ref, the sweeper reads the company at once
+ * (`retryCreateAndRead`), which is the read the event would have triggered.
+ *
+ * Otherwise an event still unowned after the hour is not ours to place: a sandbox company created
+ * from another machine (doola sends every webhook to the one configured endpoint), or, after a
+ * frozen create confirmed with `--doola-confirmed-no-company`, a company doola may hold that we
+ * recorded as never created. Kept, it would be re-driven and re-logged every tick until the
+ * 30-day retention, and would hold a place in the re-drive's batch ahead of real events.
+ * Retiring it loses no fact: a wake-up carries none.
  *
  * The same hour applies to an event with NO company id. That one can never be placed (its
  * `provider_ref` is set at receipt and never rewritten), so the hour is not a race to wait out but
@@ -929,7 +934,8 @@ export interface ProcessEventOptions {
   requiredActions?: boolean;
 }
 
-/** What the caller learns. `fetched` is the only thing that may retire an event. */
+/** What the caller learns. `fetched` is the only thing that may retire an event, apart from the
+ *  grace retirement of one no company owns (`retired`). */
 export interface ProcessEventResult {
   fetched: boolean;
   advanced: boolean;
@@ -997,7 +1003,8 @@ export async function processDoolaEvent(
   if (!owner) {
     // The company exists at doola but no `create_provider` row claims it yet — the create's
     // response and its webhook can race. Kept, not dropped: a later tick will place it. That race
-    // lasts minutes, not days; past the grace the company is not ours and the event is retired.
+    // is usually seconds; past the grace the event is retired, and a create whose ref lands even
+    // later is read by the sweeper the moment it lands.
     if (retireUnmappedWakeUp(d, wake, source))
       return { fetched: false, advanced: false, skipped: "unmapped", retired: true };
     opsLog("doola_webhook_unmapped", {
@@ -1039,7 +1046,8 @@ export async function processDoolaEvent(
       requiredActions: opts.requiredActions || eventSuggestsRequiredActions(wake.eventName),
     }),
   );
-  // Only a real read may retire the event. A skipped or failed pass leaves it for the sweeper.
+  // Only a real read may retire the event (the grace retirement above is only for an event no
+  // company owns). A skipped or failed pass leaves it for the sweeper.
   if (outcome.fetched) d.events.markProcessed(wake.eventId);
   return { fetched: outcome.fetched, advanced: outcome.advanced, companyId: owner.companyId };
 }

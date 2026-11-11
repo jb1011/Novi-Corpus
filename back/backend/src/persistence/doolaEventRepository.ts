@@ -66,7 +66,9 @@ export interface DoolaEventRepository {
   find(eventId: string): DoolaWebhookEventRecord | undefined;
   /** Everything still owed to the sweeper, oldest first. */
   listUnprocessed(limit?: number): DoolaWebhookEventRecord[];
-  /** Mark done. Only ever called AFTER a successful fetch-and-advance. */
+  /** Mark done. Called AFTER a successful fetch-and-advance, and in two cases with nothing to
+   *  read: a `partner_webhook_disabled` (account-level, logged CRITICAL), and the grace retirement
+   *  of an event no company owns, past `UNMAPPED_EVENT_GRACE_MS`. */
   markProcessed(eventId: string): boolean;
   /** Retention sweep: drop processed and unprocessable rows older than the cutoff. Returns the
    *  number deleted. */

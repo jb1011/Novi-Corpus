@@ -291,8 +291,8 @@ function deferred<T>(): {
 }
 
 /**
- * Resolves once `n` requests are IN the in-flight slot: the one that started the provider call,
- * and the rest waiting on it. Install it BEFORE sending the requests.
+ * `joined` resolves once `n` requests are IN the in-flight slot: the one that started the provider
+ * call, and the rest waiting on it. Install it BEFORE sending the requests.
  *
  * The route reads the company's formation steps and then, in the same synchronous stretch (no
  * `await` between the two), either joins the call already out to doola or starts it. So the n-th
@@ -300,14 +300,26 @@ function deferred<T>(): {
  * promise cannot run before that stretch ends. No polling and no timing margin: waiting only for
  * the provider to be reached, as this file used to, let a slow viewer still be in the session
  * middleware when the call settled, and that viewer then made a second call, by design.
+ *
+ * A route that never gets there fails FAST, with the count, instead of at the suite's timeout:
+ * `joined` rejects after `JOIN_DEADLINE_MS`. That bounds only the failure; a pass never waits on
+ * it. `seen()` is the running count, and a test asserts it equals `n` once its requests settle,
+ * so a route that read the steps twice per request fails every time instead of flaking.
  */
-function untilJoined(n: number): Promise<void> {
+const JOIN_DEADLINE_MS = 2000;
+function untilJoined(n: number): { joined: Promise<void>; seen: () => number } {
   const joined = deferred<void>();
   let seen = 0;
+  const deadline = setTimeout(
+    () => joined.reject(new Error(`only ${seen} of ${n} requests reached the shared call`)),
+    JOIN_DEADLINE_MS,
+  );
   onStepsRead = () => {
-    if (++seen === n) joined.resolve();
+    if (++seen !== n) return;
+    clearTimeout(deadline);
+    joined.resolve();
   };
-  return joined.promise;
+  return { joined: joined.promise, seen: () => seen };
 }
 
 /**
@@ -324,14 +336,15 @@ test("concurrent first viewers of one company share a single provider call", asy
   const gate = deferred<DoolaComplianceEvent[]>();
   answer = () => gate.promise;
 
-  const joined = untilJoined(4);
+  const slot = untilJoined(4);
   const inflight = [get(a, id), get(a, id), get(a, id), get(a, id)];
   // The handlers each verify a session before they reach the slot; release the provider only once
   // all four are waiting on its one call, so none of them can be served by the cache instead.
-  await joined;
+  await slot.joined;
   expect(calls).toEqual(["cmp-1"]);
   gate.resolve([EVENT]);
   const bodies = await Promise.all((await Promise.all(inflight)).map((r) => r.json()));
+  expect(slot.seen()).toBe(4);
 
   expect(calls).toEqual(["cmp-1"]);
   for (const body of bodies) expect(body.events).toHaveLength(1);
@@ -343,14 +356,16 @@ test("a FAILED fetch is not cached — but concurrent failures share one call", 
   const gate = deferred<DoolaComplianceEvent[]>();
   answer = () => gate.promise;
 
-  const joined = untilJoined(3);
+  const slot = untilJoined(3);
   const inflight = [get(a, id), get(a, id), get(a, id)];
   // All three are waiting on the ONE call before it fails. A viewer that arrived after the failure
   // settled would rightly make a new call (failures are not cached), and that was the flake.
-  await joined;
+  await slot.joined;
   expect(calls).toEqual(["cmp-1"]);
   gate.reject(new Error("upstream down"));
   for (const res of await Promise.all(inflight)) expect(res.status).toBe(502);
+  // Before the fourth request below, which reads the steps too.
+  expect(slot.seen()).toBe(3);
   // Rate-limited while in flight: three viewers, one call at a struggling partner.
   expect(calls).toEqual(["cmp-1"]);
 

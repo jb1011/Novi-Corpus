@@ -233,6 +233,96 @@ test("create_provider is retried too — through the saga step, which ADOPTS rat
   expect(doola.calls.some((c) => c.startsWith("getCompany"))).toBe(true);
 });
 
+// ── a create whose ref lands LATE: its events may already be retired, so it is read at once ──
+
+/**
+ * A company whose create was sent, lost its answer, and is now due a RETRY: `failed`, no ref,
+ * its rows claimed `claimedAgoMs` ago. doola holds the company, and the retry's create returns it.
+ */
+function seedLostCreate(claimedAgoMs: number) {
+  seedCompany(companies);
+  repo.upsert(formedEntity({ specJson: JSON.stringify({ name: "Formation Agent" }) }));
+  newParty({ companyId: COMPANY_KEY });
+  requests.claimAllSteps(COMPANY_KEY);
+  stampRows(now - claimedAgoMs);
+  db.prepare(
+    "UPDATE formation_requests SET state='failed', attempt=1 WHERE company_id=? AND step='create_provider'",
+  ).run(COMPANY_KEY);
+  const api = doola.api as unknown as Record<string, unknown>;
+  api.listCompanies = async () => [];
+  api.createCustomer = async () => {
+    doola.calls.push("createCustomer");
+    return { doolaCustomerId: "cus-1" };
+  };
+  api.createCompany = async () => {
+    doola.calls.push("createCompany");
+    return { doolaCompanyId: COMPANY_ID, formationSubmissionStatus: "PENDING" };
+  };
+  // What a read of the company will find: the filing has gone through.
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationFilingDate: "2026-08-19" };
+}
+
+test("a create whose ref lands on a RETRY after the grace is read on that same tick", async () => {
+  // The answer was lost two hours ago. doola's webhook arrived meanwhile, and nothing owned the id.
+  seedLostCreate(2 * 60 * 60 * 1000);
+  recordEventAged("evt-1", UNMAPPED_EVENT_GRACE_MS + 60_000);
+
+  const lines = await tickLines(sweeper());
+
+  // The re-drive runs first and retires the event: it is past the grace and still unowned…
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(named(lines, "doola_webhook_unmapped_retired")).toHaveLength(1);
+  // …then the retry lands the ref, and the company is read AT ONCE, not a day later by the poll.
+  expect(rowOf("create_provider")).toMatchObject({ state: "confirmed", providerRef: COMPANY_ID });
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(stateOf("await_filing")).toBe("confirmed");
+});
+
+test("a create whose ref lands on a RESUME after an outage is read on that same tick", async () => {
+  // The box died mid-create and was down for more than the grace: on the boot tick the re-drive
+  // runs before the resume, so the event is retired one step before it would have mapped.
+  seedLostCreate(2 * 60 * 60 * 1000);
+  db.prepare(
+    "UPDATE formation_requests SET state='submitted', attempt=0, updated_at=? WHERE company_id=? AND step='create_provider'",
+  ).run(sqliteUtcTimestamp(now - SUBMITTED_STALL_MS - 60 * 60 * 1000), COMPANY_KEY);
+  recordEventAged("evt-1", UNMAPPED_EVENT_GRACE_MS + 60_000);
+
+  await tickLines(sweeper());
+
+  expect(events.find("evt-1")?.processedAt).not.toBeNull();
+  expect(rowOf("create_provider")).toMatchObject({ state: "confirmed", providerRef: COMPANY_ID });
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(stateOf("await_filing")).toBe("confirmed");
+});
+
+test("the read at a late landing is not repeated by the poll on the same tick", async () => {
+  // Claimed two days ago, so the never-polled filing row is ALSO due for the daily poll. The read
+  // at landing restarts its poll clock, and the poll leg then leaves it alone.
+  seedLostCreate(2 * DAY);
+  doola.state.company = { doolaCompanyId: COMPANY_ID, formationSubmissionStatus: "SUBMITTED" };
+
+  await tickLines(sweeper());
+
+  expect(rowOf("create_provider")).toMatchObject({ state: "confirmed", providerRef: COMPANY_ID });
+  expect(doola.calls.filter((c) => c.startsWith("getCompany"))).toHaveLength(1);
+  expect(rowOf("await_filing")?.nextPollAt).toBe(now + POLL_BASE_MS);
+});
+
+test("a retry that lands NO new ref reads nothing extra: the ref was already there", async () => {
+  // The adopt case: the id was persisted before the failure, so its events were never unowned.
+  seedLostCreate(2 * 60 * 60 * 1000);
+  db.prepare(
+    "UPDATE formation_requests SET provider_ref=? WHERE company_id=? AND step='create_provider'",
+  ).run(COMPANY_ID, COMPANY_KEY);
+
+  await tickLines(sweeper());
+
+  expect(stateOf("create_provider")).toBe("confirmed");
+  // The adopt's own `getCompany`, and no read of the filing behind it.
+  expect(doola.calls.filter((c) => c.startsWith("listDocuments"))).toHaveLength(0);
+  expect(stateOf("await_filing")).toBe("pending");
+});
+
 // ── C2: the two crash windows ──────────────────────────────────────────────────────────────
 //
 // Between the claim (which writes the pin and binds the party) and `claimAllSteps` at the top of

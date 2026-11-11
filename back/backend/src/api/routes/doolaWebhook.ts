@@ -306,6 +306,7 @@ export function mountDoolaWebhookRoutes(
         const lead = batch[batch.length - 1]!;
         const result = (await d.process(lead)) as { fetched?: boolean } | undefined;
         // Only a real read may retire an event — the same rule the processor applies to its own.
+        // (Its other way, the grace retirement of an unowned event, cannot fire on a delivery.)
         if (result?.fetched)
           for (const w of batch) if (w.eventId !== lead.eventId) d.events.markProcessed(w.eventId);
       },
