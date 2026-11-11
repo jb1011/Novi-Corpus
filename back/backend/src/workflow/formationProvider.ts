@@ -130,6 +130,16 @@ export interface CreateProviderDetail {
    */
   awaitingPartyEdit?: boolean;
   /**
+   * WHICH fields doola named when it refused the body one of the two flags above parks on: the
+   * PATHS only (`["description"]`), as `summarizeDoolaFields` let them through its allowlist.
+   * Never doola's sentence about a field and never a value, so the company view can serve it.
+   *
+   * Written in the same fail transaction as the flag, and taken off with it by the door that
+   * re-arms the retry (`rearmAfterEdit`), so it always describes the park that is in place.
+   * Absent when doola named no field.
+   */
+  refusedFields?: string[];
+  /**
    * The `attempt` under which `POST /companies` was last SENT — written BEFORE the call, so it
    * survives a crash inside it (C1).
    *
@@ -287,6 +297,9 @@ function toDoolaAddress(p: FormationPartyRecord): DoolaAddress {
     phone: p.phone ?? undefined,
   };
 }
+
+/** What `describeDoolaError` makes of a failure: the shape every ops line here reads. */
+type DoolaFailure = ReturnType<typeof describeDoolaError>;
 
 function logStep(
   companyId: string,
@@ -729,16 +742,20 @@ function onCallFailure(
   const kind: DoolaFailureKind = classifyDoolaFailure(e);
   const described = describeDoolaError(e);
   if (kind === "rejected") {
+    // The field PATHS doola named, beside the flag, in the same transaction: the company view
+    // serves them so the owner's form can point at the field. `undefined` when doola named none,
+    // which also drops any list a previous refusal left behind.
+    const refusedFields = described.fieldErrors?.map((f) => f.field);
     // WHICH body was refused decides which flag, because the flags do not have the same exit
     // (review 5b). Both park identically — the attempt is burned once and never again, nothing
     // is re-sent unchanged — but only the company's has a door that can clear it today.
     if (endpoint === "createCustomer") {
-      failStep(d, row, described.message, e, { awaitingPartyEdit: true });
-      parkedForPartyEdit(d, described.message);
+      failStep(d, row, described.message, e, { awaitingPartyEdit: true, refusedFields });
+      parkedForPartyEdit(d, described);
       return;
     }
-    failStep(d, row, described.message, e, { awaitingIntakeEdit: true });
-    parkedForIntakeEdit(d, described.message);
+    failStep(d, row, described.message, e, { awaitingIntakeEdit: true, refusedFields });
+    parkedForIntakeEdit(d, described);
     return;
   }
   const reason =
@@ -989,7 +1006,7 @@ function failStep(
   detailPatch?: Partial<CreateProviderDetail>,
 ): void {
   const companyId = d.company.companyId;
-  const described: { code?: string; requestId?: string } = cause ? describeDoolaError(cause) : {};
+  const described: Partial<DoolaFailure> = cause ? describeDoolaError(cause) : {};
   // The bump-then-park sequence itself lives in `formationStep.ts`: the webhook processor and the
   // sweeper park rows too, and three copies of that contract would be three chances to burn an
   // attempt without parking the row (or the reverse). What stays HERE is what is specific to the
@@ -1017,6 +1034,10 @@ function failStep(
     level: "warn",
     code: described.code,
     requestId: described.requestId,
+    // WHICH fields, when doola named any: path, code and a redacted, capped message, never a
+    // value (`summarizeDoolaFields`). opsLog redacts only top-level strings, which is why the
+    // summary arrives already redacted.
+    fieldErrors: described.fieldErrors,
   });
 }
 
@@ -1033,15 +1054,19 @@ function failStep(
  * Once, at the moment it happens, rather than daily from the sweeper: the sweeper is now
  * deliberately not looking at this row.
  */
-function parkedForIntakeEdit(d: FormationCreateDeps, message: string): void {
+function parkedForIntakeEdit(d: FormationCreateDeps, described: DoolaFailure): void {
   opsLog("formation_stale", {
     level: "error",
     severity: "CRITICAL",
     companyId: d.company.companyId,
     step: "create_provider",
     reason: "create_rejected_awaiting_intake_edit",
-    // Third-party text: redacted at the choke point in `opsLog`, like every other `message`.
-    message,
+    // Third-party text: redacted at the choke point in `opsLog`, like every other `message`. It
+    // names the refused fields and their codes when doola gave any.
+    message: described.message,
+    // …and doola's own per-field reasons, so the operator reads WHICH field without a support
+    // ticket. Already redacted and capped (`summarizeDoolaFields`); never a value.
+    fieldErrors: described.fieldErrors,
     environment: d.environment,
   });
   recordCompanyEvent(
@@ -1065,15 +1090,20 @@ function parkedForIntakeEdit(d: FormationCreateDeps, message: string): void {
  * Still CRITICAL: both parks stop a filing until a human acts, and nothing in the system will
  * nudge anybody a second time.
  */
-function parkedForPartyEdit(d: FormationCreateDeps, message: string): void {
+function parkedForPartyEdit(d: FormationCreateDeps, described: DoolaFailure): void {
   opsLog("formation_party_rejected", {
     level: "error",
     severity: "CRITICAL",
     companyId: d.company.companyId,
     step: "create_provider",
     reason: "customer_rejected_awaiting_party_edit",
-    // Third-party text: redacted at the choke point in `opsLog`, like every other `message`.
-    message,
+    // Third-party text: redacted at the choke point in `opsLog`, like every other `message`. It
+    // names the refused fields and their codes when doola gave any.
+    message: described.message,
+    // The per-field reasons, as on `formation_stale`. A party field's message is the likeliest
+    // to quote the person: it gets what doola's top-level `message` gets (SSN shapes redacted)
+    // plus a length cap, and no submitted value is ever read out of the map.
+    fieldErrors: described.fieldErrors,
     environment: d.environment,
   });
   recordCompanyEvent(

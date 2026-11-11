@@ -180,14 +180,56 @@ test("STATE: a ready company reports its filing status verbatim once one is open
 
 // ── the park state ──────────────────────────────────────────────────────────────────────────
 
-test("PARK: a healthy company reports all three flags false", async () => {
+test("PARK: a healthy company reports all three flags false, and no refused fields", async () => {
   const id = newCompany();
   newParty(id);
   expect((await detail(id)).park).toEqual({
     awaitingIntakeEdit: false,
     awaitingPartyEdit: false,
     awaitingSsnDecision: false,
+    refusedFields: [],
   });
+});
+
+test("PARK: the refused fields are served by PATH only, through the allowlist, while a park holds", async () => {
+  // The filer writes the paths doola named beside the flag. The view re-checks every entry, since
+  // the blob is a column: a value that is not a field path (a sentence, an email, a nine-digit
+  // run) is never served, whoever wrote it there.
+  const id = newCompany();
+  newParty(id);
+  requests.claimStep(id, "create_provider");
+  requests.transition(id, "create_provider", "pending", "failed", {
+    detail: JSON.stringify({
+      awaitingIntakeEdit: true,
+      refusedFields: [
+        "description",
+        "nameOptions[0].name",
+        "size must be between 1 and 50",
+        "person@example.test",
+        "123456789",
+        42,
+      ],
+    }),
+  });
+  expect((await detail(id)).park).toEqual({
+    awaitingIntakeEdit: true,
+    awaitingPartyEdit: false,
+    awaitingSsnDecision: false,
+    refusedFields: ["description", "nameOptions[0].name"],
+  });
+
+  // A list with NO flag set describes no park, and is not served.
+  const stale = newCompany({
+    nameOptions: companyNameOptions("Beta One", "Beta Two", "Beta Three"),
+  });
+  newParty(stale);
+  requests.claimStep(stale, "create_provider");
+  requests.transition(stale, "create_provider", "pending", "failed", {
+    detail: JSON.stringify({ refusedFields: ["description"] }),
+  });
+  expect(
+    ((await detail(stale)).park as unknown as { refusedFields: string[] }).refusedFields,
+  ).toEqual([]);
 });
 
 test("PARK: the two `detail` flags are reported SEPARATELY — they have different exits", async () => {

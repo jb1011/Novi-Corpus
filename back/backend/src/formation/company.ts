@@ -943,7 +943,10 @@ function rearmAfterEdit(
   if (!row || row.state !== "failed") return;
   const detail = parseDetail<Record<string, unknown>>(row.detail);
   if (detail[flag] !== true) return;
-  const { [flag]: _cleared, ...rest } = detail;
+  // The refused field paths come off WITH the flag: they describe the park this edit ends, and
+  // left behind they would point the next reader at a refusal that is no longer in place. The
+  // error column keeps naming them, which is the operator's trail.
+  const { [flag]: _cleared, refusedFields: _refused, ...rest } = detail;
   deps.requests.transition(companyId, "create_provider", "failed", "failed", {
     detail: JSON.stringify(rest),
     error: row.error ?? null,

@@ -1481,7 +1481,7 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
       {
         title: "Get company",
         description:
-          "Fetch one of your legal bodies in full: its filing state, the documents filed for it, the agents attached to it, and — if the filing has STOPPED — which of the three human decisions it is waiting on. A parked company does nothing until its owner acts: awaitingIntakeEdit is fixed by re-submitting names/purpose/industry, awaitingPartyEdit by correcting the responsible party, awaitingSsnDecision by re-supplying an SSN or confirming the slower EIN route. The last two go through the web form and update_company_party respectively; an SSN is never an argument here.",
+          "Fetch one of your legal bodies in full: its filing state, the documents filed for it, the agents attached to it, and — if the filing has STOPPED — which of the three human decisions it is waiting on. A parked company does nothing until its owner acts: awaitingIntakeEdit is fixed by re-submitting names/purpose/industry, awaitingPartyEdit by correcting the responsible party, awaitingSsnDecision by re-supplying an SSN or confirming the slower EIN route. The last two go through the web form and update_company_party respectively; an SSN is never an argument here. When the provider named the fields it refused, park.refusedFields lists their paths (for example description), so the correction can go to the right field.",
         inputSchema: { companyId: z.string() },
       },
       async ({ companyId }) => {

@@ -2,6 +2,7 @@ import { redactPii } from "../../formation/pii";
 import { opsLog } from "../../observability/opsLog";
 import { withDeadline } from "../../util/deadline";
 import { readCappedText } from "../../util/readStreamCapped";
+import { type DoolaFieldError, fieldErrorsClause, summarizeDoolaFields } from "./fieldErrors";
 import type {
   CreateCompanyInput,
   CreateCustomerInput,
@@ -64,7 +65,9 @@ export class DoolaApiError extends Error {
     /** doola's correlation id — the FIRST thing their support asks for. */
     readonly requestId?: string,
     /** Field-level detail on a validation failure. Opaque: doola nests `{code, message}` per
-     *  field, and a narrower type would be a claim about a partner surface we do not control. */
+     *  field, and a narrower type would be a claim about a partner surface we do not control.
+     *  Read ONLY through `summarizeDoolaFields` (`fieldErrors.ts`), which is what keeps a value
+     *  doola echoes back out of every surface. */
     readonly fields?: Record<string, unknown>,
   ) {
     super(message);
@@ -109,14 +112,28 @@ export class DoolaTimeoutError extends Error {
  * A timeout gets a code of its own (`E_TIMEOUT`) rather than none: "we never heard back" is the
  * single most important distinction the create step makes, because it is the one case where the
  * request may have COMMITTED at doola and the answer was lost.
+ *
+ * A validation failure also carries WHICH fields doola refused (2026-11-11): `fieldErrors`, read
+ * by `summarizeDoolaFields` (paths through an allowlist, doola's per-field code and redacted,
+ * capped message, never a submitted value), and the paths and codes appended to `message`, so the
+ * step's stored error and the company's event trail name the field too. Present only when doola
+ * named at least one field, so every ops line that spreads this result carries it exactly then.
  */
 export function describeDoolaError(e: unknown): {
   message: string;
   code?: string;
   requestId?: string;
+  fieldErrors?: DoolaFieldError[];
 } {
-  if (e instanceof DoolaApiError)
-    return { message: redactPii(`${e.code}: ${e.message}`), code: e.code, requestId: e.requestId };
+  if (e instanceof DoolaApiError) {
+    const fieldErrors = summarizeDoolaFields(e.fields);
+    return {
+      message: redactPii(`${e.code}: ${e.message}${fieldErrorsClause(fieldErrors)}`),
+      code: e.code,
+      requestId: e.requestId,
+      ...(fieldErrors.length > 0 ? { fieldErrors } : {}),
+    };
+  }
   if (e instanceof DoolaTimeoutError) return { message: redactPii(e.message), code: "E_TIMEOUT" };
   return { message: redactPii((e as Error)?.message ?? String(e)) };
 }

@@ -689,6 +689,7 @@ test("PARITY: get_company and GET /companies/:companyId answer with the SAME bod
       awaitingIntakeEdit: false,
       awaitingPartyEdit: false,
       awaitingSsnDecision: false,
+      refusedFields: [],
     });
   });
 });

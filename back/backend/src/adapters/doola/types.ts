@@ -253,7 +253,8 @@ export interface DoolaErrorEnvelope {
     code?: string;
     message?: string;
     /** Field-level detail. Live shape is `{field: {code, message}}` — NOT the flat
-     *  `{field: "reason"}` PR 1 assumed — so it is carried opaquely and only ever logged. */
+     *  `{field: "reason"}` PR 1 assumed — so it is carried opaquely, and read only by
+     *  `summarizeDoolaFields`, which keeps the path, the code and a redacted message. */
     fields?: Record<string, unknown>;
     requestId?: string;
   };
