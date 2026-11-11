@@ -13,6 +13,7 @@ import {
 } from "../formation/intake";
 import { POLL_BASE_MS, POLL_CAP_MS, type StepBackoff, nextInterval } from "../formation/schedule";
 import { isManualRef, providerRefOf } from "../formation/status";
+import { sandboxStandInFilingNumber } from "../legalBody/companyFields";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
 import type { CompanyRepository } from "../persistence/companyRepository";
@@ -549,7 +550,7 @@ function advanceFiling(
   if (row.state === "confirmed") {
     let healed = false;
     d.repo.transaction(() => {
-      healed = healFilingFacts(d, companyId, company, reportedName);
+      healed = healFilingFacts(d, companyId, company, reportedName, providerRef);
       d.requests.transition(companyId, "await_filing", "confirmed", "confirmed", {
         detail: JSON.stringify(next),
         touchFacts: healed,
@@ -567,7 +568,7 @@ function advanceFiling(
 
   const filedAt = filingDateToUnix(company.formationFilingDate);
   let won = false;
-  d.repo.transaction(() => {
+  const standIn = d.repo.transaction((): string | null => {
     // The CAS decides; the facts are written inside the transaction it won. A second driver
     // observing the same `from` gets false here and writes nothing — which is what makes
     // "advance exactly once" true without depending on the in-process lock.
@@ -575,10 +576,15 @@ function advanceFiling(
       detail: JSON.stringify(next),
       error: null,
     });
-    if (!won) return;
+    if (!won) return null;
+    // Judged inside the transaction that won, against the row as the write will find it.
+    const offered = sandboxStandIn(d, companyId, company, providerRef);
+    // doola's number, as before, unless the stand-in rule holds (and it holds only when doola
+    // gave none).
+    const filingNumber = offered ?? company.formationFilingNumber ?? null;
     d.companies.recordFilingFacts(companyId, {
       filedAt,
-      filingNumber: company.formationFilingNumber ?? null,
+      filingNumber,
       legalNameFiled: matchFiledName(d, companyId, reportedName),
     });
     recordCompanyEvent(
@@ -587,14 +593,62 @@ function advanceFiling(
       "formationFiled",
       JSON.stringify({
         providerRef,
-        filingNumber: company.formationFilingNumber ?? null,
+        filingNumber,
+        ...(offered !== null ? { filingNumberStandIn: true } : {}),
         filedAt,
         environment: d.environment,
       }),
     );
+    return offered;
   });
+  if (won && standIn !== null) logSandboxStandIn(companyId, providerRef, standIn);
   if (won) logFormationStep(companyId, "await_filing", "confirmed", row.attempt, { providerRef });
   return won;
+}
+
+/**
+ * The stand-in filing number to record for this company on this read, or null (design 2026-11-11
+ * §2). doola's sandbox playground files a company with no filing number, and a formed legal-body
+ * company cannot be ordered without one. ONE rule for both writers, the confirmation and the
+ * heal, and every part of it must hold:
+ *
+ *  1. the COMPANY's own pin is `sandbox`. The pin, never the deployment's environment: a company
+ *     pinned to production never gets one, whatever this box runs (and `advanceFormation` refuses
+ *     a pin that differs from the deployment before any read);
+ *  2. it is a doola company for a legal body, the sandbox leg's own scope, so no stand-in can
+ *     enter an agent's anchored manifest;
+ *  3. doola's answer says it is filed and carries no filing number;
+ *  4. the row holds no filing number. The repository REPLACES a number with a different one, so a
+ *     stand-in is never offered over a number. A number doola sends later replaces the stand-in,
+ *     which on a sandbox is the right outcome.
+ *
+ * Nothing else marks it: the value is its own mark (`TEST-STANDIN-`), and `AwaitFilingDetail`
+ * keeps doola's own value, verbatim, which is none.
+ */
+function sandboxStandIn(
+  d: FormationAdvanceDeps,
+  companyId: string,
+  company: DoolaCompany,
+  providerRef: string,
+): string | null {
+  const row = d.companies.find(companyId);
+  if (row?.environment !== "sandbox") return null;
+  if (row.provider !== "doola" || row.purposeKind !== "legal_body") return null;
+  if (!isFormationFiled(company) || company.formationFilingNumber?.trim()) return null;
+  if (row.filingNumber !== null) return null;
+  return sandboxStandInFilingNumber(providerRef);
+}
+
+/** Once, when a stand-in is written. The number is a test value and the ids are ours. */
+function logSandboxStandIn(companyId: string, providerRef: string, filingNumber: string): void {
+  opsLog("sandbox_filing_number_stand_in", {
+    level: "info",
+    companyId,
+    providerRef,
+    filingNumber,
+    message:
+      "doola's sandbox files without a filing number: a stand-in was recorded, never a State filing number",
+  });
 }
 
 /**
@@ -692,8 +746,12 @@ function healFilingFacts(
   companyId: string,
   company: DoolaCompany,
   reportedName: string | undefined,
+  providerRef: string,
 ): boolean {
-  const number = company.formationFilingNumber?.trim() || null;
+  // A sandbox company confirmed with no number (before the stand-in existed) gets one here; the
+  // rule (`sandboxStandIn`) never offers one over a number the row holds.
+  const standIn = sandboxStandIn(d, companyId, company, providerRef);
+  const number = company.formationFilingNumber?.trim() || standIn;
   const filedAt = filingDateToUnix(company.formationFilingDate);
   // The FILED NAME heals too, and for the same reason: doola may report a name only after the
   // state assigns one, and `legal.companyName` cannot bootstrap itself from a manifest. It comes
@@ -718,8 +776,10 @@ function healFilingFacts(
     legalNameFiled: name ?? undefined,
     // The only source of a name since 2026-11-11: doola's list item.
     ...(name !== null ? { nameSource: "list" } : {}),
+    ...(standIn !== null ? { filingNumberStandIn: true } : {}),
     message: "a confirmed filing gained facts doola had not reported when the step confirmed",
   });
+  if (standIn !== null) logSandboxStandIn(companyId, providerRef, standIn);
   return true;
 }
 

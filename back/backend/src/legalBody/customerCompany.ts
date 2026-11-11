@@ -13,7 +13,7 @@ import type { CompanyRepository } from "../persistence/companyRepository";
 import type { GuardianIdentityCheck } from "../persistence/identityRepository";
 import type { GuardianVerification } from "../persistence/worldStore";
 import { sqliteUtcTimestamp } from "../util/sqliteTime";
-import { COMPANY_NAME, FILING_NUMBER } from "./companyFields";
+import { COMPANY_NAME, FILING_NUMBER, SANDBOX_STAND_IN_PREFIX } from "./companyFields";
 import { CUSTOMER_PROVIDER } from "./provider";
 import { automaticSandboxCheck, isAutomaticSandboxCheck, processOsUser } from "./sandboxCheck";
 import {
@@ -271,6 +271,14 @@ function prepare<T>(
     sandbox ? SANDBOX_FILING_NUMBER : FILING_NUMBER,
     problems,
   );
+  // On a sandbox, the stand-in prefix belongs to the companies formed here, whose filing numbers
+  // doola's sandbox never sets (`companyFields.ts`): a declared test number that carried it could
+  // pass for one, or be one. A check of its own, so the sandbox rule keeps its sentence.
+  if (sandbox && filingNumber?.startsWith(SANDBOX_STAND_IN_PREFIX))
+    problems.push({
+      field: "filingNumber",
+      problem: "is reserved for companies formed on this deployment: choose another test number",
+    });
   const more = readMore(body, problems);
   if (
     problems.length > 0 ||

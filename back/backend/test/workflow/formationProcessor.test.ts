@@ -20,6 +20,11 @@ import {
   einIssued,
   providerRefOf,
 } from "../../src/formation/status";
+import {
+  FILING_NUMBER,
+  passesAsItStands,
+  sandboxStandInFilingNumber,
+} from "../../src/legalBody/companyFields";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteDocumentIndexRepository } from "../../src/persistence/documentIndexRepository";
@@ -1164,6 +1169,169 @@ test("no list read once a name is held, and an operator's name is never rewritte
   await advanceFormation(deps(), COMPANY_KEY);
   expect(listCalls()).toHaveLength(1);
   expect(company()?.legalNameFiled).toBe("Formation Agent, LLC");
+});
+
+// ── the sandbox stand-in filing number (design 2026-11-11 §2) ─────────────────────────────────
+
+/** The stand-in of doola's company `cmp-1` (`COMPANY_ID`). */
+const STAND_IN = "TEST-STANDIN-D36A9A6177333DB7";
+
+/** doola's sandbox filing the company: a date, no filing number, and its list item's name. */
+const filedWithoutNumber = () => {
+  doola.state.company = {
+    doolaCompanyId: COMPANY_ID,
+    doolaCustomerId: CUSTOMER_ID,
+    formationFilingDate: "2026-08-19",
+    services: [{ name: "Formation", status: "Completed" }],
+  };
+  doola.state.listed = [listItem("Formation Agent LLC")];
+};
+
+const standInLines = (lines: Array<Record<string, unknown>>) =>
+  lines.filter((l) => l.opslog === "sandbox_filing_number_stand_in");
+
+test("a sandbox legal-body company filed with no number is confirmed with the stand-in for its doola id", async () => {
+  seedCompanyFiling("legal_body");
+  filedWithoutNumber();
+  const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(sandboxStandInFilingNumber(COMPANY_ID)).toBe(STAND_IN);
+  expect(company()).toMatchObject({
+    filingNumber: STAND_IN,
+    legalNameFiled: "Formation Agent LLC",
+    filedAt: filingDateToUnix("2026-08-19"),
+  });
+  // It passes the rule the agreement prints a number under, as it stands.
+  expect(passesAsItStands(STAND_IN, FILING_NUMBER)).toBe(true);
+  // One line, of ids and the test value only.
+  const written = standInLines(lines);
+  expect(written).toHaveLength(1);
+  const { opslog: _event, at: _at, ...fields } = written[0]!;
+  expect(fields).toEqual({
+    level: "info",
+    companyId: COMPANY_KEY,
+    providerRef: COMPANY_ID,
+    filingNumber: STAND_IN,
+    message:
+      "doola's sandbox files without a filing number: a stand-in was recorded, never a State filing number",
+  });
+  // The step's detail keeps doola's own value, verbatim: none.
+  expect(detailOf("await_filing").filingNumber).toBeUndefined();
+
+  // A second pass writes nothing and logs nothing.
+  const before = company();
+  const again = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  expect(company()).toEqual(before);
+  expect(standInLines(again)).toEqual([]);
+  expect(again.filter((l) => l.opslog === "formation_filing_healed")).toEqual([]);
+});
+
+test("a sandbox legal-body company confirmed with no number gets the stand-in on its next pass (the heal)", async () => {
+  seedCompanyFiling("legal_body");
+  filedWithoutNumber();
+  await advanceFormation(deps(), COMPANY_KEY);
+  // As a company confirmed before the stand-in existed holds it.
+  db.prepare("UPDATE companies SET filing_number = NULL WHERE company_id = ?").run(COMPANY_KEY);
+  expect(company()?.filingNumber).toBeNull();
+
+  const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  expect(company()?.filingNumber).toBe(STAND_IN);
+  expect(lines.find((l) => l.opslog === "formation_filing_healed")).toMatchObject({
+    companyId: COMPANY_KEY,
+    filingNumber: STAND_IN,
+    filingNumberStandIn: true,
+  });
+  expect(standInLines(lines)).toHaveLength(1);
+});
+
+test("a stand-in is never offered over a number the row holds; a number doola sends later replaces the stand-in", async () => {
+  // A row holding a number before the confirmation keeps it.
+  seedCompanyFiling("legal_body");
+  companies.recordFilingFacts(COMPANY_KEY, { filingNumber: "2026-000000001" });
+  filedWithoutNumber();
+  const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.filingNumber).toBe("2026-000000001");
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.filingNumber).toBe("2026-000000001");
+  expect(standInLines(lines)).toEqual([]);
+
+  // A stand-in, then doola's sandbox sends a number: doola's number replaces it, and a later
+  // read without one never puts the stand-in back.
+  db.prepare("UPDATE companies SET filing_number = NULL WHERE company_id = ?").run(COMPANY_KEY);
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.filingNumber).toBe(STAND_IN);
+  doola.state.company = { ...doola.state.company, formationFilingNumber: "2026-001234567" };
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.filingNumber).toBe("2026-001234567");
+  filedWithoutNumber();
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.filingNumber).toBe("2026-001234567");
+});
+
+test("a legal-body company pinned to production, on a production deployment, is confirmed with no number: never a stand-in", async () => {
+  seedCompanyFiling("legal_body");
+  db.prepare("UPDATE companies SET environment = 'production' WHERE company_id = ?").run(
+    COMPANY_KEY,
+  );
+  filedWithoutNumber();
+  const lines = await opsLinesOf(() =>
+    advanceFormation(deps({ environment: "production" }), COMPANY_KEY),
+  );
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.filingNumber).toBeNull();
+  expect(company()?.filedAt).toBe(filingDateToUnix("2026-08-19"));
+  // The heal's pass does not write one either.
+  const again = await opsLinesOf(() =>
+    advanceFormation(deps({ environment: "production" }), COMPANY_KEY),
+  );
+  expect(company()?.filingNumber).toBeNull();
+  expect(standInLines([...lines, ...again])).toEqual([]);
+});
+
+test("a legal-body company pinned to production, on a sandbox deployment, is skipped before any read: nothing is written", async () => {
+  seedCompanyFiling("legal_body");
+  db.prepare("UPDATE companies SET environment = 'production' WHERE company_id = ?").run(
+    COMPANY_KEY,
+  );
+  filedWithoutNumber();
+  const before = company();
+  const lines = await opsLinesOf(async () => {
+    expect(await advanceFormation(deps(), COMPANY_KEY)).toMatchObject({
+      fetched: false,
+      skipped: "environment_pin",
+    });
+  });
+  expect(doola.calls).toEqual([]);
+  expect(company()).toEqual(before);
+  expect(stateOf("await_filing")).toBe("pending");
+  expect(standInLines(lines)).toEqual([]);
+});
+
+test("a sandbox agent company filed with no number keeps no number: no stand-in enters an anchored manifest", async () => {
+  seedCompanyFiling("agent");
+  filedWithoutNumber();
+  const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+  expect(stateOf("await_filing")).toBe("confirmed");
+  expect(company()?.filingNumber).toBeNull();
+  await advanceFormation(deps(), COMPANY_KEY);
+  expect(company()?.filingNumber).toBeNull();
+  expect(standInLines(lines)).toEqual([]);
+});
+
+test("the formationFiled event, where an agent is attached, carries the stand-in and says it is one", async () => {
+  // A legal-body company never takes an agent, so the event is normally absent for it (design
+  // 2026-11-11 §2). One is attached here only to read the payload the confirmation writes.
+  seedCompanyFiling("legal_body");
+  repo.upsert(formedEntity());
+  filedWithoutNumber();
+  await advanceFormation(deps(), COMPANY_KEY);
+  const filed = repo.listEvents(ENTITY_KEY).find((e) => e.step === "formationFiled");
+  expect(JSON.parse(filed?.detail ?? "{}")).toMatchObject({
+    providerRef: COMPANY_ID,
+    filingNumber: STAND_IN,
+    filingNumberStandIn: true,
+  });
 });
 
 // ── matchFiledNameAgainst: the one rule a reported name is held to, wherever it is reported ─────

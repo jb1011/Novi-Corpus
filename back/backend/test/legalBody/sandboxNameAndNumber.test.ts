@@ -15,6 +15,7 @@ import type Database from "better-sqlite3";
 import type { Hex } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError } from "../../src/errors";
+import { sandboxStandInFilingNumber } from "../../src/legalBody/companyFields";
 import {
   type CustomerCompanyDeps,
   type CustomerCompanyInput,
@@ -63,6 +64,8 @@ const PRODUCTION_TYPED: CustomerStatementInput = {
 const NOT_VALID = "some fields of the declaration are not valid";
 const NAME_PROBLEM = "must say it is a test on this deployment";
 const NUMBER_PROBLEM = "is already declared on this deployment: choose another test number";
+const RESERVED_PROBLEM =
+  "is reserved for companies formed on this deployment: choose another test number";
 
 let db: Database.Database;
 let s: LegalBodyStores;
@@ -424,6 +427,60 @@ describe("on a sandbox, a test number is declared once", () => {
     expect(fields.filingNumber).toBe(SANDBOX_TYPED.filingNumber);
     const next = await declare(sandbox(), second, SANDBOX_TYPED);
     expect(s.checks.passedElsewhere(filingKeyOf(SANDBOX_TYPED.filingNumber), "")).toBe(next);
+  });
+});
+
+describe("on a sandbox, the stand-in prefix is the formed door's", () => {
+  // doola's sandbox files a formed company with no number, and the processor records a stand-in
+  // starting TEST-STANDIN-: a declared test number never takes the prefix (design 2026-11-11 §2).
+  const RESERVED = { ...SANDBOX_TYPED, filingNumber: "TEST-STANDIN-0001" };
+
+  test("the statement door refuses a TEST-STANDIN- number under filingNumber, with its own problem", () => {
+    const refused = refusalOf(() => prepareCustomerStatement(sandbox(), owner.address, RESERVED));
+    expect(shapeOf(refused)).toEqual(fieldRefusal("filingNumber", RESERVED_PROBLEM));
+  });
+
+  test("a stand-in itself passes the sandbox rule and is refused by the reservation alone", () => {
+    const refused = refusalOf(() =>
+      prepareCustomerStatement(sandbox(), owner.address, {
+        ...SANDBOX_TYPED,
+        filingNumber: sandboxStandInFilingNumber("cmp-1"),
+      }),
+    );
+    expect(shapeOf(refused)).toEqual(fieldRefusal("filingNumber", RESERVED_PROBLEM));
+  });
+
+  test("the create door refuses the same, and writes nothing", async () => {
+    const deps = sandbox();
+    const body = await signedOutsideTheDoor(deps, owner, RESERVED);
+    const refused = await asyncRefusalOf(createCustomerCompany(deps, owner.address, body));
+    expect(shapeOf(refused)).toEqual(fieldRefusal("filingNumber", RESERVED_PROBLEM));
+    expect(rows("companies")).toBe(0);
+    expect(rows("company_declarations")).toBe(0);
+    expect(rows("company_checks")).toBe(0);
+  });
+
+  test("the test-number rule keeps its own sentence: a number that breaks it is not told about the reservation", () => {
+    const refused = refusalOf(() =>
+      prepareCustomerStatement(sandbox(), owner.address, {
+        ...SANDBOX_TYPED,
+        filingNumber: "STANDIN-0001",
+      }),
+    );
+    expect(shapeOf(refused)).toEqual(
+      fieldRefusal(
+        "filingNumber",
+        "must be a test number on this deployment: TEST- then 4 to 27 of A-Z, 0-9 and hyphens",
+      ),
+    );
+  });
+
+  test("on production a TEST-STANDIN- number is served and declared as any other string", async () => {
+    const typed = { ...PRODUCTION_TYPED, filingNumber: "TEST-STANDIN-0001" };
+    const { fields } = prepareCustomerStatement(production(), owner.address, typed);
+    expect(fields.filingNumber).toBe("TEST-STANDIN-0001");
+    const companyId = await declare(production(), owner, typed);
+    expect(s.declarations.find(companyId)?.filingNumber).toBe("TEST-STANDIN-0001");
   });
 });
 
