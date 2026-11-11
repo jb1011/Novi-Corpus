@@ -1138,6 +1138,58 @@ describe("each way the list has no name logs one formation_filed_name_missing, a
   });
 });
 
+describe("a malformed list answer never throws out of the name read: the filing confirms, and the line says why", () => {
+  test.each([
+    ["a list holding only a null entry", "not_in_list", [null]],
+    ["a list whose entries are none of them objects", "not_in_list", [null, 7, "cmp-1"]],
+    ["content that is an object, not a list", "list_failed", { content: [] }],
+    ["content that is text, not a list", "list_failed", "cmp-1"],
+    ["no content at all", "list_failed", null],
+  ])("%s: %s", async (_label, reason, answer) => {
+    seedCompanyFiling("legal_body");
+    filedAs("Formation Agent");
+    // What a 200 from a broken or changed doola could hand the client.
+    doola.api.listCompanies = async () => answer as never;
+    const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+    // The confirmation stands, with its date and number.
+    expect(stateOf("await_filing")).toBe("confirmed");
+    expect(company()).toMatchObject({
+      legalNameFiled: null,
+      filingNumber: "2026-001234567",
+      filedAt: filingDateToUnix("2026-08-19"),
+    });
+    expect(lines.filter((l) => l.opslog === "formation_filed_name_missing")).toEqual([
+      expect.objectContaining({
+        level: "warn",
+        companyId: COMPANY_KEY,
+        providerRef: COMPANY_ID,
+        reason,
+        message: FILED_NAME_MISSING,
+      }),
+    ]);
+  });
+
+  test("an unreadable entry beside ours is skipped, and ours is read", async () => {
+    seedCompanyFiling("legal_body");
+    filedAs("Formation Agent");
+    doola.api.listCompanies = async () => [null, listItem("Formation Agent")] as never;
+    await advanceFormation(deps(), COMPANY_KEY);
+    expect(company()?.legalNameFiled).toBe("Formation Agent LLC");
+  });
+
+  test("a name that is not text is no name", async () => {
+    seedCompanyFiling("legal_body");
+    filedAs("Formation Agent");
+    doola.api.listCompanies = async () => [{ ...listItem(undefined), name: 7 }] as never;
+    const lines = await opsLinesOf(() => advanceFormation(deps(), COMPANY_KEY));
+    expect(stateOf("await_filing")).toBe("confirmed");
+    expect(company()?.legalNameFiled).toBeNull();
+    expect(lines.find((l) => l.opslog === "formation_filed_name_missing")).toMatchObject({
+      reason: "no_name",
+    });
+  });
+});
+
 test("no list read before the State files: the list name is only our first choice then", async () => {
   seedCompanyFiling("legal_body");
   doola.state.company = {

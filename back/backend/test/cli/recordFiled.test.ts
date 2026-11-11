@@ -916,6 +916,26 @@ describe("formation:record-filed", () => {
     }
   });
 
+  test("--filing-number in the sandbox stand-in space is refused for a production company, on the filing key, and nothing is written", async () => {
+    const companyId = paidCompany();
+    db.prepare("UPDATE companies SET environment = 'production' WHERE company_id = ?").run(
+      companyId,
+    );
+    const before = writtenFor(companyId);
+    for (const number of [
+      "TEST-STANDIN-D36A9A6177333DB7",
+      "TEST-STAND-IN-0001",
+      "test-standin-0001",
+    ])
+      expect(await refusal(recordFiledArgs(companyId, { number }, "--yes")), number).toBe(
+        "refusing: --filing-number is in the range kept for sandbox stand-ins (TEST-STANDIN-): record a production company's filing with the number on the State's record",
+      );
+    expect(writtenFor(companyId)).toEqual(before);
+    // The State's number goes through.
+    await run(recordFiledArgs(companyId, {}, "--yes"));
+    expect(companies.find(companyId)?.filingNumber).toBe("2026-000451207");
+  });
+
   test("--legal-name is stored exactly as typed: a name with no entity ending is written with the warning, one that matches no option with its own", async () => {
     const beacon = paidCompany({ names: ["Beacon Works", "Beacon Works Two"] });
     const { output } = await run<FiledRecorded>(

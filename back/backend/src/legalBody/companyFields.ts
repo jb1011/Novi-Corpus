@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { NAME_CHARSET_SOURCE } from "../formation/intake";
+import { filingKeyOf } from "../persistence/companyDeclarationRepository";
 import { type TextRule, applyTextRule } from "./textRules";
 
 /**
@@ -47,6 +48,19 @@ export const SANDBOX_STAND_IN_PREFIX = "TEST-STANDIN-";
 export function sandboxStandInFilingNumber(doolaCompanyId: string): string {
   const digest = createHash("sha256").update(doolaCompanyId, "utf8").digest("hex");
   return `${SANDBOX_STAND_IN_PREFIX}${digest.slice(0, 16).toUpperCase()}`;
+}
+
+/**
+ * Whether a filing number is in the stand-in space: its filing key (`filingKeyOf`: upper case,
+ * hyphens dropped, the key rows compare numbers by) starts with the prefix's. So `TEST-STAND-IN-…`,
+ * `TEST-STANDIND36A…` and `test-standin-…` are in it too: a raw-string prefix would let each of
+ * them dodge a wall that the declared door's own comparison would not tell apart.
+ *
+ * ONE helper for every wall: the declared door's reservation on a sandbox, and on production the
+ * order door (no agreement of a production company prints one) and `formation:record-filed`.
+ */
+export function isStandInFilingNumber(filingNumber: string): boolean {
+  return filingKeyOf(filingNumber).startsWith(filingKeyOf(SANDBOX_STAND_IN_PREFIX));
 }
 
 /**

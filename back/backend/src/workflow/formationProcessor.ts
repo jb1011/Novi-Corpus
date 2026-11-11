@@ -363,7 +363,8 @@ export async function advanceFormation(
 
   // The name doola files the company under is on its LIST item only (design 2026-11-11 §1). Read
   // here, before the advance, so the confirmation and the heal stay synchronous inside their
-  // transactions; it never fails, parks or delays them.
+  // transactions. It never fails or parks them; it may hold the lock up to the client timeout,
+  // once per pass.
   const reportedName = await listedFiledName(d, companyId, steps, doolaCompany, providerRef);
 
   let advanced = false;
@@ -443,10 +444,15 @@ const FILED_NAME_MISSING_MESSAGE =
  * answers a known email with its existing customer, so one guardian's two companies can share a
  * customer. The customer id is the one the full answer names, else the one the create recorded.
  *
- * NEVER THROWS, AND NEVER HOLDS UP THE CONFIRMATION. A failed list, a missing item or a blank
- * name is "no name this time": one `formation_filed_name_missing` warning, and the filing still
+ * NEVER THROWS, AND NEVER STOPS THE CONFIRMATION. A failed list, a missing item or a blank name
+ * is "no name this time": one `formation_filed_name_missing` warning, and the filing still
  * confirms with its date and number; nothing is parked, no attempt is burned and no backoff moves.
  * The next poll asks again. What the name is then held to is `matchFiledName`'s.
+ *
+ * A MALFORMED ANSWER IS ONE OF THOSE. The whole read sits in the try, the call and every look at
+ * its answer, because a TypeError out of here would stop the confirmation on every poll: an answer
+ * that is not a list is `list_failed`, an entry that is not an object is skipped (ours may still be
+ * among the rest, else `not_in_list`), and a name that is not text is `no_name`.
  */
 async function listedFiledName(
   d: FormationAdvanceDeps,
@@ -477,25 +483,33 @@ async function listedFiledName(
     return undefined;
   };
 
+  // Text, or nothing: doola's answers and the stored detail are read as what they are at run time.
+  const textOf = (value: unknown): string => (typeof value === "string" ? value.trim() : "");
   const created = steps.find((s) => s.step === "create_provider");
   const customerId =
-    doolaCompany.doolaCustomerId?.trim() ||
-    parseDetail<{ customerId?: string }>(created?.detail ?? null).customerId?.trim();
+    textOf(doolaCompany.doolaCustomerId) ||
+    textOf(parseDetail<{ customerId?: unknown }>(created?.detail ?? null).customerId);
   if (!customerId) return missing("no_customer_id");
 
-  let items: DoolaCompanyListItem[];
   try {
-    items = await d.doola.listCompanies(customerId);
+    const answer: unknown = await d.doola.listCompanies(customerId);
+    if (!Array.isArray(answer))
+      return missing("list_failed", { error: "doola's list answer is not a list" });
+    const item = answer.find(
+      (entry: unknown): entry is DoolaCompanyListItem =>
+        typeof entry === "object" &&
+        entry !== null &&
+        (entry as { doolaCompanyId?: unknown }).doolaCompanyId === providerRef,
+    );
+    if (!item) return missing("not_in_list");
+    const name = textOf(item.name);
+    if (!name) return missing("no_name");
+    return name;
   } catch (e) {
     // doola's own description, under `error`: `message` is this line's sentence.
     const { message: error, ...described } = describeDoolaError(e);
     return missing("list_failed", { ...described, error });
   }
-  const item = items.find((i) => i.doolaCompanyId === providerRef);
-  if (!item) return missing("not_in_list");
-  const name = item.name?.trim();
-  if (!name) return missing("no_name");
-  return name;
 }
 
 /** `await_filing`: the STATE has filed the company. Writes the legal facts onto the COMPANY.

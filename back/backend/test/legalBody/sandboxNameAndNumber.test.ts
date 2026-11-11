@@ -440,6 +440,16 @@ describe("on a sandbox, the stand-in prefix is the formed door's", () => {
     expect(shapeOf(refused)).toEqual(fieldRefusal("filingNumber", RESERVED_PROBLEM));
   });
 
+  test.each(["TEST-STAND-IN-0001", "TEST-STANDIND36A9A6177333DB7"])(
+    "%s, a hyphen moved or dropped, is in the reserved space all the same: the door compares numbers on their filing key",
+    (filingNumber) => {
+      const refused = refusalOf(() =>
+        prepareCustomerStatement(sandbox(), owner.address, { ...SANDBOX_TYPED, filingNumber }),
+      );
+      expect(shapeOf(refused)).toEqual(fieldRefusal("filingNumber", RESERVED_PROBLEM));
+    },
+  );
+
   test("a stand-in itself passes the sandbox rule and is refused by the reservation alone", () => {
     const refused = refusalOf(() =>
       prepareCustomerStatement(sandbox(), owner.address, {

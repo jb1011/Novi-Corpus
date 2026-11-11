@@ -8,6 +8,7 @@ import { describe, expect, test } from "vitest";
 import {
   FILING_NUMBER,
   SANDBOX_STAND_IN_PREFIX,
+  isStandInFilingNumber,
   passesAsItStands,
   sandboxStandInFilingNumber,
 } from "../../src/legalBody/companyFields";
@@ -50,4 +51,25 @@ describe("sandboxStandInFilingNumber", () => {
   test("can never pass for a Wyoming filing id", () => {
     expect(sandboxStandInFilingNumber("cmp-1")).not.toMatch(/^\d{4}-\d{9}$/);
   });
+});
+
+describe("isStandInFilingNumber: the stand-in space, on the filing key", () => {
+  test.each([
+    sandboxStandInFilingNumber("cmp-1"),
+    "TEST-STANDIN-0001",
+    // The two dodges of a raw-string prefix: a hyphen added, and one dropped.
+    "TEST-STAND-IN-0001",
+    "TEST-STANDIND36A9A6177333DB7",
+    "test-standin-0001",
+    "TESTSTANDIN0001",
+  ])("%s is in it", (number) => {
+    expect(isStandInFilingNumber(number)).toBe(true);
+  });
+
+  test.each(["TEST-0001", "TEST-STAND-0001", "TEST-STANDARD-01", "2026-001234567", "STANDIN-0001"])(
+    "%s is not",
+    (number) => {
+      expect(isStandInFilingNumber(number)).toBe(false);
+    },
+  );
 });

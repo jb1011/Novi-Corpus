@@ -40,7 +40,7 @@ the filing, and again on any later poll that learns one (`src/workflow/formation
 
 | Ops line | What it means | What to do |
 | --- | --- | --- |
-| `formation_filed_name_missing` (warn) | The company is filed and doola reports no name for it. `reason` is `no_customer_id` (no doola customer id to list by), `list_failed` (the list read failed; doola's error rides along), `not_in_list` (the customer's list has no item with this doola id) or `no_name` (the item's name is absent or blank). The filing is confirmed all the same, with its date and number; the line repeats once per poll while the name is missing. | `list_failed`: wait for the next poll. Otherwise check the State's record and set the name with `company:filed-name` (section 2). |
+| `formation_filed_name_missing` (warn) | The company is filed and doola reports no name for it. `reason` is `no_customer_id` (no doola customer id to list by), `list_failed` (the list read failed, or its answer was not a list; doola's error rides along when there is one), `not_in_list` (the customer's list has no readable item with this doola id: an entry that is not an object is skipped) or `no_name` (the item's name is absent, blank or not text). The filing is confirmed all the same, with its date and number; the line repeats once per poll while the name is missing. | `list_failed`: wait for the next poll. Otherwise check the State's record and set the name with `company:filed-name` (section 2). |
 | `formation_filed_name_unmatched` (warn) | doola lists a name that matches none of the stored options. | Check the State's record and set the name with `company:filed-name`. |
 
 **Open question, with doola.** We do not know that the list's name is the State-accepted one when
@@ -63,12 +63,19 @@ writes it.
 - **It never appears on production.** The rule reads the company's own pin, never the
   deployment's; a company pinned to one environment is never read on the other; and a company
   for agents never gets one.
+- **And production refuses one, whoever wrote it.** The order door answers
+  `filing_number_reserved` (409) for a production company whose filing number is in the stand-in
+  space, a declared company included, so no agreement prints one; `formation:record-filed`
+  refuses one for a production company (section 5). A declaration on production keeps the
+  number as the tenant's record; it just never reaches an agreement.
+- **The space is matched on the filing key** (upper case, hyphens dropped, as the declared door
+  compares numbers): `TEST-STAND-IN-…`, `TEST-STANDIND…` and `test-standin-…` are in it too.
 - **A number doola reports later replaces it.** A stand-in is never written over a number.
 - **The texts print it as they print any number.** The agreement says
   `with filing number "TEST-STANDIN-…"`, and the public statement carries it beside
   `environment: "sandbox"`.
-- **The declared door reserves the prefix on a sandbox**: a declared `filingNumber` starting
-  `TEST-STANDIN-` is refused, "is reserved for companies formed on this deployment: choose another
+- **The declared door reserves the space on a sandbox**: a declared `filingNumber` in it is
+  refused, "is reserved for companies formed on this deployment: choose another
   test number". Production takes it as any other string.
 
 Creating one (`POST /companies` with `for: "legal_body"`) runs the formed door's gates first, in
@@ -216,7 +223,8 @@ Organization. Copy every value from the State's record, not from an email.
 **The values**, each refused, never cleaned:
 
 - `--filing-number`: the agreement's filing-number rule (4 to 32 of A-Z, a-z, 0-9 and hyphens). A
-  space at an end is refused.
+  space at an end is refused. For a company pinned to production, a number in the sandbox
+  stand-in space (`TEST-STANDIN-`, on the filing key) is refused: record the State's number.
 - `--filed-at`: a real calendar date written `YYYY-MM-DD` (2026-02-30 is refused), not before
   1970-01-01 and not after today's date in UTC. It is stored as unix seconds at UTC midnight, as
   the processor stores doola's filing date. A date before the day the company was created at

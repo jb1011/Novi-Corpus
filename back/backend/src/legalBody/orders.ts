@@ -22,7 +22,7 @@ import type {
 } from "../persistence/legalBodyRepository";
 import { buildAgreement, storeAgreement } from "./agreement";
 import { filedCompanyNames, publicCompanyNames } from "./attestation";
-import { filedNamesPrintable } from "./companyFields";
+import { filedNamesPrintable, isStandInFilingNumber } from "./companyFields";
 import { CUSTOMER_PROVIDER, companySourceOf } from "./provider";
 import { refusal } from "./sentences";
 import { LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
@@ -319,8 +319,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *     `companyNamesForOrder` reads, and nothing else: a customer's company by the declared name
  *     and filing number its passed check stands behind; a formed company by the filed name and
  *     filing number its row holds, printed as they stand, so a filed fact the agreement cannot
- *     print (`filedNamesPrintable`) is refused, never cleaned. Its manifest states the company's
- *     source: `customer` or `novi` (`companySourceOf`);
+ *     print (`filedNamesPrintable`) is refused, never cleaned. A production company whose filing
+ *     number is in the sandbox stand-in space (`isStandInFilingNumber`) is refused, whatever its
+ *     provider and whoever wrote the number. Its manifest states the company's source: `customer`
+ *     or `novi` (`companySourceOf`);
  *  5. one transaction: the names are read again and must be the ones the agreement prints (an
  *     operator's `company:filed-name --replace` committed after step 4 is answered
  *     `company_not_eligible`, never a draft printing the superseded name), the two caps are
@@ -363,6 +365,12 @@ export function createOrder(
   if (names === null) throw refusal("company_not_eligible", 409);
   if (owned.provider !== CUSTOMER_PROVIDER && !filedNamesPrintable(names))
     throw refusal("company_name_unusable", 409);
+  //    A stand-in is a sandbox's test value, never a State filing number, and no agreement of a
+  //    production company prints one, whoever wrote it: the processor never does there, but an
+  //    operator's record or a declaration could. Every provider, since a declared company's
+  //    agreement prints its declared number too. Read on the company's own pin, as every pin rule.
+  if (owned.environment === "production" && isStandInFilingNumber(names.filingNumber))
+    throw refusal("filing_number_reserved", 409);
   const built = buildAgreement(
     {
       companyName: names.legalName,
