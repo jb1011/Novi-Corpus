@@ -39,6 +39,8 @@ let requests: SqliteFormationRepository;
 let calls: string[];
 let answer: () => Promise<DoolaComplianceEvent[]>;
 let now: number;
+/** Called each time the route reads a company's formation steps; see `untilJoined`. */
+let onStepsRead: () => void;
 
 beforeEach(() => {
   db = openDatabase(":memory:");
@@ -49,6 +51,7 @@ beforeEach(() => {
   calls = [];
   answer = async () => [EVENT];
   now = Date.parse("2026-09-07T12:00:00Z");
+  onStepsRead = () => {};
 });
 afterEach(() => db.close());
 
@@ -60,7 +63,10 @@ function app(withProvider = true) {
     repo,
     companies,
     docStore: { getBytesAsync: async () => Buffer.from("") },
-    formationSteps: (id: string) => requests.stepsOf(id),
+    formationSteps: (id: string) => {
+      onStepsRead();
+      return requests.stepsOf(id);
+    },
     now: () => now,
     formation: withProvider
       ? {
@@ -284,10 +290,24 @@ function deferred<T>(): {
   return { promise, resolve, reject };
 }
 
-/** Wait until the provider has actually been reached — the handlers sign a session first. */
-async function untilCalled(): Promise<void> {
-  for (let i = 0; i < 200 && calls.length === 0; i++) await new Promise((r) => setTimeout(r, 5));
-  expect(calls.length, "the provider was never reached").toBeGreaterThan(0);
+/**
+ * Resolves once `n` requests are IN the in-flight slot: the one that started the provider call,
+ * and the rest waiting on it. Install it BEFORE sending the requests.
+ *
+ * The route reads the company's formation steps and then, in the same synchronous stretch (no
+ * `await` between the two), either joins the call already out to doola or starts it. So the n-th
+ * read of the steps means the n-th request has joined, and the continuation of `await` on this
+ * promise cannot run before that stretch ends. No polling and no timing margin: waiting only for
+ * the provider to be reached, as this file used to, let a slow viewer still be in the session
+ * middleware when the call settled, and that viewer then made a second call, by design.
+ */
+function untilJoined(n: number): Promise<void> {
+  const joined = deferred<void>();
+  let seen = 0;
+  onStepsRead = () => {
+    if (++seen === n) joined.resolve();
+  };
+  return joined.promise;
 }
 
 /**
@@ -304,10 +324,12 @@ test("concurrent first viewers of one company share a single provider call", asy
   const gate = deferred<DoolaComplianceEvent[]>();
   answer = () => gate.promise;
 
+  const joined = untilJoined(4);
   const inflight = [get(a, id), get(a, id), get(a, id), get(a, id)];
-  // The handlers each sign a session before they reach the provider; wait for the first one to
-  // actually arrive rather than for a fixed number of ticks.
-  await untilCalled();
+  // The handlers each verify a session before they reach the slot; release the provider only once
+  // all four are waiting on its one call, so none of them can be served by the cache instead.
+  await joined;
+  expect(calls).toEqual(["cmp-1"]);
   gate.resolve([EVENT]);
   const bodies = await Promise.all((await Promise.all(inflight)).map((r) => r.json()));
 
@@ -321,8 +343,12 @@ test("a FAILED fetch is not cached — but concurrent failures share one call", 
   const gate = deferred<DoolaComplianceEvent[]>();
   answer = () => gate.promise;
 
+  const joined = untilJoined(3);
   const inflight = [get(a, id), get(a, id), get(a, id)];
-  await untilCalled();
+  // All three are waiting on the ONE call before it fails. A viewer that arrived after the failure
+  // settled would rightly make a new call (failures are not cached), and that was the flake.
+  await joined;
+  expect(calls).toEqual(["cmp-1"]);
   gate.reject(new Error("upstream down"));
   for (const res of await Promise.all(inflight)) expect(res.status).toBe(502);
   // Rate-limited while in flight: three viewers, one call at a struggling partner.
