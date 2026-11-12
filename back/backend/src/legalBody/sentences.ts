@@ -18,7 +18,7 @@ import type { BindingState } from "../persistence/legalBodyRepository";
 export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.freeze({
   not_found: "Nothing with this id belongs to you.",
   legal_text_not_approved:
-    "This deployment does not take legal-body orders yet: the wording of the operating agreement is not approved for use with a real company.",
+    "This deployment does not take this request yet: the legal text it relies on is still a draft, not approved for use with a real company.",
   company_not_eligible:
     "This company cannot stand behind a legal body: it must be a company you declared, not abandoned, whose latest check by the operator passed.",
   // A formed company whose filed name or filing number the agreement cannot print as the row holds

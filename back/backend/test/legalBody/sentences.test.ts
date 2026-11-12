@@ -35,6 +35,7 @@ const ANSWERING_MODULES = [
   "legalBody/checkLink.ts",
   "legalBody/gasSeed.ts",
   "legalBody/treasury.ts",
+  "legalBody/draftTextRefusal.ts",
   "formation/company.ts",
   "workflow/formationPayment.ts",
   "api/routes/legalBodyOrders.ts",
