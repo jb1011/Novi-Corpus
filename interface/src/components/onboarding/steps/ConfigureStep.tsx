@@ -1,6 +1,5 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import Link from "next/link";
 import {
   AgentConfig,
@@ -9,7 +8,6 @@ import {
   formatUsdc,
   isAddress,
   isConfigValid,
-  shortAddress,
   validateConfig,
 } from "../types";
 import { StepNav } from "../OnboardingFlow";

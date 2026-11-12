@@ -6,7 +6,7 @@ import { StepNav } from "../OnboardingFlow";
 import { deployStepIndex, TERMINAL } from "@/lib/api/poll";
 import { useEntityPollQuery } from "@/lib/api/hooks";
 import type { EntityStatus, EntityView } from "@/lib/api/types";
-import { arcTestnet, txUrl } from "@/lib/chain";
+import { txUrl } from "@/lib/chain";
 import { wireAllowlistEntries } from "@/lib/treasury/allowlist";
 import { deployPollError } from "@/lib/onboarding/deployError";
 import type { AgentConfig } from "../types";

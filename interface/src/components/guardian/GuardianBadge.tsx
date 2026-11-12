@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { useWorldIdMeQuery } from "@/lib/api/hooks";
 import { ApiError } from "@/lib/api/types";
-import { PersonhoodSeal } from "@/components/guardian/PersonhoodSeal";
 import { useAuth } from "@/components/onboarding/AuthProvider";
 import { cx } from "@/components/onboarding/primitives";
 
