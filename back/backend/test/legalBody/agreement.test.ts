@@ -44,6 +44,7 @@ const LEGAL_BODY_ID = "lb_00000000-0000-4000-8000-000000000001";
  */
 const TEMPLATE_SHA256_BY_VERSION: Readonly<Record<string, string>> = {
   "2026-10-draft-1": "d704c1217852432680e7b7b1ed63c6485956bec7dccc502b4b4bd34d92c93f20",
+  "2026-11-draft-1": "f869917a35368abee55855d15291059efd1fea95c6edee110524c6face3c6d2c",
 };
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -99,8 +100,8 @@ test("each version's template is pinned by its sha256, and no version leaves the
   expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.map((t) => t.version)).toEqual(
     Object.keys(TEMPLATE_SHA256_BY_VERSION),
   );
-  // New agreements are made under the newest version.
-  expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.at(-1)).toBe(LEGAL_BODY_OPERATING_AGREEMENT);
+  // The served version is one of the listed versions; which one a deployment serves is not this list's order.
+  expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS).toContain(LEGAL_BODY_OPERATING_AGREEMENT);
 });
 
 test("a field that holds a placeholder is not substituted again", () => {

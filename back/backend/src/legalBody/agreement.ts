@@ -59,10 +59,13 @@ const AGREEMENT_VERSION = 1;
  * same address in another letter case gives the same agreement (and an address that is not one
  * throws). The rendered text is stored in NFC, the form `computeOaHash` hashes, so the stored
  * bytes are the hashed bytes.
+ *
+ * A text whose template takes more string fields than the agreement's (the Charter's `scheduleA`)
+ * is rendered with them, and the manifest is built the same way.
  */
-export function buildAgreement(
-  fields: AgreementFields,
-  text: LegalText<AgreementFields>,
+export function buildAgreement<F extends AgreementFields>(
+  fields: F,
+  text: LegalText<F>,
   company: { source: CompanySource },
 ): BuiltAgreement {
   const guardian = getAddress(fields.guardian);

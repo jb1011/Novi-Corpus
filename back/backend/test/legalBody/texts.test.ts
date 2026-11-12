@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import type { Address } from "viem";
 import { expect, test } from "vitest";
+import { buildStatementMessage } from "../../src/legalBody/statement";
 import { LegalTextNotApprovedError, assertTextsServable } from "../../src/legalBody/texts/index";
 import {
+  DECLARATION_OF_AUTHORITY,
   STATEMENT_OF_AUTHORITY,
   STATEMENT_OF_AUTHORITY_VERSIONS,
   type StatementFields,
@@ -26,6 +28,7 @@ const FIELDS: StatementFields = {
  */
 const TEMPLATE_SHA256_BY_VERSION: Readonly<Record<string, string>> = {
   "2026-10-draft-1": "d52f3f7c91511c81462707c28c35976e1cd8b59f9fda863d342eb39fc48e8075",
+  "2026-11-draft-1": "ac384bae187ac5a347e361617a1c2f5933bea85ee4d611031d50ed294559ce48",
 };
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
@@ -84,8 +87,23 @@ test("each version's template is pinned by its sha256, and no version leaves the
   expect(STATEMENT_OF_AUTHORITY_VERSIONS.map((t) => t.version)).toEqual(
     Object.keys(TEMPLATE_SHA256_BY_VERSION),
   );
-  // New declarations are made under the newest version.
-  expect(STATEMENT_OF_AUTHORITY_VERSIONS.at(-1)).toBe(STATEMENT_OF_AUTHORITY);
+  // The served version is one of the listed versions; which one a deployment serves is not this list's order.
+  expect(STATEMENT_OF_AUTHORITY_VERSIONS).toContain(STATEMENT_OF_AUTHORITY);
+  expect(STATEMENT_OF_AUTHORITY_VERSIONS.at(-1)).toBe(DECLARATION_OF_AUTHORITY);
+});
+
+test("the declaration of authority renders its one sentence, each field between quotes", () => {
+  expect(DECLARATION_OF_AUTHORITY.version).toBe("2026-11-draft-1");
+  expect(DECLARATION_OF_AUTHORITY.status).toBe("draft");
+  expect(DECLARATION_OF_AUTHORITY.render(FIELDS)).toBe(
+    'I, "Ada Example", "Manager" of "Example Holdings LLC" (the "Company"), a Wyoming limited liability company with filing number "TEST-0001", declare to NoviCorpus, Inc. ("Novi Corpus") that: (1) I am authorised to bind the Company and to adopt, on its behalf, a supplement to its operating agreement; (2) I personally control the wallet 0x00000000000000000000000000000000000A11cE, and the Company designates it as its Guardian Wallet with Novi Corpus, authorised to adopt and amend, for the Company, a Legal Body Charter for each legal body recorded for the Company, including by granting, limiting or revoking the agent\'s authority under it, and to act for the Company as regards each such legal body; (3) the Company consents to Novi Corpus publishing its legal name, its filing number, that wallet\'s address and the text of each charter it adopts, with its grants and schedules, in signed statements anyone may read; and (4) I understand that Novi Corpus relies on this declaration and may check it against the public record and the evidence I provide.',
+  );
+});
+
+test("the signed message of a declaration carries the new sentence and its version", () => {
+  const message = buildStatementMessage(FIELDS, DECLARATION_OF_AUTHORITY, 1_800_000_000n);
+  expect(message.statement).toBe(DECLARATION_OF_AUTHORITY.render(FIELDS));
+  expect(message.wordingVersion).toBe("2026-11-draft-1");
 });
 
 test("a draft is served on sandbox only: production refuses it and names the text", () => {

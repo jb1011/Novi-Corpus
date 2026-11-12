@@ -12,6 +12,7 @@ import {
   createCustomerCompany,
   prepareCustomerStatement,
 } from "../../legalBody/customerCompany";
+import { draftTextRefusal } from "../../legalBody/draftTextRefusal";
 import {
   type AcceptEvidenceResult,
   EVIDENCE_MAX_BYTES,
@@ -160,8 +161,7 @@ async function servingApprovedWording<T>(run: () => T | Promise<T>): Promise<T> 
   try {
     return await run();
   } catch (err) {
-    if (err instanceof LegalTextNotApprovedError)
-      throw new ApiError("legal_text_not_approved", 503, err.message);
+    if (err instanceof LegalTextNotApprovedError) throw draftTextRefusal();
     throw err;
   }
 }

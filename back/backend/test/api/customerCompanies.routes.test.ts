@@ -24,6 +24,7 @@ import { toCompanyView } from "../../src/api/views";
 import { signSession } from "../../src/auth/session";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import type { CustomerCompanyDeps } from "../../src/legalBody/customerCompany";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import type { LegalText } from "../../src/legalBody/texts/index";
 import {
   STATEMENT_OF_AUTHORITY,
@@ -464,6 +465,12 @@ describe("asking for the statement, signing it and creating the company", () => 
       }),
     );
     expect(refused).toMatchObject({ status: 503, code: "legal_text_not_approved" });
+    expect((refused.body as { error: { message: string } }).error.message).toBe(
+      LEGAL_BODY_SENTENCES.legal_text_not_approved,
+    );
+    expect(LEGAL_BODY_SENTENCES.legal_text_not_approved).toBe(
+      "This deployment does not take this request yet: the legal text it relies on is still a draft, not approved for use with a real company.",
+    );
     expect(countRows("companies")).toBe(0);
   });
 
@@ -499,6 +506,9 @@ describe("asking for the statement refuses before anything is rendered", () => {
       await post(app, STATEMENT_MESSAGE, await sessionOf(owner), TYPED),
     );
     expect(refused).toMatchObject({ status: 503, code: "legal_text_not_approved" });
+    expect((refused.body as { error: { message: string } }).error.message).toBe(
+      LEGAL_BODY_SENTENCES.legal_text_not_approved,
+    );
     expect(refused.body).not.toHaveProperty("typedData");
     expect(wording.renders()).toBe(0);
   });
