@@ -377,11 +377,11 @@ export function grantDigest(grant: Grant): Hex {
   return keccak256(stringToBytes(canonicalizeJcs(grant)));
 }
 
-/** True when none of the seven kinds is allowed and no act of section 5.6 is set to `alone`. */
+/** True when none of the seven kinds is allowed and each act of section 5.6 is set to not_allowed. */
 export function grantAllowsNothing(choices: GrantChoices): boolean {
   return (
     ACT_KINDS.every((kind) => !choices.acts[kind].allowed) &&
-    HEAVY_ACTS.every((act) => choices.heavyActs[act].mode !== "alone")
+    HEAVY_ACTS.every((act) => choices.heavyActs[act].mode === "not_allowed")
   );
 }
 

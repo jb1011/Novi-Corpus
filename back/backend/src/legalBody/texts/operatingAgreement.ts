@@ -1,6 +1,10 @@
 import type { Address } from "../../types";
 import { type LegalText, defineLegalText } from "./index";
-import { type CharterFields, LEGAL_BODY_CHARTER } from "./legalBodyCharter";
+import {
+  type CharterFields,
+  LEGAL_BODY_CHARTER,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
+} from "./legalBodyCharter";
 
 /**
  * The operating agreement of a legal body that has no treasury: the text whose hash the legal
@@ -69,7 +73,11 @@ const OPERATING_AGREEMENT_2026_10_DRAFT_1 = defineLegalText<AgreementFields>({
  * is never edited or removed: a stored agreement names the version it was made under.
  */
 export const LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS: readonly LegalText<CharterFields>[] =
-  Object.freeze([OPERATING_AGREEMENT_2026_10_DRAFT_1, LEGAL_BODY_CHARTER]);
+  Object.freeze([
+    OPERATING_AGREEMENT_2026_10_DRAFT_1,
+    LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
+    LEGAL_BODY_CHARTER,
+  ]);
 
 /**
  * The version new agreements are made under. It stays the October draft until the grant step

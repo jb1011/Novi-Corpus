@@ -45,6 +45,7 @@ const LEGAL_BODY_ID = "lb_00000000-0000-4000-8000-000000000001";
 const TEMPLATE_SHA256_BY_VERSION: Readonly<Record<string, string>> = {
   "2026-10-draft-1": "d704c1217852432680e7b7b1ed63c6485956bec7dccc502b4b4bd34d92c93f20",
   "2026-11-draft-1": "f869917a35368abee55855d15291059efd1fea95c6edee110524c6face3c6d2c",
+  "2026-11-draft-2": "acf6cb2415cba17874d3c7505b7289d66dfd9148e6d584783035fad912a2a0b8",
 };
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
