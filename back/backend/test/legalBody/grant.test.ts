@@ -2,7 +2,7 @@
  * A grant's choices, parsed into one canonical value or refused field by field: an amount is a
  * plain whole number of USDC, one choice has one spelling, an end is a future calendar day, and a
  * hostile shape is a list of problems, never a throw. Then the grant built from them: its
- * fingerprint, and the Schedule A written from it, compared character for character with two
+ * fingerprint, and the Schedule A written from it, compared character for character with three
  * golden texts.
  *
  * Every amount and date here is a made-up fixture.
@@ -404,6 +404,30 @@ const GOLDEN_B = [
   "",
   "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
 ].join("\n");
+/** The Schedule A of `coSigned` below, as its reference text writes it: copied from that text,
+ *  never retyped. It has no trailing newline. */
+const GOLDEN_CO_SIGNED = [
+  "Grant 1, version 1. Digest 0x65e5d3aad6a2995070d7cac1d54b5cf8c4ff651403367c187cefbb2f4883bcf5. In force from the creation of the Legal Body until the end of 31 December 2027 (UTC), unless revoked earlier. Counterparties: only a party whose own legal body reads active in Novi Corpus's record at the time of the act.",
+  "",
+  "Acts of section 5.2:",
+  "",
+  "- (a) entering agreements for services the Company provides: not allowed;",
+  "- (b) accepting engagements: not allowed;",
+  "- (c) issuing invoices in the Company's name: not allowed;",
+  "- (d) receiving payment to the wallet named in Schedule B: not allowed;",
+  "- (e) buying goods or services: not allowed;",
+  "- (f) paying: not allowed;",
+  "- (g) engaging a contractor for work: not allowed.",
+  "",
+  "Acts of section 5.6:",
+  "",
+  "- (h) employing a person: not allowed;",
+  "- (i) borrowing: only with the Guardian Wallet's signature beside the agent's;",
+  "- (j) guaranteeing anyone's obligation: not allowed;",
+  "- (k) transferring or encumbering the Company's property, other than paying within this grant: not allowed.",
+  "",
+  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+].join("\n");
 
 const grantA = buildGrant(A, { number: 1, version: 1 });
 const grantB = buildGrant(B, { number: 1, version: 1 });
@@ -416,6 +440,18 @@ greatest.acts.buy = {
   above: "not_allowed",
 };
 const grantGreatest = buildGrant(greatest, { number: 1, version: 1 });
+/** Fixture `B` with every line not allowed: no kind of section 5.2 and no act of section 5.6. */
+const none = structuredClone(B);
+none.acts.provideServices = { allowed: false };
+none.acts.pay = { allowed: false };
+none.heavyActs.employ = { mode: "not_allowed" };
+none.heavyActs.borrow = { mode: "not_allowed" };
+none.heavyActs.guarantee = { mode: "not_allowed" };
+none.heavyActs.transferProperty = { mode: "not_allowed" };
+/** The same, with borrowing allowed only with the Guardian Wallet's signature beside the agent's. */
+const coSigned = structuredClone(none);
+coSigned.heavyActs.borrow = { mode: "guardian_signature" };
+const grantCoSigned = buildGrant(coSigned, { number: 1, version: 1 });
 
 const BAD_NUMBER = "grant: number and version must each be a whole number of at least 1";
 const BAD_AMOUNT = "grant: an amount must be a whole number of USDC of at least 1";
@@ -512,6 +548,7 @@ test("Schedule A holds only ASCII, no brace and no trailing newline, and never s
     renderScheduleA(grantA),
     renderScheduleA(grantB),
     renderScheduleA(grantGreatest),
+    renderScheduleA(grantCoSigned),
   ]) {
     expect(text).toMatch(/^[\n\x20-\x7e]+$/);
     expect(text).not.toMatch(/[{}]/);
@@ -534,17 +571,24 @@ test("an end date is written as a day, without a leading zero", () => {
 });
 
 test("a grant that allows nothing is no grant", () => {
-  const none = structuredClone(B);
-  none.acts.provideServices = { allowed: false };
-  none.acts.pay = { allowed: false };
-  none.heavyActs.employ = { mode: "guardian_signature" };
-  none.heavyActs.guarantee = { mode: "not_allowed" };
   expect(grantAllowsNothing(none)).toBe(true);
   expect(renderScheduleA(buildGrant(none, { number: 1, version: 1 }))).toBe(
     "No grant is in force.",
   );
   expect(grantAllowsNothing(A)).toBe(false);
   // One act of section 5.6 left to the agent alone is a grant.
-  none.heavyActs.guarantee = { mode: "alone", perAct: 1 };
-  expect(grantAllowsNothing(none)).toBe(false);
+  const alone = structuredClone(none);
+  alone.heavyActs.guarantee = { mode: "alone", perAct: 1 };
+  expect(grantAllowsNothing(alone)).toBe(false);
+});
+
+test("an act of section 5.6 allowed only with the Guardian Wallet's signature is a grant", () => {
+  expect(grantAllowsNothing(coSigned)).toBe(false);
+  expect(grantDigest(grantCoSigned)).toBe(
+    "0x65e5d3aad6a2995070d7cac1d54b5cf8c4ff651403367c187cefbb2f4883bcf5",
+  );
+  expect(renderScheduleA(grantCoSigned)).toBe(GOLDEN_CO_SIGNED);
+  expect(sha256(renderScheduleA(grantCoSigned))).toBe(
+    "324ea0ef524f8cd352a2f03c175f6a31a2fb94ac8b1674330c449388acede130",
+  );
 });
