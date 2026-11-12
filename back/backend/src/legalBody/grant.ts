@@ -8,7 +8,12 @@
  * `parseGrantChoices` turns the guardian's choices into one canonical value, or refuses them field
  * by field, every broken rule in one pass. A value is refused, never cleaned or converted, so one
  * set of choices has one spelling.
+ *
+ * `buildGrant` numbers those choices, `grantDigest` is their fingerprint, and `renderScheduleA`
+ * writes them as the Charter's Schedule A, in fixed sentences.
  */
+import { type Hex, keccak256, stringToBytes } from "viem";
+import { canonicalizeJcs } from "../oa/manifest";
 import type { FieldProblem } from "./textRules";
 
 export const GRANT_AMOUNT_MAX = 1_000_000_000; // whole USDC
@@ -336,4 +341,146 @@ export function parseGrantChoices(
 /** The UTC calendar day of a time in milliseconds, `YYYY-MM-DD`. */
 export function utcDay(nowMs: number): string {
   return new Date(nowMs).toISOString().slice(0, 10);
+}
+
+// ── The grant, its fingerprint and its Schedule A ─────────────────────────────────────────────
+
+export const GRANT_SCHEMA = "novi.legal-body-grant/1";
+
+export type Grant = {
+  schema: typeof GRANT_SCHEMA;
+  number: number;
+  version: number;
+  choices: GrantChoices;
+};
+
+export function buildGrant(
+  choices: GrantChoices,
+  { number, version }: { number: number; version: number },
+): Grant {
+  return { schema: GRANT_SCHEMA, number, version, choices };
+}
+
+/** keccak256 of the UTF-8 bytes of the grant's RFC 8785 form (`canonicalizeJcs`), with no trailing
+ *  newline. */
+export function grantDigest(grant: Grant): Hex {
+  return keccak256(stringToBytes(canonicalizeJcs(grant)));
+}
+
+/** True when none of the seven kinds is allowed and no act of section 5.6 is set to `alone`. */
+export function grantAllowsNothing(choices: GrantChoices): boolean {
+  return (
+    ACT_KINDS.every((kind) => !choices.acts[kind].allowed) &&
+    HEAVY_ACTS.every((act) => choices.heavyActs[act].mode !== "alone")
+  );
+}
+
+export const NO_GRANT_IN_FORCE = "No grant is in force.";
+
+const NOT_ALLOWED = "not allowed";
+const WITH_GUARDIAN_SIGNATURE = "only with the Guardian Wallet's signature beside the agent's";
+const COUNTERPARTY_WORDS: Record<GrantChoices["counterparties"], string> = {
+  anyone: "anyone",
+  active_legal_body:
+    "only a party whose own legal body reads active in Novi Corpus's record at the time of the act",
+};
+const CLOSING =
+  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.";
+const MONTHS = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
+/**
+ * A whole number with a comma between groups of three digits: `1,250,000`. Written here rather
+ * than by `toLocaleString`, whose output depends on the machine's locale data.
+ */
+function groupDigits(n: number): string {
+  const digits = String(n);
+  let out = "";
+  for (let i = 0; i < digits.length; i++) {
+    if (i > 0 && (digits.length - i) % 3 === 0) out += ",";
+    out += digits[i];
+  }
+  return out;
+}
+
+const aloneUpTo = (perAct: number, unit: string): string =>
+  `the agent alone, up to ${groupDigits(perAct)} USDC per ${unit}`;
+const aboveWords = (above: GrantAbove): string =>
+  above === "guardian_signature" ? WITH_GUARDIAN_SIGNATURE : NOT_ALLOWED;
+
+/** An act of section 5.2 with one amount. `afterUnit` follows the amount, as an invoice's payee. */
+function actWords(setting: GrantActSetting, unit: string, afterUnit = ""): string {
+  if (!setting.allowed) return NOT_ALLOWED;
+  return `${aloneUpTo(setting.perAct, unit)}${afterUnit}; above that amount, ${aboveWords(setting.above)}`;
+}
+
+/** An act of section 5.2 that spends: an amount per act and one per thirty days. */
+function spendWords(setting: GrantSpendSetting, unit: string): string {
+  if (!setting.allowed) return NOT_ALLOWED;
+  return `${aloneUpTo(setting.perAct, unit)} and ${groupDigits(setting.per30Days)} USDC per thirty days; above those amounts, ${aboveWords(setting.above)}`;
+}
+
+/** An act of section 5.6: above the agent's own amount, it always needs the guardian's signature. */
+function heavyWords(setting: GrantHeavySetting, unit: string): string {
+  if (setting.mode === "not_allowed") return NOT_ALLOWED;
+  if (setting.mode === "guardian_signature") return WITH_GUARDIAN_SIGNATURE;
+  return `${aloneUpTo(setting.perAct, unit)}; above that amount, ${WITH_GUARDIAN_SIGNATURE}`;
+}
+
+/** `revoked`, or the end of the last day, as `31 December 2027`. */
+function endWords(endsOn: string | null): string {
+  if (endsOn === null) return "revoked";
+  const m = DATE.exec(endsOn);
+  const month = m === null ? undefined : MONTHS[Number(m[2]) - 1];
+  if (m === null || month === undefined)
+    throw new Error(`a grant's endsOn must be a date written YYYY-MM-DD, not ${endsOn}`);
+  return `the end of ${Number(m[3])} ${month} ${m[1]} (UTC), unless revoked earlier`;
+}
+
+/** The items of a list: each ends with a semicolon, the last with a full stop. */
+const listItems = (items: string[]): string[] =>
+  items.map((item, i) => `${item}${i === items.length - 1 ? "." : ";"}`);
+
+/** The Charter's `scheduleA` field. No trailing newline. */
+export function renderScheduleA(grant: Grant): string {
+  const { acts, heavyActs, counterparties, endsOn } = grant.choices;
+  if (grantAllowsNothing(grant.choices)) return NO_GRANT_IN_FORCE;
+  return [
+    `Grant ${grant.number}, version ${grant.version}. Digest ${grantDigest(grant)}. In force from the creation of the Legal Body until ${endWords(endsOn)}. Counterparties: ${COUNTERPARTY_WORDS[counterparties]}.`,
+    "",
+    "Acts of section 5.2:",
+    "",
+    ...listItems([
+      `- (a) entering agreements for services the Company provides: ${actWords(acts.provideServices, "agreement")}`,
+      `- (b) accepting engagements: ${actWords(acts.acceptEngagement, "engagement")}`,
+      `- (c) issuing invoices in the Company's name: ${actWords(acts.issueInvoice, "invoice", ", payable only to the wallet named in Schedule B")}`,
+      `- (d) receiving payment to the wallet named in Schedule B: ${acts.receivePayment.allowed ? "allowed" : NOT_ALLOWED}`,
+      `- (e) buying goods or services: ${spendWords(acts.buy, "purchase")}`,
+      `- (f) paying: ${spendWords(acts.pay, "payment")}`,
+      `- (g) engaging a contractor for work: ${spendWords(acts.engageContractor, "engagement")}`,
+    ]),
+    "",
+    "Acts of section 5.6:",
+    "",
+    ...listItems([
+      `- (h) employing a person: ${heavyWords(heavyActs.employ, "employment")}`,
+      `- (i) borrowing: ${heavyWords(heavyActs.borrow, "loan")}`,
+      `- (j) guaranteeing anyone's obligation: ${heavyWords(heavyActs.guarantee, "guarantee")}`,
+      `- (k) transferring or encumbering the Company's property, other than paying within this grant: ${heavyWords(heavyActs.transferProperty, "transfer")}`,
+    ]),
+    "",
+    CLOSING,
+  ].join("\n");
 }

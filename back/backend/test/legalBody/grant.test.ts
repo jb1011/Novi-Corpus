@@ -1,18 +1,25 @@
 /**
  * A grant's choices, parsed into one canonical value or refused field by field: an amount is a
  * plain whole number of USDC, one choice has one spelling, an end is a future calendar day, and a
- * hostile shape is a list of problems, never a throw.
+ * hostile shape is a list of problems, never a throw. Then the grant built from them: its
+ * fingerprint, and the Schedule A written from it, compared character for character with two
+ * golden texts.
  *
  * Every amount and date here is a made-up fixture.
  */
+import { createHash } from "node:crypto";
 import { expect, test } from "vitest";
 import {
   GRANT_AMOUNT_MAX,
   type GrantChoices,
+  buildGrant,
+  grantAllowsNothing,
+  grantDigest,
   parseGrantChoices,
+  renderScheduleA,
   utcDay,
 } from "../../src/legalBody/grant";
-import { A } from "../helpers/grantFixtures";
+import { A, B } from "../helpers/grantFixtures";
 
 const TODAY = "2026-11-11";
 /** The problems, sorted by field: the order they are found in is not part of the contract. */
@@ -263,4 +270,141 @@ test("hostile keys are fields like any other, and no prototype is touched", () =
 test("the UTC day of a time", () => {
   expect(utcDay(Date.UTC(2026, 10, 11, 23, 59, 59))).toBe("2026-11-11");
   expect(utcDay(Date.UTC(2027, 0, 1, 0, 0, 0))).toBe("2027-01-01");
+});
+
+// ── The grant, its fingerprint and its Schedule A ─────────────────────────────────────────────
+
+const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+
+/** The Schedule A of fixture `A`, then of fixture `B`, as the reference texts write them: copied
+ *  from those texts, never retyped. Each has no trailing newline. */
+const GOLDEN_A = [
+  "Grant 1, version 1. Digest 0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1. In force from the creation of the Legal Body until revoked. Counterparties: anyone.",
+  "",
+  "Acts of section 5.2:",
+  "",
+  "- (a) entering agreements for services the Company provides: the agent alone, up to 2,000 USDC per agreement; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (b) accepting engagements: the agent alone, up to 2,000 USDC per engagement; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (c) issuing invoices in the Company's name: the agent alone, up to 2,000 USDC per invoice, payable only to the wallet named in Schedule B; above that amount, not allowed;",
+  "- (d) receiving payment to the wallet named in Schedule B: allowed;",
+  "- (e) buying goods or services: the agent alone, up to 200 USDC per purchase and 1,000 USDC per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's;",
+  "- (f) paying: the agent alone, up to 200 USDC per payment and 1,000 USDC per thirty days; above those amounts, not allowed;",
+  "- (g) engaging a contractor for work: the agent alone, up to 500 USDC per engagement and 1,000 USDC per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's.",
+  "",
+  "Acts of section 5.6:",
+  "",
+  "- (h) employing a person: not allowed;",
+  "- (i) borrowing: not allowed;",
+  "- (j) guaranteeing anyone's obligation: not allowed;",
+  "- (k) transferring or encumbering the Company's property, other than paying within this grant: only with the Guardian Wallet's signature beside the agent's.",
+  "",
+  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+].join("\n");
+const GOLDEN_B = [
+  "Grant 1, version 1. Digest 0xb9ed4f5f32f26a3c0ca454e9810af42b9a1397ba68be335090cf03283e6ec11b. In force from the creation of the Legal Body until the end of 31 December 2027 (UTC), unless revoked earlier. Counterparties: only a party whose own legal body reads active in Novi Corpus's record at the time of the act.",
+  "",
+  "Acts of section 5.2:",
+  "",
+  "- (a) entering agreements for services the Company provides: the agent alone, up to 1,250,000 USDC per agreement; above that amount, not allowed;",
+  "- (b) accepting engagements: not allowed;",
+  "- (c) issuing invoices in the Company's name: not allowed;",
+  "- (d) receiving payment to the wallet named in Schedule B: not allowed;",
+  "- (e) buying goods or services: not allowed;",
+  "- (f) paying: the agent alone, up to 1 USDC per payment and 1 USDC per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's;",
+  "- (g) engaging a contractor for work: not allowed.",
+  "",
+  "Acts of section 5.6:",
+  "",
+  "- (h) employing a person: the agent alone, up to 3,000 USDC per employment; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (i) borrowing: only with the Guardian Wallet's signature beside the agent's;",
+  "- (j) guaranteeing anyone's obligation: the agent alone, up to 1 USDC per guarantee; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (k) transferring or encumbering the Company's property, other than paying within this grant: not allowed.",
+  "",
+  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+].join("\n");
+
+const grantA = buildGrant(A, { number: 1, version: 1 });
+const grantB = buildGrant(B, { number: 1, version: 1 });
+
+test("the fingerprint of a grant is the keccak256 of its canonical form", () => {
+  expect(grantA).toEqual({ schema: "novi.legal-body-grant/1", number: 1, version: 1, choices: A });
+  expect(grantDigest(grantA)).toBe(
+    "0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1",
+  );
+  expect(grantDigest(grantB)).toBe(
+    "0xb9ed4f5f32f26a3c0ca454e9810af42b9a1397ba68be335090cf03283e6ec11b",
+  );
+});
+
+test("the fingerprint does not depend on the order of keys, and changes with any choice, number or version", () => {
+  const reordered = JSON.parse(
+    JSON.stringify({
+      endsOn: A.endsOn,
+      counterparties: A.counterparties,
+      heavyActs: A.heavyActs,
+      acts: A.acts,
+    }),
+  );
+  expect(grantDigest(buildGrant(reordered, { number: 1, version: 1 }))).toBe(grantDigest(grantA));
+  const changed = structuredClone(A);
+  (changed.acts.pay as { perAct: number }).perAct = 201;
+  expect(grantDigest(buildGrant(changed, { number: 1, version: 1 }))).not.toBe(grantDigest(grantA));
+  expect(grantDigest(buildGrant(A, { number: 2, version: 1 }))).not.toBe(grantDigest(grantA));
+  expect(grantDigest(buildGrant(A, { number: 1, version: 2 }))).not.toBe(grantDigest(grantA));
+});
+
+test("Schedule A is written from the choices, character for character", () => {
+  expect(renderScheduleA(grantA)).toBe(GOLDEN_A);
+  expect(renderScheduleA(grantB)).toBe(GOLDEN_B);
+  expect(sha256(renderScheduleA(grantA))).toBe(
+    "24c1b56b51dbbf408b74c47448271aec26ee6ebbab4f386dd90053600fef6467",
+  );
+  expect(sha256(renderScheduleA(grantB))).toBe(
+    "5b57b600bf5c70fdbbf5a118335c3a2ffb794252e036f6872732752613ce6edc",
+  );
+});
+
+test("Schedule A holds only ASCII, no brace and no trailing newline, and never says enforced", () => {
+  for (const text of [renderScheduleA(grantA), renderScheduleA(grantB)]) {
+    expect(text).toMatch(/^[\n\x20-\x7e]+$/);
+    expect(text).not.toMatch(/[{}]/);
+    expect(text.endsWith("\n")).toBe(false);
+    expect(text).not.toMatch(/enforced/i);
+  }
+});
+
+test("the greatest amount is written in full, with its commas", () => {
+  const big = structuredClone(A);
+  big.acts.buy = {
+    allowed: true,
+    perAct: 999,
+    per30Days: GRANT_AMOUNT_MAX,
+    above: "not_allowed",
+  };
+  expect(renderScheduleA(buildGrant(big, { number: 1, version: 1 }))).toContain(
+    "- (e) buying goods or services: the agent alone, up to 999 USDC per purchase and 1,000,000,000 USDC per thirty days; above those amounts, not allowed;",
+  );
+});
+
+test("an end date is written as a day, without a leading zero", () => {
+  const dated = { ...structuredClone(A), endsOn: "2027-01-01" };
+  expect(renderScheduleA(buildGrant(dated, { number: 1, version: 1 }))).toContain(
+    "until the end of 1 January 2027 (UTC), unless revoked earlier. Counterparties: anyone.",
+  );
+});
+
+test("a grant that allows nothing is no grant", () => {
+  const none = structuredClone(B);
+  none.acts.provideServices = { allowed: false };
+  none.acts.pay = { allowed: false };
+  none.heavyActs.employ = { mode: "guardian_signature" };
+  none.heavyActs.guarantee = { mode: "not_allowed" };
+  expect(grantAllowsNothing(none)).toBe(true);
+  expect(renderScheduleA(buildGrant(none, { number: 1, version: 1 }))).toBe(
+    "No grant is in force.",
+  );
+  expect(grantAllowsNothing(A)).toBe(false);
+  // One act of section 5.6 left to the agent alone is a grant.
+  none.heavyActs.guarantee = { mode: "alone", perAct: 1 };
+  expect(grantAllowsNothing(none)).toBe(false);
 });

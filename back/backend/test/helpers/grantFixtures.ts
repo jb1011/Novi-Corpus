@@ -24,3 +24,26 @@ export const A: GrantChoices = {
   counterparties: "anyone",
   endsOn: null,
 };
+
+/** A narrow set of choices: two kinds of act allowed, one heavy act with the guardian's signature,
+ *  two alone up to an amount, the last not allowed, only counterparties with an active legal body,
+ *  until a fixed day. */
+export const B: GrantChoices = {
+  acts: {
+    provideServices: { allowed: true, perAct: 1_250_000, above: "not_allowed" },
+    acceptEngagement: { allowed: false },
+    issueInvoice: { allowed: false },
+    receivePayment: { allowed: false },
+    buy: { allowed: false },
+    pay: { allowed: true, perAct: 1, per30Days: 1, above: "guardian_signature" },
+    engageContractor: { allowed: false },
+  },
+  heavyActs: {
+    employ: { mode: "alone", perAct: 3000 },
+    borrow: { mode: "guardian_signature" },
+    guarantee: { mode: "alone", perAct: 1 },
+    transferProperty: { mode: "not_allowed" },
+  },
+  counterparties: "active_legal_body",
+  endsOn: "2027-12-31",
+};
