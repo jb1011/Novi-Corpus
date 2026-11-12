@@ -8,6 +8,13 @@ import { legalBodyRecordView, type StandingPresentation } from "@/lib/legalBody/
 
 const D = LEGAL_BODY_COPY.done;
 
+function guardianIdentitySentence(read: PublicRead<LegalBodyByAgent> | null): string | null {
+  if (read?.kind !== "answer" || read.body.legalBody !== true) return null;
+  if (read.body.guardianIdentityVerified === true) return D.identityVerified;
+  if (read.body.guardianIdentityVerified === false) return D.identityDue;
+  return null;
+}
+
 /** The standing's tones. There is no green: `active` takes the accent. */
 const TONE_CLASS: Record<StandingPresentation["tone"], string> = {
   accent: "border-accent/30 bg-accent/10 text-accent-soft",
@@ -45,6 +52,7 @@ export function LegalBodyRecord({
 }) {
   const view = legalBodyRecordView({ read, orderState, environment, paymentRequired });
   const { standing, facts, links, check } = view;
+  const identityLine = guardianIdentitySentence(read);
 
   return (
     <div className="flex flex-col gap-6">
@@ -61,6 +69,9 @@ export function LegalBodyRecord({
           </span>
           {view.sandbox && <AmberPill size="sm">{D.sandboxPill}</AmberPill>}
         </div>
+        {identityLine && (
+          <p className="mt-3 text-[13px] leading-[1.6] text-muted">{identityLine}</p>
+        )}
         {view.standingLines.length > 0 && (
           <div className="mt-3 flex flex-col gap-1">
             {view.standingLines.map((line) => (

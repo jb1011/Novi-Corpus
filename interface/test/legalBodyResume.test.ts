@@ -39,6 +39,10 @@ const memory = (over: Partial<LegalBodyMemory> = {}): LegalBodyMemory => ({
   orderId: null,
   ownerChoice: null,
   agentId: null,
+  door: null,
+  identityChoice: null,
+  signer: null,
+  suggestedAgentId: null,
   ...over,
 });
 

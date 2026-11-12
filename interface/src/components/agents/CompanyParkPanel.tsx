@@ -5,6 +5,7 @@ import {
   usePublicConfigQuery,
   useUpdateCompanyIntakeMutation,
   useUpdateCompanyPartyMutation,
+  useWorldIdMeQuery,
 } from "@/lib/api/hooks";
 import type { CompanyDetailView } from "@/lib/api/types";
 import {
@@ -232,17 +233,24 @@ function SsnDecisionForm({ company }: { company: CompanyDetailView }) {
  */
 function PartyEditForm({ company }: { company: CompanyDetailView }) {
   const update = useUpdateCompanyPartyMutation(company.companyId);
+  const me = useWorldIdMeQuery();
+  const production = company.environment === "production";
+  const identity = me.data?.identity;
+  const readOnlyNames =
+    production && identity?.state === "verified" && identity.firstName && identity.lastName
+      ? { first: identity.firstName, last: identity.lastName }
+      : undefined;
   const [party, setParty] = useState<FormationParty>(emptyParty);
   const [showErrors, setShowErrors] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const errors = validateParty(party);
+  const errors = validateParty(party, { names: !production });
 
   async function submit() {
     setShowErrors(true);
-    if (!isPartyValid(party)) return;
+    if (!isPartyValid(party, { names: !production })) return;
     setError(null);
     try {
-      await update.mutateAsync(toFormationPartyInput(party));
+      await update.mutateAsync(toFormationPartyInput(party, { omitNames: production }));
       // The identity leaves this browser the moment the backend has it, exactly as at intake.
       setParty(emptyParty());
     } catch (e) {
@@ -257,6 +265,11 @@ function PartyEditForm({ company }: { company: CompanyDetailView }) {
         errors={showErrors ? errors : {}}
         set={(key, value) => setParty({ ...party, [key]: value })}
         sectionLetter="A"
+        readOnlyNames={
+          production
+            ? (readOnlyNames ?? { first: "Novi Corpus writes this name", last: "" })
+            : undefined
+        }
       />
       {error && (
         <Callout tone="warn" title="Could not update the responsible person">

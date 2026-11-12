@@ -6,7 +6,7 @@
  * these answers, apart from the binding refresh after the pointer transaction, which continues a
  * click and is idempotent under the order's lock: no answer here ever starts a write on its own.
  */
-import type { BindingState } from "@/lib/api/types";
+import type { BindingState, CompanyState } from "@/lib/api/types";
 import type { CompanyStep } from "@/lib/legalBody/flow";
 
 /** The order, while the create it reserved is not confirmed. */
@@ -60,4 +60,10 @@ export function companyPollInterval(
   environment: "sandbox" | "production",
 ): number | false {
   return step === "waiting" && environment === "production" ? COMPANY_POLL_MS : false;
+}
+
+/** Every 60s while a formed filing is open or waiting to open. A filed, failed, or abandoned
+ *  company is not polled: the screen already has the fact, and a focus refetch covers the rest. */
+export function filingPollInterval(state: CompanyState): number | false {
+  return state === "in_progress" || state === "ready" ? COMPANY_POLL_MS : false;
 }

@@ -36,8 +36,10 @@ import {
   type CarriedSentence,
 } from "@/lib/legalBody/agreement";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
+import { entranceOffer } from "@/lib/legalBody/entrance";
 import {
   deriveLegalBodyPhase,
+  isFormedCompany,
   selectLegalBodyThread,
   type LegalBodyDerivation,
   type LegalBodyThreadRef,
@@ -46,6 +48,7 @@ import {
   anySignInRequired,
   bannerLines,
   declarationsClosed,
+  identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
   legalBodyGate,
@@ -91,6 +94,8 @@ import { AgreementStep } from "./AgreementStep";
 import { ClosedNotice } from "./ClosedNotice";
 import { CompanyStep } from "./CompanyStep";
 import { DoneStep } from "./DoneStep";
+import { EntranceStep } from "./EntranceStep";
+import { FilingStep } from "./FilingStep";
 import { HumanStep } from "./HumanStep";
 import { IdentityStep } from "./IdentityStep";
 import { LegalBodyRail } from "./LegalBodyRail";
@@ -143,6 +148,8 @@ export type LegalBodyStepKit = {
   startAnother: (kind: "new_order" | "new_company") => void;
   /** For a failed request: true when it meant "sign in" and the flow went there. */
   routeSignIn: (e: unknown) => boolean;
+  /** Which company door this thread is on. */
+  door: "declare" | "form";
 };
 
 const F = LEGAL_BODY_COPY.frame;
@@ -257,7 +264,9 @@ function LegalBodySession({
   // The drafts the link door refused on this visit: none is offered again as a draft to continue.
   const [refusedDraftIds, setRefusedDraftIds] = useState<readonly string[]>([]);
   // The identity already chosen on this visit, offered first on the identity step: in memory only.
-  const [identitySuggestion, setIdentitySuggestion] = useState<string | null>(null);
+  const [identitySuggestion, setIdentitySuggestion] = useState<string | null>(
+    () => readLegalBodyMemory(tenant)?.suggestedAgentId ?? null,
+  );
 
   // Reads only.
   const code = useBytecode({ address: tenant, chainId: arcTestnet.id });
@@ -324,7 +333,12 @@ function LegalBodySession({
     requireRealHuman: true,
     forceRequired: true,
   });
-  const gate = legalBodyGate({ signIn, human, view });
+  const gate = legalBodyGate({
+    signIn,
+    human,
+    view,
+    identityBlocks: identityBlocksGate(me?.identity),
+  });
 
   const toStore = gate === "flow" && thread ? memoryAfterThread({ tenant, stored: memory, thread }) : null;
   useStoredThread(toStore);
@@ -376,7 +390,9 @@ function LegalBodySession({
     return true;
   }
 
-  const phases = visibleLegalBodyPhases(config);
+  const door: "declare" | "form" =
+    (company && isFormedCompany(company)) || memory?.door === "form" ? "form" : "declare";
+  const phases = visibleLegalBodyPhases(config, door);
   const current = railCurrentOf(gate, derivation);
 
   function jump(target: LegalBodyRailPhase) {
@@ -402,8 +418,17 @@ function LegalBodySession({
         companyId: refs.companyId,
         known: orders.map((o) => o.id),
       });
-    if (kind === "new_company")
+    if (kind === "new_company") {
       setIntent({ kind: "another-company", known: companies.map((c) => c.companyId) });
+      noteIdentity({ kind: "start_another" });
+      remember({
+        door: null,
+        identityChoice: null,
+        signer: null,
+        suggestedAgentId: null,
+      });
+      return;
+    }
     noteIdentity({ kind: "start_another" });
     // A closed order shown here is done with: this visit forgets it too.
     remember({});
@@ -498,6 +523,7 @@ function LegalBodySession({
       remember,
       startAnother,
       routeSignIn,
+      door,
     };
     const label = LEGAL_BODY_COPY.rail.labels;
     switch (derivation.phase) {
@@ -513,19 +539,41 @@ function LegalBodySession({
           <PaymentStep
             eyebrow={label.payment}
             companyId={kit.companyId}
+            onBack={door === "form" ? () => jump("company") : undefined}
             onComplete={() => {
               void companyQuery.refetch();
               void companiesQuery.refetch();
             }}
           />
         );
-      case "company":
+      case "filing":
+        return <FilingStep key={kit.companyId ?? "filing"} kit={kit} />;
+      case "company": {
+        const offer = entranceOffer(config.formedDoor);
+        if (
+          !kit.companyId &&
+          derivation.companyStep === "form" &&
+          memory?.door == null &&
+          offer.kind === "ask"
+        ) {
+          return (
+            <EntranceStep
+              offer={offer}
+              onAnswer={(patch) => {
+                remember(patch);
+                if (patch.suggestedAgentId)
+                  noteIdentity({ kind: "registered", agentId: patch.suggestedAgentId });
+              }}
+            />
+          );
+        }
         return declarationsClosed(config, derivation) ? (
           <StepPlaceholder kit={kit} sentence={LEGAL_BODY_COPY.company.declarationsOff} />
         ) : (
           // One form per thread: a new declaration never inherits another thread's typing.
           <CompanyStep key={kit.companyId ?? "new"} kit={kit} />
         );
+      }
       case "agreement":
         return (
           // One step per company: a placed order is held across the moment the list names it.
@@ -589,6 +637,7 @@ function LegalBodySession({
       current={current}
       done={railDoneOf(phases, gate, derivation)}
       onJump={jump}
+      door={door}
     >
       {arrival && (
         <Callout tone="warn" className="mb-6">
@@ -611,10 +660,34 @@ function useStoredThread(next: LegalBodyMemory | null) {
   const orderId = next?.orderId ?? null;
   const ownerChoice = next?.ownerChoice ?? null;
   const agentId = next?.agentId ?? null;
+  const door = next?.door ?? null;
+  const identityChoice = next?.identityChoice ?? null;
+  const signer = next?.signer ?? null;
+  const suggestedAgentId = next?.suggestedAgentId ?? null;
   useEffect(() => {
     if (tenant === null) return;
-    writeLegalBodyMemory({ tenant, companyId, orderId, ownerChoice, agentId });
-  }, [tenant, companyId, orderId, ownerChoice, agentId]);
+    writeLegalBodyMemory({
+      tenant,
+      companyId,
+      orderId,
+      ownerChoice,
+      agentId,
+      door,
+      identityChoice,
+      signer,
+      suggestedAgentId,
+    });
+  }, [
+    tenant,
+    companyId,
+    orderId,
+    ownerChoice,
+    agentId,
+    door,
+    identityChoice,
+    signer,
+    suggestedAgentId,
+  ]);
 }
 
 /* ── The frame ─────────────────────────────────────────────────────────────────────────────── */
@@ -625,6 +698,7 @@ function FlowLayout({
   current,
   done,
   onJump,
+  door = "declare",
   children,
 }: {
   config: AvailableConfig;
@@ -634,9 +708,10 @@ function FlowLayout({
   /** `railDoneOf`'s answer: a closed order ticks the gates only, the done page itself too. */
   done: Record<string, boolean>;
   onJump: (phase: LegalBodyRailPhase) => void;
+  door?: "declare" | "form";
   children: ReactNode;
 }) {
-  const phases = visibleLegalBodyPhases(config);
+  const phases = visibleLegalBodyPhases(config, door ?? "declare");
   const content = (
     <div className="min-w-0">
       <SandboxBanner lines={bannerLines(config)} />

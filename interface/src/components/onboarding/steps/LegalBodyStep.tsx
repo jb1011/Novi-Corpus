@@ -17,6 +17,7 @@ import {
   useFormationRulesQuery,
   usePublicConfigQuery,
   useRetryPublicConfig,
+  useWorldIdMeQuery,
 } from "@/lib/api/hooks";
 import {
   filingEnvironment,
@@ -50,6 +51,15 @@ import {
 } from "../primitives";
 import { CompanyIntakeFields } from "./CompanyIntakeFields";
 import { PartyFields } from "./PartyFields";
+import type { GuardianIdentityView } from "@/lib/api/types";
+
+function productionNames(
+  identity: GuardianIdentityView | undefined,
+): { first: string; last: string } | undefined {
+  if (identity?.state === "verified" && identity.firstName && identity.lastName)
+    return { first: identity.firstName, last: identity.lastName };
+  return { first: "Novi Corpus writes this name", last: "" };
+}
 
 type Props = {
   eyebrow: string;
@@ -117,6 +127,7 @@ export function LegalBodyStep({
   notice,
 }: Props) {
   const { data: publicConfig } = usePublicConfigQuery();
+  const me = useWorldIdMeQuery();
   const environment = useFormationEnvironment();
   const { retry, retrying } = useRetryPublicConfig();
   const createParty = useCreateFormationPartyMutation();
@@ -182,7 +193,7 @@ export function LegalBodyStep({
     [rulesQuery.data?.industries],
   );
 
-  const partyErrors = validateParty(party);
+  const partyErrors = validateParty(party, { names: environment !== "production" });
   const intakeErrors = validateCompanyIntake(intake, rules, industries.known);
   const busy = createParty.isPending || createCompany.isPending;
 
@@ -200,11 +211,12 @@ export function LegalBodyStep({
   async function create(syntheticParty: boolean) {
     setShowErrors(true);
     if (!isCompanyIntakeValid(intake, rules, industries.known)) return;
-    if (!syntheticParty && !isPartyValid(party)) return;
+    const omitNames = environment === "production";
+    if (!syntheticParty && !isPartyValid(party, { names: !omitNames })) return;
     setError(null);
     try {
       const { partyId } = await createParty.mutateAsync(
-        syntheticParty ? { synthetic: true } : toFormationPartyInput(party),
+        syntheticParty ? { synthetic: true } : toFormationPartyInput(party, { omitNames }),
       );
       const { companyId: created } = await createCompany.mutateAsync({
         partyId,
@@ -313,6 +325,7 @@ export function LegalBodyStep({
                   ssn={ssn}
                   onSsn={setSsn}
                   ssnCopy={copy.ssn}
+                  readOnlyNames={productionNames(me.data?.identity)}
                 />
               )}
             </>

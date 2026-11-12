@@ -1116,3 +1116,70 @@ describe("pointerPreflight: the chain reads before any prompt or copy box", () =
     ).toStrictEqual({ ok: false, reason: "identity_moved" });
   });
 });
+
+describe("a formed company", () => {
+  const formed = (state: CompanyView["state"]): CompanyView =>
+    company({
+      provider: "doola",
+      purpose: "legal_body",
+      state,
+      declared: undefined,
+      verification: undefined,
+      filingNumber: state === "filed" || state === "complete" ? "2026-001" : null,
+    });
+
+  test("draft and paying wait on the payment step", () => {
+    expect(deriveLegalBodyPhase(flow({ company: formed("draft") }))).toEqual({ phase: "payment" });
+    expect(deriveLegalBodyPhase(flow({ company: formed("paying") }))).toEqual({ phase: "payment" });
+  });
+
+  test("ready and in progress are the filing screen", () => {
+    expect(deriveLegalBodyPhase(flow({ company: formed("ready") }))).toEqual({ phase: "filing" });
+    expect(deriveLegalBodyPhase(flow({ company: formed("in_progress") }))).toEqual({ phase: "filing" });
+  });
+
+  test("filed and complete place the order", () => {
+    expect(deriveLegalBodyPhase(flow({ company: formed("filed") }))).toEqual({ phase: "agreement" });
+    expect(deriveLegalBodyPhase(flow({ company: formed("complete") }))).toEqual({ phase: "agreement" });
+  });
+
+  test("a failed filing stays on the filing screen", () => {
+    expect(deriveLegalBodyPhase(flow({ company: formed("failed") }))).toEqual({
+      phase: "filing",
+      notice: { kind: "formation_failed" },
+    });
+  });
+
+  test("an abandoned formed company goes back to the form", () => {
+    expect(deriveLegalBodyPhase(flow({ company: formed("abandoned") }))).toEqual({
+      phase: "company",
+      companyStep: "form",
+      notice: { kind: "company_abandoned" },
+    });
+  });
+
+  test("a linked body on a formed company is done, with no payment step", () => {
+    const row = formed("complete");
+    expect(
+      deriveLegalBodyPhase(
+        flow({
+          company: row,
+          order: view({ state: "linked" }),
+          config: config({ paymentRequired: true }),
+        }),
+      ),
+    ).toEqual({ phase: "done" });
+  });
+
+  test("a draft on a company that is not filed yet stays on the filing screen", () => {
+    expect(
+      deriveLegalBodyPhase(flow({ company: formed("in_progress"), order: view() })),
+    ).toEqual({ phase: "filing" });
+  });
+
+  test("a draft on a filed company reads the agreement", () => {
+    expect(
+      deriveLegalBodyPhase(flow({ company: formed("filed"), order: view() })),
+    ).toEqual({ phase: "agreement" });
+  });
+});

@@ -130,7 +130,11 @@ function textProblem(raw: string, rule: TextRule): string | undefined {
  * Every field that breaks a rule, with its problem. A sandbox names its own declarant, so it
  * checks the company's name and number only; production checks the four.
  */
-export function validateDeclaration(form: DeclarationForm, environment: Environment): DeclarationProblems {
+export function validateDeclaration(
+  form: DeclarationForm,
+  environment: Environment,
+  options?: { writtenName?: boolean },
+): DeclarationProblems {
   const sandbox = environment === "sandbox";
   const rules: [keyof DeclarationForm, TextRule][] = sandbox
     ? [
@@ -138,11 +142,11 @@ export function validateDeclaration(form: DeclarationForm, environment: Environm
         ["filingNumber", SANDBOX_FILING_NUMBER],
       ]
     : [
-        ["declarantName", DECLARANT_NAME],
         ["declarantTitle", DECLARANT_TITLE],
         ["companyName", COMPANY_NAME],
         ["filingNumber", FILING_NUMBER],
       ];
+  if (!sandbox && !options?.writtenName) rules.unshift(["declarantName", DECLARANT_NAME]);
   const problems: DeclarationProblems = {};
   for (const [field, rule] of rules) {
     const problem = textProblem(form[field], rule);
@@ -161,13 +165,19 @@ export function hasProblems(problems: DeclarationProblems): boolean {
  * the number and `synthetic: true`, and never a declarant; production sends the four fields and no
  * `synthetic` key. Call it on a form `validateDeclaration` accepted.
  */
-export function declarationInput(form: DeclarationForm, environment: Environment): CustomerStatementInput {
+export function declarationInput(
+  form: DeclarationForm,
+  environment: Environment,
+  options?: { writtenName?: boolean },
+): CustomerStatementInput {
   const companyName = normaliseDeclaredText(form.companyName);
   const filingNumber = normaliseDeclaredText(form.filingNumber);
   if (environment === "sandbox") return { companyName, filingNumber, synthetic: true };
+  const title = normaliseDeclaredText(form.declarantTitle);
+  if (options?.writtenName) return { declarantTitle: title, companyName, filingNumber };
   return {
     declarantName: normaliseDeclaredText(form.declarantName),
-    declarantTitle: normaliseDeclaredText(form.declarantTitle),
+    declarantTitle: title,
     companyName,
     filingNumber,
   };

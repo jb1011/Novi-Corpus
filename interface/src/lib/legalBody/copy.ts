@@ -55,6 +55,7 @@ export const LEGAL_BODY_COPY = {
       link: "Sign the link",
       pointer: "Point your identity",
       payment: "Payment",
+      filing: "Filing",
       done: "Done",
     },
   },
@@ -128,6 +129,21 @@ export const LEGAL_BODY_COPY = {
         "You dismissed the request in World App. Nothing was recorded; start again when you are ready.",
       other: "World ID could not finish the verification ({code}). Nothing was recorded; try again.",
     },
+    guardianIdentity: {
+      title: "Confirm who you are",
+      none: "We verify the identity of the person in control once, through an identity check provider. An operator sends you the link by email, usually within one working day, and asks for your legal name as printed on your document. Nothing to do here yet.",
+      pending: "We have your check and are recording it.",
+      needs_review: "We are checking your result. This can take a day.",
+      failed: "The check did not pass. We will write to you about the next step.",
+      expired: "Your verification is due again. An operator sends you a new link.",
+      revoked: "The check did not pass. We will write to you about the next step.",
+      verified: "Verified",
+      verifiedOn: "Verified on {date}",
+      checked: "What is checked: a government document and a live photo, matched.",
+      kept: "What we keep: the result, the date, the country and type of the document, and your name, encrypted.",
+      never: "What we never see: the document itself, the photo, your date of birth or document number.",
+      policy: "How a person is on record",
+    },
   },
 
   thread: {
@@ -152,6 +168,10 @@ export const LEGAL_BODY_COPY = {
     },
     identity: "Identity {agentId}",
     continue: "Continue this one",
+    formedUnnamed: "A company being formed",
+    formedFiling: "Filing in progress",
+    formedFiled: "Filed, ready to continue",
+    formedFailed: "Filing failed",
   },
 
   closed: {
@@ -225,6 +245,10 @@ export const LEGAL_BODY_COPY = {
       title: "This company was abandoned",
       body: "It can take no order. Declare the company again to continue.",
     },
+    formation_failed: {
+      title: "The filing did not go through",
+      body: "Fix the company details, or give up and ask for a refund.",
+    },
     creating: {
       title: "Novi Corpus is creating the body",
       body: "This takes a few seconds; this page checks again every 5 seconds.",
@@ -250,6 +274,37 @@ export const LEGAL_BODY_COPY = {
   /* ── The steps after the gates. Each screen's own sentences, carried here so the one walk covers
         them from the start. ─────────────────────────────────────────────────────────────────── */
 
+  entrance: {
+    title: "About your agent",
+    intro: "Three answers, kept in this browser. They choose the door. They file nothing.",
+    company: "Your company",
+    have: "We have a Wyoming LLC",
+    form: "Form one for this agent",
+    capReached: "The formed companies this deployment takes are all spoken for.",
+    identity: "Your agent's identity",
+    hasOne: "It has one",
+    notYet: "Not yet",
+    agentId: "The agent's identity number",
+    key: "Who holds its key",
+    thisWallet: "This wallet",
+    anotherKey: "Another key I control",
+    keySentence:
+      "The key must be able to send a transaction on Arc, or have a sponsor, because the pointer is a transaction.",
+    continue: "Continue",
+  },
+
+  filing: {
+    title: "The state is filing the company",
+    waiting:
+      "doola files the company with the State of Wyoming. This usually takes {days} working days. The EIN comes from the IRS later and does not hold anything up.",
+    sandbox: "On this test deployment the filing completes by itself in a few minutes.",
+    filed: "Continue: read the agreement",
+    fix: "Fix the company details",
+    abandon: "Give up and get a refund",
+    refund: "An operator refunds you. The filing has to be given up before it has started.",
+    actions: "What the filing needs",
+  },
+
   company: {
     declarationsOff: "This deployment does not take new declarations.",
     nameHintSandbox: "On this deployment the company name must say it is a test.",
@@ -263,6 +318,24 @@ export const LEGAL_BODY_COPY = {
     waiting: OPERATOR_CHECKS,
     evidenceUnavailable: "The upload is not available on this screen yet.",
     newDeclaration: "Declare the company again",
+    writtenName: "Declared by {name} (from your identity verification)",
+    writtenNameMissing: "Your identity record does not have a name yet.",
+    wrongName: "Not your name? Write to us before you sign. Nothing is filed with a wrong name.",
+    formed: {
+      title: "Form the company",
+      intro:
+        "Novi Corpus files a Wyoming LLC for this agent through doola. The two names come from your identity record.",
+      namesNote: "From your identity verification. Not your name? Write to us before paying.",
+      nonUs: "A US tax number is not needed. The EIN takes a few weeks longer.",
+      marketing: "You may also email me about Novi Corpus news and the launch.",
+      create: "Create the company",
+      sandboxIntro:
+        "This deployment files a test company. No real name or tax number is collected.",
+      cap: "The formed companies this deployment takes are all spoken for.",
+      identity: "The identity record is not on file yet. Go back to the accountable human step.",
+      texts: "The agreement is not approved for use yet.",
+      fee: "The formation fee is {fee} USDC, paid on the next step.",
+    },
     title: "Declare your company",
     introSandbox: "Name a test company and sign the statement of authority with this wallet.",
     introProduction:
@@ -331,7 +404,11 @@ export const LEGAL_BODY_COPY = {
     introBefore:
       "Placing the order freezes the operating agreement for it: the text, and the hash your link will sign. A draft order can be linked for 24 hours, and placing it sends nothing from your wallet.",
     introAfter:
-      "This is the operating agreement of your order, frozen when the order was placed. Read it before you go on; nothing is recorded on this step.",
+      "This is the operating agreement of your order, frozen when the order was placed. Read it, then sign to adopt it for the company.",
+    adopt: "Adopt this agreement: sign",
+    adoptSentence:
+      "Your signature adopts this agreement for the company in place of the one filed at formation.",
+    adoptWorking: "Asking your wallet to adopt the agreement…",
     continueDraftOneHour: "Continue with the order placed 1 hour ago",
     continueDraftRecent: "Continue with the order placed less than an hour ago",
     draftOffered:
@@ -646,6 +723,13 @@ export const LEGAL_BODY_COPY = {
     filingFactsMissing: "the filing facts are not recorded",
     anotherAgent: "Get a legal body for another agent",
     anotherCompany: "Declare another company",
+    anotherFormed: "Get a company for another agent",
+    formedBy: "Formed by Novi Corpus through doola on {date}, filing number {number}.",
+    formedByNoNumber: "Formed by Novi Corpus through doola on {date}.",
+    /** Counsel has not signed off on this sentence. Shown only once a supplement is recorded. */
+    daoSupplement: "A supplement to the articles of this company was recorded on {date}.",
+    identityVerified: "Identity of the person in control verified",
+    identityDue: "Identity verification due",
 
     title: "Your agent's legal body",
     intro:
@@ -738,7 +822,13 @@ export const CHECK_REASON_SENTENCES: Record<CheckReasonCode, string> = {
 };
 
 /** The only sentences allowed to say "verified": each is about the person on record. */
-export const PERSON_SENTENCES: readonly string[] = [PERSON_ON_RECORD, VERIFIED_AS];
+export const PERSON_SENTENCES: readonly string[] = [
+  PERSON_ON_RECORD,
+  VERIFIED_AS,
+  "Verified",
+  "Verified on {date}",
+  "Identity of the person in control verified",
+];
 
 /** The only sentences allowed to say "Novi" without "Corpus". */
 export const APPROVED_NOVI_SENTENCES: readonly string[] = [YES_SENTENCE];

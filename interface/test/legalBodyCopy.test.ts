@@ -51,6 +51,7 @@ const NOTICES: LegalBodyNotice[] = [
   { kind: "company_revoked" },
   { kind: "company_awaiting_check" },
   { kind: "company_abandoned" },
+  { kind: "formation_failed" },
   { kind: "creating" },
   { kind: "winding_down" },
   { kind: "dissolved" },

@@ -8,10 +8,10 @@
  *
  *  - the link door's flat 422, a refusal that carries the order as it now stands (still `draft`
  *    before the reservation, `lapsed` after it), which the screen needs in order to continue;
- *  - the public by-agent read, which goes to the API's own origin (`PUBLIC_API_ORIGIN`) with no
- *    header at all, so the browser is its own caller to the public limiter and the read stays a
- *    simple cross-origin GET. It never throws and never turns a failure into a negative: a 429 is
- *    "could not check", not "no legal body".
+ *  - the public by-agent read, which goes to the API's own origin (`PUBLIC_API_ORIGIN`). A session
+ *    bearer is sent when the caller has one, so an owner's read of their own page counts as
+ *    owner. A missing token sends no header. It never throws and never turns a failure into a
+ *    negative: a 429 is "could not check", not "no legal body".
  */
 import { clientBudgetMs } from "./budgets";
 import { request, throwIfNotOk } from "./client";
@@ -19,6 +19,8 @@ import { API_URL, PUBLIC_API_ORIGIN } from "./config";
 import { fetchWithTimeout, readJsonBounded, TIMEOUT_CODE } from "./timeout";
 import type {
   BindingView,
+  AdoptionMessageResult,
+  AdoptionResult,
   CustomerCompanyInput,
   CustomerStatementInput,
   Hex,
@@ -72,6 +74,20 @@ export function getLegalBodyOrder(token: string, id: string): Promise<LegalBodyO
 
 export function getLegalBodyAgreement(token: string, id: string): Promise<LegalBodyAgreement> {
   return request(`${orderPath(id)}/agreement`, { token });
+}
+
+/** `POST /legal-body-orders/:id/adoption-message`: the adoption to sign. Writes nothing. */
+export function adoptionMessage(token: string, id: string): Promise<AdoptionMessageResult> {
+  return request(`${orderPath(id)}/adoption-message`, { method: "POST", token });
+}
+
+/** `POST /legal-body-orders/:id/adoption`: the guardian's signature. A repeat answers the stored time. */
+export function adoptOrder(
+  token: string,
+  id: string,
+  body: { issuedAt: string; signature: Hex },
+): Promise<AdoptionResult> {
+  return request(`${orderPath(id)}/adoption`, { method: "POST", token, body });
 }
 
 /** `POST /legal-body-orders/:id/abandon`: the order as abandoned. Reads no body. */
@@ -197,14 +213,21 @@ function isByAgentRecord(value: unknown): value is LegalBodyByAgent {
   );
 }
 
-/** `GET <PUBLIC_API_ORIGIN>/legal-bodies/by-agent/:agentId`, with no authorization header. */
-export async function getLegalBodyByAgent(agentId: string): Promise<PublicRead<LegalBodyByAgent>> {
+/** `GET <PUBLIC_API_ORIGIN>/legal-bodies/by-agent/:agentId`. A session bearer, when the caller
+ *  has one, lets an owner's read of their own page count as `owner`. A missing token sends no
+ *  header, as a stranger's read. */
+export async function getLegalBodyByAgent(
+  agentId: string,
+  token?: string | null,
+): Promise<PublicRead<LegalBodyByAgent>> {
   const path = `/legal-bodies/by-agent/${encodeURIComponent(agentId)}`;
+  const headers: Record<string, string> = {};
+  if (token) headers.authorization = `Bearer ${token}`;
   let res: Response;
   try {
     res = await fetchWithTimeout(
       `${PUBLIC_API_ORIGIN}${path}`,
-      { method: "GET" },
+      { method: "GET", headers },
       clientBudgetMs("GET", path),
     );
   } catch (e) {

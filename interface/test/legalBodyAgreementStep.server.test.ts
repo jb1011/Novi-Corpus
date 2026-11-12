@@ -10,6 +10,12 @@
  */
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
+
+vi.mock("wagmi", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("wagmi")>()),
+  useSignTypedData: () => ({ signTypedDataAsync: async () => "0x" }),
+  useSwitchChain: () => ({ switchChainAsync: async () => undefined }),
+}));
 import { keccak256, stringToBytes, type Hex } from "viem";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 
@@ -52,6 +58,20 @@ vi.mock("@/lib/api/legalBodyHooks", () => ({
       calls.requests += 1;
       return {};
     },
+  }),
+  useAdoptionMessageMutation: () => ({
+    mutateAsync: async () => {
+      calls.requests += 1;
+      throw new Error("not in this test");
+    },
+    isPending: false,
+  }),
+  useAdoptOrderMutation: () => ({
+    mutateAsync: async () => {
+      calls.requests += 1;
+      throw new Error("not in this test");
+    },
+    isPending: false,
   }),
   useLegalBodyAgreementQuery: (id: string | null | undefined) => {
     read.id = id;
@@ -180,6 +200,7 @@ function kit(order: LegalBodyOrderView | null, orders: LegalBodyOrderView[] = []
     remember: vi.fn(),
     startAnother: vi.fn(),
     routeSignIn: vi.fn(() => false),
+    door: "declare",
   };
 }
 

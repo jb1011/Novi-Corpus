@@ -9,6 +9,7 @@ import { StepNav } from "@/components/onboarding/OnboardingFlow";
 import { Button, Callout, Card, Spinner, StepHeader } from "@/components/onboarding/primitives";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import { humanErrorSentence, humanStepView } from "@/lib/legalBody/gates";
+import { GuardianIdentityCard } from "./GuardianIdentityCard";
 
 const H = LEGAL_BODY_COPY.human;
 
@@ -35,7 +36,7 @@ export function HumanStep({
     requireRealHuman: true,
     forceRequired: true,
   });
-  const view = humanStepView(state);
+  const view = humanStepView(state, me?.identity);
   const accepted = view.title === "accepted";
   const problem = humanErrorSentence(error);
 
@@ -74,6 +75,12 @@ export function HumanStep({
                 state={state}
                 notAcceptedSentence={H.notAccepted}
                 acceptedLine={(credential) => fillCopy(H.verifiedAs, { credential })}
+              />
+            )}
+            {me?.identity?.required && view.guardianIdentity && (
+              <GuardianIdentityCard
+                state={view.guardianIdentity}
+                verifiedAt={me.identity.verifiedAt}
               />
             )}
 

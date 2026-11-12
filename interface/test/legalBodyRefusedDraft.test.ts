@@ -164,6 +164,7 @@ describe("the agreement step after a refused draft", () => {
       remember: vi.fn(),
       startAnother: vi.fn(),
       routeSignIn: vi.fn(() => false),
+      door: "declare",
     };
   }
 

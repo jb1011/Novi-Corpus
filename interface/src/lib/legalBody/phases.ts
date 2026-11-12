@@ -32,11 +32,28 @@ export const LEGAL_BODY_PHASES: { id: LegalBodyRailPhase; label: string }[] = [
   { id: "done", label: L.done },
 ];
 
-/** The phases this deployment shows: without `payment` unless it charges. */
+/** The formed door's rail. Payment stays where the deployment charges. Filing sits after it. */
+export const LEGAL_BODY_PHASES_FORMED: { id: LegalBodyRailPhase; label: string }[] = [
+  { id: "signin", label: L.signin },
+  { id: "human", label: L.human },
+  { id: "company", label: L.company },
+  { id: "payment", label: L.payment },
+  { id: "filing", label: L.filing },
+  { id: "agreement", label: L.agreement },
+  { id: "identity", label: L.identity },
+  { id: "link", label: L.link },
+  { id: "pointer", label: L.pointer },
+  { id: "done", label: L.done },
+];
+
+/** The phases this deployment shows. The formed door uses its own order. Payment is shown only
+ *  where the deployment charges. */
 export function visibleLegalBodyPhases(
   config: Extract<LegalBodyConfig, { available: true }>,
+  door: "declare" | "form" = "declare",
 ): { id: LegalBodyRailPhase; label: string }[] {
-  return LEGAL_BODY_PHASES.filter((p) => p.id !== "payment" || config.paymentRequired);
+  const source = door === "form" ? LEGAL_BODY_PHASES_FORMED : LEGAL_BODY_PHASES;
+  return source.filter((p) => p.id !== "payment" || config.paymentRequired);
 }
 
 /** Where a derivation sits on the rail. A closed order's last phase is not known and its screen
@@ -49,7 +66,11 @@ export function railPhaseOf(derivation: LegalBodyDerivation): LegalBodyRailPhase
 /** A phase's name on the rail; an id the rail does not list is named as the end. A closed order's
  *  screen shows no rail (`showRail`). */
 export function phaseLabel(phase: LegalBodyRailPhase): string {
-  return LEGAL_BODY_PHASES.find((p) => p.id === phase)?.label ?? L.done;
+  return (
+    LEGAL_BODY_PHASES.find((p) => p.id === phase)?.label ??
+    LEGAL_BODY_PHASES_FORMED.find((p) => p.id === phase)?.label ??
+    L.done
+  );
 }
 
 /** The rail's current phase: the gate, or the thread's phase; with no thread decided yet (its data

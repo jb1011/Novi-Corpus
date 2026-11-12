@@ -37,6 +37,10 @@ function fullMemory(over: Partial<LegalBodyMemory> = {}): LegalBodyMemory {
     orderId: "ord_opaque_handle",
     ownerChoice: "this-wallet",
     agentId: "42",
+    door: "declare",
+    identityChoice: "not-yet",
+    signer: "this-wallet",
+    suggestedAgentId: "7",
     ...over,
   };
 }
@@ -103,7 +107,7 @@ function memoryStorage(overrides: Partial<Storage> = {}) {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("the allowlist", () => {
-  test("the memory has its own key, and the allowlist is exactly the five opaque names", () => {
+  test("the memory has its own key, and the allowlist is exactly these opaque names", () => {
     expect(LEGAL_BODY_STORAGE_KEY).toBe("pa-legal-body-v1");
     expect(LEGAL_BODY_STORAGE_KEY).not.toBe(ONBOARDING_KEY);
     expect([...PERSISTED_LEGAL_BODY_KEYS]).toEqual([
@@ -112,6 +116,10 @@ describe("the allowlist", () => {
       "orderId",
       "ownerChoice",
       "agentId",
+      "door",
+      "identityChoice",
+      "signer",
+      "suggestedAgentId",
     ]);
     // The built memory carries exactly those names: none missing, none added.
     expect(Object.keys(buildLegalBodyMemory({ tenant: TENANT })).sort()).toEqual(
@@ -151,6 +159,10 @@ describe("the allowlist", () => {
       orderId: null,
       ownerChoice: null,
       agentId: null,
+      door: null,
+      identityChoice: null,
+      signer: null,
+      suggestedAgentId: null,
     });
     const bytes = JSON.stringify(memory);
     for (const value of TYPED_VALUES) expect(bytes, value).not.toContain(value);

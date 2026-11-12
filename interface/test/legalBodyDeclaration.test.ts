@@ -242,6 +242,16 @@ describe("declarationInput", () => {
       "filingNumber",
     ]);
   });
+
+  test("a name the record already holds is not sent", () => {
+    const input = declarationInput(PRODUCTION, "production", { writtenName: true });
+    expect(input).toEqual({
+      declarantTitle: "Manager",
+      companyName: "Example Invented Holdings LLC",
+      filingNumber: "EXAMPLE-0001",
+    });
+    expect("declarantName" in input).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

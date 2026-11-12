@@ -207,9 +207,11 @@ function Compliance({ company }: { company: CompanyDetailView }) {
         <>
           {data?.events.length === 0 ? (
             <p className="mt-2 text-[11.5px] leading-[1.5] text-muted-2">
-              {data.providerRef
-                ? "The filing agent reports nothing due."
-                : "Nothing is due until the company is filed."}
+              {data.recordedByHand
+                ? "This filing was recorded by hand. The calendar was not asked."
+                : data.providerRef
+                  ? "The filing agent reports nothing due."
+                  : "Nothing is due until the company is filed."}
             </p>
           ) : (
             <ul className="mt-3 flex flex-col gap-2">

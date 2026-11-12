@@ -14,14 +14,16 @@ import {
   StepHeader,
   TextInput,
 } from "@/components/onboarding/primitives";
-import { useCompaniesQuery } from "@/lib/api/hooks";
+import { useCompaniesQuery, useWorldIdMeQuery } from "@/lib/api/hooks";
 import {
   useAbandonCompanyMutation,
   useCreateCustomerCompanyMutation,
   useStatementMessageMutation,
 } from "@/lib/api/legalBodyHooks";
 import type { CustomerStatementInput, StatementMessageAnswer } from "@/lib/api/types";
-import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
+import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
+import { isFormedCompany } from "@/lib/legalBody/flow";
+import { FormCompanyStep } from "./FormCompanyStep";
 import {
   abandonRefusalSentence,
   companyScreen,
@@ -68,7 +70,19 @@ const EMPTY_FORM: DeclarationForm = {
  * state, never in a store.
  */
 export function CompanyStep({ kit }: { kit: LegalBodyStepKit }) {
+  if (kit.door === "form" || isFormedCompany(kit.company)) return <FormCompanyStep kit={kit} />;
+  return <DeclareCompanyStep kit={kit} />;
+}
+
+function DeclareCompanyStep({ kit }: { kit: LegalBodyStepKit }) {
   const { config, derivation } = kit;
+  const me = useWorldIdMeQuery();
+  const identity = me.data?.identity;
+  const writtenName = config.identityRequired === true && config.environment === "production";
+  const recordName =
+    writtenName && identity?.state === "verified" && identity.firstName && identity.lastName
+      ? `${identity.firstName} ${identity.lastName}`
+      : null;
   const screen = companyScreen({
     step: derivation.companyStep ?? "loading",
     notice: derivation.notice,
@@ -89,7 +103,14 @@ export function CompanyStep({ kit }: { kit: LegalBodyStepKit }) {
         title={screen.kind === "status" ? screen.title : C.title}
         intro={intro}
       />
-      {screen.kind === "form" && <Declaration kit={kit} notice={screen.notice} />}
+      {screen.kind === "form" && (
+        <Declaration
+          kit={kit}
+          notice={screen.notice}
+          writtenName={writtenName}
+          recordName={recordName}
+        />
+      )}
       {screen.kind === "loading" && (
         <div className="flex items-center gap-2 py-8 text-[13px] text-muted">
           <Spinner className="h-3.5 w-3.5" /> {LEGAL_BODY_COPY.frame.loading}
@@ -107,7 +128,17 @@ type Said = { tone: "warn" | "info"; text: string };
 /** Which door a refusal came from: only the create door answers `statement_stale`. */
 type Door = "statement" | "create";
 
-function Declaration({ kit, notice }: { kit: LegalBodyStepKit; notice: NoticeSentence | null }) {
+function Declaration({
+  kit,
+  notice,
+  writtenName,
+  recordName,
+}: {
+  kit: LegalBodyStepKit;
+  notice: NoticeSentence | null;
+  writtenName: boolean;
+  recordName: string | null;
+}) {
   const { config, tenant } = kit;
   const environment = config.environment;
   const sandbox = environment === "sandbox";
@@ -151,7 +182,7 @@ function Declaration({ kit, notice }: { kit: LegalBodyStepKit; notice: NoticeSen
 
   async function onSign() {
     if (busy) return;
-    const local = validateDeclaration(form, environment);
+    const local = validateDeclaration(form, environment, { writtenName });
     setProblems(local);
     setSaid(null);
     setContinueWith(null);
@@ -162,7 +193,7 @@ function Declaration({ kit, notice }: { kit: LegalBodyStepKit; notice: NoticeSen
       setSaid({ tone: "warn", text: notSession });
       return;
     }
-    const input = declarationInput(form, environment);
+    const input = declarationInput(form, environment, { writtenName });
     setBusy(true);
     try {
       await declare(input, onScreen);
@@ -315,7 +346,18 @@ function Declaration({ kit, notice }: { kit: LegalBodyStepKit; notice: NoticeSen
             sandbox ? C.numberHintSandbox : C.numberHintProduction,
             sandbox ? C.placeholdersSandbox.filingNumber : undefined,
           )}
-          {!sandbox && field("declarantName", undefined)}
+          {writtenName ? (
+            <div>
+              <p className="text-[14px] text-ink">
+                {recordName
+                  ? fillCopy(C.writtenName, { name: recordName })
+                  : C.writtenNameMissing}
+              </p>
+              <p className="mt-1 text-[12.5px] leading-[1.6] text-muted">{C.wrongName}</p>
+            </div>
+          ) : (
+            !sandbox && field("declarantName", undefined)
+          )}
           {!sandbox && field("declarantTitle", undefined)}
         </div>
         {sandbox && (
@@ -357,7 +399,7 @@ function Declaration({ kit, notice }: { kit: LegalBodyStepKit; notice: NoticeSen
             {C.continueWith}
           </Button>
         )}
-        <Button onClick={() => void onSign()} loading={busy}>
+        <Button onClick={() => void onSign()} loading={busy} disabled={writtenName && !recordName}>
           {C.sign}
         </Button>
       </StepNav>
