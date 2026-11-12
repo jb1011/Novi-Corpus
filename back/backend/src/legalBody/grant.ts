@@ -144,10 +144,12 @@ function container(
   return raw;
 }
 
+/** A number that is a safe integer of at least 1. */
+const isWholeFromOne = (v: unknown): v is number =>
+  typeof v === "number" && Number.isSafeInteger(v) && v >= 1;
+
 const readAmount: Reader<number> = (field, raw, problems) =>
-  typeof raw === "number" && Number.isSafeInteger(raw) && raw >= 1 && raw <= GRANT_AMOUNT_MAX
-    ? raw
-    : refuse(problems, field, AMOUNT);
+  isWholeFromOne(raw) && raw <= GRANT_AMOUNT_MAX ? raw : refuse(problems, field, AMOUNT);
 
 /** One of `values`, compared exactly. */
 function readOneOf<T extends string>(
@@ -315,7 +317,8 @@ const readEndsOn =
     return raw > todayUtc ? raw : refuse(problems, field, AFTER_TODAY);
   };
 
-/** `todayUtc` is `YYYY-MM-DD`. Never throws on any input. */
+/** `todayUtc` is `YYYY-MM-DD`. Never throws for any value `JSON.parse` can produce; a getter or a
+ *  Proxy is outside that. */
 export function parseGrantChoices(
   raw: unknown,
   todayUtc: string,
@@ -354,10 +357,17 @@ export type Grant = {
   choices: GrantChoices;
 };
 
+/**
+ * Numbers a set of choices, which must come from `parseGrantChoices`. Throws unless `number` and
+ * `version` are each a whole number of at least 1; that guard and the ones of `renderScheduleA`
+ * catch the worst cases, not every value that is not canonical.
+ */
 export function buildGrant(
   choices: GrantChoices,
   { number, version }: { number: number; version: number },
 ): Grant {
+  if (!isWholeFromOne(number) || !isWholeFromOne(version))
+    throw new Error("grant: number and version must each be a whole number of at least 1");
   return { schema: GRANT_SCHEMA, number, version, choices };
 }
 
@@ -403,9 +413,12 @@ const MONTHS = [
 
 /**
  * A whole number with a comma between groups of three digits: `1,250,000`. Written here rather
- * than by `toLocaleString`, whose output depends on the machine's locale data.
+ * than by `toLocaleString`, whose output depends on the machine's locale data. Throws unless `n`
+ * is a whole number of at least 1.
  */
 function groupDigits(n: number): string {
+  if (!isWholeFromOne(n))
+    throw new Error("grant: an amount must be a whole number of USDC of at least 1");
   const digits = String(n);
   let out = "";
   for (let i = 0; i < digits.length; i++) {
@@ -439,13 +452,14 @@ function heavyWords(setting: GrantHeavySetting, unit: string): string {
   return `${aloneUpTo(setting.perAct, unit)}; above that amount, ${WITH_GUARDIAN_SIGNATURE}`;
 }
 
-/** `revoked`, or the end of the last day, as `31 December 2027`. */
+/** `revoked`, or the end of the last day, as `31 December 2027`. Throws unless `endsOn` is a day
+ *  that exists in the calendar. */
 function endWords(endsOn: string | null): string {
   if (endsOn === null) return "revoked";
   const m = DATE.exec(endsOn);
   const month = m === null ? undefined : MONTHS[Number(m[2]) - 1];
-  if (m === null || month === undefined)
-    throw new Error(`a grant's endsOn must be a date written YYYY-MM-DD, not ${endsOn}`);
+  if (m === null || month === undefined || !isCalendarDate(endsOn))
+    throw new Error("grant: the end date is not a calendar date");
   return `the end of ${Number(m[3])} ${month} ${m[1]} (UTC), unless revoked earlier`;
 }
 
@@ -453,7 +467,11 @@ function endWords(endsOn: string | null): string {
 const listItems = (items: string[]): string[] =>
   items.map((item, i) => `${item}${i === items.length - 1 ? "." : ";"}`);
 
-/** The Charter's `scheduleA` field. No trailing newline. */
+/**
+ * The Charter's `scheduleA` field. No trailing newline. The grant's choices must come from
+ * `parseGrantChoices`: an amount or an end day that cannot be written throws here, which catches
+ * the worst cases, not every value that is not canonical.
+ */
 export function renderScheduleA(grant: Grant): string {
   const { acts, heavyActs, counterparties, endsOn } = grant.choices;
   if (grantAllowsNothing(grant.choices)) return NO_GRANT_IN_FORCE;

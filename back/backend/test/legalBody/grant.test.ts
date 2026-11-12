@@ -71,6 +71,11 @@ test.each([
   },
 );
 
+test("the amount problem names the greatest amount", () => {
+  // The amount problem writes this number out as 1,000,000,000: change both together.
+  expect(GRANT_AMOUNT_MAX).toBe(1_000_000_000);
+});
+
 test("the greatest amount is accepted", () => {
   expect(
     "choices" in
@@ -190,6 +195,83 @@ test("a heavy act alone needs its amount", () => {
   ).toEqual([
     { field: "heavyActs.employ.mode", problem: "must be not_allowed, guardian_signature or alone" },
   ]);
+});
+
+test("an allowed that is not true or false is the one problem of its setting; its amounts go unchecked, its unknown keys do not", () => {
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.acts.buy.allowed = "yes";
+      }),
+    ),
+  ).toEqual([{ field: "acts.buy.allowed", problem: "must be true or false" }]);
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.acts.buy = { allowed: "yes", perAct: 0, x: 1 };
+      }),
+    ),
+  ).toEqual([
+    { field: "acts.buy.allowed", problem: "must be true or false" },
+    { field: "acts.buy.x", problem: "is not a field of a grant" },
+  ]);
+});
+
+test("a heavy act's mode that is not one of its three values is the one problem of its setting", () => {
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.heavyActs.employ = { mode: "freely", perAct: 0 };
+      }),
+    ),
+  ).toEqual([
+    { field: "heavyActs.employ.mode", problem: "must be not_allowed, guardian_signature or alone" },
+  ]);
+});
+
+test("the counterparties are one of two values, compared exactly", () => {
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.counterparties = "Anyone";
+      }),
+    ),
+  ).toEqual([{ field: "counterparties", problem: "must be anyone or active_legal_body" }]);
+});
+
+test("a spending act not allowed carries no amount per thirty days", () => {
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.acts.pay = { allowed: false, per30Days: 5 };
+      }),
+    ),
+  ).toEqual([
+    { field: "acts.pay.per30Days", problem: "must be absent when the act is not allowed" },
+  ]);
+});
+
+test("a rule between two values is checked only when both values are valid", () => {
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.acts.pay = { allowed: true, perAct: 0, per30Days: 1, above: "not_allowed" };
+      }),
+    ),
+  ).toEqual([
+    {
+      field: "acts.pay.perAct",
+      problem: "must be a whole number of USDC from 1 to 1,000,000,000",
+    },
+  ]);
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.acts.issueInvoice.allowed = "yes";
+        c.acts.receivePayment.allowed = false;
+      }),
+    ),
+  ).toEqual([{ field: "acts.issueInvoice.allowed", problem: "must be true or false" }]);
 });
 
 test.each([["2027-02-30"], ["2027-2-3"], ["2027-12-31T00:00:00Z"], [20271231], [""], ["tomorrow"]])(
@@ -325,6 +407,67 @@ const GOLDEN_B = [
 
 const grantA = buildGrant(A, { number: 1, version: 1 });
 const grantB = buildGrant(B, { number: 1, version: 1 });
+/** Fixture `A` with the greatest amount, as the amount for thirty days of buying. */
+const greatest = structuredClone(A);
+greatest.acts.buy = {
+  allowed: true,
+  perAct: 999,
+  per30Days: GRANT_AMOUNT_MAX,
+  above: "not_allowed",
+};
+const grantGreatest = buildGrant(greatest, { number: 1, version: 1 });
+
+const BAD_NUMBER = "grant: number and version must each be a whole number of at least 1";
+const BAD_AMOUNT = "grant: an amount must be a whole number of USDC of at least 1";
+const BAD_END = "grant: the end date is not a calendar date";
+
+test.each([[0], [-1], [1.5], ["1" as never], [Number.NaN]])(
+  "a grant's number that is not a whole number of at least 1 is refused when the grant is built: %s",
+  (bad) => {
+    expect(() => buildGrant(A, { number: bad, version: 1 })).toThrow(new Error(BAD_NUMBER));
+  },
+);
+
+test("a grant's version of 0 is refused when the grant is built", () => {
+  expect(() => buildGrant(A, { number: 1, version: 0 })).toThrow(new Error(BAD_NUMBER));
+});
+
+test.each([[-100], [0], ["200" as never]])(
+  "Schedule A refuses to write an amount that is not a whole number of USDC of at least 1: %s",
+  (bad) => {
+    const choices = structuredClone(A);
+    choices.acts.buy = { allowed: true, perAct: bad, per30Days: 1000, above: "guardian_signature" };
+    expect(() => renderScheduleA(buildGrant(choices, { number: 1, version: 1 }))).toThrow(
+      new Error(BAD_AMOUNT),
+    );
+  },
+);
+
+test("Schedule A refuses to write a missing amount", () => {
+  const choices = structuredClone(A);
+  Reflect.deleteProperty(choices.acts.buy, "perAct");
+  expect(() => renderScheduleA(buildGrant(choices, { number: 1, version: 1 }))).toThrow(
+    new Error(BAD_AMOUNT),
+  );
+});
+
+test.each([["2027-02-30"], ["2027-02-31"], ["2027-03-00"]])(
+  "Schedule A refuses an end day that does not exist in its month: %s",
+  (endsOn) => {
+    expect(() => renderScheduleA(buildGrant({ ...A, endsOn }, { number: 1, version: 1 }))).toThrow(
+      new Error(BAD_END),
+    );
+  },
+);
+
+test("Schedule A refuses an end month that does not exist, and writes a leap day", () => {
+  expect(() =>
+    renderScheduleA(buildGrant({ ...A, endsOn: "2027-13-01" }, { number: 1, version: 1 })),
+  ).toThrow(new Error(BAD_END));
+  expect(
+    renderScheduleA(buildGrant({ ...A, endsOn: "2028-02-29" }, { number: 1, version: 1 })),
+  ).toContain("until the end of 29 February 2028 (UTC), unless revoked earlier.");
+});
 
 test("the fingerprint of a grant is the keccak256 of its canonical form", () => {
   expect(grantA).toEqual({ schema: "novi.legal-body-grant/1", number: 1, version: 1, choices: A });
@@ -365,7 +508,11 @@ test("Schedule A is written from the choices, character for character", () => {
 });
 
 test("Schedule A holds only ASCII, no brace and no trailing newline, and never says enforced", () => {
-  for (const text of [renderScheduleA(grantA), renderScheduleA(grantB)]) {
+  for (const text of [
+    renderScheduleA(grantA),
+    renderScheduleA(grantB),
+    renderScheduleA(grantGreatest),
+  ]) {
     expect(text).toMatch(/^[\n\x20-\x7e]+$/);
     expect(text).not.toMatch(/[{}]/);
     expect(text.endsWith("\n")).toBe(false);
@@ -374,14 +521,7 @@ test("Schedule A holds only ASCII, no brace and no trailing newline, and never s
 });
 
 test("the greatest amount is written in full, with its commas", () => {
-  const big = structuredClone(A);
-  big.acts.buy = {
-    allowed: true,
-    perAct: 999,
-    per30Days: GRANT_AMOUNT_MAX,
-    above: "not_allowed",
-  };
-  expect(renderScheduleA(buildGrant(big, { number: 1, version: 1 }))).toContain(
+  expect(renderScheduleA(grantGreatest)).toContain(
     "- (e) buying goods or services: the agent alone, up to 999 USDC per purchase and 1,000,000,000 USDC per thirty days; above those amounts, not allowed;",
   );
 });

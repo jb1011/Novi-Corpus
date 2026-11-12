@@ -1,4 +1,4 @@
-import type { ApiError } from "../api/errors";
+import type { ApiError } from "../errors";
 import { refusal } from "./sentences";
 
 /** What a door answers when the legal text it would serve is still a draft on a production
