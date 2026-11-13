@@ -54,7 +54,7 @@ shorter delay applies. Arc testnet keeps no bound.
    |---|---|---|
    | Deployer | None. It pays for three creations and is then retired. | A fresh throwaway key, funded with about 1 USDC. |
    | Admin | `DEFAULT_ADMIN_ROLE` on the controller: grants, revokes, pins. | The hardware wallet from step 1. |
-   | Executor | The two legal-body selector roles. | The production backend key; only its address is needed here. |
+   | Executor | The two legal-body selector roles. | The mainnet box's `PLATFORM_PRIVATE_KEY`; only its derived address is needed here. |
 
    Use a fresh deployer: the Arc RPC refuses well-known development accounts, and a reused key
    could already hold a role somewhere.
@@ -64,7 +64,8 @@ shorter delay applies. Arc testnet keeps no bound.
 5. **Have a backend build with the Minimal-only boot mode.** The mainnet box runs the legal-body
    product only, so its configuration names a controller, a legal-body factory and the
    controller's deployment transaction, and no full-product factory. Confirm the backend release
-   you deploy documents `CONTROLLER_DEPLOY_TX` in its `.env.example` before starting.
+   you deploy documents `CONTROLLER_DEPLOY_TX` and `CONTROLLER_DEPLOY_BLOCK` in its `.env.example`
+   before starting.
 
 ## Environment
 
@@ -199,15 +200,35 @@ Then check on the explorer:
    without it.
 
    ```bash
+   ARC_NETWORK=mainnet
+   ARC_CHAIN_ID=5042
+   # The backend reads its RPC endpoint from this variable on every network, mainnet included.
+   ARC_TESTNET_RPC_URL=<arc mainnet rpc url>
+   IDENTITY_REGISTRY=0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
    LEGAL_BODY_FACTORY_ADDRESS=<legalBodyFactory>
    CONTROLLER_ADDRESS=<noviController>
    CONTROLLER_DEPLOY_TX=<the transaction hash from step 2>
+   CONTROLLER_DEPLOY_BLOCK=<the block number from step 2>
    # FACTORY_ADDRESS stays unset
    ```
 
-   Boot reads the receipt of `CONTROLLER_DEPLOY_TX`, refuses unless it created exactly
-   `CONTROLLER_ADDRESS`, and starts the `WILDCARD_ROLE` ledger at its block, so the hash is the
-   proof of where the role history begins.
+   `CONTROLLER_DEPLOY_BLOCK` is the block the controller's creation landed in, the same value as
+   `controllerDeployBlock` in the addresses file. Boot reads the receipt of `CONTROLLER_DEPLOY_TX`,
+   refuses unless it created exactly `CONTROLLER_ADDRESS`, and starts the `WILDCARD_ROLE` ledger at
+   its block, so the hash is the proof of where the role history begins.
+
+   This block is not the whole mainnet configuration. `ARC_NETWORK=mainnet` also requires the
+   production formation provider block (the doola variables with `DOOLA_ENVIRONMENT=production`),
+   `NOVI_ATTESTATION_KEY`, `FORMATION_PII_KEY` and `IDENTITY_NAME_HMAC_KEY`. The backend's
+   `back/backend/.env.example` is the complete list, and where it disagrees with this runbook, it
+   wins.
+
+   `CONTROLLER_EXECUTOR` from the deploy must be the address derived from the box's
+   `PLATFORM_PRIVATE_KEY`; otherwise the box relays from a key the controller does not recognize.
+
+   Put these variables in the box's environment before you deploy the backend release that needs
+   them. Every backend process refuses to start when `CONTROLLER_ADDRESS` is set without its
+   deploy transaction and block.
 4. Keep the controller's deployment transaction hash and block next to the addresses in the
    addresses file.
 
