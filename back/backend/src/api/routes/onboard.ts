@@ -2,7 +2,7 @@ import type { Hono } from "hono";
 import { getAddress } from "viem";
 import type { GuardianPasskey } from "../../adapters/turnkey/provisioner";
 import type { AuthVars } from "../../auth/middleware";
-import { custodyUnavailableMessage } from "../../custody";
+import { custodyUnavailableMessage, fullProductUnavailableMessage } from "../../custody";
 import {
   companyNamesRequiredMessage,
   createFormationParty,
@@ -50,6 +50,12 @@ export function mountProtectedRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     } catch {
       throw new ApiError("validation_error", 400, "invalid JSON body");
     }
+    // Minimal-only deployment: there is no full-product factory, so the entity this would create
+    // can never be broadcast. Refused FIRST, before custody and before the claim: once claimed, the
+    // saga would provision custody wallets and leave a `failed` entities row that makes every
+    // later boot refuse (assertFullProductCoverage).
+    if (!deps.fullProductAvailable)
+      throw new ApiError("validation_error", 400, fullProductUnavailableMessage());
     if (!body.guardianPasskey || typeof body.guardianPasskey !== "object")
       throw new ApiError("validation_error", 400, "guardianPasskey is required");
 

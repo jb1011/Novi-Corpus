@@ -1194,6 +1194,9 @@ async function main() {
     ensApexAddress: getAddress(cfg.ensApexResolvesTo ?? executor.address),
     walletProviderDefault: cfg.walletProviderDefault,
     circleCustodyAvailable: Boolean(provisionCircle),
+    // Minimal-only when FACTORY_ADDRESS is unset: the onboard doors refuse, and onboard_agent is
+    // not advertised over MCP.
+    fullProductAvailable: Boolean(cfg.factoryAddress),
     // One predicate shared with the env.ts boot invariant (canProvisionTurnkey) — the advertised
     // availability and what provisioning actually needs can never drift apart. A deployment that
     // ships no TURNKEY_* is turnkey-less by construction — the mainnet circle-only shape.

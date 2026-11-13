@@ -128,6 +128,7 @@ function makeApp(
     platformManagerAddress: "0x000000000000000000000000000000000000000A",
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: custody.circle ?? true,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
     formation: formation
       ? {

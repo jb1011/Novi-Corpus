@@ -77,6 +77,9 @@ export interface McpToolDeps extends EntityViewDeps {
   walletProviderDefault: "turnkey" | "circle";
   circleCustodyAvailable: boolean;
   turnkeyCustodyAvailable: boolean;
+  /** Mirrors ApiDeps: false on a Minimal-only deployment, where onboard_agent (and the spec schema
+   *  resource that only serves it) are not registered at all. */
+  fullProductAvailable: boolean;
   /** Audit fix C: the platform/manager account address, force-set into `roles.manager` on
    *  onboard_agent so an agent-first caller never needs to know or guess it. */
   platformManagerAddress: string;
@@ -162,6 +165,7 @@ export const MCP_TOOL_DEP_KEYS = [
   "walletProviderDefault",
   "circleCustodyAvailable",
   "turnkeyCustodyAvailable",
+  "fullProductAvailable",
   "platformManagerAddress",
   "jobs",
   "payments",
@@ -503,24 +507,26 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
     },
   );
 
-  server.registerResource(
-    "agent-spec",
-    "schema://agent-spec",
-    {
-      title: "AgentSpec schema",
-      description: "JSON-schema for onboard_agent's spec argument",
-      mimeType: "application/json",
-    },
-    async (uri) => ({
-      contents: [
-        {
-          uri: uri.href,
-          mimeType: "application/json",
-          text: JSON.stringify(zodToJsonSchema(AgentSpecSchema)),
-        },
-      ],
-    }),
-  );
+  // The spec schema exists only for onboard_agent, so it is advertised only where that tool is.
+  if (deps.fullProductAvailable)
+    server.registerResource(
+      "agent-spec",
+      "schema://agent-spec",
+      {
+        title: "AgentSpec schema",
+        description: "JSON-schema for onboard_agent's spec argument",
+        mimeType: "application/json",
+      },
+      async (uri) => ({
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify(zodToJsonSchema(AgentSpecSchema)),
+          },
+        ],
+      }),
+    );
 
   server.registerTool(
     "list_entities",
@@ -1430,87 +1436,93 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
     );
   }
 
-  server.registerTool(
-    "onboard_agent",
-    {
-      title: "Onboard agent",
-      description: `Create an agent legal body. spec must match schema://agent-spec; the guardian is set automatically to your tenant and the manager is set automatically to the platform manager account — you don't need to know or supply either. passkeyId references a previously stored guardian passkey (POST /passkey). custody optionally picks the operator key custody: 'circle' (Novi-managed smart account, gasless) or 'turnkey' (guardian-passkey-rooted key vault) — omitted uses the platform default ${custodyCapabilityNote(deps)} companyId attaches this agent to a company you already own and is REQUIRED wherever formation is: attaching is free, and a company is created at its own door (create_company, after create_formation_party) — see list_companies for the ones you have. partyId is NOT accepted here and never will be; passing one is refused, not ignored. Never put personal data in spec. ${formationCapabilityNote(deps)} Returns immediately with status 'pending' — poll get_entity until 'bound'. Requires the provision capability and a tenant-wide key.`,
-      inputSchema: {
-        spec: z.record(z.unknown()),
-        passkeyId: z.string(),
-        idempotencyKey: z.string().optional(),
-        custody: z.enum(["turnkey", "circle"]).optional(),
-        /**
-         * ⚠ DECLARED IN ORDER TO BE REFUSED (A3), exactly like `ssn` on `create_company`.
-         *
-         * A1's shim minted a 1:1 company for a party-only onboard; A3 removed it, so this door
-         * attaches and never creates. An UNDECLARED field is not rejected by the SDK — it is
-         * silently STRIPPED before the handler runs, because the tool's zod schema discards what
-         * it does not know. A model that had just called `create_formation_party` and passed the
-         * handle here would therefore have got back an entity id, with nothing filed and no
-         * indication that the identity it registered was going nowhere.
-         */
-        partyId: z.string().optional(),
-        companyId: z.string().optional(),
+  // Registered ONLY where the full product is on, like the Hedera tools below: a Minimal-only box
+  // can never create an entity, and a tool that exists and refuses still advertises a capability
+  // the deployment does not have. Tool discovery is the agent-first caller's only capability
+  // surface.
+  if (deps.fullProductAvailable)
+    server.registerTool(
+      "onboard_agent",
+      {
+        title: "Onboard agent",
+        description: `Create an agent legal body. spec must match schema://agent-spec; the guardian is set automatically to your tenant and the manager is set automatically to the platform manager account — you don't need to know or supply either. passkeyId references a previously stored guardian passkey (POST /passkey). custody optionally picks the operator key custody: 'circle' (Novi-managed smart account, gasless) or 'turnkey' (guardian-passkey-rooted key vault) — omitted uses the platform default ${custodyCapabilityNote(deps)} companyId attaches this agent to a company you already own and is REQUIRED wherever formation is: attaching is free, and a company is created at its own door (create_company, after create_formation_party) — see list_companies for the ones you have. partyId is NOT accepted here and never will be; passing one is refused, not ignored. Never put personal data in spec. ${formationCapabilityNote(deps)} Returns immediately with status 'pending' — poll get_entity until 'bound'. Requires the provision capability and a tenant-wide key.`,
+        inputSchema: {
+          spec: z.record(z.unknown()),
+          passkeyId: z.string(),
+          idempotencyKey: z.string().optional(),
+          custody: z.enum(["turnkey", "circle"]).optional(),
+          /**
+           * ⚠ DECLARED IN ORDER TO BE REFUSED (A3), exactly like `ssn` on `create_company`.
+           *
+           * A1's shim minted a 1:1 company for a party-only onboard; A3 removed it, so this door
+           * attaches and never creates. An UNDECLARED field is not rejected by the SDK — it is
+           * silently STRIPPED before the handler runs, because the tool's zod schema discards what
+           * it does not know. A model that had just called `create_formation_party` and passed the
+           * handle here would therefore have got back an entity id, with nothing filed and no
+           * indication that the identity it registered was going nowhere.
+           */
+          partyId: z.string().optional(),
+          companyId: z.string().optional(),
+        },
       },
-    },
-    async ({ spec, passkeyId, idempotencyKey, custody, partyId, companyId }) => {
-      const denied = requireProvisionTenantWide(scope);
-      if (denied) return denied;
-      const passkey = deps.passkeys.get(tenantId, passkeyId);
-      if (!passkey)
-        return { content: [{ type: "text", text: "passkey handle not found" }], isError: true };
-      try {
-        // Tier-0 custody: same resolution, availability gates, and ORDER as the REST /onboard
-        // route — gate before the World check and spec parse, circle first, so a request that is
-        // both invalid-spec and unavailable-custody gets the same primary error on both surfaces.
-        const resolvedCustody = custody ?? deps.walletProviderDefault;
-        if (resolvedCustody === "circle" && !deps.circleCustodyAvailable)
-          return {
-            content: [{ type: "text", text: custodyUnavailableMessage("circle") }],
-            isError: true,
+      async ({ spec, passkeyId, idempotencyKey, custody, partyId, companyId }) => {
+        const denied = requireProvisionTenantWide(scope);
+        if (denied) return denied;
+        const passkey = deps.passkeys.get(tenantId, passkeyId);
+        if (!passkey)
+          return { content: [{ type: "text", text: "passkey handle not found" }], isError: true };
+        try {
+          // Tier-0 custody: same resolution, availability gates, and ORDER as the REST /onboard
+          // route — gate before the World check and spec parse, circle first, so a request that is
+          // both invalid-spec and unavailable-custody gets the same primary error on both surfaces.
+          const resolvedCustody = custody ?? deps.walletProviderDefault;
+          if (resolvedCustody === "circle" && !deps.circleCustodyAvailable)
+            return {
+              content: [{ type: "text", text: custodyUnavailableMessage("circle") }],
+              isError: true,
+            };
+          if (resolvedCustody === "turnkey" && !deps.turnkeyCustodyAvailable)
+            return {
+              content: [{ type: "text", text: custodyUnavailableMessage("turnkey") }],
+              isError: true,
+            };
+          // Formation gate: AFTER custody, BEFORE the World check — the SAME order as the REST
+          // /onboard route, running the SAME function (src/formation.ts), so a request that is both
+          // company-less and unattachable gets the identical primary error on both surfaces.
+          //
+          // `partyId` stays DECLARED in the schema below in order to be REFUSED here (A3, and the
+          // same argument as `ssn` on create_company): an undeclared field is silently stripped by
+          // the SDK's zod parse, so a model passing one would have got back an entity id with no
+          // indication that the legal identity it had just registered was never going to be filed.
+          const formationRefusal = formationDoorRefusal(deps, { tenantId, partyId, companyId });
+          if (formationRefusal)
+            return { content: [{ type: "text", text: formationRefusal }], isError: true };
+          // Mirror of the REST gate: when World enforcement is on, the guardian must be a
+          // World-ID-verified unique human under the per-human entity cap.
+          assertGuardianAllowed(deps.worldId, tenantId);
+          const raw = spec as Record<string, unknown>;
+          const roles = {
+            ...((raw.roles as object) ?? {}),
+            guardian: tenantId,
+            manager: deps.platformManagerAddress,
           };
-        if (resolvedCustody === "turnkey" && !deps.turnkeyCustodyAvailable)
-          return {
-            content: [{ type: "text", text: custodyUnavailableMessage("turnkey") }],
-            isError: true,
-          };
-        // Formation gate: AFTER custody, BEFORE the World check — the SAME order as the REST
-        // /onboard route, running the SAME function (src/formation.ts), so a request that is both
-        // company-less and unattachable gets the identical primary error on both surfaces.
-        //
-        // `partyId` stays DECLARED in the schema below in order to be REFUSED here (A3, and the
-        // same argument as `ssn` on create_company): an undeclared field is silently stripped by
-        // the SDK's zod parse, so a model passing one would have got back an entity id with no
-        // indication that the legal identity it had just registered was never going to be filed.
-        const formationRefusal = formationDoorRefusal(deps, { tenantId, partyId, companyId });
-        if (formationRefusal)
-          return { content: [{ type: "text", text: formationRefusal }], isError: true };
-        // Mirror of the REST gate: when World enforcement is on, the guardian must be a
-        // World-ID-verified unique human under the per-human entity cap.
-        assertGuardianAllowed(deps.worldId, tenantId);
-        const raw = spec as Record<string, unknown>;
-        const roles = {
-          ...((raw.roles as object) ?? {}),
-          guardian: tenantId,
-          manager: deps.platformManagerAddress,
-        };
-        const parsed = AgentSpecSchema.parse({ ...raw, roles });
-        const userKey = idempotencyKey && idempotencyKey.length > 0 ? idempotencyKey : parsed.name;
-        const { id, status } = deps.runner.start({
-          spec: parsed,
-          userKey,
-          tenantId,
-          guardianPasskey: passkey,
-          custody: resolvedCustody,
-          companyId,
-        });
-        return { content: [{ type: "text", text: JSON.stringify({ id, status }) }] };
-      } catch (e) {
-        return { content: [{ type: "text", text: (e as Error).message }], isError: true };
-      }
-    },
-  );
+          const parsed = AgentSpecSchema.parse({ ...raw, roles });
+          const userKey =
+            idempotencyKey && idempotencyKey.length > 0 ? idempotencyKey : parsed.name;
+          const { id, status } = deps.runner.start({
+            spec: parsed,
+            userKey,
+            tenantId,
+            guardianPasskey: passkey,
+            custody: resolvedCustody,
+            companyId,
+          });
+          return { content: [{ type: "text", text: JSON.stringify({ id, status }) }] };
+        } catch (e) {
+          return { content: [{ type: "text", text: (e as Error).message }], isError: true };
+        }
+      },
+    );
 
   // ── The Hedera rail (design 2026-09-10) ──────────────────────────────────────────────────────
   //

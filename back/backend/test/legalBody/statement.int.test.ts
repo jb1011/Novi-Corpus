@@ -405,6 +405,7 @@ function deploy(opts: DeployOptions = {}): Deployment {
     platformManagerAddress: "0x000000000000000000000000000000000000000A",
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: false,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
   };
   const app = buildApiApp(deps as ApiDeps);

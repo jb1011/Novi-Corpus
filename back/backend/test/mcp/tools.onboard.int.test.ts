@@ -79,6 +79,7 @@ function buildTestApp(overrides: Record<string, unknown> = {}) {
     apiKeys,
     passkeys,
     platformManagerAddress: PLATFORM_MANAGER,
+    fullProductAvailable: true,
     ...overrides,
   } as never);
 }
@@ -173,6 +174,7 @@ test("onboard_agent custody=turnkey on a turnkey-less deployment (mainnet shape)
   const circleOnlyApp = buildTestApp({
     walletProviderDefault: "circle",
     circleCustodyAvailable: true,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: false,
   });
   const handle = passkeys.store(TENANT, VALID_PASSKEY);
@@ -191,4 +193,30 @@ test("onboard_agent custody=turnkey on a turnkey-less deployment (mainnet shape)
   } finally {
     await close();
   }
+});
+
+test("a Minimal-only deployment does not advertise onboard_agent or its spec schema", async () => {
+  const { key } = apiKeys.mint(TENANT, { capability: "provision" });
+  const names = async (target: ReturnType<typeof buildApiApp>) => {
+    const { client, close } = await startMcpTestClient(target, key);
+    try {
+      const tools = (await client.listTools()).tools.map((t) => t.name);
+      // A server with no resources registered does not offer the resources capability at all.
+      const resources = client.getServerCapabilities()?.resources
+        ? (await client.listResources()).resources.map((r) => r.uri)
+        : [];
+      return { tools, resources };
+    } finally {
+      await close();
+    }
+  };
+  const minimal = await names(buildTestApp({ fullProductAvailable: false }));
+  expect(minimal.tools).not.toContain("onboard_agent");
+  expect(minimal.resources).not.toContain("schema://agent-spec");
+  // Every other tool is still there: only the full-product door is withdrawn.
+  expect(minimal.tools).toContain("list_entities");
+
+  const full = await names(app);
+  expect(full.tools).toContain("onboard_agent");
+  expect(full.resources).toContain("schema://agent-spec");
 });

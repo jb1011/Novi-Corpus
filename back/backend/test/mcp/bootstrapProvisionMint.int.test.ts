@@ -123,6 +123,7 @@ beforeEach(() => {
     fundCaps: TEST_FUND_CAPS,
   });
   app = buildApiApp({
+    fullProductAvailable: true,
     webOrigin: "*",
     nonceStore: new SqliteNonceStore(db),
     siweDomain: DOMAIN,

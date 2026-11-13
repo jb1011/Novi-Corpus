@@ -35,6 +35,7 @@ function makeApp(opts?: {
   };
   const runner = new OnboardingRunner({ repo, runSaga, fundCaps: TEST_FUND_CAPS });
   const app = buildApiApp({
+    fullProductAvailable: true,
     webOrigin: "*",
     nonceStore: new SqliteNonceStore(db),
     siweDomain: DOMAIN,
