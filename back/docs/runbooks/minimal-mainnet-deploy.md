@@ -232,9 +232,10 @@ Then check on the explorer:
    ```
 
    `CONTROLLER_DEPLOY_BLOCK` is the block the controller's creation landed in, the same value as
-   `controllerDeployBlock` in the addresses file. Boot reads the receipt of `CONTROLLER_DEPLOY_TX`,
-   refuses unless it created exactly `CONTROLLER_ADDRESS`, and starts the `WILDCARD_ROLE` ledger at
-   its block, so the hash is the proof of where the role history begins.
+   `controllerDeployBlock` in the addresses file. Boot looks `CONTROLLER_DEPLOY_TX` up in that
+   block rather than by hash, because the public RPCs stop serving old transactions by hash. It
+   refuses unless the transaction created exactly `CONTROLLER_ADDRESS`, and starts the
+   `WILDCARD_ROLE` ledger at that block, so the pair is the proof of where the role history begins.
 
    This block is not the whole mainnet configuration. `ARC_NETWORK=mainnet` also requires the
    production formation provider block (the doola variables with `DOOLA_ENVIRONMENT=production`),
