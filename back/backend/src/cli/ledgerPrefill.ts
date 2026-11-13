@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { publicClientFor } from "../adapters/arc/clients";
 import { prefillWildcardLedger } from "../adapters/arc/wildcardLedger";
 import { loadConfig } from "../config/env";
-import { migrate, openDatabase } from "../persistence/db";
+import { ensureControllerRoleLedger, openDatabase } from "../persistence/db";
 
 /**
  * `pnpm ledger:prefill` — build the controller's WILDCARD_ROLE ledger ahead of a release.
@@ -18,7 +18,10 @@ async function main() {
   const cfg = loadConfig();
   const db = openDatabase(cfg.dbPath);
   try {
-    migrate(db);
+    // Only the one table this needs, never the full migrate(): the previous release may still be
+    // serving this database, and migrate() carries schema changes and one-shot data moves it does
+    // not expect. The release that follows runs the full migration itself at boot.
+    ensureControllerRoleLedger(db);
     console.log(await prefillWildcardLedger(cfg, publicClientFor(cfg), db));
   } finally {
     db.close();

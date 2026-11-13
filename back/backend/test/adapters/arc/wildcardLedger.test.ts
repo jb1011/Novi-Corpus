@@ -25,7 +25,7 @@ import {
   prefillWildcardLedger,
 } from "../../../src/adapters/arc/wildcardLedger";
 import type { Config } from "../../../src/config/env";
-import { migrate, openDatabase } from "../../../src/persistence/db";
+import { ensureControllerRoleLedger, migrate, openDatabase } from "../../../src/persistence/db";
 
 /** The account that broadcast the controller's deployment, and its nonce at the time. */
 const DEPLOYER = "0x00000000000000000000000000000000000000d0" as Address;
@@ -575,4 +575,67 @@ test("rate limiting is recognised by HTTP status anywhere in the cause chain, or
   expect(
     isRateLimitError(new HttpRequestError({ url: "https://rpc.example/arc", status: 503 })),
   ).toBe(false);
+});
+
+test("ledger:prefill works on a database that has never been migrated, creating only the ledger table", async () => {
+  const fresh = openDatabase(":memory:");
+  try {
+    ensureControllerRoleLedger(fresh);
+    const cfg = {
+      controllerAddress: CONTROLLER,
+      chainId: CHAIN_ID,
+      controllerDeployTx: DEPLOY_TX,
+      controllerDeployBlock: Number(DEPLOY_BLOCK),
+      platformPrivateKey: `0x${"ab".repeat(32)}`,
+    } as Config;
+    await expect(prefillWildcardLedger(cfg, client({ latest: 500n }).pc, fresh)).resolves.toMatch(
+      /no holder in the role history through block 500/,
+    );
+    const tables = (
+      fresh.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as {
+        name: string;
+      }[]
+    ).map((t) => t.name);
+    expect(tables).toEqual(["controller_role_ledger"]);
+    expect(
+      fresh
+        .prepare("SELECT cursor_block, deploy_tx, deploy_block FROM controller_role_ledger")
+        .get(),
+    ).toEqual({ cursor_block: 500, deploy_tx: DEPLOY_TX, deploy_block: 10 });
+  } finally {
+    fresh.close();
+  }
+});
+
+test("ensureControllerRoleLedger adds the deploy columns to an old-shape table and keeps its rows", () => {
+  const old = openDatabase(":memory:");
+  try {
+    old.exec(`CREATE TABLE controller_role_ledger (
+      controller TEXT NOT NULL, chain_id INTEGER NOT NULL, cursor_block INTEGER NOT NULL,
+      holders_json TEXT NOT NULL, PRIMARY KEY (controller, chain_id))`);
+    old.prepare("INSERT INTO controller_role_ledger VALUES ('0xc0', 1, 42, '[]')").run();
+    ensureControllerRoleLedger(old);
+    ensureControllerRoleLedger(old); // idempotent
+    const cols = (
+      old.prepare("PRAGMA table_info(controller_role_ledger)").all() as { name: string }[]
+    ).map((c) => c.name);
+    expect(cols).toEqual([
+      "controller",
+      "chain_id",
+      "cursor_block",
+      "holders_json",
+      "deploy_tx",
+      "deploy_block",
+    ]);
+    expect(old.prepare("SELECT * FROM controller_role_ledger").get()).toEqual({
+      controller: "0xc0",
+      chain_id: 1,
+      cursor_block: 42,
+      holders_json: "[]",
+      deploy_tx: null,
+      deploy_block: null,
+    });
+  } finally {
+    old.close();
+  }
 });

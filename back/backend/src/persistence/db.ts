@@ -1792,21 +1792,6 @@ export function migrate(db: Database.Database): void {
     );
     CREATE INDEX IF NOT EXISTS idx_platform_outflows_at ON platform_outflows(at);
 
-    -- The controller's WILDCARD_ROLE holders, rebuilt from its RoleGranted/RoleRevoked logs and
-    -- kept here so each boot resumes from cursor_block instead of replaying from the deploy block.
-    -- holders_json is a JSON array of { account, grantedTx, grantedBlock }; addresses lowercase.
-    -- deploy_tx and deploy_block are the controller's creation, verified once on chain and kept so
-    -- later boots skip that check and a changed CONTROLLER_DEPLOY_TX is caught, never overwritten.
-    CREATE TABLE IF NOT EXISTS controller_role_ledger (
-      controller   TEXT    NOT NULL,
-      chain_id     INTEGER NOT NULL,
-      cursor_block INTEGER NOT NULL,
-      holders_json TEXT    NOT NULL,
-      deploy_tx    TEXT,
-      deploy_block INTEGER,
-      PRIMARY KEY (controller, chain_id)
-    );
-
     -- S5: one row per billable Turnkey enclave signature (metered plan: 25/month, then per-sig).
     CREATE TABLE IF NOT EXISTS turnkey_sigs (
       id   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2317,15 +2302,9 @@ export function migrate(db: Database.Database): void {
     "CREATE INDEX IF NOT EXISTS idx_payments_ledger_entity ON payments_ledger(entity_key, status)",
   );
 
-  // The controller's verified creation, stored with the WILDCARD_ROLE ledger. NULL on a row written
-  // before this change: the next boot verifies the deploy transaction on chain and fills both in.
-  const roleLedgerCols = (
-    db.prepare("PRAGMA table_info(controller_role_ledger)").all() as { name: string }[]
-  ).map((c) => c.name);
-  if (!roleLedgerCols.includes("deploy_tx"))
-    db.exec("ALTER TABLE controller_role_ledger ADD COLUMN deploy_tx TEXT");
-  if (!roleLedgerCols.includes("deploy_block"))
-    db.exec("ALTER TABLE controller_role_ledger ADD COLUMN deploy_block INTEGER");
+  // The controller's WILDCARD_ROLE ledger: its own function, because `ledger:prefill` creates this
+  // one table on a database the previous release may still be serving, without the rest of migrate.
+  ensureControllerRoleLedger(db);
 
   // Legal bodies: their own tables (see LEGAL_BODIES_DDL), created late so the companies table
   // their foreign key points at exists on every database shape. Not a bare exec of the DDL: a
@@ -2791,4 +2770,40 @@ function purposeOf(specJson: string | null): string {
   } catch {
     return DEFAULT_DESCRIPTION;
   }
+}
+
+/**
+ * The controller's WILDCARD_ROLE ledger table, created or brought up to date on its own.
+ *
+ * migrate() calls it like any other step. `ledger:prefill` calls ONLY this, because it runs against
+ * a database the previous release may still be serving, where the rest of migrate (one-shot data
+ * moves included) must wait for the release that follows. Idempotent: CREATE IF NOT EXISTS, then
+ * additive columns.
+ */
+export function ensureControllerRoleLedger(db: Database.Database): void {
+  // The controller's WILDCARD_ROLE holders, rebuilt from its RoleGranted/RoleRevoked logs and kept
+  // here so each boot resumes from cursor_block instead of replaying from the deploy block.
+  // holders_json is a JSON array of { account, grantedTx, grantedBlock }; addresses lowercase.
+  // deploy_tx and deploy_block are the controller's creation, verified once on chain and kept so
+  // later boots skip that check and a changed CONTROLLER_DEPLOY_TX is caught, never overwritten.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS controller_role_ledger (
+      controller   TEXT    NOT NULL,
+      chain_id     INTEGER NOT NULL,
+      cursor_block INTEGER NOT NULL,
+      holders_json TEXT    NOT NULL,
+      deploy_tx    TEXT,
+      deploy_block INTEGER,
+      PRIMARY KEY (controller, chain_id)
+    );
+  `);
+  // NULL on a row written before the deploy columns existed: the next boot verifies the deploy
+  // transaction on chain and fills both in.
+  const cols = (
+    db.prepare("PRAGMA table_info(controller_role_ledger)").all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!cols.includes("deploy_tx"))
+    db.exec("ALTER TABLE controller_role_ledger ADD COLUMN deploy_tx TEXT");
+  if (!cols.includes("deploy_block"))
+    db.exec("ALTER TABLE controller_role_ledger ADD COLUMN deploy_block INTEGER");
 }
