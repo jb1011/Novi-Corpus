@@ -1,12 +1,16 @@
 import { type Address, pad, toFunctionSelector } from "viem";
 import { beforeEach, describe, expect, test, vi } from "vitest";
-import { noviControllerAbi } from "../../src/abis/generated";
+import { legalBodyFactoryAbi, legalManagerAbi, noviControllerAbi } from "../../src/abis/generated";
 import { LEGAL_BODY_GRANTED_SELECTORS, selectorRole } from "../../src/adapters/arc/bootVerify";
 import { type Alert, type AlertSink, buildAlertSink } from "../../src/monitor/alerts";
-import type { EntityLookup, MonitoredEntity } from "../../src/monitor/entityLookup";
+import type {
+  EntityLookup,
+  LegalBodyRecord,
+  MonitoredEntity,
+} from "../../src/monitor/entityLookup";
 import { EntityLookupError } from "../../src/monitor/errors";
 import { WILDCARD_ROLE } from "../../src/monitor/events";
-import { Monitor, type MonitorConfig } from "../../src/monitor/monitor";
+import { Monitor, type MonitorConfig, watchedLegalBodyFactories } from "../../src/monitor/monitor";
 import type { LogQuery, MonitorRpc, RawLog } from "../../src/monitor/rpc";
 import { type MonitorStore, SqliteMonitorStore } from "../../src/monitor/store";
 import { ADDR, entity, makeLog, placeholderAddresses } from "./helpers";
@@ -16,6 +20,7 @@ const BASE_CFG: MonitorConfig = {
   registry: ADDR.registry,
   factories: [ADDR.factory],
   beacons: [],
+  legalBodyFactories: [],
   executor: ADDR.executor,
   pollMs: 30_000,
   grantTtlMs: 15 * 60_000,
@@ -28,13 +33,19 @@ function collectingSink() {
   return { sink, alerts };
 }
 
-function lookup(entities: MonitoredEntity[] = [entity()]): EntityLookup {
-  return { all: () => entities, close: () => {} };
+function lookup(
+  entities: MonitoredEntity[] = [entity()],
+  legalBodies: LegalBodyRecord[] = [],
+): EntityLookup {
+  return { all: () => entities, legalBodies: () => legalBodies, close: () => {} };
 }
 
 function failingLookup(): EntityLookup {
   return {
     all: () => {
+      throw new EntityLookupError("database is locked");
+    },
+    legalBodies: () => {
       throw new EntityLookupError("database is locked");
     },
     close: () => {},
@@ -51,6 +62,7 @@ function rpcStub(over: {
   failLogs?: boolean;
   blockTimestamp?: bigint;
   payout?: Address;
+  read?: (p: Parameters<MonitorRpc["readContract"]>[0]) => Promise<unknown>;
 }): RpcStub {
   const queries: LogQuery[] = [];
   return {
@@ -62,7 +74,7 @@ function rpcStub(over: {
       return over.logsFor?.(q) ?? [];
     },
     getBlockTimestamp: async () => over.blockTimestamp ?? 1_700_000_000n,
-    readContract: async () => over.payout ?? ADDR.operator,
+    readContract: async (p) => (over.read ? over.read(p) : (over.payout ?? ADDR.operator)),
   };
 }
 
@@ -524,6 +536,7 @@ describe("entity lookup resilience", () => {
           schemaMismatch: true,
         });
       },
+      legalBodies: () => [],
       close: () => {},
     };
     const store = SqliteMonitorStore.open(":memory:");
@@ -963,5 +976,259 @@ describe("treasury payout read", () => {
     expect(policy?.severity).toBe("WARN");
     expect(policy?.detail.currentPayoutAddress).toBe("unreadable");
     expect(alerts.some((a) => a.rule === "treasury_guardian_notification")).toBe(true);
+  });
+});
+
+describe("legal bodies", () => {
+  const NEW_BODY = "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB" as Address;
+  const CFG: MonitorConfig = { ...BASE_CFG, legalBodyFactories: [ADDR.legalBodyFactory] };
+  const RECORDED: LegalBodyRecord = {
+    address: ADDR.body,
+    agentId: "4242",
+    guardian: ADDR.guardian,
+    factory: ADDR.legalBodyFactory,
+  };
+
+  /** A chain that serves `logs` to any own-contracts query whose address filter names them. */
+  function chain(logs: RawLog[]) {
+    return (q: LogQuery) => {
+      if (q.event) return [];
+      const wanted = new Set(
+        (Array.isArray(q.address) ? q.address : q.address ? [q.address] : []).map((a) =>
+          a.toLowerCase(),
+        ),
+      );
+      return logs.filter(
+        (l) =>
+          wanted.has(l.address.toLowerCase()) &&
+          l.blockNumber >= q.fromBlock &&
+          l.blockNumber <= q.toBlock,
+      );
+    };
+  }
+
+  function created(factory: Address, block: bigint, body: Address = NEW_BODY): RawLog {
+    return makeLog({
+      abi: legalBodyFactoryAbi,
+      eventName: "LegalBodyCreated",
+      args: {
+        agentId: 77n,
+        legalBody: body,
+        identityOwner: ADDR.operator,
+        guardian: ADDR.guardian,
+        linkDigest: `0x${"cd".repeat(32)}`,
+      },
+      address: factory,
+      blockNumber: block,
+      transactionHash: `0x${"e1".repeat(32)}`,
+    });
+  }
+
+  function dissolution(body: Address, block: bigint): RawLog {
+    return makeLog({
+      abi: legalManagerAbi,
+      eventName: "DissolutionInitiated",
+      args: { initiator: ADDR.guardian, executableAt: 1_800_000_000n },
+      address: body,
+      blockNumber: block,
+      transactionHash: `0x${"e2".repeat(32)}`,
+    });
+  }
+
+  function ownAddresses(rpc: RpcStub, from = 0): string[] {
+    return rpc.queries
+      .slice(from)
+      .filter((q) => !q.event)
+      .flatMap((q) => (Array.isArray(q.address) ? q.address : q.address ? [q.address] : []))
+      .map((a) => a.toLowerCase());
+  }
+
+  function watcher(p: {
+    rpc: RpcStub;
+    store?: MonitorStore;
+    recorded?: LegalBodyRecord[];
+    cfg?: MonitorConfig;
+  }) {
+    const store = p.store ?? SqliteMonitorStore.open(":memory:");
+    if (store.getCursor() === undefined) store.setCursor(999n);
+    const { sink, alerts } = collectingSink();
+    const monitor = new Monitor({
+      rpc: p.rpc,
+      store,
+      entities: lookup([entity()], p.recorded ?? []),
+      sink,
+      cfg: p.cfg ?? CFG,
+      log: () => {},
+    });
+    return { monitor, store, alerts };
+  }
+
+  test("a body the API recorded is watched from the first tick, with the factory", async () => {
+    const rpc = rpcStub({ head: 1000n });
+    const { monitor } = watcher({ rpc, recorded: [RECORDED] });
+    await monitor.tick();
+    const own = ownAddresses(rpc);
+    expect(own).toContain(ADDR.body.toLowerCase());
+    expect(own).toContain(ADDR.legalBodyFactory.toLowerCase());
+  });
+
+  test("a body seen created on chain but absent from the API's record is stored and watched next tick", async () => {
+    const rpc = rpcStub({ head: 1000n, logsFor: chain([created(ADDR.legalBodyFactory, 1000n)]) });
+    const { monitor, store, alerts } = watcher({ rpc });
+    await monitor.tick();
+    expect(alerts.map((a) => a.rule)).toContain("legal_body_created");
+    expect(store.listLegalBodies()).toEqual([
+      {
+        address: NEW_BODY.toLowerCase(),
+        factory: ADDR.legalBodyFactory.toLowerCase(),
+        agentId: "77",
+        guardian: ADDR.guardian.toLowerCase(),
+        block: 1000n,
+        tx: `0x${"e1".repeat(32)}`,
+      },
+    ]);
+
+    // A restarted monitor, same monitor.db, still no API record: the body is in `own`.
+    const next = rpcStub({ head: 1001n });
+    const { monitor: restarted } = watcher({ rpc: next, store });
+    await restarted.tick();
+    expect(ownAddresses(next)).toContain(NEW_BODY.toLowerCase());
+  });
+
+  test("a body created and dissolving inside one window pages before the cursor passes it", async () => {
+    const rpc = rpcStub({
+      head: 1010n,
+      logsFor: chain([created(ADDR.legalBodyFactory, 1001n), dissolution(NEW_BODY, 1005n)]),
+    });
+    const { monitor, store, alerts } = watcher({ rpc });
+    await monitor.tick();
+    expect(alerts.find((a) => a.rule === "legal_body_dissolution_initiated")?.severity).toBe(
+      "CRITICAL",
+    );
+    expect(store.getCursor()).toBe(1010n);
+  });
+
+  test("if that catch-up read fails the cursor stays, and the next tick pages from the stored body", async () => {
+    const logs = [created(ADDR.legalBodyFactory, 1001n), dissolution(NEW_BODY, 1005n)];
+    let failNewBody = true;
+    const serve = chain(logs);
+    const rpc = rpcStub({
+      head: 1010n,
+      logsFor: (q) => {
+        const only = Array.isArray(q.address) && q.address.length === 1 ? q.address[0] : undefined;
+        if (failNewBody && only?.toLowerCase() === NEW_BODY.toLowerCase())
+          throw new Error("rpc unavailable");
+        return serve(q);
+      },
+    });
+    const { monitor, store, alerts } = watcher({ rpc });
+    await monitor.tick();
+    expect(store.getCursor()).toBe(999n);
+    expect(alerts.map((a) => a.rule)).not.toContain("legal_body_dissolution_initiated");
+
+    failNewBody = false;
+    await monitor.tick();
+    expect(alerts.map((a) => a.rule)).toContain("legal_body_dissolution_initiated");
+    expect(store.getCursor()).toBe(1010n);
+  });
+
+  test("a store that cannot record the body still leaves it watched for this process", async () => {
+    const real = SqliteMonitorStore.open(":memory:");
+    real.setCursor(999n);
+    const broken = new Proxy(real, {
+      get(target, prop) {
+        if (prop === "recordLegalBody")
+          return () => {
+            throw new Error("attempt to write a readonly database");
+          };
+        const value = Reflect.get(target, prop);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const rpc = rpcStub({ head: 1000n, logsFor: chain([created(ADDR.legalBodyFactory, 1000n)]) });
+    const { monitor } = watcher({ rpc, store: broken });
+    await monitor.tick();
+    const before = rpc.queries.length;
+    real.setCursor(999n);
+    await monitor.tick();
+    expect(ownAddresses(rpc, before)).toContain(NEW_BODY.toLowerCase());
+  });
+
+  test("a body on the old factory keeps being watched when MONITOR_WATCH_LEGAL_BODY_FACTORIES names it", async () => {
+    const legalBodyFactories = watchedLegalBodyFactories(ADDR.legalBodyFactory, [
+      ADDR.oldLegalBodyFactory,
+    ]);
+    const cfg: MonitorConfig = { ...BASE_CFG, legalBodyFactories };
+    const rpc = rpcStub({
+      head: 1000n,
+      logsFor: chain([created(ADDR.oldLegalBodyFactory, 1000n)]),
+    });
+    const { monitor, store } = watcher({ rpc, cfg });
+    await monitor.tick();
+    expect(ownAddresses(rpc)).toContain(ADDR.oldLegalBodyFactory.toLowerCase());
+    const before = rpc.queries.length;
+    store.setCursor(999n);
+    await monitor.tick();
+    expect(ownAddresses(rpc, before)).toContain(NEW_BODY.toLowerCase());
+  });
+
+  test("an amendment on a body reads pendingAmendment(body) from the body's factory", async () => {
+    const hash = `0x${"5a".repeat(32)}` as const;
+    const reads: { address: string; functionName: string; args?: readonly unknown[] }[] = [];
+    const rpc = rpcStub({
+      head: 1000n,
+      logsFor: chain([
+        makeLog({
+          abi: legalManagerAbi,
+          eventName: "AmendmentScheduled",
+          args: { newHash: hash, executableAt: 1_800_000_000n },
+          address: ADDR.body,
+          blockNumber: 1000n,
+        }),
+      ]),
+      read: async (p) => {
+        reads.push({ address: p.address, functionName: p.functionName, args: p.args });
+        return hash;
+      },
+    });
+    const { monitor, alerts } = watcher({ rpc, recorded: [RECORDED] });
+    await monitor.tick();
+    expect(reads).toEqual([
+      {
+        address: ADDR.legalBodyFactory,
+        functionName: "pendingAmendment",
+        args: [ADDR.body],
+      },
+    ]);
+    expect(alerts.find((a) => a.rule === "legal_body_amendment_scheduled")?.severity).toBe("WARN");
+  });
+
+  test("a failed legal-body lookup keeps the last known bodies watched", async () => {
+    let calls = 0;
+    const entities: EntityLookup = {
+      all: () => [entity()],
+      legalBodies: () => {
+        if (calls++ === 0) return [RECORDED];
+        throw new EntityLookupError("database is locked");
+      },
+      close: () => {},
+    };
+    const store = SqliteMonitorStore.open(":memory:");
+    store.setCursor(999n);
+    const rpc = rpcStub({ head: 1000n });
+    const monitor = new Monitor({
+      rpc,
+      store,
+      entities,
+      sink: collectingSink().sink,
+      cfg: CFG,
+      log: () => {},
+    });
+    await monitor.tick();
+    const before = rpc.queries.length;
+    store.setCursor(999n);
+    await monitor.tick();
+    expect(calls).toBe(2);
+    expect(ownAddresses(rpc, before)).toContain(ADDR.body.toLowerCase());
   });
 });

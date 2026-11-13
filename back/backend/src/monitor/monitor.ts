@@ -1,11 +1,17 @@
-import type { Address } from "viem";
-import { agentTreasuryAbi } from "../abis/generated";
+import type { Address, Hex } from "viem";
+import { agentTreasuryAbi, legalBodyFactoryAbi } from "../abis/generated";
 import { opsLog } from "../observability/opsLog";
 import type { AlertSink } from "./alerts";
-import type { EntityIndex, EntityLookup, MonitoredEntity } from "./entityLookup";
-import { indexEntities } from "./entityLookup";
+import type {
+  EntityIndex,
+  EntityLookup,
+  LegalBodyRecord,
+  MonitoredEntity,
+  WatchedLegalBody,
+} from "./entityLookup";
+import { indexEntities, indexLegalBodies } from "./entityLookup";
 import { standingRoles } from "./events";
-import type { MonitorRpc } from "./rpc";
+import type { MonitorRpc, RawLog } from "./rpc";
 import {
   type GrantOp,
   type RuleContext,
@@ -24,7 +30,7 @@ import {
   isRangeTooLargeError,
   shrinkRange,
 } from "./scan";
-import type { MonitorStore, OpenGrant } from "./store";
+import type { MonitorStore, OpenGrant, SeenLegalBody } from "./store";
 
 /**
  * The watcher loop.
@@ -44,12 +50,38 @@ export interface MonitorConfig {
   factories: Address[];
   /** MONITOR_WATCH_BEACONS; the configured factory's own beacon is added at startup. */
   beacons: Address[];
+  /** LegalBodyFactory addresses: the configured one first, then MONITOR_WATCH_LEGAL_BODY_FACTORIES.
+   *  Kept apart from `factories`: the beacon logic belongs to the full-product factory only. */
+  legalBodyFactories: Address[];
   /** Address of the platform signing key (the executor identity). No key material here. */
   executor: Address;
   pollMs: number;
   grantTtlMs: number;
   lookbackBlocks: number;
   maxLogRange?: bigint;
+}
+
+/** `addresses` with case-insensitive duplicates dropped, first occurrence and order kept. */
+export function uniqueAddresses(addresses: readonly Address[]): Address[] {
+  const seen = new Set<string>();
+  return addresses.filter((a) => {
+    const key = a.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+/**
+ * The LegalBodyFactory addresses the monitor watches: the configured LEGAL_BODY_FACTORY_ADDRESS
+ * (when set) and MONITOR_WATCH_LEGAL_BODY_FACTORIES. After a factory redeploy the old factory goes
+ * on the watch list, so its ownership events and the bodies it created stay watched.
+ */
+export function watchedLegalBodyFactories(
+  configured: Address | undefined,
+  watch: readonly Address[],
+): Address[] {
+  return uniqueAddresses([...(configured ? [configured] : []), ...watch]);
 }
 
 export interface MonitorDeps {
@@ -81,6 +113,11 @@ export class Monitor {
   private resolvedBeacons: Address[] = [];
   private beaconResolved = false;
   private lastEntities: MonitoredEntity[] = [];
+  /** The API's legal bodies as last read; reused when a read fails, like `lastEntities`. */
+  private lastRecordedBodies: LegalBodyRecord[] = [];
+  /** Bodies seen created on chain: the store's table, plus any sighting the store failed to
+   *  write, so a full disk cannot drop a body from the watch for the life of the process. */
+  private sightedBodies = new Map<string, SeenLegalBody>();
   private stopped = false;
   private timer?: NodeJS.Timeout;
 
@@ -141,13 +178,43 @@ export class Monitor {
     return this.lastEntities;
   }
 
-  private buildContext(index: EntityIndex): RuleContext {
+  /**
+   * The legal-body watch set, rebuilt each tick from the API's `legal_bodies` and the monitor's
+   * own `legal_bodies_seen`. A failure on either side keeps that side's last known set, for the
+   * reason `refreshEntities` gives.
+   */
+  private refreshLegalBodies(): Map<string, WatchedLegalBody> {
+    try {
+      this.lastRecordedBodies = this.deps.entities.legalBodies();
+    } catch (err) {
+      this.log("monitor_legal_body_lookup_failed", {
+        message: (err as Error).message,
+        usingCached: this.lastRecordedBodies.length,
+      });
+    }
+    try {
+      for (const b of this.deps.store.listLegalBodies()) this.sightedBodies.set(b.address, b);
+    } catch (err) {
+      this.log("monitor_legal_body_sightings_read_failed", {
+        message: (err as Error).message,
+        usingCached: this.sightedBodies.size,
+      });
+    }
+    return indexLegalBodies(this.lastRecordedBodies, [...this.sightedBodies.values()]);
+  }
+
+  private buildContext(
+    index: EntityIndex,
+    legalBodies: Map<string, WatchedLegalBody>,
+  ): RuleContext {
     const { cfg } = this.deps;
     return {
       controller: cfg.controller,
       registry: cfg.registry,
       factories: new Set(cfg.factories.map((a) => a.toLowerCase())),
       beacons: new Set([...cfg.beacons, ...this.resolvedBeacons].map((a) => a.toLowerCase())),
+      legalBodyFactories: new Set(cfg.legalBodyFactories.map((a) => a.toLowerCase())),
+      legalBodies,
       executor: cfg.executor,
       standingRoles: standingRoles(),
       entities: index,
@@ -159,13 +226,59 @@ export class Monitor {
     await this.ensureBeacon();
     const entities = this.refreshEntities();
     const index = indexEntities(entities);
-    const ctx = this.buildContext(index);
+    const ctx = this.buildContext(index, this.refreshLegalBodies());
 
     await this.scan(ctx, index);
     await this.sweepGrantTtl(ctx);
   }
 
-  private async scan(ctx: RuleContext, index: EntityIndex): Promise<void> {
+  /**
+   * Run each log through the rules and apply what they return. Returns the legal bodies whose
+   * creation the logs recorded, already added to the monitor's own set.
+   */
+  private async evaluateLogs(logs: readonly RawLog[], ctx: RuleContext): Promise<SeenLegalBody[]> {
+    const created: SeenLegalBody[] = [];
+    for (const log of logs) {
+      try {
+        const outcome = await evaluateLog(log, ctx, {
+          now: this.now,
+          currentPayout: (t) => this.readPayoutAddress(t),
+          pendingAmendment: (factory, body) => this.readPendingAmendment(factory, body),
+        });
+        for (const body of outcome.legalBodies ?? []) {
+          this.recordLegalBody(body);
+          created.push(body);
+        }
+        const grants = await this.stampGrantTimestamps(outcome.grants);
+        this.applyGrants(grants);
+        for (const alert of outcome.alerts) await this.deps.sink.emit(alert);
+      } catch (err) {
+        // A single undecodable log must not abort the window; record it and move on.
+        this.log("monitor_log_eval_failed", {
+          tx: log.transactionHash,
+          logIndex: log.logIndex,
+          message: (err as Error).message,
+        });
+      }
+    }
+    return created;
+  }
+
+  /** In memory first, so a store that cannot be written still leaves the body watched. */
+  private recordLegalBody(body: SeenLegalBody): void {
+    if (!this.sightedBodies.has(body.address)) this.sightedBodies.set(body.address, body);
+    try {
+      this.deps.store.recordLegalBody(body);
+    } catch (err) {
+      this.log("monitor_legal_body_record_failed", {
+        body: body.address,
+        message: (err as Error).message,
+      });
+    }
+  }
+
+  private async scan(initialCtx: RuleContext, index: EntityIndex): Promise<void> {
+    let ctx = initialCtx;
     const { rpc, store, cfg } = this.deps;
     let latest: bigint;
     try {
@@ -179,9 +292,10 @@ export class Monitor {
     const from = cursor === undefined ? coldStartFrom(latest, cfg.lookbackBlocks) : cursor + 1n;
     if (from > latest) return; // no new blocks since the last tick.
 
-    const own: Address[] = [
+    let own: Address[] = uniqueAddresses([
       cfg.controller,
       ...cfg.factories,
+      ...cfg.legalBodyFactories,
       ...cfg.beacons,
       ...this.resolvedBeacons,
       ...[...index.byTreasury.values()].map((e) => e.treasury as Address),
@@ -189,7 +303,10 @@ export class Monitor {
       // amendment path — the one governance action with a timelock and a guardian veto — emitted
       // its events into a monitor that was not looking.
       ...[...index.byProxy.values()].map((e) => e.proxy as Address),
-    ];
+      // The legal bodies: the guardian's dissolution path and the amendment path of the product
+      // where the customer keeps their own company.
+      ...[...ctx.legalBodies.keys()].map((a) => a as Address),
+    ]);
     const agentIds = [...index.byAgentId.keys()];
 
     for (const range of chunkRange(from, latest, this.currentRange)) {
@@ -248,23 +365,53 @@ export class Monitor {
         return;
       }
 
-      for (const log of logs) {
+      const created = await this.evaluateLogs(logs, ctx);
+
+      // A body created inside this window was not in `own` when the window was read, so anything
+      // it emitted later in the same window (a dissolution started right after creation, say)
+      // was not fetched. Read those bodies over the same window before the cursor passes it. If
+      // the read fails the cursor stays, and the next tick re-reads the window with the bodies in
+      // `own`; the alert dedup key makes the repeat free.
+      const unwatched = uniqueAddresses(
+        created.map((b) => b.address as Address).filter((a) => !ctx.legalBodies.has(a)),
+      );
+      if (unwatched.length > 0) {
+        const legalBodies = new Map(ctx.legalBodies);
+        for (const b of created)
+          if (!legalBodies.has(b.address))
+            legalBodies.set(b.address, {
+              address: b.address,
+              factory: b.factory,
+              agentId: b.agentId,
+              guardian: b.guardian,
+            });
+        ctx = { ...ctx, legalBodies };
+        let late: Awaited<ReturnType<typeof fetchWindow>>;
         try {
-          const outcome = await evaluateLog(log, ctx, {
-            now: this.now,
-            currentPayout: (t) => this.readPayoutAddress(t),
-          });
-          const grants = await this.stampGrantTimestamps(outcome.grants);
-          this.applyGrants(grants);
-          for (const alert of outcome.alerts) await this.deps.sink.emit(alert);
+          late = await fetchWindow(
+            rpc,
+            { own: unwatched, registry: cfg.registry, agentIds: [] },
+            range,
+            this.currentAddressChunk,
+          );
         } catch (err) {
-          // A single undecodable log must not abort the window; record it and move on.
-          this.log("monitor_log_eval_failed", {
-            tx: log.transactionHash,
-            logIndex: log.logIndex,
+          this.log("monitor_new_legal_body_scan_failed", {
+            from: range.from.toString(),
+            to: range.to.toString(),
+            bodies: unwatched,
             message: (err as Error).message,
           });
+          return;
         }
+        // Only the new bodies' own logs: the registry query fetchWindow always adds was already
+        // read with the window.
+        const lowered = new Set(unwatched.map((a) => a.toLowerCase()));
+        await this.evaluateLogs(
+          late.filter((l) => lowered.has(l.address.toLowerCase())),
+          ctx,
+        );
+        // Later windows of this tick read them with everything else.
+        own = uniqueAddresses([...own, ...unwatched]);
       }
 
       store.setCursor(range.to);
@@ -331,6 +478,25 @@ export class Monitor {
       // Unreadable, not unchanged: the alert says "unreadable" and stays at WARN rather than
       // claiming the payout address is fine.
       this.log("monitor_payout_read_failed", { treasury, message: (err as Error).message });
+      return undefined;
+    }
+  }
+
+  private async readPendingAmendment(factory: Address, body: Address): Promise<Hex | undefined> {
+    try {
+      return (await this.deps.rpc.readContract({
+        address: factory,
+        abi: legalBodyFactoryAbi,
+        functionName: "pendingAmendment",
+        args: [body],
+      })) as Hex;
+    } catch (err) {
+      // Unreadable, not matching: the amendment rule escalates rather than trusting a guess.
+      this.log("monitor_pending_amendment_read_failed", {
+        factory,
+        body,
+        message: (err as Error).message,
+      });
       return undefined;
     }
   }

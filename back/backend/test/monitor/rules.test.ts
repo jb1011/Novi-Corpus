@@ -2,6 +2,7 @@ import { pad, toFunctionSelector, zeroAddress } from "viem";
 import { describe, expect, test } from "vitest";
 import {
   agentTreasuryAbi,
+  legalBodyFactoryAbi,
   legalManagerAbi,
   legalManagerFactoryAbi,
   noviControllerAbi,
@@ -27,7 +28,7 @@ import {
   ttlEscalations,
 } from "../../src/monitor/rules";
 import type { OpenGrant } from "../../src/monitor/store";
-import { ADDR, entity, makeLog, ruleContext, ruleDeps } from "./helpers";
+import { ADDR, entity, legalBody, makeLog, ruleContext, ruleDeps } from "./helpers";
 
 const STANDING_ROLE = selectorRole(CONTROLLER_GRANTED_SELECTORS[0]!.selector);
 const UNKNOWN_ROLE = pad(toFunctionSelector("function upgradeTo(address)"), {
@@ -762,5 +763,250 @@ describe("legal manager — the OA amendment path", () => {
       ruleDeps(),
     );
     expect(out.alerts).toHaveLength(0);
+  });
+});
+
+describe("legal-body factories", () => {
+  const NEW_BODY = "0xbBbBBBBbbBBBbbbBbbBbbbbBBbBbbbbBbBbbBBbB";
+
+  function createdLog(address = ADDR.legalBodyFactory) {
+    return makeLog({
+      abi: legalBodyFactoryAbi,
+      eventName: "LegalBodyCreated",
+      args: {
+        agentId: 77n,
+        legalBody: NEW_BODY,
+        identityOwner: ADDR.operator,
+        guardian: ADDR.guardian,
+        linkDigest: `0x${"cd".repeat(32)}`,
+      },
+      address,
+      blockNumber: 321n,
+    });
+  }
+
+  test("LegalBodyCreated is INFO, names the body, agent id and guardian, and hands the body over", async () => {
+    const out = await evaluateLog(createdLog(), ruleContext(), ruleDeps());
+    expect(out.alerts).toHaveLength(1);
+    expect(out.alerts[0]).toMatchObject({
+      severity: "INFO",
+      rule: "legal_body_created",
+      subject: NEW_BODY,
+      detail: { body: NEW_BODY, agentId: "77", guardian: ADDR.guardian },
+    });
+    expect(out.legalBodies).toEqual([
+      {
+        address: NEW_BODY.toLowerCase(),
+        factory: ADDR.legalBodyFactory.toLowerCase(),
+        agentId: "77",
+        guardian: ADDR.guardian.toLowerCase(),
+        block: 321n,
+        tx: `0x${"ab".repeat(32)}`,
+      },
+    ]);
+  });
+
+  test("a creation on an address that is not a watched legal-body factory is ignored", async () => {
+    const out = await evaluateLog(createdLog(ADDR.helper), ruleContext(), ruleDeps());
+    expect(out.alerts).toHaveLength(0);
+    expect(out.legalBodies).toBeUndefined();
+  });
+
+  test("the factory ownership rules fire on a legal-body factory as on the full-product one", async () => {
+    for (const address of [ADDR.legalBodyFactory, ADDR.oldLegalBodyFactory]) {
+      for (const [eventName, rule] of [
+        ["OwnershipTransferStarted", "factory_ownership_transfer_started"],
+        ["OwnershipTransferred", "factory_ownership_transferred"],
+      ] as const) {
+        const out = await evaluateLog(
+          makeLog({
+            abi: legalBodyFactoryAbi,
+            eventName,
+            args: { previousOwner: ADDR.controller, newOwner: ADDR.attacker },
+            address,
+          }),
+          ruleContext(),
+          ruleDeps(),
+        );
+        expect(out.alerts).toHaveLength(1);
+        expect(out.alerts[0]).toMatchObject({
+          severity: "CRITICAL",
+          rule,
+          subject: address,
+          detail: { previousOwner: ADDR.controller, newOwner: ADDR.attacker },
+        });
+      }
+    }
+  });
+});
+
+describe("legal bodies", () => {
+  const HASH = `0x${"5a".repeat(32)}` as const;
+  const OTHER_HASH = `0x${"6b".repeat(32)}` as const;
+
+  function bodyLog(eventName: string, args: Record<string, unknown>) {
+    return makeLog({ abi: legalManagerAbi, eventName, args, address: ADDR.body });
+  }
+
+  test("DissolutionInitiated is CRITICAL and names the body and the initiator", async () => {
+    const out = await evaluateLog(
+      bodyLog("DissolutionInitiated", { initiator: ADDR.guardian, executableAt: 1_800_000_000n }),
+      ruleContext(),
+      ruleDeps(),
+    );
+    expect(out.alerts).toHaveLength(1);
+    expect(out.alerts[0]).toMatchObject({
+      severity: "CRITICAL",
+      rule: "legal_body_dissolution_initiated",
+      subject: ADDR.body,
+      detail: { body: ADDR.body, initiator: ADDR.guardian },
+    });
+  });
+
+  test("DissolutionVetoed is WARN and names the caller", async () => {
+    const out = await evaluateLog(
+      bodyLog("DissolutionVetoed", { vetoedBy: ADDR.controller }),
+      ruleContext(),
+      ruleDeps(),
+    );
+    expect(out.alerts[0]).toMatchObject({
+      severity: "WARN",
+      rule: "legal_body_dissolution_cancelled",
+      detail: { body: ADDR.body, caller: ADDR.controller },
+    });
+  });
+
+  test("Dissolved is WARN", async () => {
+    const out = await evaluateLog(bodyLog("Dissolved", {}), ruleContext(), ruleDeps());
+    expect(out.alerts[0]).toMatchObject({
+      severity: "WARN",
+      rule: "legal_body_dissolved",
+      detail: { body: ADDR.body },
+    });
+  });
+
+  test("an amendment whose hash is the factory's pending one is WARN, read from the body's own factory", async () => {
+    const reads: [string, string][] = [];
+    const out = await evaluateLog(
+      bodyLog("AmendmentScheduled", { newHash: HASH, executableAt: 1_800_000_000n }),
+      ruleContext(),
+      ruleDeps({
+        pending: HASH.toUpperCase().replace("0X", "0x") as `0x${string}`,
+        onPendingRead: (f, b) => void reads.push([f, b]),
+      }),
+    );
+    expect(reads).toEqual([[ADDR.legalBodyFactory, ADDR.body]]);
+    expect(out.alerts).toHaveLength(1);
+    expect(out.alerts[0]).toMatchObject({
+      severity: "WARN",
+      rule: "legal_body_amendment_scheduled",
+      detail: { body: ADDR.body, newHash: HASH, matchesPending: true },
+    });
+  });
+
+  test("an amendment the factory does not hold as pending is CRITICAL: it came from outside the factory", async () => {
+    const out = await evaluateLog(
+      bodyLog("AmendmentScheduled", { newHash: HASH, executableAt: 1_800_000_000n }),
+      ruleContext(),
+      ruleDeps({ pending: OTHER_HASH }),
+    );
+    expect(out.alerts[0]).toMatchObject({
+      severity: "CRITICAL",
+      rule: "legal_body_amendment_scheduled",
+      detail: { newHash: HASH, pendingHash: OTHER_HASH, matchesPending: false },
+    });
+  });
+
+  test("an unreadable pending slot is CRITICAL, not a match", async () => {
+    const out = await evaluateLog(
+      bodyLog("AmendmentScheduled", { newHash: HASH, executableAt: 1_800_000_000n }),
+      ruleContext(),
+      ruleDeps({ pending: undefined }),
+    );
+    expect(out.alerts[0]).toMatchObject({
+      severity: "CRITICAL",
+      detail: { pendingHash: "unreadable", matchesPending: false },
+    });
+  });
+
+  test("a body whose factory is unknown is CRITICAL, says so, and reads nothing", async () => {
+    let reads = 0;
+    const out = await evaluateLog(
+      bodyLog("AmendmentScheduled", { newHash: HASH, executableAt: 1_800_000_000n }),
+      ruleContext({
+        legalBodies: new Map([[ADDR.body.toLowerCase(), legalBody({ factory: null })]]),
+      }),
+      ruleDeps({ pending: HASH, onPendingRead: () => void reads++ }),
+    );
+    expect(reads).toBe(0);
+    expect(out.alerts[0]?.severity).toBe("CRITICAL");
+    expect(out.alerts[0]?.detail).toMatchObject({ factory: null, pendingHash: null });
+    expect(String(out.alerts[0]?.detail.note)).toMatch(/factory of this legal body is unknown/);
+  });
+
+  test("an address outside the body set is ignored", async () => {
+    const out = await evaluateLog(
+      makeLog({
+        abi: legalManagerAbi,
+        eventName: "DissolutionInitiated",
+        args: { initiator: ADDR.guardian, executableAt: 1n },
+        address: ADDR.helper,
+      }),
+      ruleContext(),
+      ruleDeps(),
+    );
+    expect(out.alerts).toHaveLength(0);
+  });
+});
+
+describe("controller BoundTargetSet", () => {
+  function boundTargetLog(selector: string, target: string) {
+    return makeLog({
+      abi: noviControllerAbi,
+      eventName: "BoundTargetSet",
+      args: { selector, target },
+      address: ADDR.controller,
+    });
+  }
+
+  test("an unpin is CRITICAL and names a legal-body selector by name", async () => {
+    const create = LEGAL_BODY_GRANTED_SELECTORS.find(
+      (g) => g.name === "LegalBodyFactory.createLegalBody",
+    )!;
+    const out = await evaluateLog(
+      boundTargetLog(create.selector, zeroAddress),
+      ruleContext(),
+      ruleDeps(),
+    );
+    expect(out.alerts[0]).toMatchObject({
+      severity: "CRITICAL",
+      rule: "controller_bound_target_set",
+      detail: {
+        selector: create.selector,
+        selectorName: "LegalBodyFactory.createLegalBody",
+        unpinned: true,
+      },
+    });
+  });
+
+  test("a controller selector is named too", async () => {
+    const pinned = CONTROLLER_GRANTED_SELECTORS.find(
+      (g) => g.name === "IdentityRegistry.setAgentWallet",
+    )!;
+    const out = await evaluateLog(
+      boundTargetLog(pinned.selector, ADDR.registry),
+      ruleContext(),
+      ruleDeps(),
+    );
+    expect(out.alerts[0]?.detail).toMatchObject({
+      selectorName: "IdentityRegistry.setAgentWallet",
+      unpinned: false,
+    });
+  });
+
+  test("an unknown selector keeps the bare hex", async () => {
+    const unknown = toFunctionSelector("function upgradeTo(address)");
+    const out = await evaluateLog(boundTargetLog(unknown, zeroAddress), ruleContext(), ruleDeps());
+    expect(out.alerts[0]?.detail).toMatchObject({ selectorName: unknown, unpinned: true });
   });
 });

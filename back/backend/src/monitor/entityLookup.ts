@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import Database from "better-sqlite3";
+import { isAddress } from "viem";
 import { EntityLookupError } from "./errors";
+import type { SeenLegalBody } from "./store";
 
 /**
  * READ-ONLY view of the main legalbody.db.
@@ -8,8 +10,8 @@ import { EntityLookupError } from "./errors";
  * Opened with `{ readonly: true, fileMustExist: true }` — not as a convention but as an
  * enforcement: better-sqlite3 rejects every write statement on such a handle, so no future edit to
  * this process can accidentally mutate the money-path database. The API owns that schema; the
- * monitor only asks it three questions: which treasuries are ours, which agentIds are ours, and
- * what operator/guardian/manager did we record for them.
+ * monitor only asks it four questions: which treasuries are ours, which agentIds are ours, what
+ * operator/guardian/manager did we record for them, and which legal bodies have we deployed.
  *
  * The API writes in WAL mode, so a reader never blocks a writer and vice versa. A busy timeout
  * still guards the checkpoint window; anything longer surfaces as EntityLookupError, which the
@@ -40,9 +42,22 @@ export interface MonitoredEntity {
   oaManifestPendingVersion: number | null;
 }
 
+/** A legal body the API recorded (`legal_bodies`), as the monitor watches it. */
+export interface LegalBodyRecord {
+  /** the deployed body's address */
+  address: string;
+  /** decimal string; null until the body is linked to an identity. */
+  agentId: string | null;
+  guardian: string;
+  /** the LegalBodyFactory that created the body */
+  factory: string;
+}
+
 export interface EntityLookup {
   /** Every entity with an on-chain footprint (treasury or agentId). */
   all(): MonitoredEntity[];
+  /** Every legal body with a deployed address. */
+  legalBodies(): LegalBodyRecord[];
   close(): void;
 }
 
@@ -69,6 +84,12 @@ const SELECT_ALL = `
          oa_manifest_pending_hash, oa_manifest_pending_version
   FROM entities
   WHERE treasury IS NOT NULL OR agent_id IS NOT NULL
+  ORDER BY rowid`;
+
+const SELECT_LEGAL_BODIES = `
+  SELECT body_address, agent_id, guardian, factory
+  FROM legal_bodies
+  WHERE body_address IS NOT NULL
   ORDER BY rowid`;
 
 /**
@@ -101,13 +122,14 @@ function isSchemaMismatch(err: unknown): boolean {
 export function assertLookupSchema(lookup: EntityLookup): void {
   try {
     lookup.all();
+    lookup.legalBodies();
   } catch (err) {
     if (err instanceof EntityLookupError && err.schemaMismatch)
       throw new EntityLookupError(
         [
           `monitor: the main database is missing columns this monitor reads (${err.message}).`,
           "DEPLOY ORDER: restart the API (which migrates the schema on boot) BEFORE the monitor.",
-          "Refusing to start blind — a running monitor with an empty entity set watches no treasury and no LegalManager proxy.",
+          "Refusing to start blind — a running monitor with an empty entity set watches no treasury, no LegalManager proxy and no legal body.",
         ].join(" "),
         { cause: err, schemaMismatch: true },
       );
@@ -175,6 +197,31 @@ export class SqliteEntityLookup implements EntityLookup {
     }));
   }
 
+  legalBodies(): LegalBodyRecord[] {
+    let rows: {
+      body_address: string;
+      agent_id: string | null;
+      guardian: string;
+      factory: string;
+    }[];
+    try {
+      rows = this.connect().prepare(SELECT_LEGAL_BODIES).all() as typeof rows;
+    } catch (err) {
+      // Same recovery as `all()`: drop the handle so the next tick reconnects.
+      this.close();
+      throw new EntityLookupError(
+        `monitor: legal body lookup failed against ${this.path}: ${(err as Error).message}`,
+        { cause: err, schemaMismatch: isSchemaMismatch(err) },
+      );
+    }
+    return rows.map((r) => ({
+      address: r.body_address,
+      agentId: r.agent_id,
+      guardian: r.guardian,
+      factory: r.factory,
+    }));
+  }
+
   close(): void {
     try {
       this.db?.close();
@@ -205,4 +252,66 @@ export function indexEntities(entities: readonly MonitoredEntity[]): EntityIndex
     if (e.proxy) byProxy.set(e.proxy.toLowerCase(), e);
   }
   return { byTreasury, byAgentId, byProxy };
+}
+
+/** One watched legal body, merged from the API's record and the monitor's own sightings. */
+export interface WatchedLegalBody {
+  /** lowercased */
+  address: string;
+  /** lowercased; null when no source holds a valid factory address for this body. */
+  factory: string | null;
+  agentId: string | null;
+  guardian: string | null;
+}
+
+function lowerAddressOrNull(v: string | null | undefined): string | null {
+  return v && isAddress(v, { strict: false }) ? v.toLowerCase() : null;
+}
+
+/**
+ * The legal-body watch set: the union of the API's `legal_bodies` rows and the monitor's own
+ * `legal_bodies_seen`, keyed by lowercased body address. Either source alone would leave a gap:
+ * the API's record misses a body created while it was down or on a factory it no longer names,
+ * and the monitor's sightings miss a body created before it started. Where both know a body, the
+ * API's row comes first and a sighting only fills in a factory the row lacks.
+ */
+export function indexLegalBodies(
+  recorded: readonly LegalBodyRecord[],
+  seen: readonly SeenLegalBody[],
+): Map<string, WatchedLegalBody> {
+  const out = new Map<string, WatchedLegalBody>();
+  const add = (b: WatchedLegalBody | null) => {
+    if (!b) return;
+    const existing = out.get(b.address);
+    if (!existing) out.set(b.address, b);
+    else if (existing.factory === null && b.factory !== null)
+      out.set(b.address, { ...existing, factory: b.factory });
+  };
+  for (const r of recorded) {
+    const address = lowerAddressOrNull(r.address);
+    add(
+      address
+        ? {
+            address,
+            factory: lowerAddressOrNull(r.factory),
+            agentId: r.agentId,
+            guardian: r.guardian,
+          }
+        : null,
+    );
+  }
+  for (const b of seen) {
+    const address = lowerAddressOrNull(b.address);
+    add(
+      address
+        ? {
+            address,
+            factory: lowerAddressOrNull(b.factory),
+            agentId: b.agentId,
+            guardian: b.guardian,
+          }
+        : null,
+    );
+  }
+  return out;
 }
