@@ -43,7 +43,7 @@ import { managerAccount } from "./clients";
  *
  * Cost: the first boot against an old testnet controller replays months of blocks at the public
  * RPC's window size (PUBLIC_RPC_LOG_RANGE, with sub-second blocks) and may take many minutes. A
- * rate-limited window is retried with backoff rather than failing the boot, and `pnpm
+ * rate-limited window is retried with backoff rather than failing the boot, and `npm run
  * ledger:prefill` runs this same check on its own so the ledger can be built while the previous
  * release is still serving. Every later boot resumes from the stored cursor and reads only the
  * blocks since the last boot. A fresh mainnet controller is one window.
