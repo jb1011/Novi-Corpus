@@ -69,11 +69,12 @@ shorter delay applies. Arc testnet keeps no bound.
 ## Environment
 
 Type the deployer key into the shell from the password manager. Never paste it into a chat, a
-ticket or a file under version control.
+ticket or a file under version control. The `read -rs` line waits for the key: type or paste it
+and press Enter. The shell does not echo it, and it never lands in the shell history.
 
 ```bash
 cd back
-export PRIVATE_KEY=<deployer key>
+read -rs PRIVATE_KEY && export PRIVATE_KEY
 export CHAIN_ID=5042
 export IDENTITY_REGISTRY=0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
 export CONTROLLER_ADMIN=<admin address>
@@ -94,9 +95,8 @@ export CONTROLLER_EXECUTOR=<executor address>
 
 2. If it prints a refusal message, fix the input it names and run step 1 again.
 3. Read the output. It must show the `Inputs:` block, `All post-conditions hold`, the addresses
-   block and `SIMULATION COMPLETE`. Check that the key in the shell is the throwaway deployer, with
-   `cast wallet address --private-key $PRIVATE_KEY`, and that it is neither the admin nor the
-   executor.
+   block and `SIMULATION COMPLETE`. Read the `deployer (from PRIVATE_KEY)` line of the `Inputs:`
+   block: it must be the throwaway deployer, and neither the admin nor the executor.
 4. Compare the `CONTROLLER_ADMIN` line of the `Inputs:` block with the address on the hardware
    wallet's screen, character by character. Do not broadcast until they match. A typo in the
    executor is recoverable with a role change; a typo in the admin means a redeploy, because no
