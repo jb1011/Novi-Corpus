@@ -185,14 +185,15 @@ Then check on the explorer:
 
 1. Fill `back/addresses.arc-mainnet.json` from the printed block: `legalManagerImpl`,
    `legalBodyFactory`, `noviController`. Fill `rpc`, `explorer` and `updatedAt` too.
-2. Take `controllerDeployBlock` from the controller's receipt, not from the printed block. The
-   printed value is the simulated block, which is never later than the real one.
+2. Fill `controllerDeployTx` and `controllerDeployBlock` from the controller's receipt. The printed
+   block leaves both empty: the simulation knows neither the hash nor the block the transaction
+   lands in.
 
    ```bash
    TX=$(jq -r '.transactions[] | select(.contractName=="NoviController") | .hash' \
      broadcast/DeployMinimal.s.sol/5042/run-latest.json)
-   echo $TX
-   cast receipt $TX blockNumber --rpc-url <arc mainnet rpc url>
+   echo $TX                                                         # controllerDeployTx
+   cast receipt $TX blockNumber --rpc-url <arc mainnet rpc url>     # controllerDeployBlock
    ```
 
 3. Set the backend environment for the mainnet box. Leave `FACTORY_ADDRESS` unset: there is no
@@ -229,8 +230,6 @@ Then check on the explorer:
    Put these variables in the box's environment before you deploy the backend release that needs
    them. Every backend process refuses to start when `CONTROLLER_ADDRESS` is set without its
    deploy transaction and block.
-4. Keep the controller's deployment transaction hash and block next to the addresses in the
-   addresses file.
 
 ## Testnet dress rehearsal
 

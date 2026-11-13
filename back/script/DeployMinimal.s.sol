@@ -216,11 +216,13 @@ contract DeployMinimal is Script {
         console2.log(string.concat('    "legalManagerImpl": "', vm.toString(address(d.implementation)), '",'));
         console2.log(string.concat('    "legalBodyFactory": "', vm.toString(address(d.factory)), '",'));
         console2.log(string.concat('    "noviController": "', vm.toString(address(d.controller)), '",'));
-        console2.log(string.concat('    "controllerDeployBlock": "', vm.toString(d.controllerDeployBlock), '"'));
+        console2.log('    "controllerDeployTx": "",');
+        console2.log('    "controllerDeployBlock": ""');
         console2.log("  },");
         console2.log(string.concat('  "reused": { "identityRegistry": "', vm.toString(address(d.factory.identityRegistry())), '" }'));
         console2.log("}");
-        console2.log("controllerDeployBlock is the simulated block, a lower bound; take the exact block");
-        console2.log("from the controller's receipt in the broadcast log after --broadcast.");
+        console2.log("Fill controllerDeployTx and controllerDeployBlock from the NoviController receipt in");
+        console2.log(string.concat("broadcast/DeployMinimal.s.sol/", vm.toString(block.chainid), "/run-latest.json after --broadcast."));
+        console2.log("Simulated controller block, a lower bound only:", d.controllerDeployBlock);
     }
 }
