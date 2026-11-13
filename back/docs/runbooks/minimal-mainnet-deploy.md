@@ -1,6 +1,6 @@
 # Runbook — Minimal Novi mainnet deploy
 
-Last revised: 2026-11-10
+Last revised: 2026-11-13
 
 Script: `back/script/DeployMinimal.s.sol` · tests: `back/test/DeployMinimal.t.sol` (local) and
 `back/test/DeployMinimalFork.t.sol` (live Arc testnet) · addresses: `back/addresses.arc-mainnet.json`.
@@ -61,7 +61,25 @@ shorter delay applies. Arc testnet keeps no bound.
 4. **Build the commit you deploy.** From a clean checkout, run `forge build` in `back/` with the
    repo's own `foundry.toml`. Do not set `FOUNDRY_EVM_VERSION`: the repo pins its deploy EVM
    version there, and another version produces different bytecode from the one the tests ran on.
-5. **Have a backend build with the Minimal-only boot mode.** The mainnet box runs the legal-body
+5. **Rehearse on Arc testnet with this build.** Run the same script on Arc testnet first, with
+   fresh keys for all three roles, and follow every section of this runbook with these values.
+   This is a gate, not a nicety: the fork job runs on the shanghai EVM while `foundry.toml`
+   deploys paris, so the rehearsal is the only real broadcast of the paris build against the live
+   registry.
+
+   ```bash
+   export CHAIN_ID=5042002
+   export IDENTITY_REGISTRY=0x8004A818BFB912233c491871b3d84c89A494BD9e
+   export ARC_TESTNET_RPC_URL=<arc testnet rpc url>   # foundry.toml's arc_testnet endpoint reads it
+   forge script script/DeployMinimal.s.sol --rpc-url arc_testnet               # dry run
+   forge script script/DeployMinimal.s.sol --rpc-url arc_testnet --broadcast
+   ```
+
+   The rehearsal deploys a new controller, factory and implementation at new addresses. It never
+   calls the testnet controller the testnet box uses, which stays untouched, as do its factory and
+   its bodies. Record the rehearsal addresses apart from the ones in use, and write down every
+   deviation from this runbook so the mainnet run does not meet it for the first time.
+6. **Have a backend build with the Minimal-only boot mode.** The mainnet box runs the legal-body
    product only, so its configuration names a controller, a legal-body factory and the
    controller's deployment transaction, and no full-product factory. Confirm the backend release
    you deploy documents `CONTROLLER_DEPLOY_TX` and `CONTROLLER_DEPLOY_BLOCK` in its `.env.example`
@@ -230,24 +248,6 @@ Then check on the explorer:
    Put these variables in the box's environment before you deploy the backend release that needs
    them. Every backend process refuses to start when `CONTROLLER_ADDRESS` is set without its
    deploy transaction and block.
-
-## Testnet dress rehearsal
-
-Run the same script on Arc testnet before mainnet, with fresh keys for all three roles, and follow
-every section of this runbook with these values:
-
-```bash
-export CHAIN_ID=5042002
-export IDENTITY_REGISTRY=0x8004A818BFB912233c491871b3d84c89A494BD9e
-export ARC_TESTNET_RPC_URL=<arc testnet rpc url>   # foundry.toml's arc_testnet endpoint reads it
-forge script script/DeployMinimal.s.sol --rpc-url arc_testnet               # dry run
-forge script script/DeployMinimal.s.sol --rpc-url arc_testnet --broadcast
-```
-
-The rehearsal deploys a new controller, factory and implementation at new addresses. It never
-calls the testnet controller the testnet box uses, which stays untouched, as do its factory and
-its bodies. Record the rehearsal addresses apart from the ones in use, and write down every
-deviation from this runbook so the mainnet run does not meet it for the first time.
 
 ## Rollback
 
