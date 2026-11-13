@@ -9,8 +9,10 @@ import {
   toHex,
 } from "viem";
 import { noviControllerAbi } from "../../abis/generated";
-import { MAX_LOG_RANGE, chunkRange, isRangeTooLargeError, shrinkRange } from "../../monitor/scan";
+import type { Config } from "../../config/env";
+import { chunkRange, isRangeTooLargeError, shrinkRange } from "../../monitor/scan";
 import { unreadable } from "./bootVerify";
+import { managerAccount } from "./clients";
 
 /**
  * Boot check: nobody holds the controller's WILDCARD_ROLE.
@@ -40,10 +42,44 @@ import { unreadable } from "./bootVerify";
  *     granted it. Any read failure is "could not verify", never a pass.
  *
  * Cost: the first boot against an old testnet controller replays months of blocks at the public
- * RPC's window size (a few thousand blocks per query on Arc's public endpoint, with sub-second
- * blocks) and may take many minutes. Every later boot resumes from the stored cursor and reads only
- * the blocks since the last boot. A fresh mainnet controller is one window.
+ * RPC's window size (PUBLIC_RPC_LOG_RANGE, with sub-second blocks) and may take many minutes. A
+ * rate-limited window is retried with backoff rather than failing the boot, and `pnpm
+ * ledger:prefill` runs this same check on its own so the ledger can be built while the previous
+ * release is still serving. Every later boot resumes from the stored cursor and reads only the
+ * blocks since the last boot. A fresh mainnet controller is one window.
  */
+
+/**
+ * The first window size, in blocks: the cap of Arc's public RPC on eth_getLogs. Starting wider
+ * would spend the first queries of every window on range refusals. A node with a smaller cap is
+ * still handled by the shrink-on-refusal loop.
+ */
+export const PUBLIC_RPC_LOG_RANGE = 10_000n;
+
+/** Waits before each retry of a rate-limited window, in milliseconds; one retry per entry. */
+export const RATE_LIMIT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 16_000] as const;
+
+/**
+ * Whether an RPC failure is the node rate limiting us: an HTTP 429 anywhere in the cause chain
+ * (viem's HttpRequestError carries it as `status`), or a message naming a rate limit. A
+ * rate-limited read says nothing about the chain, so it is retried rather than refused.
+ */
+export function isRateLimitError(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && depth < 10; depth++) {
+    if ((e as { status?: unknown }).status === 429) return true;
+    const message = e instanceof Error ? e.message : String(e);
+    if (/\b429\b|rate.?limit|too many requests/i.test(message)) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+const realSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/** The boot log line for a passed check; the API and `ledger:prefill` print the same words. */
+export function wildcardLedgerLogLine(ledger: WildcardLedgerResult): string {
+  return `[boot] WILDCARD_ROLE verified on-chain: held by neither the executor nor the default admin, and no holder in the role history through block ${ledger.toBlock}${ledger.fromBlock !== undefined ? ` (read blocks ${ledger.fromBlock} to ${ledger.toBlock} in ${ledger.windows} window(s))` : ""}`;
+}
 
 /** One current holder of the wildcard role, with the grant that gave it the role. */
 export interface WildcardHolder {
@@ -141,7 +177,10 @@ export async function assertNoWildcardHolder(
     deployBlock: bigint | number | undefined;
     executor: Address;
   },
+  /** Injectable for tests, so a backoff costs no wall-clock time. */
+  io: { sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<WildcardLedgerResult> {
+  const sleep = io.sleep ?? realSleep;
   if (!p.deployTx)
     throw new Error(
       `boot: CONTROLLER_DEPLOY_TX is unset — the WILDCARD_ROLE check on CONTROLLER_ADDRESS ${p.controller} replays the controller's role history from the transaction that created it`,
@@ -216,13 +255,15 @@ export async function assertNoWildcardHolder(
   }
 
   const firstBlock = from <= latest ? from : undefined;
-  let range = MAX_LOG_RANGE;
+  let range = PUBLIC_RPC_LOG_RANGE;
   let windows = 0;
+  let rateLimitRetries = 0;
   while (from <= latest) {
     const window = chunkRange(from, latest, range)[0]!;
     let logs: Awaited<ReturnType<typeof readWindow>>;
     try {
       logs = await readWindow(publicClient, p.controller, wildcard, window.from, window.to);
+      rateLimitRetries = 0;
     } catch (err) {
       if (isRangeTooLargeError(err)) {
         const smaller = shrinkRange(range);
@@ -230,6 +271,12 @@ export async function assertNoWildcardHolder(
           range = smaller;
           continue; // the same window again, narrower
         }
+      }
+      const backoff = RATE_LIMIT_BACKOFF_MS[rateLimitRetries];
+      if (backoff !== undefined && isRateLimitError(err)) {
+        rateLimitRetries++;
+        await sleep(backoff);
+        continue; // the same window again, after the node has had time to recover
       }
       throw unreadable(
         `the WILDCARD_ROLE history of CONTROLLER_ADDRESS ${p.controller} (blocks ${window.from} to ${window.to})`,
@@ -340,6 +387,35 @@ function getFullBlock(publicClient: PublicClient, blockNumber: bigint) {
 /** Raw receipts (hex fields, as the node sends them); null when the node has none for the block. */
 function getBlockReceipts(publicClient: PublicClient, blockNumber: bigint) {
   return publicClient.request({ method: "eth_getBlockReceipts", params: [toHex(blockNumber)] });
+}
+
+/**
+ * The check as `ledger:prefill` runs it: from the configuration alone, with the executor address
+ * derived from PLATFORM_PRIVATE_KEY exactly as the API derives it. Returns the API's log line.
+ */
+export async function prefillWildcardLedger(
+  cfg: Config,
+  publicClient: PublicClient,
+  db: Database.Database,
+  io: { sleep?: (ms: number) => Promise<void> } = {},
+): Promise<string> {
+  if (!cfg.controllerAddress)
+    throw new Error(
+      "ledger:prefill: CONTROLLER_ADDRESS is unset — the WILDCARD_ROLE ledger belongs to a controller, and this deployment has none",
+    );
+  const ledger = await assertNoWildcardHolder(
+    publicClient,
+    db,
+    {
+      controller: cfg.controllerAddress,
+      chainId: cfg.chainId,
+      deployTx: cfg.controllerDeployTx,
+      deployBlock: cfg.controllerDeployBlock,
+      executor: managerAccount(cfg).address,
+    },
+    io,
+  );
+  return wildcardLedgerLogLine(ledger);
 }
 
 /** Both role events for one window, in block and log-index order. */

@@ -14,11 +14,17 @@ import {
   type Address,
   BlockNotFoundError,
   type Hex,
+  HttpRequestError,
   type PublicClient,
   getContractAddress,
 } from "viem";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { assertNoWildcardHolder } from "../../../src/adapters/arc/wildcardLedger";
+import {
+  assertNoWildcardHolder,
+  isRateLimitError,
+  prefillWildcardLedger,
+} from "../../../src/adapters/arc/wildcardLedger";
+import type { Config } from "../../../src/config/env";
 import { migrate, openDatabase } from "../../../src/persistence/db";
 
 /** The account that broadcast the controller's deployment, and its nonce at the time. */
@@ -77,6 +83,8 @@ interface World {
   maxRange?: bigint;
   /** A getLogs whose fromBlock is this block fails with a transport error. */
   failAtFrom?: bigint;
+  /** The window starting at `from` is answered with HTTP 429 for its first `times` attempts. */
+  rateLimit?: { from: bigint; times: number };
 }
 
 const creation: BlockTx = { hash: DEPLOY_TX, to: null, from: DEPLOYER, nonce: DEPLOY_NONCE };
@@ -84,6 +92,7 @@ const creation: BlockTx = { hash: DEPLOY_TX, to: null, from: DEPLOYER, nonce: DE
 /** A PublicClient-shaped object answering from a scripted chain, recording every log query. */
 function client(world: World) {
   const queries: { event: string; fromBlock: bigint; toBlock: bigint; role: Hex }[] = [];
+  let rateLimitedAttempts = 0;
   const readContract = vi.fn(
     async ({ functionName, args }: { functionName: string; args?: unknown[] }) => {
       if (functionName === "WILDCARD_ROLE") return WILDCARD;
@@ -145,6 +154,16 @@ function client(world: World) {
       if (q.address !== CONTROLLER) throw new Error(`unexpected address ${q.address}`);
       if (world.failAtFrom !== undefined && q.fromBlock === world.failAtFrom)
         throw new Error("socket hang up");
+      if (world.rateLimit && q.fromBlock === world.rateLimit.from) {
+        // One attempt is the pair of queries for one window; count it on the first of the two.
+        if (q.event.name === "RoleGranted") rateLimitedAttempts++;
+        if (rateLimitedAttempts <= world.rateLimit.times)
+          throw new HttpRequestError({
+            url: "https://rpc.example/arc",
+            status: 429,
+            details: "Too Many Requests",
+          });
+      }
       if (world.maxRange !== undefined && q.toBlock - q.fromBlock + 1n > world.maxRange)
         throw new Error("requested range too large");
       return (world.logs ?? [])
@@ -173,7 +192,16 @@ function client(world: World) {
     getBlockNumber,
     getLogs,
   } as unknown as PublicClient;
-  return { pc, queries, getLogs, getBlock, request, getTransactionReceipt, getTransaction };
+  return {
+    pc,
+    queries,
+    getLogs,
+    getBlock,
+    request,
+    getTransactionReceipt,
+    getTransaction,
+    rateLimitedAttempts: () => rateLimitedAttempts,
+  };
 }
 
 const params = {
@@ -286,16 +314,17 @@ test("a holder found on one boot is still refused on the next, from the stored s
 test("a range-too-large refusal halves the window and retries it; the final cursor is the latest block", async () => {
   const { pc, queries } = client({
     latest: 100_000n,
-    maxRange: 22_500n,
+    maxRange: 2_500n,
     logs: [grant(STRANGER, 70_000n), revoke(STRANGER, 80_000n)],
   });
   await assertNoWildcardHolder(pc, db, { ...params, deployBlock: 0n });
   const granted = queries.filter((q) => q.event === "RoleGranted");
-  // 90,000 refused, 45,000 refused, then 22,500-block windows from the same first block.
+  // The public RPC's 10,000-block cap first; 10,000 refused, 5,000 refused, then 2,500-block
+  // windows from the same first block.
   expect(granted.slice(0, 3).map((q) => q.toBlock - q.fromBlock + 1n)).toEqual([
-    90_000n,
-    45_000n,
-    22_500n,
+    10_000n,
+    5_000n,
+    2_500n,
   ]);
   expect(granted.slice(0, 3).map((q) => q.fromBlock)).toEqual([0n, 0n, 0n]);
   expect(granted.at(-1)?.toBlock).toBe(100_000n);
@@ -463,12 +492,12 @@ test("the default admin holding the wildcard role refuses too", async () => {
 test("an RPC failure is 'could not verify', and the cursor stays at the last complete window", async () => {
   const { pc } = client({
     latest: 200_000n,
-    failAtFrom: 90_000n, // the second 90,000-block window
+    failAtFrom: 10_000n, // the second 10,000-block window
   });
   const err = await assertNoWildcardHolder(pc, db, { ...params, deployBlock: 0n }).catch((e) => e);
-  expect(err.message).toMatch(/could not verify .*WILDCARD_ROLE history.*blocks 90000 to 179999/s);
+  expect(err.message).toMatch(/could not verify .*WILDCARD_ROLE history.*blocks 10000 to 19999/s);
   expect(err.message).not.toMatch(/hold WILDCARD_ROLE/);
-  expect(stored().cursor_block).toBe(89_999);
+  expect(stored().cursor_block).toBe(9_999);
 });
 
 test("a missing CONTROLLER_DEPLOY_TX refuses by name", async () => {
@@ -481,4 +510,69 @@ test("a missing CONTROLLER_DEPLOY_BLOCK refuses by name", async () => {
   await expect(
     assertNoWildcardHolder(client({ latest: 1n }).pc, db, { ...params, deployBlock: undefined }),
   ).rejects.toThrow(/CONTROLLER_DEPLOY_BLOCK is unset/);
+});
+
+test("a rate-limited window is retried after a backoff, and the cursor never moves past it early", async () => {
+  const c = client({ latest: 25_000n, rateLimit: { from: 10_000n, times: 1 } });
+  const cursorsAtSleep: number[] = [];
+  const sleep = vi.fn(async (_ms: number) => {
+    cursorsAtSleep.push(stored().cursor_block);
+  });
+  const result = await assertNoWildcardHolder(c.pc, db, { ...params, deployBlock: 0n }, { sleep });
+  expect(result).toEqual({ fromBlock: 0n, toBlock: 25_000n, windows: 3 });
+  expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([1_000]);
+  // While waiting, the ledger held only the window read in full before the rate limit.
+  expect(cursorsAtSleep).toEqual([9_999]);
+  expect(c.rateLimitedAttempts()).toBe(2);
+  expect(stored().cursor_block).toBe(25_000);
+});
+
+test("a rate limit that does not clear refuses as 'could not verify' after five retries", async () => {
+  const c = client({ latest: 25_000n, rateLimit: { from: 10_000n, times: 99 } });
+  const sleep = vi.fn(async (_ms: number) => {});
+  const err = await assertNoWildcardHolder(
+    c.pc,
+    db,
+    { ...params, deployBlock: 0n },
+    { sleep },
+  ).catch((e) => e);
+  expect(err.message).toMatch(/could not verify .*WILDCARD_ROLE history.*blocks 10000 to 19999/s);
+  expect(sleep.mock.calls.map(([ms]) => ms)).toEqual([1_000, 2_000, 4_000, 8_000, 16_000]);
+  // The first attempt plus one per backoff.
+  expect(c.rateLimitedAttempts()).toBe(6);
+  expect(stored().cursor_block).toBe(9_999);
+});
+
+test("ledger:prefill runs the boot check from the configuration and returns the API's log line", async () => {
+  const cfg = {
+    controllerAddress: CONTROLLER,
+    chainId: CHAIN_ID,
+    controllerDeployTx: DEPLOY_TX,
+    controllerDeployBlock: Number(DEPLOY_BLOCK),
+    platformPrivateKey: `0x${"ab".repeat(32)}`,
+  } as Config;
+  const line = await prefillWildcardLedger(cfg, client({ latest: 500n }).pc, db);
+  expect(line).toBe(
+    "[boot] WILDCARD_ROLE verified on-chain: held by neither the executor nor the default admin, and no holder in the role history through block 500 (read blocks 10 to 500 in 1 window(s))",
+  );
+  expect(stored().cursor_block).toBe(500);
+});
+
+test("ledger:prefill refuses on a deployment with no controller", async () => {
+  await expect(
+    prefillWildcardLedger({ chainId: CHAIN_ID } as Config, client({ latest: 1n }).pc, db),
+  ).rejects.toThrow(/CONTROLLER_ADDRESS is unset/);
+});
+
+test("rate limiting is recognised by HTTP status anywhere in the cause chain, or by its wording", () => {
+  const http429 = new HttpRequestError({ url: "https://rpc.example/arc", status: 429 });
+  expect(isRateLimitError(http429)).toBe(true);
+  expect(isRateLimitError(new Error("request failed", { cause: http429 }))).toBe(true);
+  expect(isRateLimitError(new Error("Too Many Requests"))).toBe(true);
+  expect(isRateLimitError(new Error("rate limit exceeded, retry later"))).toBe(true);
+  expect(isRateLimitError(new Error("socket hang up"))).toBe(false);
+  expect(isRateLimitError(new Error("requested range too large"))).toBe(false);
+  expect(
+    isRateLimitError(new HttpRequestError({ url: "https://rpc.example/arc", status: 503 })),
+  ).toBe(false);
 });

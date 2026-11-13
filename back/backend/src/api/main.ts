@@ -22,7 +22,7 @@ import {
 } from "../adapters/arc/clients";
 import { LegalBodyChain } from "../adapters/arc/legalBodyChain";
 import { readUsdcDomain } from "../adapters/arc/usdcToken";
-import { assertNoWildcardHolder } from "../adapters/arc/wildcardLedger";
+import { assertNoWildcardHolder, wildcardLedgerLogLine } from "../adapters/arc/wildcardLedger";
 import { withCircleRateLimit } from "../adapters/circle/circleRateLimit";
 import {
   activateCircleSca,
@@ -237,9 +237,7 @@ async function main() {
       deployBlock: cfg.controllerDeployBlock,
       executor: executor.address,
     });
-    console.log(
-      `[boot] WILDCARD_ROLE verified on-chain: held by neither the executor nor the default admin, and no holder in the role history through block ${ledger.toBlock}${ledger.fromBlock !== undefined ? ` (read blocks ${ledger.fromBlock} to ${ledger.toBlock} in ${ledger.windows} window(s))` : ""}`,
-    );
+    console.log(wildcardLedgerLogLine(ledger));
   } else if (factoryAddress) {
     await assertLegacyFactoryOwner(publicClient, {
       factory: factoryAddress,
