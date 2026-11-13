@@ -194,6 +194,11 @@ const EnvSchema = z.object({
    *  boot checks that its receipt created exactly that contract, and replays the controller's
    *  WILDCARD_ROLE grants and revokes from its block to prove nobody holds the role. */
   CONTROLLER_DEPLOY_TX: txHashSchema.optional(),
+  /** The block that holds CONTROLLER_DEPLOY_TX. Required whenever CONTROLLER_ADDRESS is set: boot
+   *  verifies the deploy transaction through this block and its receipts rather than by the
+   *  transaction's hash, because public Arc nodes stop serving receipt-by-hash for old transactions
+   *  while still serving blocks. */
+  CONTROLLER_DEPLOY_BLOCK: z.coerce.number().int().positive().optional(),
   /** Address the ENS apex (`ENS_PARENT_NAME`) resolves to. Explicit BY DESIGN: in controller mode
    *  the platform manager address becomes a contract that can neither hold nor be paid, so the apex
    *  must never inherit it by accident. Unset = today's behavior (the platform signing key). */
@@ -822,8 +827,11 @@ export interface Config {
    *  Requires at least one of `factoryAddress` and `legalBodyFactory`. */
   controllerAddress?: Address;
   /** The hash of the transaction that created the controller; set whenever `controllerAddress` is.
-   *  Boot verifies the receipt's contract address and starts the WILDCARD_ROLE ledger at its block. */
+   *  Boot verifies, through `controllerDeployBlock`, that it created exactly the controller. */
   controllerDeployTx?: Hex;
+  /** The block that holds `controllerDeployTx`; set whenever `controllerAddress` is. Boot finds the
+   *  transaction in this block, checks its receipt there, and starts the WILDCARD_ROLE ledger at it. */
+  controllerDeployBlock?: number;
   /** LegalBodyFactory address; undefined = the legal-body feature is off. */
   legalBodyFactory?: Address;
   /** The legal-body flow's settings (see LEGAL_BODY_FLOW_DEFAULTS). Optional in the TYPE only, for
@@ -1317,6 +1325,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     factoryAddress: e.FACTORY_ADDRESS,
     controllerAddress: e.CONTROLLER_ADDRESS,
     controllerDeployTx: e.CONTROLLER_DEPLOY_TX,
+    controllerDeployBlock: e.CONTROLLER_DEPLOY_BLOCK,
     legalBodyFactory: e.LEGAL_BODY_FACTORY_ADDRESS,
     legalBodyFlow: {
       amendmentDelaySeconds: e.LEGAL_BODY_AMENDMENT_DELAY_SECONDS,
@@ -1997,13 +2006,18 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       "Invalid config: CONTROLLER_ADDRESS is set but neither FACTORY_ADDRESS nor LEGAL_BODY_FACTORY_ADDRESS is — controller mode requires a factory whose owner is the controller to be named explicitly",
     );
   }
-  // The deploy transaction anchors the boot's WILDCARD_ROLE check: it proves which contract the
-  // controller is and where its role history starts. Without it there is no first block to replay
-  // from, and a holder granted before any block we picked would go unseen.
-  if (cfg.controllerAddress && !cfg.controllerDeployTx) {
-    throw new Error(
-      "Invalid config: CONTROLLER_ADDRESS is set but CONTROLLER_DEPLOY_TX is missing — boot proves nobody holds the controller's WILDCARD_ROLE by replaying its role history from the transaction that created it",
-    );
+  // The deploy transaction and its block anchor the boot's WILDCARD_ROLE check: together they prove
+  // which contract the controller is and where its role history starts. Without them there is no
+  // first block to replay from, and a holder granted before any block we picked would go unseen.
+  if (cfg.controllerAddress) {
+    const missing = [
+      cfg.controllerDeployTx ? undefined : "CONTROLLER_DEPLOY_TX",
+      cfg.controllerDeployBlock ? undefined : "CONTROLLER_DEPLOY_BLOCK",
+    ].filter((name) => name !== undefined);
+    if (missing.length > 0)
+      throw new Error(
+        `Invalid config: CONTROLLER_ADDRESS is set but ${missing.join(" and ")} ${missing.length > 1 ? "are" : "is"} missing — boot proves nobody holds the controller's WILDCARD_ROLE by replaying its role history from the transaction that created it, found in its block`,
+      );
   }
   if (cfg.legalBodyFactory && !cfg.controllerAddress) {
     throw new Error(

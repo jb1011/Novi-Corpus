@@ -93,6 +93,7 @@ test("controller mode: the AgentWalletSet signature commits to owner == CONTROLL
     ...env,
     CONTROLLER_ADDRESS: CONTROLLER,
     CONTROLLER_DEPLOY_TX: `0x${"ab".repeat(32)}`,
+    CONTROLLER_DEPLOY_BLOCK: "10",
   });
   const manager = platformManagerAddress(cfg); // what both onboard doors force into roles.manager
   expect(manager).toBe(cfg.controllerAddress);
@@ -205,6 +206,7 @@ test("a controller-managed agent threads the CONTROLLER as its manager everywher
     ...env,
     CONTROLLER_ADDRESS: CONTROLLER,
     CONTROLLER_DEPLOY_TX: `0x${"ab".repeat(32)}`,
+    CONTROLLER_DEPLOY_BLOCK: "10",
   });
   const manager = platformManagerAddress(cfg);
   const { arc, signer } = makeFakeArc();

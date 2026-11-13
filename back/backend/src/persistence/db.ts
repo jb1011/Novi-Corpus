@@ -1795,11 +1795,15 @@ export function migrate(db: Database.Database): void {
     -- The controller's WILDCARD_ROLE holders, rebuilt from its RoleGranted/RoleRevoked logs and
     -- kept here so each boot resumes from cursor_block instead of replaying from the deploy block.
     -- holders_json is a JSON array of { account, grantedTx, grantedBlock }; addresses lowercase.
+    -- deploy_tx and deploy_block are the controller's creation, verified once on chain and kept so
+    -- later boots skip that check and a changed CONTROLLER_DEPLOY_TX is caught, never overwritten.
     CREATE TABLE IF NOT EXISTS controller_role_ledger (
       controller   TEXT    NOT NULL,
       chain_id     INTEGER NOT NULL,
       cursor_block INTEGER NOT NULL,
       holders_json TEXT    NOT NULL,
+      deploy_tx    TEXT,
+      deploy_block INTEGER,
       PRIMARY KEY (controller, chain_id)
     );
 
@@ -2312,6 +2316,16 @@ export function migrate(db: Database.Database): void {
   db.exec(
     "CREATE INDEX IF NOT EXISTS idx_payments_ledger_entity ON payments_ledger(entity_key, status)",
   );
+
+  // The controller's verified creation, stored with the WILDCARD_ROLE ledger. NULL on a row written
+  // before this change: the next boot verifies the deploy transaction on chain and fills both in.
+  const roleLedgerCols = (
+    db.prepare("PRAGMA table_info(controller_role_ledger)").all() as { name: string }[]
+  ).map((c) => c.name);
+  if (!roleLedgerCols.includes("deploy_tx"))
+    db.exec("ALTER TABLE controller_role_ledger ADD COLUMN deploy_tx TEXT");
+  if (!roleLedgerCols.includes("deploy_block"))
+    db.exec("ALTER TABLE controller_role_ledger ADD COLUMN deploy_block INTEGER");
 
   // Legal bodies: their own tables (see LEGAL_BODIES_DDL), created late so the companies table
   // their foreign key points at exists on every database shape. Not a bare exec of the DDL: a

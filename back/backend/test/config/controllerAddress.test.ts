@@ -23,6 +23,7 @@ test("CONTROLLER_ADDRESS parses to a checksummed Address; absent stays undefined
     ...base,
     CONTROLLER_ADDRESS: CONTROLLER,
     CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+    CONTROLLER_DEPLOY_BLOCK: "10",
     FACTORY_ADDRESS: FACTORY,
   });
   expect(cfg.controllerAddress).toBe("0x4819bd1e7f5F1e2b0e07A2E4f3d0B3E1C2A4f6e0");
@@ -48,6 +49,7 @@ test("Minimal-only: a controller, the legal-body factory and the deploy tx boot 
     ...base,
     CONTROLLER_ADDRESS: CONTROLLER,
     CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+    CONTROLLER_DEPLOY_BLOCK: "10",
     LEGAL_BODY_FACTORY_ADDRESS: LB_FACTORY,
   });
   expect(cfg.factoryAddress).toBeUndefined();
@@ -55,13 +57,49 @@ test("Minimal-only: a controller, the legal-body factory and the deploy tx boot 
   expect(cfg.controllerDeployTx).toBe(`0x${"ab".repeat(32)}`);
 });
 
-test("a controller without CONTROLLER_DEPLOY_TX refuses to boot, by name", () => {
+test("a controller without its deploy transaction or block refuses to boot, naming what is missing", () => {
   expect(() =>
     loadConfig({ ...base, CONTROLLER_ADDRESS: CONTROLLER, FACTORY_ADDRESS: FACTORY }),
+  ).toThrow(
+    /CONTROLLER_ADDRESS is set but CONTROLLER_DEPLOY_TX and CONTROLLER_DEPLOY_BLOCK are missing/,
+  );
+  expect(() =>
+    loadConfig({
+      ...base,
+      CONTROLLER_ADDRESS: CONTROLLER,
+      CONTROLLER_DEPLOY_BLOCK: "10",
+      LEGAL_BODY_FACTORY_ADDRESS: LB_FACTORY,
+    }),
   ).toThrow(/CONTROLLER_ADDRESS is set but CONTROLLER_DEPLOY_TX is missing/);
   expect(() =>
-    loadConfig({ ...base, CONTROLLER_ADDRESS: CONTROLLER, LEGAL_BODY_FACTORY_ADDRESS: LB_FACTORY }),
-  ).toThrow(/CONTROLLER_DEPLOY_TX/);
+    loadConfig({
+      ...base,
+      CONTROLLER_ADDRESS: CONTROLLER,
+      CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+      FACTORY_ADDRESS: FACTORY,
+    }),
+  ).toThrow(/CONTROLLER_ADDRESS is set but CONTROLLER_DEPLOY_BLOCK is missing/);
+});
+
+test("CONTROLLER_DEPLOY_BLOCK parses to a number, and a malformed one is refused by name", () => {
+  const cfg = loadConfig({
+    ...base,
+    CONTROLLER_ADDRESS: CONTROLLER,
+    CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+    CONTROLLER_DEPLOY_BLOCK: "1234567",
+    FACTORY_ADDRESS: FACTORY,
+  });
+  expect(cfg.controllerDeployBlock).toBe(1_234_567);
+  for (const bad of ["0", "-5", "1.5", "ten"])
+    expect(() =>
+      loadConfig({
+        ...base,
+        CONTROLLER_ADDRESS: CONTROLLER,
+        CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+        CONTROLLER_DEPLOY_BLOCK: bad,
+        FACTORY_ADDRESS: FACTORY,
+      }),
+    ).toThrow(/CONTROLLER_DEPLOY_BLOCK/);
 });
 
 test("a malformed CONTROLLER_DEPLOY_TX is refused by name", () => {
@@ -71,6 +109,7 @@ test("a malformed CONTROLLER_DEPLOY_TX is refused by name", () => {
         ...base,
         CONTROLLER_ADDRESS: CONTROLLER,
         CONTROLLER_DEPLOY_TX: bad,
+        CONTROLLER_DEPLOY_BLOCK: "10",
         FACTORY_ADDRESS: FACTORY,
       }),
     ).toThrow(/CONTROLLER_DEPLOY_TX/);
@@ -90,6 +129,7 @@ test("platform manager identity: the controller in controller mode, the signing 
     ...base,
     CONTROLLER_ADDRESS: CONTROLLER,
     CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+    CONTROLLER_DEPLOY_BLOCK: "10",
     FACTORY_ADDRESS: FACTORY,
   });
   expect(platformManagerAddress(controlled)).toBe(controlled.controllerAddress);
@@ -121,6 +161,7 @@ test("controller + ENS gateway without ENS_APEX_RESOLVES_TO refuses to boot", ()
       ...ENS_ON,
       CONTROLLER_ADDRESS: CONTROLLER,
       CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+      CONTROLLER_DEPLOY_BLOCK: "10",
       FACTORY_ADDRESS: FACTORY,
     }),
   ).toThrow(/ENS_APEX_RESOLVES_TO/);
@@ -134,6 +175,7 @@ test("...and the message explains WHY (the key is rotatable, the apex must not f
         ...ENS_ON,
         CONTROLLER_ADDRESS: CONTROLLER,
         CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+        CONTROLLER_DEPLOY_BLOCK: "10",
         FACTORY_ADDRESS: FACTORY,
       });
     } catch (e) {
@@ -150,6 +192,7 @@ test("naming the apex satisfies the invariant", () => {
     ...ENS_ON,
     CONTROLLER_ADDRESS: CONTROLLER,
     CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+    CONTROLLER_DEPLOY_BLOCK: "10",
     FACTORY_ADDRESS: FACTORY,
     ENS_APEX_RESOLVES_TO: APEX,
   });
@@ -163,6 +206,7 @@ test("the invariant is scoped: ENS without a controller boots, controller withou
       ...base,
       CONTROLLER_ADDRESS: CONTROLLER,
       CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+      CONTROLLER_DEPLOY_BLOCK: "10",
       FACTORY_ADDRESS: FACTORY,
     }).ens,
   ).toBeUndefined(); // controller, no gateway: no apex to get wrong
@@ -173,6 +217,7 @@ test("redact() leaves the controller address visible — it is an address, not a
     ...base,
     CONTROLLER_ADDRESS: CONTROLLER,
     CONTROLLER_DEPLOY_TX: DEPLOY_TX,
+    CONTROLLER_DEPLOY_BLOCK: "10",
     FACTORY_ADDRESS: FACTORY,
   });
   const safe = redact(cfg);

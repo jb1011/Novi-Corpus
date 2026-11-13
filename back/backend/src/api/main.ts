@@ -234,6 +234,7 @@ async function main() {
       controller: cfg.controllerAddress,
       chainId: cfg.chainId,
       deployTx: cfg.controllerDeployTx,
+      deployBlock: cfg.controllerDeployBlock,
       executor: executor.address,
     });
     console.log(

@@ -2,18 +2,30 @@
  * The boot check that nobody holds the controller's WILDCARD_ROLE.
  *
  * The controller cannot list a role's members, so the check rebuilds the holder set from the
- * role's RoleGranted and RoleRevoked logs, starting at the block of the transaction that created
- * the controller, and keeps the set and a cursor in SQLite so a later boot resumes. Every test here
- * pins one way that must refuse (or must not), and that a failure never moves the cursor past the
- * last window read in full.
+ * role's RoleGranted and RoleRevoked logs, starting at the block that holds the transaction that
+ * created the controller, and keeps the set and a cursor in SQLite so a later boot resumes. The
+ * deploy transaction is proven through its block and that block's receipts, never by its hash,
+ * because public nodes stop serving receipt-by-hash for old transactions. Every test here pins one
+ * way that must refuse (or must not), and that a failure never moves the cursor past the last
+ * window read in full.
  */
 import type Database from "better-sqlite3";
-import { type Address, type Hex, type PublicClient, TransactionReceiptNotFoundError } from "viem";
+import {
+  type Address,
+  BlockNotFoundError,
+  type Hex,
+  type PublicClient,
+  getContractAddress,
+} from "viem";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { assertNoWildcardHolder } from "../../../src/adapters/arc/wildcardLedger";
 import { migrate, openDatabase } from "../../../src/persistence/db";
 
-const CONTROLLER = "0x4819bd1e7f5F1e2b0e07A2E4f3d0B3E1C2A4f6e0" as Address;
+/** The account that broadcast the controller's deployment, and its nonce at the time. */
+const DEPLOYER = "0x00000000000000000000000000000000000000d0" as Address;
+const DEPLOY_NONCE = 7;
+/** Derived the way the chain derives it, so the creation check has something true to match. */
+const CONTROLLER = getContractAddress({ from: DEPLOYER, nonce: BigInt(DEPLOY_NONCE) });
 const EXECUTOR = "0x000000000000000000000000000000000000000b" as Address;
 const ADMIN = "0x000000000000000000000000000000000000000a" as Address;
 const STRANGER = "0x00000000000000000000000000000000000000Ff" as Address;
@@ -21,9 +33,11 @@ const OTHER_CONTRACT = "0x00000000000000000000000000000000000000c0" as Address;
 /** The controller's wildcard role id: right-aligned, as the contract defines it. */
 const WILDCARD = `0x${"0".repeat(63)}1` as Hex;
 const DEPLOY_TX = `0x${"ab".repeat(32)}` as Hex;
+const OTHER_TX = `0x${"12".repeat(32)}` as Hex;
 const GRANT_TX = `0x${"cd".repeat(32)}` as Hex;
 const REVOKE_TX = `0x${"ef".repeat(32)}` as Hex;
 const CHAIN_ID = 5042002;
+const DEPLOY_BLOCK = 10n;
 
 interface RoleLog {
   eventName: "RoleGranted" | "RoleRevoked";
@@ -34,15 +48,29 @@ interface RoleLog {
   transactionHash: Hex;
 }
 
+interface BlockTx {
+  hash: Hex;
+  to: Address | null;
+  from: Address;
+  nonce: number;
+}
+
+/** A receipt as eth_getBlockReceipts returns it: raw hex fields. */
+interface RawReceipt {
+  transactionHash: Hex;
+  status: Hex;
+  contractAddress: Address | null;
+}
+
 interface World {
   executorHolds?: boolean;
   adminHolds?: boolean;
-  receipt?: {
-    status: "success" | "reverted";
-    contractAddress: Address | null;
-    blockNumber: bigint;
-  };
-  receiptMissing?: boolean;
+  /** The transactions of the deploy block; defaults to the controller's creation alone. */
+  blockTxs?: BlockTx[];
+  /** The deploy block's receipts; null is a node that has none, undefined the default success. */
+  receipts?: RawReceipt[] | null;
+  /** The node does not implement eth_getBlockReceipts. */
+  receiptsUnsupported?: boolean;
   latest: bigint;
   logs?: RoleLog[];
   /** Windows wider than this many blocks are refused with Arc's range error. */
@@ -50,6 +78,8 @@ interface World {
   /** A getLogs whose fromBlock is this block fails with a transport error. */
   failAtFrom?: bigint;
 }
+
+const creation: BlockTx = { hash: DEPLOY_TX, to: null, from: DEPLOYER, nonce: DEPLOY_NONCE };
 
 /** A PublicClient-shaped object answering from a scripted chain, recording every log query. */
 function client(world: World) {
@@ -68,9 +98,34 @@ function client(world: World) {
       throw new Error(`unexpected read ${functionName}`);
     },
   );
-  const getTransactionReceipt = vi.fn(async ({ hash }: { hash: Hex }) => {
-    if (world.receiptMissing) throw new TransactionReceiptNotFoundError({ hash });
-    return world.receipt ?? { status: "success", contractAddress: CONTROLLER, blockNumber: 10n };
+  const getBlock = vi.fn(
+    async ({
+      blockNumber,
+      includeTransactions,
+    }: { blockNumber: bigint; includeTransactions: boolean }) => {
+      if (!includeTransactions) throw new Error("the check needs the block's transactions");
+      if (blockNumber > world.latest) throw new BlockNotFoundError({ blockNumber });
+      return { number: blockNumber, transactions: world.blockTxs ?? [creation] };
+    },
+  );
+  const request = vi.fn(async ({ method, params }: { method: string; params: unknown[] }) => {
+    if (method !== "eth_getBlockReceipts") throw new Error(`unexpected request ${method}`);
+    if (world.receiptsUnsupported)
+      throw new Error("the method eth_getBlockReceipts does not exist/is not available");
+    if (params[0] !== `0x${DEPLOY_BLOCK.toString(16)}` && params[0] !== "0x0")
+      throw new Error(`unexpected block ${String(params[0])}`);
+    if (world.receipts !== undefined) return world.receipts;
+    return [
+      { transactionHash: DEPLOY_TX, status: "0x1", contractAddress: CONTROLLER.toLowerCase() },
+    ];
+  });
+  // The lookups by transaction hash that public nodes stop answering for old transactions. The
+  // check must never call them; each records the call and fails as such a node would.
+  const getTransactionReceipt = vi.fn(async () => {
+    throw new Error("receipt-by-hash must not be used");
+  });
+  const getTransaction = vi.fn(async () => {
+    throw new Error("transaction-by-hash must not be used");
   });
   const getBlockNumber = vi.fn(async () => world.latest);
   const getLogs = vi.fn(
@@ -111,17 +166,21 @@ function client(world: World) {
   );
   const pc = {
     readContract,
+    getBlock,
+    request,
     getTransactionReceipt,
+    getTransaction,
     getBlockNumber,
     getLogs,
   } as unknown as PublicClient;
-  return { pc, queries, getLogs, getTransactionReceipt };
+  return { pc, queries, getLogs, getBlock, request, getTransactionReceipt, getTransaction };
 }
 
 const params = {
   controller: CONTROLLER,
   chainId: CHAIN_ID,
   deployTx: DEPLOY_TX,
+  deployBlock: DEPLOY_BLOCK,
   executor: EXECUTOR,
 };
 
@@ -139,6 +198,16 @@ function stored(): { cursor_block: number; holders: { account: string; grantedTx
     )
     .get(CONTROLLER.toLowerCase(), CHAIN_ID) as { cursor_block: number; holders_json: string };
   return { cursor_block: row.cursor_block, holders: JSON.parse(row.holders_json) };
+}
+
+function storedDeploy(): { deploy_tx: string | null; deploy_block: number | null } | undefined {
+  return db
+    .prepare(
+      "SELECT deploy_tx, deploy_block FROM controller_role_ledger WHERE controller = ? AND chain_id = ?",
+    )
+    .get(CONTROLLER.toLowerCase(), CHAIN_ID) as
+    | { deploy_tx: string | null; deploy_block: number | null }
+    | undefined;
 }
 
 const grant = (account: Address, blockNumber: bigint, logIndex = 0): RoleLog => ({
@@ -216,12 +285,11 @@ test("a holder found on one boot is still refused on the next, from the stored s
 
 test("a range-too-large refusal halves the window and retries it; the final cursor is the latest block", async () => {
   const { pc, queries } = client({
-    receipt: { status: "success", contractAddress: CONTROLLER, blockNumber: 0n },
     latest: 100_000n,
     maxRange: 22_500n,
     logs: [grant(STRANGER, 70_000n), revoke(STRANGER, 80_000n)],
   });
-  await assertNoWildcardHolder(pc, db, params);
+  await assertNoWildcardHolder(pc, db, { ...params, deployBlock: 0n });
   const granted = queries.filter((q) => q.event === "RoleGranted");
   // 90,000 refused, 45,000 refused, then 22,500-block windows from the same first block.
   expect(granted.slice(0, 3).map((q) => q.toBlock - q.fromBlock + 1n)).toEqual([
@@ -234,41 +302,154 @@ test("a range-too-large refusal halves the window and retries it; the final curs
   expect(stored()).toEqual({ cursor_block: 100_000, holders: [] });
 });
 
-test("a receipt that created another contract refuses, naming CONTROLLER_DEPLOY_TX", async () => {
+test("the deploy block proves the creation, and the boot passes without any lookup by hash", async () => {
+  const { pc, getBlock, request, getTransactionReceipt, getTransaction } = client({ latest: 500n });
+  await expect(assertNoWildcardHolder(pc, db, params)).resolves.toEqual({
+    fromBlock: DEPLOY_BLOCK,
+    toBlock: 500n,
+    windows: 1,
+  });
+  expect(getBlock).toHaveBeenCalledWith({ blockNumber: DEPLOY_BLOCK, includeTransactions: true });
+  expect(request).toHaveBeenCalledWith({ method: "eth_getBlockReceipts", params: ["0xa"] });
+  expect(getTransactionReceipt).not.toHaveBeenCalled();
+  expect(getTransaction).not.toHaveBeenCalled();
+  // The verified pair is stored with the ledger, so the next boot can skip the block reads.
+  expect(storedDeploy()).toEqual({ deploy_tx: DEPLOY_TX, deploy_block: 10 });
+});
+
+test("a deploy transaction that is not in CONTROLLER_DEPLOY_BLOCK refuses, naming the block", async () => {
   const { pc, getLogs } = client({
     latest: 500n,
-    receipt: { status: "success", contractAddress: OTHER_CONTRACT, blockNumber: 10n },
+    blockTxs: [{ ...creation, hash: OTHER_TX }],
   });
-  const err = await assertNoWildcardHolder(pc, db, params).catch((e) => e);
-  expect(err.message).toMatch(
-    new RegExp(
-      `CONTROLLER_DEPLOY_TX ${DEPLOY_TX} created ${OTHER_CONTRACT}, not CONTROLLER_ADDRESS`,
-    ),
+  await expect(assertNoWildcardHolder(pc, db, params)).rejects.toThrow(
+    new RegExp(`CONTROLLER_DEPLOY_TX ${DEPLOY_TX} is not in block 10`),
   );
   expect(getLogs).not.toHaveBeenCalled();
+  expect(storedDeploy()).toBeUndefined();
 });
 
-test("a failed or missing deploy transaction refuses, naming CONTROLLER_DEPLOY_TX", async () => {
+test("a deploy transaction that is a call, or that derives another address, refuses", async () => {
+  const call = client({ latest: 500n, blockTxs: [{ ...creation, to: OTHER_CONTRACT }] });
+  await expect(assertNoWildcardHolder(call.pc, db, params)).rejects.toThrow(
+    new RegExp(
+      `CONTROLLER_DEPLOY_TX ${DEPLOY_TX} is a call to ${OTHER_CONTRACT}, not a contract creation`,
+    ),
+  );
+  const elsewhere = client({ latest: 500n, blockTxs: [{ ...creation, nonce: DEPLOY_NONCE + 1 }] });
+  const derived = getContractAddress({ from: DEPLOYER, nonce: BigInt(DEPLOY_NONCE + 1) });
+  await expect(assertNoWildcardHolder(elsewhere.pc, db, params)).rejects.toThrow(
+    new RegExp(`CONTROLLER_DEPLOY_TX ${DEPLOY_TX} created ${derived} .*not CONTROLLER_ADDRESS`),
+  );
+  expect(call.request).not.toHaveBeenCalled();
+  expect(elsewhere.getLogs).not.toHaveBeenCalled();
+});
+
+test("a deploy transaction whose receipt in the block failed, or names another contract, refuses", async () => {
   const reverted = client({
     latest: 500n,
-    receipt: { status: "reverted", contractAddress: null, blockNumber: 10n },
+    receipts: [{ transactionHash: DEPLOY_TX, status: "0x0", contractAddress: null }],
   });
   await expect(assertNoWildcardHolder(reverted.pc, db, params)).rejects.toThrow(
-    /CONTROLLER_DEPLOY_TX .* has status reverted/,
+    /CONTROLLER_DEPLOY_TX .* has status 0x0 in block 10/,
   );
-  const missing = client({ latest: 500n, receiptMissing: true });
-  await expect(assertNoWildcardHolder(missing.pc, db, params)).rejects.toThrow(
-    /CONTROLLER_DEPLOY_TX .* has no receipt on this chain/,
+  const other = client({
+    latest: 500n,
+    receipts: [{ transactionHash: DEPLOY_TX, status: "0x1", contractAddress: OTHER_CONTRACT }],
+  });
+  await expect(assertNoWildcardHolder(other.pc, db, params)).rejects.toThrow(
+    new RegExp(`created ${OTHER_CONTRACT} according to its receipt, not CONTROLLER_ADDRESS`),
+  );
+  expect(reverted.getLogs).not.toHaveBeenCalled();
+  expect(storedDeploy()).toBeUndefined();
+});
+
+test("a node without eth_getBlockReceipts, or with no receipts, is 'could not verify' and stores nothing", async () => {
+  for (const world of [
+    { latest: 500n, receiptsUnsupported: true },
+    { latest: 500n, receipts: null },
+    { latest: 500n, receipts: [] },
+  ]) {
+    const { pc, getLogs } = client(world);
+    const err = await assertNoWildcardHolder(pc, db, params).catch((e) => e);
+    expect(err.message).toMatch(
+      /could not verify .*(receipts of CONTROLLER_DEPLOY_BLOCK 10|receipt of CONTROLLER_DEPLOY_TX)/,
+    );
+    expect(getLogs).not.toHaveBeenCalled();
+    expect(storedDeploy()).toBeUndefined();
+  }
+});
+
+test("a deploy block the node cannot serve is 'could not verify'", async () => {
+  const { pc } = client({ latest: 5n });
+  await expect(assertNoWildcardHolder(pc, db, params)).rejects.toThrow(
+    /could not verify CONTROLLER_DEPLOY_BLOCK 10/,
   );
 });
 
-test("the executor holding the wildcard role refuses before any receipt or log is read", async () => {
-  const { pc, getLogs, getTransactionReceipt } = client({ latest: 500n, executorHolds: true });
+test("a stored row with the same deploy transaction and block skips the block reads", async () => {
+  await assertNoWildcardHolder(client({ latest: 100n }).pc, db, params);
+  const second = client({ latest: 150n });
+  const result = await assertNoWildcardHolder(second.pc, db, params);
+  expect(result.fromBlock).toBe(101n);
+  expect(second.getBlock).not.toHaveBeenCalled();
+  expect(second.request).not.toHaveBeenCalled();
+});
+
+test("a stored row with a different deploy transaction or block refuses and is left as it was", async () => {
+  await assertNoWildcardHolder(client({ latest: 100n }).pc, db, params);
+  for (const changed of [
+    { ...params, deployTx: OTHER_TX },
+    { ...params, deployBlock: 11n },
+  ]) {
+    const { pc, getBlock, getLogs } = client({ latest: 150n });
+    await expect(assertNoWildcardHolder(pc, db, changed)).rejects.toThrow(
+      /stored deploy transaction for CONTROLLER_ADDRESS .* differs from CONTROLLER_DEPLOY_TX .*reconcile/,
+    );
+    expect(getBlock).not.toHaveBeenCalled();
+    expect(getLogs).not.toHaveBeenCalled();
+  }
+  expect(storedDeploy()).toEqual({ deploy_tx: DEPLOY_TX, deploy_block: 10 });
+  expect(stored().cursor_block).toBe(100);
+});
+
+test("a ledger row from before the deploy transaction was stored is verified once and filled in", async () => {
+  db.prepare(
+    "INSERT INTO controller_role_ledger (controller, chain_id, cursor_block, holders_json) VALUES (?, ?, ?, '[]')",
+  ).run(CONTROLLER.toLowerCase(), CHAIN_ID, 500);
+  const { pc, getBlock, getLogs } = client({ latest: 500n });
+  await expect(assertNoWildcardHolder(pc, db, params)).resolves.toEqual({
+    fromBlock: undefined,
+    toBlock: 500n,
+    windows: 0,
+  });
+  expect(getBlock).toHaveBeenCalledTimes(1);
+  expect(getLogs).not.toHaveBeenCalled();
+  expect(storedDeploy()).toEqual({ deploy_tx: DEPLOY_TX, deploy_block: 10 });
+  expect(stored().cursor_block).toBe(500);
+});
+
+test("migrate adds the deploy columns to a ledger table created without them", () => {
+  const old = openDatabase(":memory:");
+  old.exec(`CREATE TABLE controller_role_ledger (
+    controller TEXT NOT NULL, chain_id INTEGER NOT NULL, cursor_block INTEGER NOT NULL,
+    holders_json TEXT NOT NULL, PRIMARY KEY (controller, chain_id))`);
+  migrate(old);
+  const cols = (
+    old.prepare("PRAGMA table_info(controller_role_ledger)").all() as { name: string }[]
+  ).map((c) => c.name);
+  old.close();
+  expect(cols).toEqual(expect.arrayContaining(["deploy_tx", "deploy_block"]));
+});
+
+test("the executor holding the wildcard role refuses before any block, receipt or log is read", async () => {
+  const { pc, getLogs, getBlock, request } = client({ latest: 500n, executorHolds: true });
   const err = await assertNoWildcardHolder(pc, db, params).catch((e) => e);
   expect(err.message).toMatch(/executor .* holds WILDCARD_ROLE on CONTROLLER_ADDRESS/);
   expect(err.message).toContain(EXECUTOR);
   expect(getLogs).not.toHaveBeenCalled();
-  expect(getTransactionReceipt).not.toHaveBeenCalled();
+  expect(getBlock).not.toHaveBeenCalled();
+  expect(request).not.toHaveBeenCalled();
 });
 
 test("the default admin holding the wildcard role refuses too", async () => {
@@ -281,11 +462,10 @@ test("the default admin holding the wildcard role refuses too", async () => {
 
 test("an RPC failure is 'could not verify', and the cursor stays at the last complete window", async () => {
   const { pc } = client({
-    receipt: { status: "success", contractAddress: CONTROLLER, blockNumber: 0n },
     latest: 200_000n,
     failAtFrom: 90_000n, // the second 90,000-block window
   });
-  const err = await assertNoWildcardHolder(pc, db, params).catch((e) => e);
+  const err = await assertNoWildcardHolder(pc, db, { ...params, deployBlock: 0n }).catch((e) => e);
   expect(err.message).toMatch(/could not verify .*WILDCARD_ROLE history.*blocks 90000 to 179999/s);
   expect(err.message).not.toMatch(/hold WILDCARD_ROLE/);
   expect(stored().cursor_block).toBe(89_999);
@@ -295,4 +475,10 @@ test("a missing CONTROLLER_DEPLOY_TX refuses by name", async () => {
   await expect(
     assertNoWildcardHolder(client({ latest: 1n }).pc, db, { ...params, deployTx: undefined }),
   ).rejects.toThrow(/CONTROLLER_DEPLOY_TX is unset/);
+});
+
+test("a missing CONTROLLER_DEPLOY_BLOCK refuses by name", async () => {
+  await expect(
+    assertNoWildcardHolder(client({ latest: 1n }).pc, db, { ...params, deployBlock: undefined }),
+  ).rejects.toThrow(/CONTROLLER_DEPLOY_BLOCK is unset/);
 });

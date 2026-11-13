@@ -3,9 +3,10 @@ import {
   type Address,
   type Hex,
   type PublicClient,
-  TransactionReceiptNotFoundError,
   getAbiItem,
+  getContractAddress,
   isAddressEqual,
+  toHex,
 } from "viem";
 import { noviControllerAbi } from "../../abis/generated";
 import { MAX_LOG_RANGE, chunkRange, isRangeTooLargeError, shrinkRange } from "../../monitor/scan";
@@ -23,11 +24,18 @@ import { unreadable } from "./bootVerify";
  *  1. Two direct reads first: the executor and the default admin must not hold the role. They
  *     stand on their own, so a bug in the replay below can never hide the two addresses that
  *     matter most.
- *  2. The deploy receipt (CONTROLLER_DEPLOY_TX) must exist, have succeeded, and have created
- *     exactly the configured controller. Its block is where the role history starts.
+ *  2. The deploy transaction (CONTROLLER_DEPLOY_TX) must sit in CONTROLLER_DEPLOY_BLOCK, be a
+ *     contract creation whose sender and nonce derive exactly the configured controller, and have
+ *     a successful receipt in that block's receipts that names the controller. The check goes
+ *     through the block, never through the transaction's hash: public Arc nodes return null from
+ *     receipt-by-hash for old transactions while still serving the block and its receipts, and a
+ *     null there would read as "this transaction does not exist". Once verified, the transaction
+ *     and block are stored with the ledger; a later boot with the same pair skips this step, and a
+ *     different pair refuses until an operator reconciles the stored row by hand.
  *  3. The replay reads the wildcard role's grants and revokes, filtered on the role topic by the
  *     node, from the deploy block (or the stored cursor) to the latest block, and keeps the holder
- *     set and the cursor in `controller_role_ledger` after every fully read window.
+ *     set, the cursor and the verified deploy transaction in `controller_role_ledger` after every
+ *     fully read window.
  *  4. A non-empty holder set refuses the boot, naming every holder and the transaction that
  *     granted it. Any read failure is "could not verify", never a pass.
  *
@@ -58,23 +66,38 @@ const roleRevokedEvent = getAbiItem({ abi: noviControllerAbi, name: "RoleRevoked
 interface LedgerRow {
   cursor_block: number;
   holders_json: string;
+  deploy_tx: string | null;
+  deploy_block: number | null;
+}
+
+interface StoredLedger {
+  cursor: bigint;
+  holders: Map<string, WildcardHolder>;
+  /** Lowercase; null on a row written before the deploy transaction was stored. */
+  deployTx: string | null;
+  deployBlock: bigint | null;
 }
 
 function loadLedger(
   db: Database.Database,
   controller: string,
   chainId: number,
-): { cursor: bigint; holders: Map<string, WildcardHolder> } | undefined {
+): StoredLedger | undefined {
   const row = db
     .prepare(
-      "SELECT cursor_block, holders_json FROM controller_role_ledger WHERE controller = ? AND chain_id = ?",
+      "SELECT cursor_block, holders_json, deploy_tx, deploy_block FROM controller_role_ledger WHERE controller = ? AND chain_id = ?",
     )
     .get(controller, chainId) as LedgerRow | undefined;
   if (!row) return undefined;
   const holders = new Map<string, WildcardHolder>();
   for (const h of JSON.parse(row.holders_json) as WildcardHolder[])
     holders.set(h.account.toLowerCase(), { ...h, account: h.account.toLowerCase() as Address });
-  return { cursor: BigInt(row.cursor_block), holders };
+  return {
+    cursor: BigInt(row.cursor_block),
+    holders,
+    deployTx: row.deploy_tx?.toLowerCase() ?? null,
+    deployBlock: row.deploy_block === null ? null : BigInt(row.deploy_block),
+  };
 }
 
 function saveLedger(
@@ -83,13 +106,23 @@ function saveLedger(
   chainId: number,
   cursor: bigint,
   holders: Map<string, WildcardHolder>,
+  deploy: { tx: Hex; block: bigint },
 ): void {
   db.prepare(
-    `INSERT INTO controller_role_ledger (controller, chain_id, cursor_block, holders_json)
-     VALUES (?, ?, ?, ?)
+    `INSERT INTO controller_role_ledger
+       (controller, chain_id, cursor_block, holders_json, deploy_tx, deploy_block)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT (controller, chain_id)
-     DO UPDATE SET cursor_block = excluded.cursor_block, holders_json = excluded.holders_json`,
-  ).run(controller, chainId, Number(cursor), JSON.stringify([...holders.values()]));
+     DO UPDATE SET cursor_block = excluded.cursor_block, holders_json = excluded.holders_json,
+                   deploy_tx = excluded.deploy_tx, deploy_block = excluded.deploy_block`,
+  ).run(
+    controller,
+    chainId,
+    Number(cursor),
+    JSON.stringify([...holders.values()]),
+    deploy.tx.toLowerCase(),
+    Number(deploy.block),
+  );
 }
 
 /**
@@ -104,6 +137,8 @@ export async function assertNoWildcardHolder(
     chainId: number;
     /** CONTROLLER_DEPLOY_TX. Optional in the type because the config field is; absent refuses. */
     deployTx: Hex | undefined;
+    /** CONTROLLER_DEPLOY_BLOCK, the block holding `deployTx`. Optional for the same reason. */
+    deployBlock: bigint | number | undefined;
     executor: Address;
   },
 ): Promise<WildcardLedgerResult> {
@@ -111,7 +146,12 @@ export async function assertNoWildcardHolder(
     throw new Error(
       `boot: CONTROLLER_DEPLOY_TX is unset — the WILDCARD_ROLE check on CONTROLLER_ADDRESS ${p.controller} replays the controller's role history from the transaction that created it`,
     );
-  const deployTx = p.deployTx;
+  if (p.deployBlock === undefined)
+    throw new Error(
+      `boot: CONTROLLER_DEPLOY_BLOCK is unset — the WILDCARD_ROLE check on CONTROLLER_ADDRESS ${p.controller} verifies the deploy transaction through the block that holds it`,
+    );
+  const deployTx = p.deployTx.toLowerCase() as Hex;
+  const deployBlock = BigInt(p.deployBlock);
 
   // 1. The two direct reads.
   let wildcard: Hex;
@@ -151,37 +191,22 @@ export async function assertNoWildcardHolder(
       `boot: the default admin ${admin} holds WILDCARD_ROLE on CONTROLLER_ADDRESS ${p.controller} — it could relay any call to any contract; revoke the role before starting`,
     );
 
-  // 2. The deploy receipt names the contract and the first block of its history.
-  let receipt: Awaited<ReturnType<PublicClient["getTransactionReceipt"]>>;
-  try {
-    receipt = await publicClient.getTransactionReceipt({ hash: deployTx });
-  } catch (err) {
-    if (err instanceof TransactionReceiptNotFoundError)
-      throw new Error(
-        `boot: CONTROLLER_DEPLOY_TX ${deployTx} has no receipt on this chain — it is not the transaction that created CONTROLLER_ADDRESS ${p.controller}`,
-        { cause: err },
-      );
-    throw unreadable(`the deploy receipt (CONTROLLER_DEPLOY_TX ${deployTx})`, err);
-  }
-  if (!receipt)
-    throw new Error(
-      `boot: CONTROLLER_DEPLOY_TX ${deployTx} has no receipt on this chain — it is not the transaction that created CONTROLLER_ADDRESS ${p.controller}`,
-    );
-  if (receipt.status !== "success")
-    throw new Error(
-      `boot: CONTROLLER_DEPLOY_TX ${deployTx} has status ${receipt.status} — a failed transaction created no controller`,
-    );
-  if (!receipt.contractAddress || !isAddressEqual(receipt.contractAddress, p.controller))
-    throw new Error(
-      `boot: CONTROLLER_DEPLOY_TX ${deployTx} created ${receipt.contractAddress ?? "no contract"}, not CONTROLLER_ADDRESS ${p.controller} — set it to the transaction that deployed the controller`,
-    );
-
-  // 3. The replay, resumed from the stored cursor.
+  // 2. The deploy transaction, verified through its block unless the ledger already holds it.
   const key = p.controller.toLowerCase();
   const stored = loadLedger(db, key, p.chainId);
+  const alreadyVerified =
+    stored !== undefined && stored.deployTx === deployTx && stored.deployBlock === deployBlock;
+  if (stored && stored.deployTx !== null && !alreadyVerified)
+    throw new Error(
+      `boot: the stored deploy transaction for CONTROLLER_ADDRESS ${p.controller} on chain ${p.chainId} (${stored.deployTx} in block ${stored.deployBlock}) differs from CONTROLLER_DEPLOY_TX ${deployTx} in CONTROLLER_DEPLOY_BLOCK ${deployBlock} — the WILDCARD_ROLE ledger was built from the stored one; reconcile the configuration or the controller_role_ledger row by hand before starting`,
+    );
+  if (!alreadyVerified)
+    await verifyDeployByBlock(publicClient, p.controller, deployTx, deployBlock);
+  const deploy = { tx: deployTx, block: deployBlock };
+
+  // 3. The replay, resumed from the stored cursor.
   const holders = stored?.holders ?? new Map<string, WildcardHolder>();
-  let from =
-    stored && stored.cursor + 1n > receipt.blockNumber ? stored.cursor + 1n : receipt.blockNumber;
+  let from = stored && stored.cursor + 1n > deployBlock ? stored.cursor + 1n : deployBlock;
 
   let latest: bigint;
   try {
@@ -228,10 +253,14 @@ export async function assertNoWildcardHolder(
         holders.delete(account);
       }
     }
-    saveLedger(db, key, p.chainId, window.to, holders);
+    saveLedger(db, key, p.chainId, window.to, holders, deploy);
     windows++;
     from = window.to + 1n;
   }
+  // Nothing to replay yet (a fresh controller whose ledger is already at the latest block, or a
+  // row from before the deploy transaction was stored): keep the facts verified above anyway, so
+  // the next boot skips the block reads and still catches a changed CONTROLLER_DEPLOY_TX.
+  if (windows === 0 && !alreadyVerified) saveLedger(db, key, p.chainId, from - 1n, holders, deploy);
 
   // 4. Anyone left holds the role.
   if (holders.size > 0)
@@ -246,6 +275,71 @@ export async function assertNoWildcardHolder(
     );
 
   return { fromBlock: firstBlock, toBlock: latest, windows };
+}
+
+/**
+ * Prove CONTROLLER_DEPLOY_TX created CONTROLLER_ADDRESS, reading only the block and its receipts.
+ * Any read that fails or comes back empty is "could not verify", never a pass; a transaction that
+ * is readable and wrong refuses with what it actually is.
+ */
+async function verifyDeployByBlock(
+  publicClient: PublicClient,
+  controller: Address,
+  deployTx: Hex,
+  deployBlock: bigint,
+): Promise<void> {
+  let block: Awaited<ReturnType<typeof getFullBlock>>;
+  try {
+    block = await getFullBlock(publicClient, deployBlock);
+  } catch (err) {
+    throw unreadable(`CONTROLLER_DEPLOY_BLOCK ${deployBlock}`, err);
+  }
+  const tx = block.transactions.find((t) => t.hash.toLowerCase() === deployTx);
+  if (!tx)
+    throw new Error(
+      `boot: CONTROLLER_DEPLOY_TX ${deployTx} is not in block ${deployBlock} — set CONTROLLER_DEPLOY_TX and CONTROLLER_DEPLOY_BLOCK to the transaction that deployed CONTROLLER_ADDRESS ${controller} and the block that holds it`,
+    );
+  if (tx.to !== null)
+    throw new Error(
+      `boot: CONTROLLER_DEPLOY_TX ${deployTx} is a call to ${tx.to}, not a contract creation — it did not deploy CONTROLLER_ADDRESS ${controller}`,
+    );
+  const derived = getContractAddress({ from: tx.from, nonce: BigInt(tx.nonce) });
+  if (!isAddressEqual(derived, controller))
+    throw new Error(
+      `boot: CONTROLLER_DEPLOY_TX ${deployTx} created ${derived} (sender ${tx.from}, nonce ${tx.nonce}), not CONTROLLER_ADDRESS ${controller} — set it to the transaction that deployed the controller`,
+    );
+
+  let receipts: Awaited<ReturnType<typeof getBlockReceipts>>;
+  try {
+    receipts = await getBlockReceipts(publicClient, deployBlock);
+  } catch (err) {
+    throw unreadable(`the receipts of CONTROLLER_DEPLOY_BLOCK ${deployBlock}`, err);
+  }
+  const receipt = receipts?.find((r) => r.transactionHash.toLowerCase() === deployTx);
+  if (!receipt)
+    throw unreadable(
+      `the receipt of CONTROLLER_DEPLOY_TX ${deployTx} in block ${deployBlock}`,
+      new Error(
+        receipts ? "the block's receipts do not include it" : "eth_getBlockReceipts returned null",
+      ),
+    );
+  if (receipt.status !== "0x1")
+    throw new Error(
+      `boot: CONTROLLER_DEPLOY_TX ${deployTx} has status ${receipt.status} in block ${deployBlock} — a failed transaction created no controller`,
+    );
+  if (!receipt.contractAddress || !isAddressEqual(receipt.contractAddress, controller))
+    throw new Error(
+      `boot: CONTROLLER_DEPLOY_TX ${deployTx} created ${receipt.contractAddress ?? "no contract"} according to its receipt, not CONTROLLER_ADDRESS ${controller} — set it to the transaction that deployed the controller`,
+    );
+}
+
+function getFullBlock(publicClient: PublicClient, blockNumber: bigint) {
+  return publicClient.getBlock({ blockNumber, includeTransactions: true });
+}
+
+/** Raw receipts (hex fields, as the node sends them); null when the node has none for the block. */
+function getBlockReceipts(publicClient: PublicClient, blockNumber: bigint) {
+  return publicClient.request({ method: "eth_getBlockReceipts", params: [toHex(blockNumber)] });
 }
 
 /** Both role events for one window, in block and log-index order. */
