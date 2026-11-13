@@ -28,6 +28,12 @@ The script refuses to run, and a dry run reverts before anything is sent, when a
 | The registry has code | `IDENTITY_REGISTRY is not a contract` |
 | Admin and executor are set and differ | `admin and executor are required`, `admin and executor must differ` |
 | The deployer is neither admin nor executor | `the deployer must hold no role` |
+| On Arc mainnet, the admin delay is at least 1 hour | `CONTROLLER_ADMIN_DELAY is under 1 hour` |
+| On Arc mainnet, the admin delay is at most 30 days | `CONTROLLER_ADMIN_DELAY is over 30 days (a value in milliseconds?)` |
+
+A zero delay lets a mistaken or stolen admin key hand the role over at once. An oversized delay
+takes as long to shorten as it is long, because the controller waits out the difference before a
+shorter delay applies. Arc testnet keeps no bound.
 
 ## Preconditions
 
@@ -73,6 +79,7 @@ export IDENTITY_REGISTRY=0x8004A169FB4a3325136EB29fA0ceB6D2e539a432
 export CONTROLLER_ADMIN=<admin address>
 export CONTROLLER_EXECUTOR=<executor address>
 # Optional, in seconds. The admin handover delay; defaults to 86400 (24 hours).
+# On Arc mainnet it must lie between 3600 (1 hour) and 2592000 (30 days).
 # export CONTROLLER_ADMIN_DELAY=86400
 ```
 
@@ -86,17 +93,21 @@ export CONTROLLER_EXECUTOR=<executor address>
    ```
 
 2. If it prints a refusal message, fix the input it names and run step 1 again.
-3. Read the output. It must show `All post-conditions hold`, the addresses block and
-   `SIMULATION COMPLETE`. Check that the key in the shell is the throwaway deployer, with
+3. Read the output. It must show the `Inputs:` block, `All post-conditions hold`, the addresses
+   block and `SIMULATION COMPLETE`. Check that the key in the shell is the throwaway deployer, with
    `cast wallet address --private-key $PRIVATE_KEY`, and that it is neither the admin nor the
    executor.
-4. Broadcast.
+4. Compare the `CONTROLLER_ADMIN` line of the `Inputs:` block with the address on the hardware
+   wallet's screen, character by character. Do not broadcast until they match. A typo in the
+   executor is recoverable with a role change; a typo in the admin means a redeploy, because no
+   one else can ever change the controller's roles.
+5. Broadcast.
 
    ```bash
    forge script script/DeployMinimal.s.sol --rpc-url <arc mainnet rpc url> --broadcast
    ```
 
-5. Clear the key from the shell with `unset PRIVATE_KEY`.
+6. Clear the key from the shell with `unset PRIVATE_KEY`.
 
 ## What the output means, and the explorer checks
 

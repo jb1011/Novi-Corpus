@@ -18,7 +18,8 @@ import {NoviController} from "../src/NoviController.sol";
 ///           IDENTITY_REGISTRY        must equal the ERC-8004 registry pinned below for this chain
 ///           CONTROLLER_ADMIN         the cold role administrator (a hardware wallet on mainnet)
 ///           CONTROLLER_EXECUTOR      the backend key that relays the two legal-body selectors
-///           CONTROLLER_ADMIN_DELAY   optional, seconds; defaults to 24 hours
+///           CONTROLLER_ADMIN_DELAY   optional, seconds; defaults to 24 hours; on Arc mainnet it
+///                                    must lie between 1 hour and 30 days
 ///
 ///         The factory needs the controller's address at construction and the controller needs
 ///         the factory's address for its pins, so the controller's address is predicted from the
@@ -51,21 +52,27 @@ contract DeployMinimal is Script {
     }
 
     function run() external returns (Deployment memory d) {
+        Config memory c = Config({
+            deployerKey: vm.envUint("PRIVATE_KEY"),
+            chainId: vm.envUint("CHAIN_ID"),
+            registry: vm.envAddress("IDENTITY_REGISTRY"),
+            admin: vm.envAddress("CONTROLLER_ADMIN"),
+            executor: vm.envAddress("CONTROLLER_EXECUTOR"),
+            adminDelay: _envAdminDelay()
+        });
+        // Printed before deploy() so a dry run shows every input before anything is broadcast.
+        _printInputs(c);
+        d = deploy(c);
+        _printAddresses(d);
+    }
+
+    /// @dev CONTROLLER_ADMIN_DELAY in seconds, 24 hours when unset.
+    function _envAdminDelay() internal view returns (uint48) {
         uint256 delay = vm.envOr("CONTROLLER_ADMIN_DELAY", uint256(24 hours));
         require(delay <= type(uint48).max, "CONTROLLER_ADMIN_DELAY does not fit in 48 bits");
-        d = deploy(
-            Config({
-                deployerKey: vm.envUint("PRIVATE_KEY"),
-                chainId: vm.envUint("CHAIN_ID"),
-                registry: vm.envAddress("IDENTITY_REGISTRY"),
-                admin: vm.envAddress("CONTROLLER_ADMIN"),
-                executor: vm.envAddress("CONTROLLER_EXECUTOR"),
-                // Safe: the require above bounds `delay` to 48 bits.
-                // forge-lint: disable-next-line(unsafe-typecast)
-                adminDelay: uint48(delay)
-            })
-        );
-        _printAddresses(d);
+        // Safe: the require above bounds `delay` to 48 bits.
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint48(delay);
     }
 
     /// @notice The deploy itself, separate from the env reading so tests can drive it with
@@ -111,6 +118,13 @@ contract DeployMinimal is Script {
         require(c.admin != address(0) && c.executor != address(0), "admin and executor are required");
         require(c.admin != c.executor, "admin and executor must differ");
         require(deployer != c.admin && deployer != c.executor, "the deployer must hold no role");
+        if (block.chainid == CHAIN_ARC_MAINNET) {
+            // A zero delay lets a mistaken or stolen admin hand the role over at once. An oversized
+            // one cannot be undone quickly: shortening the delay waits out the difference between
+            // the current and the new value. Testnet keeps no bound.
+            require(c.adminDelay >= 1 hours, "CONTROLLER_ADMIN_DELAY is under 1 hour");
+            require(c.adminDelay <= 30 days, "CONTROLLER_ADMIN_DELAY is over 30 days (a value in milliseconds?)");
+        }
     }
 
     function _requirePostConditions(Deployment memory d, address predicted, Config memory c, address deployer)
@@ -154,6 +168,17 @@ contract DeployMinimal is Script {
             !controller.hasRole(adminRole, deployer) && !controller.hasRole(adminRole, c.executor),
             "DEFAULT_ADMIN_ROLE is held by the deployer or the executor"
         );
+    }
+
+    /// @dev Prints the inputs the deploy will use, so the operator checks them before a broadcast.
+    function _printInputs(Config memory c) internal view {
+        console2.log("Inputs:");
+        console2.log("  chain id (connected):", block.chainid);
+        console2.log("  deployer (from PRIVATE_KEY):", vm.addr(c.deployerKey));
+        console2.log("  CONTROLLER_ADMIN, compare with the hardware wallet's screen:", c.admin);
+        console2.log("  CONTROLLER_EXECUTOR:", c.executor);
+        console2.log("  CONTROLLER_ADMIN_DELAY (seconds):", uint256(c.adminDelay));
+        console2.log("  IDENTITY_REGISTRY:", c.registry);
     }
 
     /// @dev Prints the block to copy into addresses.arc-mainnet.json (or the testnet file).

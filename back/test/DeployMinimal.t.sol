@@ -281,6 +281,61 @@ contract DeployMinimalTest is DeployMinimalChecks {
         script.deploy(c);
     }
 
+    // ── the admin delay on Arc mainnet ───────────────────────────────────
+
+    address internal constant REGISTRY_ARC_MAINNET = 0x8004A169FB4a3325136EB29fA0ceB6D2e539a432;
+    address internal constant REGISTRY_ARC_TESTNET = 0x8004A818BFB912233c491871b3d84c89A494BD9e;
+
+    /// @dev Switches to `chainId` and places the mock registry's code at that chain's pinned
+    ///      registry, so the shipped pins accept it and only the delay decides.
+    function _onChainWithRegistry(uint256 chainId, address pinned) internal returns (DeployMinimal.Config memory c) {
+        vm.chainId(chainId);
+        vm.etch(pinned, address(registry).code);
+        c = _config(chainId, pinned);
+    }
+
+    function test_revert_mainnetAdminDelayUnderOneHour() public {
+        DeployMinimal.Config memory c = _onChainWithRegistry(5042, REGISTRY_ARC_MAINNET);
+        c.adminDelay = 0;
+        vm.expectRevert(bytes("CONTROLLER_ADMIN_DELAY is under 1 hour"));
+        script.deploy(c);
+        c.adminDelay = 1 hours - 1;
+        vm.expectRevert(bytes("CONTROLLER_ADMIN_DELAY is under 1 hour"));
+        script.deploy(c);
+    }
+
+    function test_revert_mainnetAdminDelayOverThirtyDays() public {
+        DeployMinimal.Config memory c = _onChainWithRegistry(5042, REGISTRY_ARC_MAINNET);
+        c.adminDelay = 30 days + 1;
+        vm.expectRevert(bytes("CONTROLLER_ADMIN_DELAY is over 30 days (a value in milliseconds?)"));
+        script.deploy(c);
+        // 24 hours entered in milliseconds.
+        c.adminDelay = 86_400_000;
+        vm.expectRevert(bytes("CONTROLLER_ADMIN_DELAY is over 30 days (a value in milliseconds?)"));
+        script.deploy(c);
+    }
+
+    function test_deploy_mainnetAcceptsTheDefaultDelayAndBothBounds() public {
+        DeployMinimal.Config memory c = _onChainWithRegistry(5042, REGISTRY_ARC_MAINNET);
+        assertEq(c.adminDelay, 24 hours);
+        d = script.deploy(c);
+        controller = d.controller;
+        _assertDeployment(REGISTRY_ARC_MAINNET);
+
+        c.adminDelay = 1 hours;
+        assertEq(script.deploy(c).controller.defaultAdminDelay(), 1 hours);
+        c.adminDelay = 30 days;
+        assertEq(script.deploy(c).controller.defaultAdminDelay(), 30 days);
+    }
+
+    function test_deploy_testnetAcceptsAZeroDelay() public {
+        DeployMinimal.Config memory c = _onChainWithRegistry(5042002, REGISTRY_ARC_TESTNET);
+        c.adminDelay = 0;
+        DeployMinimal.Deployment memory e = script.deploy(c);
+        assertEq(e.controller.defaultAdminDelay(), 0);
+        assertEq(e.controller.defaultAdmin(), admin);
+    }
+
     function test_revert_deployerIsExecutor() public {
         DeployMinimal.Config memory c = _config(block.chainid, address(registry));
         c.executor = deployer;
