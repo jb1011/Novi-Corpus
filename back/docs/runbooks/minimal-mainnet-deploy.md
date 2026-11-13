@@ -107,11 +107,44 @@ export CONTROLLER_EXECUTOR=<executor address>
    forge script script/DeployMinimal.s.sol --rpc-url <arc mainnet rpc url> --broadcast
    ```
 
-6. Clear the key from the shell with `unset PRIVATE_KEY`.
+6. Read the deployment back from the chain. Take the three addresses from the broadcast output,
+   export the deployer address from step 3, and run `verify`. It reads only the deployed
+   contracts' state and re-runs every post-condition against them, so it is the check that the
+   chain holds what the simulation predicted. It must print
+   `Post-conditions hold on the deployed contracts`.
+
+   ```bash
+   export DEPLOYER=<deployer address>
+   forge script script/DeployMinimal.s.sol --sig "verify(address,address,address)" \
+     <legalManagerImpl> <legalBodyFactory> <noviController> --rpc-url <arc mainnet rpc url>
+   ```
+
+7. Clear the key from the shell with `unset PRIVATE_KEY`.
+
+## If a transaction fails
+
+If the broadcast stops partway, for example because the RPC dropped a transaction, pick one of
+these:
+
+- **Resume the same run.** Add `--resume` to the broadcast command. It re-sends only the
+  transactions that were not sent and keeps their nonces, so the controller's predicted address
+  still holds.
+- **Start a fresh run.** Run the dry run and the broadcast again. The deployer's next nonce gives a
+  new, consistent triple, and the post-conditions check it as before. Contracts from the earlier
+  attempt become harmless orphans: a factory without its controller is owned by an address that
+  nothing can create any more, so no one can ever call its owner functions, and a lone
+  implementation is inert because it is locked and only a factory clones it.
+
+If the RPC drops transactions sent back to back, add `--slow` to the broadcast command: it waits
+for each transaction to land before sending the next.
+
+Record only the final triple. Never point the backend at a factory from an earlier attempt.
 
 ## What the output means, and the explorer checks
 
-`All post-conditions hold` means the script read back, from the deployed contracts:
+The dry run's `All post-conditions hold` line comes from the local simulation, before anything is
+sent, so it proves the inputs and the prediction, not the chain. The `verify` read-back in "Dry
+run, then broadcast" runs the same checks against the deployed contracts. Together they establish:
 
 - The controller sits at the predicted address, and it owns the factory with no pending owner.
 - The factory uses the new implementation and the pinned registry.
@@ -128,7 +161,7 @@ Then check on the explorer:
 2. The controller's creation transaction emits `RoleGranted` for `DEFAULT_ADMIN_ROLE` to the admin,
    two `RoleGranted` for the selector roles to the executor, and two `BoundTargetSet` naming the
    factory.
-3. Read the wiring back independently of the script.
+3. Read the wiring back independently of the script, with `cast` rather than `verify`.
 
    ```bash
    RPC=<arc mainnet rpc url>

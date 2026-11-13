@@ -66,6 +66,33 @@ contract DeployMinimal is Script {
         _printAddresses(d);
     }
 
+    /// @notice Re-runs every post-condition against contracts already on the connected chain,
+    ///         reading nothing but their state. The success line of a deploy run comes from the
+    ///         local simulation, before anything is sent; this is the read-back after the
+    ///         broadcast. Env: CONTROLLER_ADMIN, CONTROLLER_EXECUTOR, CONTROLLER_ADMIN_DELAY (same
+    ///         default as run()), and DEPLOYER, the address that sent the three creations.
+    function verify(address implementation, address factory, address controller) external view {
+        address registry = _expectedRegistry(block.chainid);
+        require(registry != address(0), "no identity registry is pinned for this chain");
+        Config memory c = Config({
+            deployerKey: 0,
+            chainId: block.chainid,
+            registry: registry,
+            admin: vm.envAddress("CONTROLLER_ADMIN"),
+            executor: vm.envAddress("CONTROLLER_EXECUTOR"),
+            adminDelay: _envAdminDelay()
+        });
+        Deployment memory d = Deployment({
+            implementation: LegalManager(payable(implementation)),
+            factory: LegalBodyFactory(factory),
+            controller: NoviController(controller),
+            controllerDeployBlock: 0
+        });
+        // The controller is already deployed, so the address it was predicted at is its own.
+        _requirePostConditions(d, controller, c, vm.envAddress("DEPLOYER"));
+        console2.log("Post-conditions hold on the deployed contracts");
+    }
+
     /// @dev CONTROLLER_ADMIN_DELAY in seconds, 24 hours when unset.
     function _envAdminDelay() internal view returns (uint48) {
         uint256 delay = vm.envOr("CONTROLLER_ADMIN_DELAY", uint256(24 hours));
@@ -183,7 +210,7 @@ contract DeployMinimal is Script {
 
     /// @dev Prints the block to copy into addresses.arc-mainnet.json (or the testnet file).
     function _printAddresses(Deployment memory d) internal view {
-        console2.log("All post-conditions hold. Addresses for the addresses file:");
+        console2.log("All post-conditions hold in the local simulation. Addresses for the addresses file:");
         console2.log("{");
         console2.log('  "ours": {');
         console2.log(string.concat('    "legalManagerImpl": "', vm.toString(address(d.implementation)), '",'));

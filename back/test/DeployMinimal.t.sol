@@ -217,6 +217,50 @@ contract DeployMinimalTest is DeployMinimalChecks {
         assertEq(e.controller.boundTarget(LegalBodyFactory.createLegalBody.selector), address(e.factory));
     }
 
+    // ── read-back of a deployed triple ───────────────────────────────────
+
+    /// @dev Sets the env verify() reads. The admin, executor and delay match the values
+    ///      test_run_readsTheEnvironment sets, because environment variables are shared by tests
+    ///      running in parallel; a wrong admin is exercised with a deployment instead.
+    function _setVerifyEnv() internal {
+        vm.setEnv("CONTROLLER_ADMIN", vm.toString(admin));
+        vm.setEnv("CONTROLLER_EXECUTOR", vm.toString(executor));
+        vm.setEnv("CONTROLLER_ADMIN_DELAY", "172800");
+        vm.setEnv("DEPLOYER", vm.toString(deployer));
+    }
+
+    function _deployWithTwoDayDelay(address admin_) internal returns (DeployMinimal.Deployment memory e) {
+        DeployMinimal.Config memory c = _config(block.chainid, address(registry));
+        c.admin = admin_;
+        c.adminDelay = 2 days;
+        e = script.deploy(c);
+    }
+
+    function test_verify_passesOnTheDeployedContracts() public {
+        DeployMinimal.Deployment memory e = _deployWithTwoDayDelay(admin);
+        _setVerifyEnv();
+        script.verify(address(e.implementation), address(e.factory), address(e.controller));
+    }
+
+    function test_verify_revertsOnAWrongTriple() public {
+        DeployMinimal.Deployment memory e = _deployWithTwoDayDelay(admin);
+        _setVerifyEnv();
+        vm.expectRevert(bytes("factory owner is not the controller"));
+        script.verify(address(e.implementation), address(e.factory), address(e.factory));
+        vm.expectRevert(bytes("factory implementation"));
+        script.verify(address(d.implementation), address(e.factory), address(e.controller));
+        // The setUp deployment's controller pins the setUp factory, not this one.
+        vm.expectRevert(bytes("factory owner is not the controller"));
+        script.verify(address(e.implementation), address(e.factory), address(d.controller));
+    }
+
+    function test_verify_revertsWhenTheAdminDiffersFromTheEnvironment() public {
+        DeployMinimal.Deployment memory e = _deployWithTwoDayDelay(makeAddr("anotherAdmin"));
+        _setVerifyEnv();
+        vm.expectRevert(bytes("default admin is not CONTROLLER_ADMIN"));
+        script.verify(address(e.implementation), address(e.factory), address(e.controller));
+    }
+
     // ── pre-check refusals ───────────────────────────────────────────────
 
     function test_revert_chainIdMismatch() public {
