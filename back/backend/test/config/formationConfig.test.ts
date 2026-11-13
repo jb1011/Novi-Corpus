@@ -64,6 +64,8 @@ const MAINNET = {
   DOOLA_ENVIRONMENT: "production",
   ...WORLD,
   ...PII,
+  // The funnel's salt: a production deployment refuses to boot without one.
+  FUNNEL_SALT: "0f".repeat(32),
 };
 
 // A production-NODE_ENV env that already satisfies the pre-existing prod invariants, so a throw
@@ -431,4 +433,16 @@ test("FORMATION_MAX_AGENTS_PER_COMPANY defaults to 10 and is overridable", () =>
     loadConfig({ ...BASE, ...DOOLA, FORMATION_MAX_AGENTS_PER_COMPANY: "2" }).formation
       ?.maxAgentsPerCompany,
   ).toBe(2);
+});
+
+test("FORMATION_MAX_TOTAL defaults to 10, takes a whole number from 1, and refuses anything else", () => {
+  // The early-access beta's lifetime cap on formed legal-body companies, read on production only.
+  expect(loadConfig(BASE).formation?.maxTotal).toBe(10);
+  expect(loadConfig({ ...BASE, ...DOOLA_PROD }).formation?.maxTotal).toBe(10);
+  expect(loadConfig({ ...BASE, FORMATION_MAX_TOTAL: "12" }).formation?.maxTotal).toBe(12);
+  expect(loadConfig({ ...BASE, FORMATION_MAX_TOTAL: "1" }).formation?.maxTotal).toBe(1);
+  for (const refused of ["0", "-1", "2.5", "ten"])
+    expect(() => loadConfig({ ...BASE, FORMATION_MAX_TOTAL: refused }), refused).toThrow(
+      /FORMATION_MAX_TOTAL/,
+    );
 });

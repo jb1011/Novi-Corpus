@@ -1,4 +1,9 @@
-import { assertGuardianAllowed } from "../api/routes/worldId";
+import { randomUUID } from "node:crypto";
+import {
+  assertGuardianAllowed,
+  assertHumanCompanyCap,
+  assertRealHuman,
+} from "../api/routes/worldId";
 import {
   businessPurposeRequiredMessage,
   businessPurposeTooLongMessage,
@@ -7,6 +12,7 @@ import {
   companyNameCharsetMessage,
   companyNameDuplicateMessage,
   companyNameEndingOnlyMessage,
+  companyNameEndingRefusedMessage,
   companyNameRestrictedMessage,
   companyNameTooLongMessage,
   companyNamesRequiredMessage,
@@ -16,18 +22,25 @@ import {
   formationQuotaExhaustedMessage,
   industryLabelRequiredMessage,
   industryLabelUnknownMessage,
+  partyBodyNamesThePerson,
+  partyFieldsOf,
   partyFrozenMessage,
+  partyNamesRequiredMessage,
   partyUnchangedMessage,
   sqliteUtcTimestamp,
   ssnFormatMessage,
   ssnRefusedHereMessage,
   ssnUnavailableMessage,
+  syntheticFormationParty,
   syntheticPiiRefusedMessage,
   syntheticPiiRequiredMessage,
   truncateTenant,
   warnIfNearLimit,
 } from "../formation";
+import { type IdentityDeps, assertIdentityVerified, namesOfRecordAtDoor } from "../identity/state";
 import { refusal } from "../legalBody/sentences";
+import { LegalTextNotApprovedError, assertTextsServable } from "../legalBody/texts/index";
+import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
 import { opsLog } from "../observability/opsLog";
 import type { TransferAuthorizationDomain } from "../payments/transferAuthorization";
 import type { CompanyRepository, CompanyStatus } from "../persistence/companyRepository";
@@ -36,6 +49,9 @@ import type {
   FormationPartyRepository,
 } from "../persistence/formationPartyRepository";
 import { parseDetail } from "../persistence/formationRepository";
+import type { GuardianIdentityCheck } from "../persistence/identityRepository";
+import type { FormationPartyInput } from "../policy/agentSpec";
+import { formedCapReached, formedDoorEnvironmentOf, logFormedCapReached } from "./formedDoor";
 import { partyEditAllowed } from "./freeze";
 import type { CompanyIntake, CompanyPin } from "./intake";
 import {
@@ -46,6 +62,7 @@ import {
   companyNameOptions,
   duplicateKey,
   firstIllegalNameChar,
+  hasEntityEnding,
   stripEntityEnding,
 } from "./intake";
 import { isKnownIndustryLabel } from "./naicsLabels";
@@ -68,11 +85,13 @@ import { findRestrictedWord } from "./wyRestrictedWords";
  * transaction: a party that loses the CAS rolls the company back with it, so a person's identity
  * can never end up spent on two companies.
  *
- * ⚠ It deliberately imports `assertGuardianAllowed` from the API layer. The rule the design gives
- * is "the gate is on the doors that spend the money", and the gate's implementation is a request
- * refusal (an `ApiError`). Re-implementing it here would be a second personhood check, which is
- * exactly the drift this module exists to prevent. The layering test forbids `src/workflow` →
- * `src/api`; this is `src/formation`, which is the door layer's own domain module.
+ * ⚠ It deliberately imports the World gates from the API layer: `assertGuardianAllowed` for a
+ * company for agents, `assertRealHuman` and `assertHumanCompanyCap` for the formed door. The rule
+ * the design gives is "the gate is on the doors that spend the money", and the gate's
+ * implementation is a request refusal (an `ApiError`). Re-implementing it here would be a second
+ * personhood check, which is exactly the drift this module exists to prevent. The layering test
+ * forbids `src/workflow` → `src/api`; this is `src/formation`, which is the door layer's own
+ * domain module.
  */
 
 export interface CreateCompanyDeps {
@@ -85,11 +104,13 @@ export interface CreateCompanyDeps {
    *    rows because that is where the fee is actually incurred (with payment on, a company can
    *    sit in draft for days before its create fires);
    *  - `find` + `transition` so a successful edit-and-retry can RE-ARM the filing step it just
-   *    unblocked, in the same transaction as the edit (§4.7 — see `updateCompanyIntake`).
+   *    unblocked, in the same transaction as the edit (§4.7 — see `updateCompanyIntake`);
+   *  - `stepsOf` + `transition` for the tenant's abandon of a formed company
+   *    (`abandonFormedCompany`), which reads every row and closes each one.
    */
   requests: Pick<
     import("../persistence/formationRepository").FormationRepository,
-    "createRequestsSince" | "find" | "transition"
+    "createRequestsSince" | "find" | "transition" | "stepsOf"
   >;
   /** What this deployment pins a company to. Never caller input. */
   pin: CompanyPin;
@@ -97,6 +118,13 @@ export interface CreateCompanyDeps {
   sandboxSyntheticPii: boolean;
   maxPerTenant: number;
   dailyCeiling: number;
+  /**
+   * FORMATION_MAX_TOTAL: how many formed legal-body companies the formed door takes in all, on
+   * production only (`formedCapReached`). `/config.legalBodies.formedDoor` reads this field, on
+   * `ApiDeps.formation.companyDeps`, so the door and the config cannot hold two figures. Absent =
+   * no cap. A company for agents is never counted and never refused.
+   */
+  maxTotal?: number;
   /**
    * The SSN encryption keyring (§4.2). Absent on every deployment that does not collect one —
    * which is every deployment except production doola, where it is a BOOT invariant.
@@ -106,9 +134,24 @@ export interface CreateCompanyDeps {
   pii?: PiiKeyring;
   /** The company INSERT, the party bind CAS and the SSN write commit together, or not at all. */
   transaction: <T>(fn: () => T) => T;
-  /** The World gate. Absent (or unwired) = no personhood check, exactly as on every other door —
-   *  which is why production formation has a BOOT invariant that this is constructed. */
+  /** The World gate. Absent (or unwired) = no personhood check at the agent door, exactly as on
+   *  every other door — which is why production formation has a BOOT invariant that this is
+   *  constructed. The formed door refuses without it (503 `unavailable`). */
   world?: import("../api/routes/worldId").WorldIdDeps;
+  /** The guardian identity record; the formed door's identity gate reads it on production. */
+  identity?: import("../identity/state").IdentityDeps;
+  /** `legalBodyEnvironment(cfg)`: the network's environment. Absent reads as the pin's. */
+  legalBodyEnvironment?: "sandbox" | "production";
+  /**
+   * PLACEHOLDER, the shape of `ApiDeps.invites`: PR 2b replaces it with its InviteDeps and
+   * `assertInvited`. The composition root passes nothing until then, so a production formed door
+   * refuses with `formed_door_not_offered` after every other gate.
+   *
+   * ⚠ `required: true` here checks no invite. Never pass it outside tests until `assertInvited`
+   * replaces the line in step 0; passing it on production would open the formed door to anyone who
+   * passes World, identity and the texts.
+   */
+  invites?: { required: boolean };
   /**
    * FORMATION PAYMENTS (§6.1). Present on every deployment that can quote; `required` inside it
    * is the switch.
@@ -192,6 +235,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 class PartyBindLost extends Error {}
 
+/**
+ * The total cap reached inside the mint: another create took the last place between step 4b and
+ * the mint. Thrown so the transaction rolls back, before anything in it was written; private to
+ * this module and converted back into the same refusal step 4b answers.
+ */
+class CapReached extends Error {}
+
 export function createCompany(
   deps: CreateCompanyDeps,
   tenantId: string,
@@ -199,21 +249,40 @@ export function createCompany(
 ): CreateCompanyResult {
   const now = deps.now ?? Date.now;
 
-  // 0. A company for a legal body is not offered on PRODUCTION yet: the formed door's gates
-  //    (strict World, the identity record, the approved texts, the invite, the total cap) are not
-  //    wired, and without them this door would file real companies for anyone World lets through.
-  //    The deployment's pin decides: a mainnet box always pins doola production (a boot
-  //    invariant), so this covers `legalBodyEnvironment(cfg) === "production"`, and it refuses on
-  //    any box that would file a real company. Before anything else, so nothing is written.
-  //    ⚠ F-A-2 REPLACES this check with those gates.
-  if (intake.for === "legal_body" && deps.pin.environment === "production")
-    throw refusal("formed_door_not_offered", 403);
-
-  // 1. PERSONHOOD, first, and on this door specifically (§6.7): `POST /companies` is where the
-  //    money is spent, and an anonymous caller with a wallet must not be able to buy real
-  //    Wyoming LLCs. Throws (403) rather than returning a message — it is the same refusal
-  //    onboard makes, and both surfaces already render it.
-  assertGuardianAllowed(deps.world, tenantId, { scope: "company" });
+  // 0. THE FORMED DOOR's gates, for a company that will stand behind a legal body, in this order
+  //    and before anything is written. It runs under production when the doola pin OR the network
+  //    is production (`formedDoorEnvironment`, the rule `/config.legalBodies.formedDoor` reads
+  //    too).
+  //     a. A REAL human, whatever the enforcement switch says: a waiver is refused on both
+  //        environments, and a box with no World block answers 503 rather than filing.
+  //     b. The per-human company cap, counted as the agent door counts it.
+  //     c. The guardian identity record (production only: a sandbox returns at once).
+  //     d. The operating agreement approved (production only: a sandbox serves a draft).
+  //     e. The invite gate, last, so every gate above runs and is tested in its final order.
+  //    A company for agents keeps step 1, the agent door's own gate, unchanged. The formed door's
+  //    total cap is step 4b, after the per-tenant quota.
+  const formed = intake.for === "legal_body";
+  const door = formedDoorEnvironmentOf(deps);
+  if (formed) {
+    const verification = assertRealHuman(deps.world, tenantId, door);
+    assertHumanCompanyCap(deps.world, verification);
+    assertIdentityVerified(deps.identity, deps.world, tenantId, door);
+    try {
+      assertTextsServable(door, [LEGAL_BODY_OPERATING_AGREEMENT]);
+    } catch (err) {
+      if (err instanceof LegalTextNotApprovedError) throw refusal("legal_text_not_approved", 503);
+      throw err;
+    }
+    // PR 2b replaces this line with assertInvited.
+    if (door === "production" && deps.invites?.required !== true)
+      throw refusal("formed_door_not_offered", 403);
+  } else {
+    // 1. PERSONHOOD, first, and on this door specifically (§6.7): `POST /companies` is where the
+    //    money is spent, and an anonymous caller with a wallet must not be able to buy real
+    //    Wyoming LLCs. Throws (403) rather than returning a message — it is the same refusal
+    //    onboard makes, and both surfaces already render it.
+    assertGuardianAllowed(deps.world, tenantId, { scope: "company" });
+  }
 
   // 2. The synthetic-PII refusals, in BOTH directions and never as a substitution (§3, audit H7).
   //    Keyed on the DEPLOYMENT: quietly swapping in a fixture would leave the caller believing
@@ -251,6 +320,15 @@ export function createCompany(
     return { error: formationQuotaExhaustedMessage(deps.maxPerTenant) };
   }
 
+  // 4b. THE TOTAL CAP (FORMATION_MAX_TOTAL), for a legal-body company on production only: the
+  //     early-access beta takes so many formed companies in all, over every tenant. A sandbox
+  //     forms demo companies without number, and a company for agents is never counted or capped.
+  //     Asked again inside the mint (step 8), where two people creating at once meet.
+  if (formed && formedCapReached(deps.companies, deps.maxTotal, door)) {
+    logFormedCapReached(deps.companies, deps.maxTotal, "count");
+    throw refusal("formation_cap_reached", 409);
+  }
+
   // 5. The platform daily ceiling, still on `create_provider` rows.
   const inWindow = deps.requests.createRequestsSince(sqliteUtcTimestamp(now() - DAY_MS));
   if (inWindow >= deps.dailyCeiling) {
@@ -270,8 +348,8 @@ export function createCompany(
   if ("error" in gated) return gated;
   const sealed = gated.sealed;
 
-  // 7. Intake validation, in whichever of the two shapes this caller sent (§5).
-  const validated = validateIntake(intake);
+  // 7. Intake validation (§5), with the formed door's own name rule for a legal-body company.
+  const validated = validateIntake(intake, { forLegalBody: formed });
   if ("error" in validated) return validated;
   const built = validated.intake;
 
@@ -295,6 +373,10 @@ export function createCompany(
   let paymentId: string | undefined;
   try {
     companyId = deps.transaction(() => {
+      // Step 4b again, first and inside: a create that passed the count above while another
+      // person's create minted the last place in between is refused here, before any write, and
+      // the sentinel rolls the transaction back (the `PartyBindLost` rule below).
+      if (formed && formedCapReached(deps.companies, deps.maxTotal, door)) throw new CapReached();
       const id = deps.companies.create({
         tenantId,
         status,
@@ -306,7 +388,7 @@ export function createCompany(
         businessPurpose: built.businessPurpose,
         industryLabel: built.industryLabel,
         intakeSynthesized: built.synthesized,
-        purposeKind: intake.for === "legal_body" ? "legal_body" : "agent",
+        purposeKind: formed ? "legal_body" : "agent",
       });
       // THROWN, not returned. better-sqlite3 rolls a transaction back on an EXCEPTION and on
       // nothing else: a callback that returns `false` COMMITS, and the company row it just
@@ -336,6 +418,10 @@ export function createCompany(
     });
   } catch (e) {
     if (e instanceof PartyBindLost) return { error: formationPartyUnavailableMessage() };
+    if (e instanceof CapReached) {
+      logFormedCapReached(deps.companies, deps.maxTotal, "mint");
+      throw refusal("formation_cap_reached", 409);
+    }
     throw e;
   }
 
@@ -446,7 +532,8 @@ export function updateCompanyIntake(
   if ("error" in gated) return gated;
   const sealed = gated.sealed;
 
-  const validated = validateIntake(intake);
+  // The rules the company was created under: a legal-body company keeps the formed door's.
+  const validated = validateIntake(intake, { forLegalBody: company.purposeKind === "legal_body" });
   if ("error" in validated) return validated;
   const built = validated.intake;
   // A re-opened intake is typed by a human, so the synthesized path has no business here: it
@@ -506,6 +593,149 @@ export function updateCompanyIntake(
   return { companyId };
 }
 
+// ── THE PARTY DOORS: the intake and the edit of the responsible person (design §3/§5/§7) ────
+
+/**
+ * What the intake reads: the party store, the synthetic rule, and the formed door's environment
+ * and its two gates. The composition root's `companyDeps` is one, so both doors pass it as it is.
+ */
+export type FormationPartyIntakeDeps = Pick<
+  CreateCompanyDeps,
+  "parties" | "sandboxSyntheticPii" | "world" | "identity" | "pin" | "legalBodyEnvironment" | "now"
+>;
+
+/** Either the handle, or the single-sourced refusal both surfaces render. */
+export type FormationPartyIntakeResult = { partyId: string } | { error: string };
+
+/**
+ * THE PARTY DOORS' GATES on a production door: a real human (strict World: a waiver is refused,
+ * an unwired World is 503), then the guardian's identity record (`assertIdentityVerified`). Returns
+ * the record and the identity deps it was read with, so the intake can write its names; on a
+ * sandbox door reads nothing and returns undefined. Each gate throws its own `ApiError`, which
+ * both surfaces answer as it is.
+ */
+function partyDoorGates(
+  deps: Pick<CreateCompanyDeps, "world" | "identity" | "pin" | "legalBodyEnvironment">,
+  tenantId: string,
+): { identity: IdentityDeps; record: GuardianIdentityCheck } | undefined {
+  const door = formedDoorEnvironmentOf(deps);
+  if (door === "sandbox") return undefined;
+  assertRealHuman(deps.world, tenantId, door);
+  const record = assertIdentityVerified(deps.identity, deps.world, tenantId, door);
+  // `assertIdentityVerified` answers 503 without the identity deps and returns the record on
+  // production; this states it for the compiler, and refuses rather than writes if it ever fails.
+  if (deps.identity === undefined || record === undefined)
+    throw new Error("the identity gate passed without a record");
+  return { identity: deps.identity, record };
+}
+
+/**
+ * Whether a party door must refuse this body because it names the person: on a production door, a
+ * `legalFirstName` or a `legalLastName` key, whatever its value (`partyBodyNamesThePerson`). Asked
+ * of the body as the caller sent it, before anything else, by both party doors on both surfaces,
+ * so REST and MCP refuse it at the same point; the MCP tools answer it with the table's sentence.
+ */
+export function typedPartyNamesRefused(
+  deps: Pick<CreateCompanyDeps, "pin" | "legalBodyEnvironment">,
+  body: unknown,
+): boolean {
+  return formedDoorEnvironmentOf(deps) === "production" && partyBodyNamesThePerson(body);
+}
+
+/** `typedPartyNamesRefused`, as the REST doors answer it: 400 `party_name_is_written_by_novi`. */
+export function refuseTypedPartyNames(
+  deps: Pick<CreateCompanyDeps, "pin" | "legalBodyEnvironment">,
+  body: unknown,
+): void {
+  if (typedPartyNamesRefused(deps, body)) throw refusal("party_name_is_written_by_novi", 400);
+}
+
+/**
+ * Create a formation party from a validated body, or from the sandbox shortcut.
+ *
+ * Shared by `POST /formation-party` and the `create_formation_party` MCP tool so the two intake
+ * surfaces cannot accept different things — the same reason the door gate is one function.
+ *
+ * ON A PRODUCTION DOOR (`formedDoorEnvironment`: doola's pin or the network production), before
+ * anything is read of the body: the strict World gate, then the identity record (`partyDoorGates`).
+ * The NAMES are then the record's (`namesOfRecordAtDoor`; a record whose names cannot be read is
+ * 503 `identity_unavailable`), never typed: a body that carries `legalFirstName` or
+ * `legalLastName`, whatever its value, is refused 400 `party_name_is_written_by_novi`. The two
+ * doors refuse such a body before calling here too, so both surfaces answer it first; this check
+ * holds for any other caller. The mainnet box runs the legal-body product only (decided 9
+ * November), so every production party is a legal-body party and the rule is unconditional there.
+ * `marketingConsent: true` stores `marketing_consent_at` (now); false or absent stores null.
+ * Nothing is sent or queued for it: the email outbox that adds the address to the campaign
+ * contacts is not on this branch.
+ *
+ * ON A SANDBOX DOOR, as before: no World gate (the full product's pilots use this door with
+ * waivers), the record never read, the names typed (both required on a box that takes test
+ * bodies), no consent stored.
+ *
+ * The synthetic rule is a REFUSAL in both directions, never a substitution (§3, audit H7):
+ *  - on a sandbox deployment, real names and addresses are refused outright and never reach
+ *    doola's development environment. Quietly swapping in a fixture would leave the caller
+ *    believing their data had been filed, and would still have accepted (and stored) it;
+ *  - on a production deployment, the synthetic shortcut is refused because it would file a real
+ *    Wyoming LLC naming a person who does not exist.
+ */
+export function createFormationParty(
+  deps: FormationPartyIntakeDeps,
+  tenantId: string,
+  body: { synthetic?: unknown; parsed?: FormationPartyInput },
+): FormationPartyIntakeResult {
+  // The gates first, before the body is read: a production intake is a legal identity, and only
+  // a verified guardian may give one.
+  const ofRecord = partyDoorGates(deps, tenantId);
+  if (body.synthetic === true) {
+    if (!deps.sandboxSyntheticPii) return { error: syntheticPiiRefusedMessage() };
+    // The id is minted HERE rather than by the repository because the fixture's email embeds it
+    // (`sandbox+<partyId>@novicorpus.com`) — which is what keeps each sandbox filing
+    // distinguishable in doola's portal, and unmistakably ours.
+    const partyId = randomUUID();
+    deps.parties.create({
+      tenantId,
+      ...syntheticFormationParty(partyId),
+      synthetic: true,
+      partyId,
+    });
+    return { partyId };
+  }
+  if (deps.sandboxSyntheticPii) return { error: syntheticPiiRequiredMessage() };
+  const parsed = body.parsed;
+  if (!parsed) return { error: "a formation party body is required" };
+
+  // The SAME mapping the edit doors use — see `partyFieldsOf`. `synthetic` is the deployment's,
+  // never the caller's, which is why it is added here rather than being part of the shape.
+  if (ofRecord !== undefined) {
+    if (partyBodyNamesThePerson(parsed)) throw refusal("party_name_is_written_by_novi", 400);
+    const names = namesOfRecordAtDoor(ofRecord.identity, ofRecord.record);
+    return {
+      partyId: deps.parties.create({
+        tenantId,
+        legalFirstName: names.first,
+        legalLastName: names.last,
+        ...partyFieldsOf(parsed),
+        synthetic: false,
+        marketingConsentAt: parsed.marketingConsent === true ? (deps.now ?? Date.now)() : null,
+      }),
+    };
+  }
+  if (parsed.legalFirstName === undefined || parsed.legalLastName === undefined)
+    return { error: partyNamesRequiredMessage() };
+  return {
+    partyId: deps.parties.create({
+      tenantId,
+      legalFirstName: parsed.legalFirstName,
+      legalLastName: parsed.legalLastName,
+      ...partyFieldsOf(parsed),
+      synthetic: false,
+      // A sandbox stores no consent: nobody there is a contact of ours.
+      marketingConsentAt: null,
+    }),
+  };
+}
+
 /**
  * THE PARTY-EDIT DOOR (design §7, A3) — correct the responsible person doola refused, ADDRESSED
  * BY COMPANY.
@@ -546,11 +776,24 @@ export function updateCompanyIntake(
  * identity columns with neither check: on a sandbox box a real name, email, phone and home
  * address could be written over a labeled fixture and then filed to doola's DEVELOPMENT
  * environment as the responsible person — the precise harm the sandbox refusal exists to prevent.
+ *
+ * ⚠ ON A PRODUCTION DOOR it runs the intake's two gates, the strict World gate and then the
+ * identity record, right after the ownership check (`partyDoorGates`). The NAMES are never edited
+ * here: `fields` cannot carry them, by type, and the two doors refuse a body that does, with
+ * `party_name_is_written_by_novi` on production. The repository's UPDATE does not name them.
  */
 export function updateCompanyParty(
   deps: Pick<
     CreateCompanyDeps,
-    "companies" | "parties" | "requests" | "transaction" | "sandboxSyntheticPii"
+    | "companies"
+    | "parties"
+    | "requests"
+    | "transaction"
+    | "sandboxSyntheticPii"
+    | "world"
+    | "identity"
+    | "pin"
+    | "legalBodyEnvironment"
   >,
   tenantId: string,
   companyId: string,
@@ -566,6 +809,8 @@ export function updateCompanyParty(
   // not-an-oracle rule: an unknown id and somebody else's get ONE answer.
   const company = deps.companies.findOwned(tenantId, companyId);
   if (!company) return { error: companyUnavailableMessage() };
+  // The intake's gates, on a production door: the person behind this edit is the verified guardian.
+  partyDoorGates(deps, tenantId);
   // The party is RESOLVED from the company, never named by the caller — `company_id` is UNIQUE on
   // `formation_parties`, so this is the one identity that filing was opened with.
   const party = deps.parties.findByCompanyId(companyId);
@@ -587,7 +832,7 @@ export function updateCompanyParty(
     // RE-READ inside the transaction and compare, because SQLite's `changes` counts rows MATCHED
     // rather than rows whose values differ: an UPDATE setting every column to the value it already
     // held reports 1, and the re-arm below would then hand a parked filing a retry of the exact
-    // body doola refused. The comparison is over the ten editable columns and nothing else.
+    // body doola refused. The comparison is over the eight editable columns and nothing else.
     const current = deps.parties.findByCompanyId(companyId);
     if (!current) return;
     if (samePartyFields(current, fields)) {
@@ -621,7 +866,7 @@ export function updateCompanyParty(
 }
 
 /**
- * IS THIS EDIT A NO-OP? — the ten editable columns, compared field for field.
+ * IS THIS EDIT A NO-OP? — the eight editable columns, compared field for field.
  *
  * Its own function rather than an inline `every`, because the LIST is the thing that has to stay
  * right: `EditablePartyFields` is a positive list somebody wrote down, and a comparison that
@@ -698,7 +943,10 @@ function rearmAfterEdit(
   if (!row || row.state !== "failed") return;
   const detail = parseDetail<Record<string, unknown>>(row.detail);
   if (detail[flag] !== true) return;
-  const { [flag]: _cleared, ...rest } = detail;
+  // The refused field paths come off WITH the flag: they describe the park this edit ends, and
+  // left behind they would point the next reader at a refusal that is no longer in place. The
+  // error column keeps naming them, which is the operator's trail.
+  const { [flag]: _cleared, refusedFields: _refused, ...rest } = detail;
   deps.requests.transition(companyId, "create_provider", "failed", "failed", {
     detail: JSON.stringify(rest),
     error: row.error ?? null,
@@ -737,9 +985,14 @@ export function rearmAfterPartyEdit(
  * Order matters and is deliberate: the SHAPE first (three candidates, present), then each
  * candidate in position order, then the cross-candidate rule (duplicates), then purpose, then
  * industry. A caller fixing a form gets the first thing wrong with it, in the order they typed.
+ *
+ * `forLegalBody`: the company is (or will be) one for a legal body, formed at the formed door.
+ * There a candidate typed with its entity ending is refused, right after the blank check: the
+ * filing adds the one ending itself. The agent door keeps stripping a single LLC ending.
  */
 export function validateIntake(
   intake: Pick<CompanyIntakeInput, "names" | "businessPurpose" | "industryLabel">,
+  opts: { forLegalBody: boolean },
 ): { intake: CompanyIntake } | { error: string } {
   const raw = intake.names;
   if (!Array.isArray(raw) || raw.length !== NAME_OPTION_COUNT)
@@ -752,6 +1005,8 @@ export function validateIntake(
     if (typeof candidate !== "string") return { error: companyNameBlankMessage(position) };
     const name = canonicalizeIntakeText(candidate);
     if (!name) return { error: companyNameBlankMessage(position) };
+    if (opts.forLegalBody && hasEntityEnding(name))
+      return { error: companyNameEndingRefusedMessage(position) };
     if (name.length > NAME_MAX_LENGTH)
       return { error: companyNameTooLongMessage(position, NAME_MAX_LENGTH) };
     const illegal = firstIllegalNameChar(name);

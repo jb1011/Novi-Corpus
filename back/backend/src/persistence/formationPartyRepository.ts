@@ -62,6 +62,12 @@ export interface FormationPartyRecord {
    * decided to proceed without one.
    */
   ssnErasedReason: SsnErasedReason | null;
+  /**
+   * When the guardian consented to marketing email, in unix milliseconds; null = no consent. Written
+   * at intake on a production door only (`createFormationParty`), never by the edit door, and
+   * cleared by `erase` with the rest of the person's data.
+   */
+  marketingConsentAt: number | null;
 }
 
 /**
@@ -70,35 +76,38 @@ export interface FormationPartyRecord {
  * `partyId` is optional and is NOT a caller-facing field: the sandbox fixture's email embeds the
  * id (`sandbox+<partyId>@novicorpus.com`), so that one path mints the uuid before building the
  * row. Every other path leaves it out and gets one from here.
+ *
+ * `marketingConsentAt` is optional for a writer that asks for no consent: absent is null. The
+ * intake door (`createFormationParty`) states it on every path.
  */
 export type NewFormationParty = Omit<
   FormationPartyRecord,
-  "partyId" | "entityKey" | "companyId" | "deletedAt" | "createdAt" | "ssnErasedReason"
+  | "partyId"
+  | "entityKey"
+  | "companyId"
+  | "deletedAt"
+  | "createdAt"
+  | "ssnErasedReason"
+  | "marketingConsentAt"
 > & {
   partyId?: string;
+  marketingConsentAt?: number | null;
 };
 
 /**
- * The ten columns the party-edit door may rewrite (design §7, A3) — the identity, and nothing
- * that decides what happens to it.
+ * The eight columns the party-edit door may rewrite (design §7, A3) — the contact and the address,
+ * and nothing that decides what happens to them.
  *
  * Its own type rather than an `Omit` of `NewFormationParty`, so that what a caller may change is
  * a positive list somebody wrote down. `tenant_id` (ownership), `synthetic` (a property of the
- * DEPLOYMENT the party was created against), `company_id` (single-use, and this is not a re-bind)
- * and every `ssn_*` column are absent by construction, not by subtraction.
+ * DEPLOYMENT the party was created against), `company_id` (single-use, and this is not a re-bind),
+ * every `ssn_*` column and the marketing consent are absent by construction, not by subtraction.
+ * So are the two NAMES: on production they are written from the guardian's verified identity
+ * record at intake, and no door rewrites them.
  */
 export type EditablePartyFields = Pick<
   FormationPartyRecord,
-  | "legalFirstName"
-  | "legalLastName"
-  | "email"
-  | "phone"
-  | "line1"
-  | "line2"
-  | "city"
-  | "region"
-  | "postalCode"
-  | "country"
+  "email" | "phone" | "line1" | "line2" | "city" | "region" | "postalCode" | "country"
 >;
 
 interface Row {
@@ -120,6 +129,7 @@ interface Row {
   created_at: string;
   deleted_at: string | null;
   ssn_erased_reason: string | null;
+  marketing_consent_at: number | null;
 }
 
 function toRecord(r: Row): FormationPartyRecord {
@@ -142,6 +152,7 @@ function toRecord(r: Row): FormationPartyRecord {
     createdAt: r.created_at,
     deletedAt: r.deleted_at,
     ssnErasedReason: (r.ssn_erased_reason as SsnErasedReason | null) ?? null,
+    marketingConsentAt: r.marketing_consent_at ?? null,
   };
 }
 
@@ -198,13 +209,14 @@ export interface FormationPartyRepository {
   bindToCompany(partyId: string, companyId: string, tenantId: string): boolean;
 
   /**
-   * REWRITE the identity, and NOTHING else (design §7, A3's party-edit door).
+   * REWRITE the contact and the address, and NOTHING else (design §7, A3's party-edit door).
    *
-   * The ten PII columns, tenant-scoped and refusing an erased row. Deliberately NOT in the
-   * statement: `company_id` (the bind is single-use and this is not a re-bind), `synthetic` (a
-   * property of the DEPLOYMENT the party was created against, never of a request), `tenant_id`,
-   * and every `ssn_*` column — an SSN is not editable here and never travels to this door, which
-   * is why there is no field for one to arrive in.
+   * The eight editable columns, tenant-scoped and refusing an erased row. Deliberately NOT in the
+   * statement: the two names (written from the identity record at intake, never rewritten),
+   * `company_id` (the bind is single-use and this is not a re-bind), `synthetic` (a property of
+   * the DEPLOYMENT the party was created against, never of a request), `tenant_id`, the marketing
+   * consent, and every `ssn_*` column — an SSN is not editable here and never travels to this
+   * door, which is why there is no field for one to arrive in.
    *
    * Returns whether the row moved. WHEN it may move is `PARTY_EDIT_ALLOWED_SQL`, carried IN THE
    * WHERE CLAUSE — the `INTAKE_FROZEN_SQL` precedent. It is a correlated subquery over a
@@ -330,9 +342,10 @@ export class SqliteFormationPartyRepository implements FormationPartyRepository 
       insert: db.prepare(
         `INSERT INTO formation_parties
            (party_id, tenant_id, legal_first_name, legal_last_name, email, phone,
-            line1, line2, city, region, postal_code, country, synthetic)
+            line1, line2, city, region, postal_code, country, synthetic, marketing_consent_at)
          VALUES (@party_id, @tenant_id, @legal_first_name, @legal_last_name, @email, @phone,
-                 @line1, @line2, @city, @region, @postal_code, @country, @synthetic)`,
+                 @line1, @line2, @city, @region, @postal_code, @country, @synthetic,
+                 @marketing_consent_at)`,
       ),
       // `deleted_at IS NULL` on every read: an erased party is gone for every purpose, and a
       // lookup that ignored the marker would file with data we promised to have destroyed.
@@ -343,12 +356,11 @@ export class SqliteFormationPartyRepository implements FormationPartyRepository 
         `UPDATE formation_parties SET company_id = ?
           WHERE party_id = ? AND tenant_id = ? AND company_id IS NULL AND deleted_at IS NULL`,
       ),
-      // The ten PII columns and nothing else — see the interface comment for what is deliberately
-      // absent from this list.
+      // The eight editable columns and nothing else — see the interface comment for what is
+      // deliberately absent from this list, the two names first.
       update: db.prepare(
         `UPDATE formation_parties
-            SET legal_first_name = @legal_first_name, legal_last_name = @legal_last_name,
-                email = @email, phone = @phone,
+            SET email = @email, phone = @phone,
                 line1 = @line1, line2 = @line2, city = @city, region = @region,
                 postal_code = @postal_code, country = @country
           WHERE party_id = @party_id AND tenant_id = @tenant_id
@@ -405,6 +417,9 @@ export class SqliteFormationPartyRepository implements FormationPartyRepository 
                 -- fires for a company that provably never filed, or for a party that was never
                 -- used at all, which is the same terminal fact 'terminal' names.
                 ssn_erased_reason = COALESCE(ssn_erased_reason, 'terminal'),
+                -- The consent goes with the address it was given for: an erased person is not a
+                -- contact of ours, and keeps no trace of one.
+                marketing_consent_at = NULL,
                 deleted_at = CURRENT_TIMESTAMP
           WHERE party_id = ? AND deleted_at IS NULL`,
       ),
@@ -497,6 +512,7 @@ export class SqliteFormationPartyRepository implements FormationPartyRepository 
       postal_code: input.postalCode,
       country: input.country,
       synthetic: input.synthetic ? 1 : 0,
+      marketing_consent_at: input.marketingConsentAt ?? null,
     });
     return partyId;
   }
@@ -524,8 +540,6 @@ export class SqliteFormationPartyRepository implements FormationPartyRepository 
         party_id: partyId,
         tenant_id: tenantId,
         company_id: companyId,
-        legal_first_name: fields.legalFirstName,
-        legal_last_name: fields.legalLastName,
         email: fields.email,
         phone: fields.phone,
         line1: fields.line1,

@@ -10,6 +10,7 @@ import {
 } from "viem";
 import {
   agentTreasuryAbi,
+  legalBodyFactoryAbi,
   legalManagerAbi,
   legalManagerFactoryAbi,
   noviControllerAbi,
@@ -20,7 +21,7 @@ import {
   selectorRole,
 } from "../adapters/arc/bootVerify";
 import type { Alert, Severity } from "./alerts";
-import type { EntityIndex, MonitoredEntity } from "./entityLookup";
+import type { EntityIndex, MonitoredEntity, WatchedLegalBody } from "./entityLookup";
 import {
   AGENT_WALLET_KEY,
   DEFAULT_ADMIN_ROLE,
@@ -32,7 +33,7 @@ import {
 } from "./events";
 import type { RawLog } from "./rpc";
 import { logKey } from "./scan";
-import type { OpenGrant } from "./store";
+import type { OpenGrant, SeenLegalBody } from "./store";
 
 /**
  * The rule set from docs/design/2026-08-13-novi-controller-design.md §8.
@@ -52,6 +53,10 @@ export interface RuleContext {
   factories: ReadonlySet<string>;
   /** lowercased */
   beacons: ReadonlySet<string>;
+  /** lowercased LegalBodyFactory addresses: the configured one plus the watch list. */
+  legalBodyFactories: ReadonlySet<string>;
+  /** lowercased body address -> the legal body as the monitor knows it. */
+  legalBodies: ReadonlyMap<string, WatchedLegalBody>;
   /** The platform signing key's ADDRESS. Needed to tell the permanent standing grant apart from a
    *  ceremony grant; the monitor never holds the key itself (see main.ts). */
   executor: Address;
@@ -64,6 +69,8 @@ export interface RuleDeps {
   now(): number;
   /** Current on-chain `payoutAddress` of a treasury; undefined when the read failed. */
   currentPayout(treasury: Address): Promise<Address | undefined>;
+  /** `factory.pendingAmendment(body)` on chain; undefined when the read failed. */
+  pendingAmendment(factory: Address, body: Address): Promise<Hex | undefined>;
 }
 
 /** A grant to start tracking for TTL, or one to close. */
@@ -74,6 +81,8 @@ export type GrantOp =
 export interface RuleOutcome {
   alerts: Alert[];
   grants: GrantOp[];
+  /** Legal bodies whose creation this log records; the monitor appends them to its own set. */
+  legalBodies?: SeenLegalBody[];
 }
 
 const EMPTY: RuleOutcome = { alerts: [], grants: [] };
@@ -98,6 +107,15 @@ export function roleLabel(role: Hex): string {
     (g) => selectorRole(g.selector).toLowerCase() === lower,
   );
   return known ? known.name : "UNKNOWN_SELECTOR_ROLE";
+}
+
+/** "LegalBodyFactory.createLegalBody" for a selector the executor holds; the bare hex otherwise. */
+export function selectorName(selector: Hex): string {
+  const lower = selector.toLowerCase();
+  const known = [...CONTROLLER_GRANTED_SELECTORS, ...LEGAL_BODY_GRANTED_SELECTORS].find(
+    (g) => g.selector.toLowerCase() === lower,
+  );
+  return known ? known.name : selector;
 }
 
 /** One entity's stable public handle for an alert subject. */
@@ -132,12 +150,16 @@ export async function evaluateLog(
 
   if (address === ctx.controller.toLowerCase()) return controllerRule(log, topic0, ctx, deps);
   if (ctx.beacons.has(address)) return beaconRule(log, topic0, deps);
+  // Before the full-product factories: an address on both lists must not lose its creation log.
+  if (ctx.legalBodyFactories.has(address)) return legalBodyFactoryRule(log, topic0, deps);
   if (ctx.factories.has(address)) return factoryRule(log, topic0, deps);
   if (address === ctx.registry.toLowerCase()) return registryRule(log, topic0, ctx, deps);
   const treasuryOwner = ctx.entities.byTreasury.get(address);
   if (treasuryOwner) return treasuryRule(log, topic0, treasuryOwner, deps);
   const proxyOwner = ctx.entities.byProxy.get(address);
   if (proxyOwner) return legalManagerRule(log, topic0, proxyOwner, deps);
+  const body = ctx.legalBodies.get(address);
+  if (body) return legalBodyRule(log, topic0, body, deps);
   return EMPTY;
 }
 
@@ -327,7 +349,13 @@ function controllerRule(
         "CRITICAL",
         "controller_bound_target_set",
         ctx.controller,
-        { ...base, selector, target, unpinned: isAddressEqual(target, zeroAddress) },
+        {
+          ...base,
+          selector,
+          selectorName: selectorName(selector),
+          target,
+          unpinned: isAddressEqual(target, zeroAddress),
+        },
         ts,
         logKey("controller_bound_target_set", log),
       ),
@@ -419,6 +447,179 @@ function factoryRule(log: RawLog, topic0: string, deps: RuleDeps): RuleOutcome {
       ),
     );
   }
+  return EMPTY;
+}
+
+// --- Legal-body factories ----------------------------------------------------------------------
+
+/**
+ * A LegalBodyFactory. Its ownership events take the full-product factory's rule unchanged (same
+ * Ownable2Step events, same CRITICAL: the owner schedules every amendment and creates every body).
+ * A `LegalBodyCreated` is recorded at INFO and hands the new body to the monitor's own watch set,
+ * so the body is watched even if the API never records it.
+ */
+function legalBodyFactoryRule(log: RawLog, topic0: string, deps: RuleDeps): RuleOutcome {
+  if (topic0 !== TOPIC.legalBodyCreated.toLowerCase()) return factoryRule(log, topic0, deps);
+  const { agentId, legalBody, identityOwner, guardian } = decode(log, legalBodyFactoryAbi) as {
+    agentId: bigint;
+    legalBody: Address;
+    identityOwner: Address;
+    guardian: Address;
+  };
+  return {
+    alerts: [
+      alert(
+        "INFO",
+        "legal_body_created",
+        legalBody,
+        {
+          tx: log.transactionHash,
+          block: s(log.blockNumber),
+          factory: log.address,
+          body: legalBody,
+          agentId: s(agentId),
+          guardian,
+          identityOwner,
+        },
+        deps.now(),
+        logKey("legal_body_created", log),
+      ),
+    ],
+    grants: [],
+    legalBodies: [
+      {
+        address: legalBody.toLowerCase(),
+        factory: log.address.toLowerCase(),
+        agentId: s(agentId),
+        guardian: guardian.toLowerCase(),
+        block: log.blockNumber,
+        tx: log.transactionHash,
+      },
+    ],
+  };
+}
+
+// --- Legal bodies ------------------------------------------------------------------------------
+
+/**
+ * A legal body (a LegalManager clone the LegalBodyFactory made). The guardian alone can start a
+ * dissolution, so `DissolutionInitiated` is either the guardian acting or the guardian's key in the
+ * wrong hands, and a human looks at once. A cancel and the final dissolution are WARN: neither
+ * removes a control, but the platform must know a body it serves changed state.
+ *
+ * An amendment on a body is scheduled only through its factory, which records the hash as the
+ * body's single pending amendment in the same call. So the factory's `pendingAmendment(body)` is
+ * the second opinion: a scheduled hash it does not hold means a path outside the factory, which is
+ * CRITICAL. As with the full product's amendment rule, the comparison only ever escalates: an
+ * unreadable pending slot, or a body whose factory is unknown, is CRITICAL too.
+ */
+async function legalBodyRule(
+  log: RawLog,
+  topic0: string,
+  body: WatchedLegalBody,
+  deps: RuleDeps,
+): Promise<RuleOutcome> {
+  const ts = deps.now();
+  const bodyAddress = log.address;
+  const base = {
+    tx: log.transactionHash,
+    block: s(log.blockNumber),
+    body: bodyAddress,
+    factory: body.factory,
+    agentId: body.agentId,
+    guardian: body.guardian,
+  };
+
+  if (topic0 === TOPIC.dissolutionInitiated.toLowerCase()) {
+    const { initiator, executableAt } = decode(log, legalManagerAbi) as {
+      initiator: Address;
+      executableAt: bigint;
+    };
+    return single(
+      alert(
+        "CRITICAL",
+        "legal_body_dissolution_initiated",
+        bodyAddress,
+        {
+          ...base,
+          initiator,
+          executableAt: isoFromSeconds(executableAt),
+          meaning:
+            "the guardian started dissolving this legal body, or someone holds the guardian's key; confirm with the guardian before the delay runs out",
+        },
+        ts,
+        logKey("legal_body_dissolution_initiated", log),
+      ),
+    );
+  }
+
+  if (topic0 === TOPIC.dissolutionVetoed.toLowerCase()) {
+    const { vetoedBy } = decode(log, legalManagerAbi) as { vetoedBy: Address };
+    return single(
+      alert(
+        "WARN",
+        "legal_body_dissolution_cancelled",
+        bodyAddress,
+        {
+          ...base,
+          caller: vetoedBy,
+          meaning: "the dissolution was cancelled; the body is Active again",
+        },
+        ts,
+        logKey("legal_body_dissolution_cancelled", log),
+      ),
+    );
+  }
+
+  if (topic0 === TOPIC.dissolved.toLowerCase())
+    return single(
+      alert(
+        "WARN",
+        "legal_body_dissolved",
+        bodyAddress,
+        { ...base, meaning: "the legal body is dissolved; this is final" },
+        ts,
+        logKey("legal_body_dissolved", log),
+      ),
+    );
+
+  if (topic0 === TOPIC.amendmentScheduled.toLowerCase()) {
+    const { newHash, executableAt } = decode(log, legalManagerAbi) as {
+      newHash: Hex;
+      executableAt: bigint;
+    };
+    const pending =
+      body.factory === null
+        ? undefined
+        : await deps.pendingAmendment(getAddress(body.factory), bodyAddress);
+    const matchesPending = pending !== undefined && pending.toLowerCase() === newHash.toLowerCase();
+    const note =
+      body.factory === null
+        ? "the factory of this legal body is unknown, so the scheduled hash could not be checked against its pending amendment"
+        : pending === undefined
+          ? "the factory's pending amendment for this body could not be read"
+          : matchesPending
+            ? "this is the amendment the factory holds as pending for this body"
+            : "the factory does not hold this hash as pending: the amendment was scheduled outside the factory";
+    return single(
+      alert(
+        matchesPending ? "WARN" : "CRITICAL",
+        "legal_body_amendment_scheduled",
+        bodyAddress,
+        {
+          ...base,
+          newHash,
+          pendingHash: body.factory === null ? null : (pending ?? "unreadable"),
+          matchesPending,
+          vetoDeadline: isoFromSeconds(executableAt),
+          note,
+        },
+        ts,
+        logKey("legal_body_amendment_scheduled", log),
+      ),
+    );
+  }
+
   return EMPTY;
 }
 

@@ -1,4 +1,4 @@
-import type { DoolaEnvironment } from "../adapters/doola/types";
+import { DOOLA_DESCRIPTION_MAX_LENGTH, type DoolaEnvironment } from "../adapters/doola/types";
 
 /**
  * The company INTAKE vocabulary (design 2026-08-26 §2/§5) — the facts a filing is made of, in
@@ -25,9 +25,12 @@ export const FORMATION_ENTITY_TYPE = "LLC";
 export const DEFAULT_INDUSTRY = "Software development";
 
 /** `description` is REQUIRED by the create. The caller's own purpose wins when they wrote one;
- *  this is the fallback, and it is deliberately a true statement about the entity. */
-export const DEFAULT_DESCRIPTION =
-  "An autonomous software agent operating under an on-chain governed operating agreement.";
+ *  this is the fallback, and it is deliberately a true statement about the entity. It is filed
+ *  as the description, so it fits doola's limit (`DOOLA_DESCRIPTION_MAX_LENGTH`, 50); the
+ *  87-character sentence it replaces did not. Plural, because a company may stand behind more
+ *  than one agent. A company the migration already stored with the old sentence keeps it: see
+ *  `buildCompanyInput` for why nothing is shortened at send time. */
+export const DEFAULT_DESCRIPTION = "Operates autonomous software agents.";
 
 /**
  * ONE stored shape for name candidates: `[{name, entityTypeEnding, position}]`.
@@ -94,14 +97,24 @@ export function normalizeCompanyName(raw: string): string {
     .toLowerCase();
 }
 
-/** A trailing limited-liability ending, after a space or a comma: LLC or L.L.C. (dots optional),
- *  or the words, with "Limited" or "Ltd." and "Company" or "Co.", in any case. */
-const LLC_ENDING = /[\s,](l\.?l\.?c\.?|(limited|ltd\.?)\s+liability\s+(company|co\.?))$/i;
+/**
+ * Every Wyoming LLC ending (W.S. 17-29-108(a)) as the last token or phrase of a name, at its start
+ * or after a space or a comma, in any case: the abbreviations LLC, L.L.C., LC and L.C., with any
+ * periods and spacing between the letters ("L. L. C."); and the phrases "limited liability
+ * company" and "limited company", with "Limited" as "Ltd." and "Company" as "Co.", with any
+ * spacing. A word that only ends in those letters ("Kalc") is not an ending.
+ */
+const LLC_ENDING =
+  /(^|[\s,])(l\.?\s*(?:l\.?\s*)?c\.?|(?:limited|ltd\.?)\s*(?:liability\s*)?(?:company|co\.?))$/i;
 
 /**
- * Whether a full legal name ends in a limited-liability ending, as the State's record of an LLC
- * does. Advice only (`company:filed-name` warns on a name without one): it never decides a match,
- * which is `normalizeCompanyName`'s, so it may admit the abbreviated spellings that one keeps.
+ * Whether a name ends in a Wyoming LLC ending (`LLC_ENDING`), as the State's record of an LLC does.
+ * Two readers, which therefore agree: advice to an operator (`company:filed-name` warns on a full
+ * legal name without one), and a refusal at the formed door (`validateIntake` refuses a name option
+ * of a legal-body company that carries one, since the filing adds the ending itself). It never
+ * decides a match, which is `normalizeCompanyName`'s, nor strips one, which is
+ * `stripEntityEnding`'s (the agent door and `withEntityEnding`), so it may admit spellings those
+ * two keep.
  */
 export function hasEntityEnding(name: string): boolean {
   return LLC_ENDING.test(name.normalize("NFC").trim());
@@ -125,9 +138,17 @@ export function canonicalizeIntakeText(raw: string): string {
 export const NAME_OPTION_COUNT = 3;
 /** The stored/sent length bound, matching A1's single-name limit. */
 export const NAME_MAX_LENGTH = 120;
-/** doola requires a description and does not document a maximum; this keeps the body sane and
- *  the filed purpose readable. */
-export const PURPOSE_MAX_LENGTH = 500;
+/**
+ * The purpose is filed VERBATIM as doola's `description`, so its bound is doola's documented
+ * limit for that field (`DOOLA_DESCRIPTION_MAX_LENGTH`, 50), not a number of our own. It used to
+ * be 500, on the belief that doola documented no maximum; a purpose between the two passed this
+ * door and was refused by doola after the customer was created, which parks the filing.
+ *
+ * ONE constant for every door: `validateIntake` (REST `POST /companies` and
+ * `PATCH /companies/:companyId`, MCP `create_company`), the MCP tool description, and the rules
+ * `GET /formation/rules` serves to the form.
+ */
+export const PURPOSE_MAX_LENGTH = DOOLA_DESCRIPTION_MAX_LENGTH;
 
 /**
  * The characters Wyoming accepts in an entity name — deliberately NARROW.

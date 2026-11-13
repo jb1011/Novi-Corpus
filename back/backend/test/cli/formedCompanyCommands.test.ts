@@ -51,7 +51,7 @@ import {
   FACTORY,
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
-import { MemoryDocumentStore, fakeDoola, seedCompany } from "../helpers/formationFakes";
+import { MemoryDocumentStore, fakeDoola, listItem, seedCompany } from "../helpers/formationFakes";
 import {
   type LegalBodyStores,
   legalBodyOrderDeps,
@@ -637,17 +637,21 @@ const NO_STORED_OPTION = /^matches no stored option/;
 const NO_ENTITY_ENDING =
   "no entity ending (LLC, L.L.C., Limited Liability Company): the State's record of an LLC carries its ending; check the name";
 const NO_FILING_NUMBER =
-  "the company has no filing number: it cannot be ordered until one is recorded";
+  "the company has no filing number: the API's next poll fills it for a company doola filed; for a filing done by hand, formation:record-filed records it";
 
-/** One poll of the formation processor, doola reporting the company filed under `name`. */
+/** One poll of the formation processor, doola reporting the company filed and its list item
+ *  naming it `name` (the full answer carries no name, as doola's carries none). */
 async function poll(companyId: string, name: string): Promise<void> {
+  const doolaCompanyId = `doola-${companyId}`;
+  const doolaCustomerId = `cus-${companyId}`;
   const doola = fakeDoola({
     company: {
-      doolaCompanyId: `doola-${companyId}`,
-      name,
+      doolaCompanyId,
+      doolaCustomerId,
       formationFilingDate: "2026-11-02",
       formationFilingNumber: FILING_NUMBER,
     },
+    listed: [listItem(name, { doolaCompanyId, doolaCustomerId })],
   });
   await advanceFormation(
     {
@@ -746,12 +750,18 @@ describe("company:filed-name", () => {
     const { output: dry } = await run<{ warnings: string[] }>(filedNameArgs(other, "Lantern Labs"));
     expect(dry.warnings).toEqual([expect.stringMatching(NO_STORED_OPTION), NO_ENTITY_ENDING]);
 
-    // Every spelling of the ending counts as one.
+    // Every spelling of the ending counts as one: every Wyoming LLC ending, as the formed door
+    // reads them (`hasEntityEnding`).
     for (const name of [
       "Lantern Works L.L.C.",
       "Lantern Works, llc",
       "Lantern Works Limited Liability Company",
       "Lantern Works Ltd. Liability Co.",
+      "Lantern Works LC",
+      "Lantern Works L.C.",
+      "Lantern Works Limited Liability Co.",
+      "Lantern Works Ltd. Liability Company",
+      "Lantern Works Limited Company",
     ]) {
       const companyId = formedCompany({ legalNameFiled: null });
       const { output } = await run<FiledNameRecorded>(filedNameArgs(companyId, name));
@@ -759,7 +769,7 @@ describe("company:filed-name", () => {
     }
   });
 
-  test("a filed company with no filing number is written, with a warning in the dry run and the write: it cannot be ordered until one is recorded", async () => {
+  test("a filed company with no filing number is written, with a warning in the dry run and the write: it cannot be ordered until its number is recorded", async () => {
     const companyId = formedCompany({ legalNameFiled: null, filingNumber: null });
     expect(companies.find(companyId)?.filingNumber).toBeNull();
     // A stored option with its ending, so the missing number is the only advice.

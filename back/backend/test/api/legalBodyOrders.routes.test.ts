@@ -30,6 +30,7 @@ import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../../src/persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../../src/persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../../src/persistence/legalBodyRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
@@ -120,7 +121,16 @@ afterEach(() => {
  *  read the chain. */
 function orderDeps(over: Partial<LegalBodyOrderDeps> = {}): LegalBodyOrderDeps {
   return legalBodyOrderDeps(
-    { db, companies, declarations, checks, store, repo: legalBodies, docStore },
+    {
+      db,
+      companies,
+      declarations,
+      checks,
+      store,
+      repo: legalBodies,
+      adoptions: new SqliteLegalBodyAdoptionRepository(db),
+      docStore,
+    },
     over,
   );
 }

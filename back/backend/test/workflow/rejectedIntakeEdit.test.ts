@@ -13,7 +13,11 @@
  */
 import type DatabaseType from "better-sqlite3";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { type DoolaApi, DoolaApiError } from "../../src/adapters/doola/doolaClient";
+import {
+  CUSTOMER_TEXT_WITHHELD,
+  type DoolaApi,
+  DoolaApiError,
+} from "../../src/adapters/doola/doolaClient";
 import type { CreateCompanyInput } from "../../src/adapters/doola/types";
 import { partyFrozenMessage } from "../../src/formation";
 import {
@@ -291,7 +295,9 @@ test("a rejected PARTY parks under its OWN flag — not the one the company PATC
   expect(row.state).toBe("failed");
   // The attempt is burned ONCE — `rejected` releases doola's key — and never again.
   expect(row.attempt).toBe(1);
-  expect(row.error).toContain("phone is not a valid number");
+  // doola's CODE, and not its sentence: on the person's body that text can quote the person.
+  expect(row.error).toBe(`E_VALIDATION_FAILED: ${CUSTOMER_TEXT_WITHHELD}`);
+  expect(row.error).not.toContain("phone is not a valid number");
 
   // Its own event, because the two parks are answered by different people: the intake's is
   // self-service, this one is not.
@@ -380,13 +386,12 @@ test("A3: a PARTY edit re-arms exactly one retry, and it goes out with the CORRE
           parties,
           requests,
           sandboxSyntheticPii: false,
+          pin: { provider: "doola", environment: "sandbox" },
           transaction: (fn) => db.transaction(fn)(),
         },
         TENANT,
         companyId,
         {
-          legalFirstName: "Grace",
-          legalLastName: "Hopper",
           email: "grace@example.com",
           phone: "+13075550142",
           line1: "30 N Gould St",
@@ -401,14 +406,15 @@ test("A3: a PARTY edit re-arms exactly one retry, and it goes out with the CORRE
     // The flag comes off in the SAME transaction as the edit — the edit is the evidence.
     expect(partyParked(companyId)).toBe(false);
     // …and the operator trail still says what doola refused.
-    expect(rowOf(companyId).error).toContain("phone is not a valid number");
+    expect(rowOf(companyId).error).toBe(`E_VALIDATION_FAILED: ${CUSTOMER_TEXT_WITHHELD}`);
 
     await sweeper(doola).tick();
 
     expect(doola.customers).toHaveLength(2);
+    // The corrected contact goes out; the names stay the ones the party was created with, since
+    // the edit door never rewrites them.
     expect(doola.customers[1]).toMatchObject({
-      firstName: "Grace",
-      lastName: "Hopper",
+      firstName: "Ada",
       email: "grace@example.com",
       phoneNumber: "+13075550142",
     });
@@ -439,13 +445,12 @@ test("A3: a company parked on its INTAKE has a party doola already holds — and
         parties,
         requests,
         sandboxSyntheticPii: false,
+        pin: { provider: "doola", environment: "sandbox" },
         transaction: (fn) => db.transaction(fn)(),
       },
       TENANT,
       companyId,
       {
-        legalFirstName: "Grace",
-        legalLastName: "Hopper",
         email: "grace@example.com",
         phone: "+13075550142",
         line1: "30 N Gould St",
@@ -458,7 +463,7 @@ test("A3: a company parked on its INTAKE has a party doola already holds — and
     );
     expect(refused).toEqual({ error: partyFrozenMessage() });
     // Nothing moved: not the identity, and not the intake park, which is the intake door's.
-    expect(parties.findOwned(TENANT, partyId)!.legalFirstName).toBe("Ada");
+    expect(parties.findOwned(TENANT, partyId)!.email).not.toBe("grace@example.com");
     expect(parked(companyId)).toBe(true);
   })();
 });

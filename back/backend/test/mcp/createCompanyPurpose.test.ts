@@ -6,12 +6,16 @@
  * the tool does not declare is stripped and the call goes on, as it always has, so a caller that
  * passed `for` undeclared would get back a company for agents it did not ask for.
  *
+ * It also holds the purpose to doola's 50-character `description` limit, in the REST door's words.
+ *
  * Every tenant, name and id here is an invention.
  */
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
+import { businessPurposeTooLongMessage } from "../../src/formation";
+import { PURPOSE_MAX_LENGTH } from "../../src/formation/intake";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
@@ -168,4 +172,38 @@ test("create_company without `for` creates a company for agents, and an unknown 
   expect(isError(extra)).toBe(false);
   const { companyId: extraId } = JSON.parse(textOf(extra)) as { companyId: string };
   expect(companies.find(extraId)!.purposeKind).toBe("agent");
+});
+
+test("create_company holds the purpose to doola's 50-character limit, says so, and refuses in the REST sentence", async () => {
+  // The purpose is filed verbatim as doola's `description` (documented maximum 50). The tool's
+  // description is an agent's only discovery surface for that rule, so it states the number, and
+  // the refusal is the same sentence `POST /companies` gives, from the same domain function.
+  await withClient(async (c) => {
+    const { tools } = await c.listTools();
+    const tool = tools.find((t) => t.name === "create_company")!;
+    expect(tool.description).toContain(`at most ${PURPOSE_MAX_LENGTH} characters`);
+    expect(PURPOSE_MAX_LENGTH).toBe(50);
+
+    const refused = await c.callTool({
+      name: "create_company",
+      arguments: {
+        partyId: newParty(),
+        ...MCP_INTAKE,
+        businessPurpose: "x".repeat(PURPOSE_MAX_LENGTH + 1),
+      },
+    });
+    expect(isError(refused)).toBe(true);
+    expect(textOf(refused)).toBe(businessPurposeTooLongMessage(PURPOSE_MAX_LENGTH));
+    expect(textOf(refused)).toBe("businessPurpose is longer than 50 characters");
+    expect(companies.listByTenant(TENANT)).toHaveLength(0);
+
+    const exactly = "y".repeat(PURPOSE_MAX_LENGTH);
+    const ok = await c.callTool({
+      name: "create_company",
+      arguments: { partyId: newParty(), ...MCP_INTAKE, businessPurpose: exactly },
+    });
+    expect(isError(ok)).toBe(false);
+    const { companyId } = JSON.parse(textOf(ok)) as { companyId: string };
+    expect(companies.find(companyId)!.businessPurpose).toBe(exactly);
+  });
 });

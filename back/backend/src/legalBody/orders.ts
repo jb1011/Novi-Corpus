@@ -11,6 +11,7 @@ import type { CompanyDeclarationRepository } from "../persistence/companyDeclara
 import type { CompanyRepository } from "../persistence/companyRepository";
 import type { DocumentStore } from "../persistence/documentStore";
 import type { FormationRequestRecord } from "../persistence/formationRepository";
+import type { LegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
 import type {
   BindingState,
   BrokenReason,
@@ -22,7 +23,7 @@ import type {
 } from "../persistence/legalBodyRepository";
 import { buildAgreement, storeAgreement } from "./agreement";
 import { filedCompanyNames, publicCompanyNames } from "./attestation";
-import { filedNamesPrintable } from "./companyFields";
+import { filedNamesPrintable, isStandInFilingNumber } from "./companyFields";
 import { CUSTOMER_PROVIDER, companySourceOf } from "./provider";
 import { refusal } from "./sentences";
 import { LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
@@ -49,6 +50,8 @@ import { LEGAL_BODY_OPERATING_AGREEMENT } from "./texts/operatingAgreement";
 
 export interface LegalBodyOrderDeps {
   repo: LegalBodyRepository & LegalBodyReasonReads;
+  /** The guardians' adoptions of their orders' agreements: the link doors require one. */
+  adoptions: LegalBodyAdoptionRepository;
   companies: CompanyRepository;
   declarations: CompanyDeclarationRepository;
   checks: CompanyCheckRepository;
@@ -73,6 +76,8 @@ export interface LegalBodyOrderDeps {
   maxOrdersPerTenantPerDay: number;
   maxCreatesPerTenantPerDay: number;
   maxCreatesPerDay: number;
+  /** Seconds: how long after it was issued a signed adoption is still accepted. */
+  adoptionMaxAgeSeconds: number;
   /** The legal-body doors' own budget, shared with nothing else. */
   doorBudget: { take(): boolean };
   tenantBucket: (tenantId: string) => { take(): boolean };
@@ -148,19 +153,24 @@ export interface OrderViewFacts {
    *  company Novi formed, the filed name its row holds. Null when there is none (no declaration, or
    *  no filed name written yet). */
   companyName: string | null;
+  /** When the guardian adopted the order's agreement, in unix seconds; null until then. The link
+   *  doors require it. */
+  adoptedAt: number | null;
 }
 
 /**
  * The facts of `row`, read by state: the lapse only for `lapsed`, the latest break for `broken`
  * and `superseded` (a superseded body that never broke has no break to read), the superseding
- * order only for `superseded`; the revocation and the declaration always, and the company only
- * when there is no declaration (only a customer's own company has one). So at most three reads of
- * the event log, one of the declarations and one of the companies per row, and a declared
- * company's row reads no company at all, which keeps a tenant's list cheap.
+ * order only for `superseded`; the revocation, the declaration and the adoption always, and the
+ * company only when there is no declaration (only a customer's own company has one). So at most
+ * three reads of the event log, one of the declarations, one of the adoptions and one of the
+ * companies per row, and a declared company's row reads no company at all, which keeps a tenant's
+ * list cheap.
  */
 export function orderViewFacts(
   deps: {
     repo: LegalBodyRepository & LegalBodyReasonReads;
+    adoptions: LegalBodyAdoptionRepository;
     declarations: CompanyDeclarationRepository;
     companies: CompanyRepository;
   },
@@ -179,6 +189,7 @@ export function orderViewFacts(
     supersededBy: state === "superseded" ? deps.repo.supersededBy(id) : null,
     replacedBy: lastBreak?.reason === "replaced" ? lastBreak.by : null,
     companyName: companyNameOf(deps, row.companyId),
+    adoptedAt: deps.adoptions.find(id)?.adoptedAt ?? null,
   };
 }
 
@@ -255,6 +266,7 @@ export function toOrderView(row: LegalBodyRecord, facts: OrderViewFacts): LegalB
     supersededBy: facts.supersededBy,
     replacedBy: facts.replacedBy,
     companyName: facts.companyName,
+    adoptedAt: facts.adoptedAt,
   };
 }
 
@@ -319,8 +331,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *     `companyNamesForOrder` reads, and nothing else: a customer's company by the declared name
  *     and filing number its passed check stands behind; a formed company by the filed name and
  *     filing number its row holds, printed as they stand, so a filed fact the agreement cannot
- *     print (`filedNamesPrintable`) is refused, never cleaned. Its manifest states the company's
- *     source: `customer` or `novi` (`companySourceOf`);
+ *     print (`filedNamesPrintable`) is refused, never cleaned. A production company whose filing
+ *     number is in the sandbox stand-in space (`isStandInFilingNumber`) is refused, whatever its
+ *     provider and whoever wrote the number. Its manifest states the company's source: `customer`
+ *     or `novi` (`companySourceOf`);
  *  5. one transaction: the names are read again and must be the ones the agreement prints (an
  *     operator's `company:filed-name --replace` committed after step 4 is answered
  *     `company_not_eligible`, never a draft printing the superseded name), the two caps are
@@ -363,6 +377,12 @@ export function createOrder(
   if (names === null) throw refusal("company_not_eligible", 409);
   if (owned.provider !== CUSTOMER_PROVIDER && !filedNamesPrintable(names))
     throw refusal("company_name_unusable", 409);
+  //    A stand-in is a sandbox's test value, never a State filing number, and no agreement of a
+  //    production company prints one, whoever wrote it: the processor never does there, but an
+  //    operator's record or a declaration could. Every provider, since a declared company's
+  //    agreement prints its declared number too. Read on the company's own pin, as every pin rule.
+  if (owned.environment === "production" && isStandInFilingNumber(names.filingNumber))
+    throw refusal("filing_number_reserved", 409);
   const built = buildAgreement(
     {
       companyName: names.legalName,

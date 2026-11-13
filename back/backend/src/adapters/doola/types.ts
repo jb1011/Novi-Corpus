@@ -79,7 +79,8 @@ export interface DoolaCustomer {
 export interface DoolaNameOption {
   name: string;
   entityTypeEnding: string;
-  /** 1 = first choice. */
+  /** Preference order, lowest first. doola's responses number it from 0; on a create the array
+   *  order sets it and this value is ignored. We never read it back. */
   position?: number;
 }
 
@@ -120,6 +121,22 @@ export interface DoolaRequestedService {
   variant: "Standard" | "Expedite";
 }
 
+/**
+ * The longest `CreateCompanyRequest.description` doola accepts: `maxLength: 50` (and
+ * `minLength: 1`) in the published OpenAPI document cited at the top of this file, re-read
+ * 2026-11-11. doola's own example description is 49 characters. No other field of the create
+ * body carries a length rule there.
+ *
+ * A longer description is refused with `E_VALIDATION_FAILED` AFTER the customer was created,
+ * which parks the filing for a human: that is how a 109-character purpose stopped a sandbox
+ * filing on 2026-11-11. The intake's `PURPOSE_MAX_LENGTH` is this constant, so the door refuses
+ * what doola would refuse, before anything is sent.
+ *
+ * doola's wording ("size must be between 1 and 50") is Jakarta Bean Validation's `@Size`, which
+ * counts UTF-16 code units, as JavaScript's `length` does: the door and doola agree on what 50 is.
+ */
+export const DOOLA_DESCRIPTION_MAX_LENGTH = 50;
+
 /** `CreateCompanyRequest`. `addresses`, `description`, `doolaCustomerId`, `nameOptions`,
  *  `responsibleParty` and `state` are REQUIRED by the API; `members` is required for an LLC. */
 export interface CreateCompanyInput {
@@ -132,6 +149,7 @@ export interface CreateCompanyInput {
   /** The `industry` label from GET /references/naics-codes. Preferred over the deprecated
    *  `naicsCode`. */
   industry: string;
+  /** At most `DOOLA_DESCRIPTION_MAX_LENGTH` characters, and at least one. */
   description: string;
   responsibleParty: DoolaResponsibleParty;
   /** Exactly two entries: one `mailing`, one `business`. */
@@ -140,17 +158,23 @@ export interface CreateCompanyInput {
   requestedServices?: DoolaRequestedService[];
 }
 
-/** `PartnerCompanyResponse` (and, for the fields they share, `PartnerCompanyListItemDto`). */
+/**
+ * `PartnerCompanyResponse`: the FULL company, as `GET /companies/{id}` and the company create
+ * answer it.
+ *
+ * It carries NO `name`. The full answer has `nameOptions` (our candidates, with no winner flag);
+ * the one name doola reports is on the list item (`DoolaCompanyListItem`). Reading a name off this
+ * type is the mistake that left every formed company nameless, so it does not compile.
+ */
 export interface DoolaCompany {
   doolaCompanyId: string;
   doolaCustomerId?: string;
-  /** Present on the LIST item; the full response carries `nameOptions` instead. */
-  name?: string;
   entityType?: DoolaEntityType;
   state?: string;
   nameOptions?: (DoolaNameOption & { id?: string })[];
-  /** doola's intake status for the formation REQUEST — not "the company is formed". Their words:
-   *  PENDING | SUBMITTED | FAILED. Humanized for the tenant, never re-interpreted as truth. */
+  /** doola's intake status for the formation REQUEST, not "the company is formed". Their words:
+   *  AWAITING_PAYMENT | PENDING | SUBMITTED | COMPLETED | FAILED | CANCELLED. We branch on FAILED
+   *  only; it is humanized for the tenant and never re-interpreted as truth. */
   formationSubmissionStatus?: string;
   ein?: string | null;
   /** yyyy-MM-dd, once the state has filed it. */
@@ -161,9 +185,28 @@ export interface DoolaCompany {
   signatureRequirements?: { documentType?: string; status?: string }[];
 }
 
+/**
+ * `PartnerCompanyListItemDto`: one company as `GET /companies` lists it. Seven fields, and only
+ * these: no filing date, no filing number, no EIN. Those are on the full answer (`DoolaCompany`),
+ * and a separate type is what stops code from reading them off a list item, where they never are.
+ */
+export interface DoolaCompanyListItem {
+  doolaCompanyId: string;
+  doolaCustomerId?: string;
+  /** "Company name", with its entity ending, e.g. "Acme Labs LLC". The only name doola reports. */
+  name?: string;
+  state?: string;
+  /** The same status the full answer carries ("as Get a company returns it"). */
+  formationSubmissionStatus?: string;
+  /** DOOLA for a company doola formed through the API, IMPORTED for one a partner imported. */
+  origin?: string;
+  /** AWAITING_DOCUMENTS | IN_REVIEW | VERIFIED. Absent for a company doola formed. */
+  importStatus?: string;
+}
+
 /** `PartnerSearchPagePartnerCompanyListItemDto` — the paged wrapper on GET /companies. */
 export interface DoolaCompanyPage {
-  content?: DoolaCompany[] | null;
+  content?: DoolaCompanyListItem[] | null;
   page?: number;
   size?: number;
   total?: number;
@@ -239,7 +282,8 @@ export interface DoolaErrorEnvelope {
     code?: string;
     message?: string;
     /** Field-level detail. Live shape is `{field: {code, message}}` — NOT the flat
-     *  `{field: "reason"}` PR 1 assumed — so it is carried opaquely and only ever logged. */
+     *  `{field: "reason"}` PR 1 assumed — so it is carried opaquely, and read only by
+     *  `summarizeDoolaFields`, which keeps the path, the code and a redacted message. */
     fields?: Record<string, unknown>;
     requestId?: string;
   };

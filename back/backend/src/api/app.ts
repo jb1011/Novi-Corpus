@@ -5,6 +5,7 @@ import type { AuthVars } from "../auth/middleware";
 import { requireAuth } from "../auth/middleware";
 import { DEFAULT_FORMATION_FILING_WORKING_DAYS } from "../config/env";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
+import { formedCapReached, formedDoorEnvironment } from "../formation/formedDoor";
 import type { FoundingDeps } from "../founding/config";
 import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
@@ -121,6 +122,24 @@ export interface ApiDeps extends EntityViewDeps {
   legalBodyTreasury?: LegalBodyTreasuryDeps;
   webOrigin: string;
   nonceStore: import("../auth/nonceStore").NonceStore;
+  /**
+   * The funnel's "signed in" stage: `POST /auth/verify` records an account's first sign-in here.
+   * Wired on every box with a database; absent (a test app), a sign-in records nothing.
+   */
+  tenantFirstSeen?: import("../persistence/tenantFirstSeenRepository").TenantFirstSeenRepository;
+  /**
+   * The funnel's "statement reads" stage: the by-agent route records each read of a body's
+   * statement here, its caller kept only as a hash salted with `salt` (FUNNEL_SALT). Present only
+   * where FUNNEL_SALT is set: without the salt no read is recorded at all.
+   */
+  statementReads?: {
+    repo: import("../persistence/statementReadRepository").StatementReadRepository;
+    salt: string;
+    /** The route's once-a-minute lines (a failed write, a dropped one). The composition root
+     *  hands the same object to the shutdown, which prints any count they still hold; absent, the
+     *  route makes its own. */
+    lines?: import("./routes/legalBodyStatements").StatementReadLines;
+  };
   siweDomain: string;
   chainId: number;
   /**
@@ -269,12 +288,6 @@ export interface ApiDeps extends EntityViewDeps {
      * DEFAULT_FORMATION_FILING_WORKING_DAYS, the setting's own default.
      */
     filingWorkingDays?: number;
-    /**
-     * FORMATION_MAX_TOTAL: how many formed legal-body companies this deployment takes in all
-     * (`countChargeableFormedLegalBodies`). The setting is not built yet; absent, nothing caps the
-     * formed door, and `/config.legalBodies.formedDoor` never reads `cap_reached`.
-     */
-    maxTotal?: number;
   };
 
   /**
@@ -318,6 +331,10 @@ export interface ApiDeps extends EntityViewDeps {
    * switch. Not wired yet: PR 2b adds the repository and wires the object. Absent, a production
    * deployment never offers the formed door (`/config.legalBodies.formedDoor` reads `hidden`), so
    * the door cannot open on mainnet without invite codes.
+   *
+   * ⚠ `required: true` here checks no invite. Never pass it outside tests until PR 2b wires the
+   * repository and `assertInvited`; passing it on production would advertise the formed door as
+   * offered to anyone who passes World, identity and the texts.
    */
   invites?: { required: boolean };
   /** AgentBook (design 2026-08-25 v3). Present wherever the World Chain READ config is, which is
@@ -430,15 +447,23 @@ type FormedDoorDeps = Pick<ApiDeps, "formation" | "identity" | "invites">;
 /**
  * Whether the formed door is offered on a deployment of this legal-body environment.
  *
- * On a sandbox deployment it is offered wherever doola is configured. On a production deployment
- * it is offered only when every gate holds: doola pinned to production, a deployment that charges,
- * both legal texts approved, the guardian identity record wired, invite codes required, and the
- * formed legal-body companies below the total cap. It reads `cap_reached` when the cap is the only
- * gate that fails, and `hidden` otherwise. The count is read last, and only on production.
+ * The door's environment is `formedDoorEnvironment` of doola's pin and this one, the rule
+ * `createCompany` applies: production when either is. Under sandbox it is offered wherever doola
+ * and World ID are both configured: the door's first gate is a real human (`assertRealHuman`), so
+ * on a box without World every create answers 503. It reads the World deps the create door is
+ * given (`formation.companyDeps.world`), so the two cannot disagree. Under production it is offered
+ * only when every gate holds: doola pinned to production, a deployment that charges, both legal
+ * texts approved, the guardian identity record wired, invite codes required, and the formed
+ * legal-body companies below the total cap (World is a boot invariant of production formation).
+ * It reads `cap_reached` when the cap is the only gate that fails, and `hidden` otherwise. The
+ * cap is `formedCapReached` over the create door's own deps (`companyDeps.companies` and
+ * `companyDeps.maxTotal`, FORMATION_MAX_TOTAL), the rule and the figure `createCompany` refuses
+ * by, read last and only under production: a sandbox is never capped.
  */
 function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production"): FormedDoor {
   const formation = deps.formation;
-  if (environment === "sandbox") return formation ? "offered" : "hidden";
+  const door = formedDoorEnvironment(formation?.pin.environment ?? environment, environment);
+  if (door === "sandbox") return formation?.companyDeps.world ? "offered" : "hidden";
   const gated =
     formation !== undefined &&
     formation.pin.environment === "production" &&
@@ -448,8 +473,8 @@ function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production
     deps.identity !== undefined &&
     deps.invites?.required === true;
   if (!gated) return "hidden";
-  const cap = formation.maxTotal ?? Number.POSITIVE_INFINITY;
-  return formation.companies.countChargeableFormedLegalBodies() < cap ? "offered" : "cap_reached";
+  const create = formation.companyDeps;
+  return formedCapReached(create.companies, create.maxTotal, door) ? "cap_reached" : "offered";
 }
 
 /** The `/config.legalBodies` answer of these deps. */
@@ -655,7 +680,17 @@ export function buildApiApp(deps: ApiDeps) {
   mountProtectedRoutes(app, deps);
   // A customer's own company: under the `/companies/*` requireAuth above, and only where the
   // deployment wires the doors.
-  if (deps.customerCompanies) mountCustomerCompanyRoutes(app, deps.customerCompanies);
+  // The abandon door among them takes a company formed for a legal body too, with the formed
+  // door's own deps and its write-lock (IMMEDIATE) transaction, the one the formed create takes.
+  if (deps.customerCompanies)
+    mountCustomerCompanyRoutes(
+      app,
+      deps.customerCompanies,
+      deps.formation && {
+        companyDeps: deps.formation.companyDeps,
+        transaction: (fn) => deps.repo.immediateTransaction(fn),
+      },
+    );
   // The legal-body order doors: their protection and their routes together, and only where the
   // deployment wires the feature.
   if (deps.legalBodyOrders) {

@@ -16,6 +16,7 @@ import {
   recoverAddress,
   serializeSignature,
 } from "viem";
+import { EIP712_DOMAIN_FIELDS } from "./statement";
 
 /**
  * The message an identity owner signs to authorise a legal body for their agent.
@@ -47,13 +48,6 @@ export const LINK_FIELDS = [
   { name: "amendmentDelay", type: "uint256" },
   { name: "operatingAgreementHash", type: "bytes32" },
   { name: "deadline", type: "uint256" },
-] as const;
-
-const EIP712_DOMAIN_FIELDS = [
-  { name: "name", type: "string" },
-  { name: "version", type: "string" },
-  { name: "chainId", type: "uint256" },
-  { name: "verifyingContract", type: "address" },
 ] as const;
 
 /** The factory refuses a deadline further ahead than this. */

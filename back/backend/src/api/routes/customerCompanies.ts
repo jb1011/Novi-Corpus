@@ -2,6 +2,9 @@ import type { Hono } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import type { Hex } from "viem";
 import type { AuthVars } from "../../auth/middleware";
+import { formationUnavailableMessage } from "../../formation";
+import { abandonFormedCompany } from "../../formation/abandonFormed";
+import type { CreateCompanyDeps } from "../../formation/company";
 import {
   type CustomerCompanyInput,
   type CustomerStatementInput,
@@ -9,6 +12,7 @@ import {
   createCustomerCompany,
   prepareCustomerStatement,
 } from "../../legalBody/customerCompany";
+import { draftTextRefusal } from "../../legalBody/draftTextRefusal";
 import {
   type AcceptEvidenceResult,
   EVIDENCE_MAX_BYTES,
@@ -36,7 +40,8 @@ import { ApiError, readJson, requireOwnedCompany } from "../errors";
  *
  *  - `POST /companies/customer/statement-message` answers the statement to sign, as typed data;
  *  - `POST /companies/customer` creates the company from the signed statement;
- *  - `POST /companies/:companyId/abandon` gives up an unchecked one;
+ *  - `POST /companies/:companyId/abandon` gives up an unchecked one, or a company formed for a
+ *    legal body that nothing has filed yet (it dispatches by provider);
  *  - `POST /companies/:companyId/evidence` takes a PDF for the operator to check the declaration
  *    against. The tenant lists and downloads it through the document routes.
  *
@@ -156,15 +161,25 @@ async function servingApprovedWording<T>(run: () => T | Promise<T>): Promise<T> 
   try {
     return await run();
   } catch (err) {
-    if (err instanceof LegalTextNotApprovedError)
-      throw new ApiError("legal_text_not_approved", 503, err.message);
+    if (err instanceof LegalTextNotApprovedError) throw draftTextRefusal();
     throw err;
   }
+}
+
+/**
+ * What the abandon door needs for a company formed for a legal body: the formed door's own
+ * dependency set (`ApiDeps.formation.companyDeps`) and its write-lock transaction. Absent on a
+ * deployment that forms nothing.
+ */
+export interface FormedAbandonDeps {
+  companyDeps: Omit<CreateCompanyDeps, "transaction">;
+  transaction: <T>(fn: () => T) => T;
 }
 
 export function mountCustomerCompanyRoutes(
   app: Hono<{ Variables: AuthVars }>,
   cc: NonNullable<ApiDeps["customerCompanies"]>,
+  formed: FormedAbandonDeps | undefined,
 ): void {
   // On every door, the abandon door included: it reads no body, and still bounds what a caller may
   // send it. A declared length over the limit is refused before a byte is read.
@@ -218,12 +233,36 @@ export function mountCustomerCompanyRoutes(
   });
 
   /**
-   * Abandon the tenant's own customer company while nobody has checked it, nothing has been paid
-   * and no legal body stands open on it; its declarant's personal data is erased in the same
-   * transaction. Unknown and not-yours are one 404; any other refusal is a 409.
+   * Abandon the tenant's own company, by its provider:
+   *  - a customer's own company, while nobody has checked it, nothing has been paid and no legal
+   *    body stands open on it; its declarant's personal data is erased in the same transaction
+   *    (`abandonCustomerCompany`);
+   *  - a company formed through doola for a legal body, while nothing has reached doola; its
+   *    party is erased in the same transaction, and a settled payment stays for the operator's
+   *    refund (`abandonFormedCompany`). On a deployment that forms nothing, 503;
+   *  - any other company, 409.
+   * Unknown and not-yours are one 404; any other refusal is a 409.
    */
   app.post("/companies/:companyId/abandon", limit, (c) => {
-    abandonCustomerCompany(cc, c.get("tenantId"), c.req.param("companyId"));
+    const tenantId = c.get("tenantId");
+    const company = requireOwnedCompany(cc, c);
+    if (company.provider === CUSTOMER_PROVIDER)
+      abandonCustomerCompany(cc, tenantId, company.companyId);
+    // 'doola' is the formation provider, as `countChargeableFormedLegalBodies` counts it.
+    else if (company.provider === "doola" && company.purposeKind === "legal_body") {
+      if (formed === undefined)
+        throw new ApiError("unavailable", 503, formationUnavailableMessage());
+      abandonFormedCompany(
+        { ...formed.companyDeps, transaction: formed.transaction },
+        tenantId,
+        company.companyId,
+      );
+    } else
+      throw new ApiError(
+        "conflict",
+        409,
+        "only a declared company, or a company formed for a legal body, can be abandoned this way",
+      );
     return c.body(null, 204);
   });
 

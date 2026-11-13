@@ -7,7 +7,7 @@ import {
   encodeEventTopics,
   getAbiItem,
 } from "viem";
-import type { MonitoredEntity } from "../../src/monitor/entityLookup";
+import type { MonitoredEntity, WatchedLegalBody } from "../../src/monitor/entityLookup";
 import { indexEntities } from "../../src/monitor/entityLookup";
 import { standingRoles } from "../../src/monitor/events";
 import type { RawLog } from "../../src/monitor/rpc";
@@ -27,6 +27,9 @@ export const ADDR = {
   operator: "0x5555555555555555555555555555555555555555" as Address,
   guardian: "0x6666666666666666666666666666666666666666" as Address,
   helper: "0x7777777777777777777777777777777777777777" as Address,
+  legalBodyFactory: "0xA1A1a1a1A1A1A1A1A1a1a1a1a1a1A1A1a1A1a1a1" as Address,
+  oldLegalBodyFactory: "0xa2A2a2A2A2A2A2a2a2a2a2A2A2A2A2a2A2A2a2a2" as Address,
+  body: "0x9999999999999999999999999999999999999999" as Address,
 } as const;
 
 /**
@@ -101,12 +104,28 @@ export function entity(over: Partial<MonitoredEntity> = {}): MonitoredEntity {
   };
 }
 
+/** The legal body every default rule context watches, created by `ADDR.legalBodyFactory`. */
+export function legalBody(over: Partial<WatchedLegalBody> = {}): WatchedLegalBody {
+  return {
+    address: ADDR.body.toLowerCase(),
+    factory: ADDR.legalBodyFactory.toLowerCase(),
+    agentId: "4242",
+    guardian: ADDR.guardian.toLowerCase(),
+    ...over,
+  };
+}
+
 export function ruleContext(over: Partial<RuleContext> = {}): RuleContext {
   return {
     controller: ADDR.controller,
     registry: ADDR.registry,
     factories: new Set([ADDR.factory.toLowerCase(), ADDR.legacyFactory.toLowerCase()]),
     beacons: new Set([ADDR.beacon.toLowerCase()]),
+    legalBodyFactories: new Set([
+      ADDR.legalBodyFactory.toLowerCase(),
+      ADDR.oldLegalBodyFactory.toLowerCase(),
+    ]),
+    legalBodies: new Map([[ADDR.body.toLowerCase(), legalBody()]]),
     executor: ADDR.executor,
     standingRoles: standingRoles(),
     entities: indexEntities([entity()]),
@@ -114,10 +133,21 @@ export function ruleContext(over: Partial<RuleContext> = {}): RuleContext {
   };
 }
 
-/** Rule deps with a frozen clock and a stubbed payout read. */
-export function ruleDeps(over: { now?: number; payout?: Address | undefined } = {}) {
+/** Rule deps with a frozen clock and stubbed payout and pending-amendment reads. */
+export function ruleDeps(
+  over: {
+    now?: number;
+    payout?: Address | undefined;
+    pending?: Hex | undefined;
+    onPendingRead?: (factory: Address, body: Address) => void;
+  } = {},
+) {
   return {
     now: () => over.now ?? 1_700_000_000_000,
     currentPayout: async () => over.payout,
+    pendingAmendment: async (factory: Address, body: Address) => {
+      over.onPendingRead?.(factory, body);
+      return over.pending;
+    },
   };
 }

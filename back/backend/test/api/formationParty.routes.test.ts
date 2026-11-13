@@ -13,22 +13,54 @@
 import type Database from "better-sqlite3";
 import { privateKeyToAccount } from "viem/accounts";
 import { createSiweMessage } from "viem/siwe";
-import { afterEach, beforeEach, expect, test } from "vitest";
+import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { ApiError } from "../../src/api/errors";
+import type { WorldIdDeps } from "../../src/api/routes/worldId";
 import { SqliteNonceStore } from "../../src/auth/nonceStore";
 import { createCompany } from "../../src/formation/company";
+import { PURPOSE_MAX_LENGTH } from "../../src/formation/intake";
+import type { IdentityDeps } from "../../src/identity/state";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import type { LegalTextStatus } from "../../src/legalBody/texts/index";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../../src/persistence/formationPartyRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
+import { SqliteWorldStore } from "../../src/persistence/worldStore";
 import { OnboardingRunner } from "../../src/workflow/runner";
+import {
+  NAMES_OF_RECORD,
+  identityOver,
+  recordHuman,
+  recordIdentity,
+  worldFor,
+} from "../helpers/customerCompanyFixtures";
 import { TEST_FUND_CAPS } from "../helpers/fundCaps";
+
+/**
+ * The operating agreement is a draft today, and production refuses a draft before the formed
+ * door's last gate: a test that reaches that gate reads it as `texts.agreement` says. Unset, the
+ * real text.
+ */
+const texts = vi.hoisted(() => ({ agreement: undefined as LegalTextStatus | undefined }));
+
+vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
+  return {
+    ...actual,
+    get LEGAL_BODY_OPERATING_AGREEMENT() {
+      const text = actual.LEGAL_BODY_OPERATING_AGREEMENT;
+      return texts.agreement === undefined ? text : { ...text, status: texts.agreement };
+    },
+  };
+});
 
 const account = privateKeyToAccount(
   "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
@@ -85,7 +117,17 @@ beforeEach(() => {
   repo = new SqliteEntityRepository(db);
   parties = new SqliteFormationPartyRepository(db);
 });
-afterEach(() => db.close());
+afterEach(() => {
+  texts.agreement = undefined;
+  db.close();
+});
+
+/** The guardian as a real human, with a World row: the formed door's World gate met. */
+function realHuman(): WorldIdDeps {
+  const store = new SqliteWorldStore(db);
+  recordHuman(store, account.address, "1001", Date.now());
+  return worldFor(store);
+}
 
 function makeApp(
   formation?: {
@@ -93,6 +135,10 @@ function makeApp(
     syntheticPii?: boolean;
     maxPerTenant?: number;
     environment?: "sandbox" | "production";
+    /** World ID, for the formed door's gate. */
+    world?: WorldIdDeps;
+    /** The guardian identity record, which the formed door reads on production. */
+    identity?: IdentityDeps;
   },
   custody: { circle?: boolean } = {},
 ) {
@@ -109,6 +155,8 @@ function makeApp(
     sandboxSyntheticPii: formation?.syntheticPii ?? false,
     maxPerTenant: formation?.maxPerTenant ?? 3,
     dailyCeiling: 10,
+    world: formation?.world,
+    identity: formation?.identity,
   };
   const runner = new OnboardingRunner({
     repo,
@@ -195,11 +243,11 @@ const patch = (app: ReturnType<typeof buildApiApp>, path: string, token: string,
     body: JSON.stringify(body),
   });
 
-/** The correction a caller sends when doola refuses the person. */
+/** The correction a caller sends when doola refuses the person: the contact and the address. The
+ *  names are never rewritten here: a body that carries one is refused. */
+const { legalFirstName: _first, legalLastName: _last, ...PARTY_WITHOUT_NAMES } = REAL_PARTY;
 const CORRECTED_PARTY = {
-  ...REAL_PARTY,
-  legalFirstName: "Grace",
-  legalLastName: "Hopper",
+  ...PARTY_WITHOUT_NAMES,
   email: "grace@example.com",
   phone: "+13075550142",
 };
@@ -566,7 +614,7 @@ test("POST /companies mints a company through the ONE domain function, and lists
 });
 
 test("POST /companies with `for: legal_body` mints a legal-body company; without it, one for agents", async () => {
-  const app = makeApp({ required: true });
+  const app = makeApp({ required: true, world: realHuman() });
   const token = await login(app);
   const companies = new SqliteCompanyRepository(db);
   const create = async (extra: Record<string, unknown>) => {
@@ -574,7 +622,11 @@ test("POST /companies with `for: legal_body` mints a legal-body company; without
     return post(app, "/companies", token, { partyId, ...COMPANY_INTAKE, ...extra });
   };
 
-  const lb = await create({ for: "legal_body" });
+  // The formed door refuses a name option typed with its entity ending.
+  const lb = await create({
+    for: "legal_body",
+    names: ["Acme Robotics", "Acme Automata", "Acme Mechanicals"],
+  });
   expect(lb.status).toBe(201);
   const { companyId: lbId } = await lb.json();
   expect(companies.find(lbId)!.purposeKind).toBe("legal_body");
@@ -597,10 +649,27 @@ test("POST /companies with `for: legal_body` mints a legal-body company; without
 });
 
 test("PRODUCTION: POST /companies with `for: legal_body` is refused, 403 formed_door_not_offered, and nothing is written", async () => {
-  const app = makeApp({ required: true, environment: "production" });
+  // Every earlier gate of the formed door met, so the refusal is its last: a real human, the
+  // guardian identity record, and the operating agreement read as approved.
+  texts.agreement = "approved";
+  const identityRepo = new SqliteIdentityRepository(db);
+  recordIdentity(identityRepo, account.address, {
+    at: Date.now() - 24 * 60 * 60 * 1000,
+    expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    nullifier: "1001",
+  });
+  const app = makeApp({
+    required: true,
+    environment: "production",
+    world: realHuman(),
+    identity: identityOver(identityRepo, Date.now),
+  });
   const token = await login(app);
   const companies = new SqliteCompanyRepository(db);
-  const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();
+  // On production the names are written from the identity record: the body leaves them out.
+  const { partyId } = await (
+    await post(app, "/formation-party", token, PARTY_WITHOUT_NAMES)
+  ).json();
 
   const res = await post(app, "/companies", token, {
     partyId,
@@ -727,6 +796,50 @@ test("PATCH /companies/:id re-opens a rejected intake, and REQUIRES a session", 
   expect((await frozen.json()).error.message).toMatch(/can no longer be changed/);
 });
 
+test("POST and PATCH /companies hold the purpose to doola's 50-character limit, in the door's own sentence", async () => {
+  // The purpose is filed verbatim as doola's `description` (documented maximum 50). Both REST
+  // doors refuse a longer one BEFORE anything is stored or sent, with the sentence that names
+  // the field and the number, rather than letting doola refuse it after the customer exists.
+  const app = makeApp({ required: true });
+  const token = await login(app);
+  const tooLong = "x".repeat(PURPOSE_MAX_LENGTH + 1);
+  const exactly = "y".repeat(PURPOSE_MAX_LENGTH);
+
+  const { partyId } = await (await post(app, "/formation-party", token, REAL_PARTY)).json();
+  const refused = await post(app, "/companies", token, {
+    partyId,
+    ...COMPANY_INTAKE,
+    businessPurpose: tooLong,
+  });
+  expect(refused.status).toBe(400);
+  expect((await refused.json()).error.message).toBe("businessPurpose is longer than 50 characters");
+  const none = await (
+    await app.request("/companies", { headers: { authorization: `Bearer ${token}` } })
+  ).json();
+  expect(none.companies).toHaveLength(0);
+
+  // Exactly 50 is doola's own maximum, and is taken.
+  const created = await post(app, "/companies", token, {
+    partyId,
+    ...COMPANY_INTAKE,
+    businessPurpose: exactly,
+  });
+  expect(created.status).toBe(201);
+  const { companyId } = await created.json();
+
+  // The edit door: the same rule, the same sentence, and the stored purpose untouched.
+  const edit = await patch(app, `/companies/${companyId}`, token, {
+    ...COMPANY_INTAKE,
+    businessPurpose: tooLong,
+  });
+  expect(edit.status).toBe(400);
+  expect((await edit.json()).error.message).toBe("businessPurpose is longer than 50 characters");
+  const list = await (
+    await app.request("/companies", { headers: { authorization: `Bearer ${token}` } })
+  ).json();
+  expect(list.companies[0].businessPurpose).toBe(exactly);
+});
+
 test("a deployment that forms nothing answers 503 on POST and an empty list on GET", async () => {
   const app = makeApp(undefined);
   const token = await login(app);
@@ -837,8 +950,11 @@ test("the party-edit door rewrites the identity and answers with the handle alon
   // PII in a response body and in every client that caches one.
   expect(await res.json()).toEqual({ partyId });
   expect(parties.findOwned(account.address, partyId)).toMatchObject({
-    legalFirstName: "Grace",
     email: "grace@example.com",
+    phone: "+13075550142",
+    // The names the party was created with stay: this door never rewrites them.
+    legalFirstName: "Ada",
+    legalLastName: "Lovelace",
   });
 });
 
@@ -865,7 +981,7 @@ test("it requires a session, and another tenant's company is refused as if it di
   expect([foreign.status, unknown.status]).toEqual([400, 400]);
   // One answer for both, or the door is an existence oracle over another tenant's company ids.
   expect((await foreign.json()).error.message).toBe((await unknown.json()).error.message);
-  expect(parties.findOwned(account.address, partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(account.address, partyId)!.email).toBe("ada@example.com");
 });
 
 /**
@@ -885,8 +1001,8 @@ test("a tenant with two companies cannot cross-edit: the party is resolved, neve
   expect((await patch(app, `/companies/${a.companyId}/party`, token, CORRECTED_PARTY)).status).toBe(
     200,
   );
-  expect(parties.findOwned(account.address, a.partyId)!.legalFirstName).toBe("Grace");
-  expect(parties.findOwned(account.address, b.partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(account.address, a.partyId)!.email).toBe("grace@example.com");
+  expect(parties.findOwned(account.address, b.partyId)!.email).toBe("ada@example.com");
   // …and there is no door left that takes a party handle at all.
   expect((await patch(app, `/formation-party/${b.partyId}`, token, CORRECTED_PARTY)).status).toBe(
     404,
@@ -908,7 +1024,7 @@ test("it parses the SAME .strict() schema the create does — an `ssn` key is re
   expect(res.status).toBe(400);
   // …and no digits of it come back in the refusal.
   expect(await res.text()).not.toMatch(/\d{3}-\d{2}-\d{4}/);
-  expect(parties.findOwned(account.address, partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(account.address, partyId)!.email).toBe("ada@example.com");
 
   // The same body WITHOUT it is accepted, so the refusal is about that key alone.
   expect((await patch(app, `/companies/${companyId}/party`, token, CORRECTED_PARTY)).status).toBe(
@@ -938,7 +1054,7 @@ test("SANDBOX: the edit door refuses a real identity, in the create door's own w
   expect(res.status).toBe(400);
   expect((await res.json()).error.message).toMatch(/FORMATION_SANDBOX_SYNTHETIC_PII/);
   // Nothing was written: the fixture is intact.
-  expect(parties.findOwned(account.address, partyId)!.legalFirstName).not.toBe("Grace");
+  expect(parties.findOwned(account.address, partyId)!.email).not.toBe("grace@example.com");
 });
 
 test("PRODUCTION: the edit door refuses a SYNTHETIC party row, in the create door's own words", async () => {
@@ -953,7 +1069,7 @@ test("PRODUCTION: the edit door refuses a SYNTHETIC party row, in the create doo
   const res = await patch(app, `/companies/${companyId}/party`, token, CORRECTED_PARTY);
   expect(res.status).toBe(400);
   expect((await res.json()).error.message).toMatch(/synthetic formation parties are refused/);
-  expect(parties.findOwned(account.address, partyId)!.legalFirstName).toBe("Ada");
+  expect(parties.findOwned(account.address, partyId)!.email).toBe("ada@example.com");
 });
 
 test("a deployment that forms nothing has no party-edit door either (503)", async () => {
@@ -961,4 +1077,177 @@ test("a deployment that forms nothing has no party-edit door either (503)", asyn
   const token = await login(app);
   const res = await patch(app, "/companies/whatever/party", token, CORRECTED_PARTY);
   expect(res.status).toBe(503);
+});
+
+// ── PRODUCTION: the names are written from the identity record (F-A-2a) ─────────────────────
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A production deployment (doola's production pin, and the network read as the pin's). The
+ * guardian holds a World row unless `world` is false, and a passed identity record holding
+ * NAMES_OF_RECORD unless `record` is false.
+ */
+function productionApp(opts: { world?: boolean; record?: boolean } = {}) {
+  const identityRepo = new SqliteIdentityRepository(db);
+  if (opts.record !== false)
+    recordIdentity(identityRepo, account.address, {
+      at: Date.now() - DAY_MS,
+      expiresAt: Date.now() + 365 * DAY_MS,
+      nullifier: "1001",
+    });
+  return makeApp({
+    required: true,
+    environment: "production",
+    world: opts.world === false ? worldFor(new SqliteWorldStore(db)) : realHuman(),
+    identity: identityOver(identityRepo, Date.now),
+  });
+}
+
+const partyCount = () =>
+  (db.prepare("SELECT COUNT(*) AS n FROM formation_parties").get() as { n: number }).n;
+
+test("PRODUCTION: POST /formation-party without a World row answers 403 guardian_not_verified, and stores nothing", async () => {
+  const app = productionApp({ world: false });
+  const res = await post(app, "/formation-party", await login(app), PARTY_WITHOUT_NAMES);
+  expect(res.status).toBe(403);
+  expect((await res.json()).error.code).toBe("guardian_not_verified");
+  expect(partyCount()).toBe(0);
+});
+
+test("PRODUCTION: POST /formation-party with a World row and no identity record answers 403 guardian_identity_not_verified", async () => {
+  const app = productionApp({ record: false });
+  const res = await post(app, "/formation-party", await login(app), PARTY_WITHOUT_NAMES);
+  expect(res.status).toBe(403);
+  expect((await res.json()).error.code).toBe("guardian_identity_not_verified");
+  expect(partyCount()).toBe(0);
+});
+
+test("PRODUCTION: a body carrying either name is refused 400 party_name_is_written_by_novi with its sentence, and stores nothing", async () => {
+  const app = productionApp();
+  const token = await login(app);
+  for (const names of [
+    { legalFirstName: "Someone" },
+    { legalLastName: "Else" },
+    { legalFirstName: "Someone", legalLastName: "Else" },
+    // Any value: the key is the refusal, so an empty or a non-string name is refused the same way.
+    { legalFirstName: "" },
+    { legalLastName: null },
+  ]) {
+    const res = await post(app, "/formation-party", token, { ...PARTY_WITHOUT_NAMES, ...names });
+    expect(res.status, JSON.stringify(Object.keys(names))).toBe(400);
+    expect((await res.json()).error).toMatchObject({
+      code: "party_name_is_written_by_novi",
+      message: LEGAL_BODY_SENTENCES.party_name_is_written_by_novi,
+    });
+  }
+  expect(partyCount()).toBe(0);
+});
+
+test("PRODUCTION: the name refusal comes first, as on MCP: before the World gate", async () => {
+  const app = productionApp({ world: false, record: false });
+  const res = await post(app, "/formation-party", await login(app), REAL_PARTY);
+  expect(res.status).toBe(400);
+  expect((await res.json()).error.code).toBe("party_name_is_written_by_novi");
+});
+
+test("PRODUCTION: without names the row holds the record's names, and marketingConsent true stores the stamp", async () => {
+  const app = productionApp();
+  const token = await login(app);
+  const before = Date.now();
+  const consented = await post(app, "/formation-party", token, {
+    ...PARTY_WITHOUT_NAMES,
+    marketingConsent: true,
+  });
+  expect(consented.status).toBe(201);
+  const body = await consented.json();
+  // The handle and nothing else, as on every deployment.
+  expect(Object.keys(body)).toEqual(["partyId"]);
+  const row = parties.findOwned(account.address, body.partyId)!;
+  expect(row).toMatchObject({
+    legalFirstName: NAMES_OF_RECORD.first,
+    legalLastName: NAMES_OF_RECORD.last,
+    email: REAL_PARTY.email,
+    synthetic: false,
+  });
+  expect(row.marketingConsentAt).toBeGreaterThanOrEqual(before);
+  expect(row.marketingConsentAt).toBeLessThanOrEqual(Date.now());
+
+  const silent = await (await post(app, "/formation-party", token, PARTY_WITHOUT_NAMES)).json();
+  expect(parties.findOwned(account.address, silent.partyId)!.marketingConsentAt).toBeNull();
+});
+
+test("PRODUCTION: PATCH /companies/:id/party with a name is refused; without one the other fields move and the names stay", async () => {
+  const app = productionApp();
+  const token = await login(app);
+  const { partyId } = await (
+    await post(app, "/formation-party", token, PARTY_WITHOUT_NAMES)
+  ).json();
+  const { companyId } = await (
+    await post(app, "/companies", token, { partyId, ...COMPANY_INTAKE })
+  ).json();
+
+  const named = await patch(app, `/companies/${companyId}/party`, token, {
+    ...CORRECTED_PARTY,
+    legalLastName: "Else",
+  });
+  expect(named.status).toBe(400);
+  expect((await named.json()).error).toMatchObject({
+    code: "party_name_is_written_by_novi",
+    message: LEGAL_BODY_SENTENCES.party_name_is_written_by_novi,
+  });
+  expect(parties.findOwned(account.address, partyId)!.email).toBe(REAL_PARTY.email);
+
+  const res = await patch(app, `/companies/${companyId}/party`, token, CORRECTED_PARTY);
+  expect(res.status).toBe(200);
+  expect(await res.json()).toEqual({ partyId });
+  expect(parties.findOwned(account.address, partyId)).toMatchObject({
+    email: CORRECTED_PARTY.email,
+    phone: CORRECTED_PARTY.phone,
+    legalFirstName: NAMES_OF_RECORD.first,
+    legalLastName: NAMES_OF_RECORD.last,
+  });
+});
+
+test("PRODUCTION: PATCH /companies/:id/party without a World row answers 403 guardian_not_verified, and nothing moves", async () => {
+  // The company is minted with every gate met; the World row is then gone (another person
+  // verified on the account, or the row was removed), and the edit door asks again.
+  const app = productionApp();
+  const token = await login(app);
+  const { partyId } = await (
+    await post(app, "/formation-party", token, PARTY_WITHOUT_NAMES)
+  ).json();
+  const { companyId } = await (
+    await post(app, "/companies", token, { partyId, ...COMPANY_INTAKE })
+  ).json();
+  db.prepare("DELETE FROM guardian_verifications").run();
+
+  const res = await patch(app, `/companies/${companyId}/party`, token, CORRECTED_PARTY);
+  expect(res.status).toBe(403);
+  expect((await res.json()).error.code).toBe("guardian_not_verified");
+  expect(parties.findOwned(account.address, partyId)!.email).toBe(REAL_PARTY.email);
+});
+
+test("a deployment that takes test bodies refuses a name or a consent on the edit door, naming the key, and moves nothing", async () => {
+  const app = makeApp({ required: true });
+  const token = await login(app);
+  const { partyId, companyId } = await companyWithParty(app, token);
+  for (const extra of [
+    { legalFirstName: "Someone" },
+    { legalLastName: "Else" },
+    { marketingConsent: true },
+  ]) {
+    const res = await patch(app, `/companies/${companyId}/party`, token, {
+      ...CORRECTED_PARTY,
+      ...extra,
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error.code).toBe("validation_error");
+    expect(JSON.stringify(body.error)).toContain(Object.keys(extra)[0] as string);
+  }
+  expect(parties.findOwned(account.address, partyId)).toMatchObject({
+    legalFirstName: "Ada",
+    email: "ada@example.com",
+  });
 });

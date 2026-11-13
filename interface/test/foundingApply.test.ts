@@ -53,4 +53,7 @@ test("the share link carries the page and the campaign", () => {
   const href = shareOnX("https://novicorpus.xyz/founding-5?utm_source=x&utm_medium=share");
   expect(href.startsWith("https://x.com/intent/post?")).toBe(true);
   expect(href).toContain("utm_source%3Dx");
+  expect(new URL(href).searchParams.get("text")).toBe(
+    "I applied for the NoviCorpus Arc mainnet beta. Agents with a NoviCorpus legal body, invite only.",
+  );
 });

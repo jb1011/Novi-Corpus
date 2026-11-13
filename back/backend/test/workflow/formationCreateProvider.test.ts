@@ -18,6 +18,7 @@ import {
   DoolaApiError,
   DoolaTimeoutError,
 } from "../../src/adapters/doola/doolaClient";
+import type { CreateCompanyInput } from "../../src/adapters/doola/types";
 import type { OperatorSigner } from "../../src/adapters/turnkey/signer";
 import { companyNameOptions } from "../../src/formation/intake";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
@@ -33,6 +34,7 @@ import {
   runFormationCreateProvider,
 } from "../../src/workflow/formationProvider";
 import { runOnboarding } from "../../src/workflow/onboarding";
+import { refuseLikeDoola } from "../helpers/formationFakes";
 
 const TENANT = "0x000000000000000000000000000000000000000A";
 const KEY = "form-A";
@@ -114,6 +116,8 @@ function makeFakeDoola(over: Partial<DoolaApi> = {}) {
     }),
     createCompany: vi.fn(async (body: unknown, idempotencyKey: string) => {
       calls.push({ method: "createCompany", idempotencyKey, body });
+      // doola's one documented length rule, held the way doola holds it.
+      refuseLikeDoola(body as CreateCompanyInput);
       return { doolaCompanyId: COMPANY, formationSubmissionStatus: "PENDING" };
     }),
     getCompany: vi.fn(async (id: string) => {

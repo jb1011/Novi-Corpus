@@ -339,8 +339,10 @@ async function door(
 }
 
 /**
- * A new order of `g`, linked for `agentId` by `owner`'s signature of the served message as it
- * arrives: the link door answers it `deployed`.
+ * A new order of `g`, whose agreement `g` adopts with its own wallet (the served adoption message,
+ * signed as it arrives, as the web app has it do before any link), linked for `agentId` by
+ * `owner`'s signature of the served link message as it arrives: the link door answers it
+ * `deployed`.
  */
 export async function deployedOrder(
   h: LinkedHarness,
@@ -352,6 +354,13 @@ export async function deployedOrder(
   const ordered = await door(h, "POST", ORDERS, g, { companyId: g.companyId });
   expect(ordered.status).toBe(201);
   const id: string = ordered.body.id;
+  const adoption = await door(h, "POST", `${ORDERS}/${id}/adoption-message`, g, {});
+  expect(adoption.status).toBe(200);
+  const adopted = await door(h, "POST", `${ORDERS}/${id}/adoption`, g, {
+    issuedAt: adoption.body.issuedAt,
+    signature: await g.account.signTypedData(adoption.body.typedData),
+  });
+  expect(adopted.status).toBe(200);
   const served = await door(h, "POST", `${ORDERS}/${id}/link-message`, g, {
     agentId: agentId.toString(),
     ttlSeconds,

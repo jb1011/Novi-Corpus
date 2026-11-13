@@ -7,7 +7,7 @@ import { opsLog } from "../observability/opsLog";
 import { buildAlertSink } from "./alerts";
 import { SqliteEntityLookup, assertLookupSchema } from "./entityLookup";
 import { MonitorConfigError } from "./errors";
-import { Monitor } from "./monitor";
+import { Monitor, uniqueAddresses, watchedLegalBodyFactories } from "./monitor";
 import { fromPublicClient } from "./rpc";
 import { SqliteMonitorStore } from "./store";
 
@@ -41,10 +41,16 @@ async function main() {
 
   // The configured factory is always watched; MONITOR_WATCH_FACTORIES adds the legacy one, which
   // still owns every pre-cutover agent's creation path.
-  const factories: Address[] = [
+  const factories: Address[] = uniqueAddresses([
     ...(cfg.factoryAddress ? [cfg.factoryAddress] : []),
     ...monitorCfg.watchFactories,
-  ].filter((a, i, all) => all.findIndex((b) => b.toLowerCase() === a.toLowerCase()) === i);
+  ]);
+  // The same for the legal-body factory, in its own list: after a redeploy the old factory goes in
+  // MONITOR_WATCH_LEGAL_BODY_FACTORIES, so the bodies it created stay watched.
+  const legalBodyFactories = watchedLegalBodyFactories(
+    cfg.legalBodyFactory,
+    monitorCfg.watchLegalBodyFactories,
+  );
 
   const store = SqliteMonitorStore.open(monitorCfg.dbPath);
   const entities = new SqliteEntityLookup(cfg.dbPath);
@@ -71,6 +77,7 @@ async function main() {
       registry: cfg.identityRegistry,
       factories,
       beacons: monitorCfg.watchBeacons,
+      legalBodyFactories,
       executor: managerAccount(cfg).address as Address,
       pollMs: monitorCfg.pollSec * 1000,
       grantTtlMs: monitorCfg.grantTtlMin * 60_000,
@@ -83,6 +90,7 @@ async function main() {
     controller: cfg.controllerAddress,
     registry: cfg.identityRegistry,
     factories,
+    legalBodyFactories,
     extraBeacons: monitorCfg.watchBeacons,
     pollSec: monitorCfg.pollSec,
     grantTtlMin: monitorCfg.grantTtlMin,

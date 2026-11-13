@@ -9,7 +9,7 @@ import {
   toEventSelector,
   toHex,
 } from "viem";
-import { legalManagerAbi } from "../abis/generated";
+import { legalBodyFactoryAbi, legalManagerAbi } from "../abis/generated";
 import {
   CONTROLLER_GRANTED_SELECTORS,
   LEGAL_BODY_GRANTED_SELECTORS,
@@ -70,14 +70,26 @@ export const registryTransferEvent = parseAbiItem(
  * that is renamed or removed fails HERE, at import time, instead of at 3am.
  */
 export function legalManagerEvent(name: string): AbiEvent {
+  return generatedEvent(legalManagerAbi, "LegalManager", name);
+}
+
+/**
+ * One event fragment out of the GENERATED LegalBodyFactory ABI, by name. Same reasoning as
+ * `legalManagerEvent`: the topic moves with the contract, and a removed event fails at import.
+ */
+export function legalBodyFactoryEvent(name: string): AbiEvent {
+  return generatedEvent(legalBodyFactoryAbi, "LegalBodyFactory", name);
+}
+
+function generatedEvent(abi: readonly unknown[], contract: string, name: string): AbiEvent {
   // viem's own ABI accessor rather than a hand-rolled `.find`: it already knows that a name can be
   // overloaded and that `type` has to be matched too, and it is the thing that stays right when
   // the ABI shape changes under us. Widened to `Abi` on purpose — against the generated const-ABI
   // viem narrows `name` to the union of every member, and taking a name it cannot know at compile
   // time is this helper's entire job.
-  const found = getAbiItem({ abi: legalManagerAbi as Abi, name });
+  const found = getAbiItem({ abi: abi as Abi, name });
   if (!found || found.type !== "event")
-    throw new Error(`monitor: LegalManager ABI has no event ${name}`);
+    throw new Error(`monitor: ${contract} ABI has no event ${name}`);
   return found as AbiEvent;
 }
 
@@ -114,6 +126,13 @@ export const TOPIC = {
   amendmentVetoed: toEventSelector(legalManagerEvent("AmendmentVetoed")),
   vetoLifted: toEventSelector(legalManagerEvent("VetoLifted")),
   operatingAgreementUpdated: toEventSelector(legalManagerEvent("OperatingAgreementUpdated")),
+  // A legal body (a LegalManager clone made by the LegalBodyFactory): the guardian's dissolution
+  // path. Same generated ABI as the full product's LegalManager.
+  dissolutionInitiated: toEventSelector(legalManagerEvent("DissolutionInitiated")),
+  dissolutionVetoed: toEventSelector(legalManagerEvent("DissolutionVetoed")),
+  dissolved: toEventSelector(legalManagerEvent("Dissolved")),
+  // LegalBodyFactory: a new body to add to the watch set.
+  legalBodyCreated: toEventSelector(legalBodyFactoryEvent("LegalBodyCreated")),
 } as const;
 
 function sel(signature: string): Hex {

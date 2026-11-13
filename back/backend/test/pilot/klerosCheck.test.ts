@@ -5,6 +5,7 @@
  * `fetch` for the two real deployments. Nothing here writes, and a test proves the check never
  * calls a write tool.
  */
+import { readFileSync } from "node:fs";
 import type { Address } from "viem";
 import { generatePrivateKey } from "viem/accounts";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -28,11 +29,20 @@ const API_URL = "https://dispute-service.example.test/mcp";
 const TESTNET_KEY = "test-key-testnet";
 const LIVE_KEY = "test-key-live";
 const ALL_TOOLS = ["dispute_create", "evidence_pin", "evidence_submit", "dispute_get", "court_get"];
+/** The sentence a key's instructions use to say what its filing sends, as Kleros words it. */
+const sends = (court: number, jurors: number, chain: string) =>
+  `The court, juror count and template are fixed for you, and this call sends them:\ncourt ${court}, ${jurors} jurors, on ${chain}.`;
 const INSTRUCTIONS: Record<KlerosDeploymentName, string> = {
-  testnet:
-    "This key files on arbitrum-sepolia-testnet, court 8, with 5 jurors; the preset broadcasts.",
-  live: "This key files on arbitrum-one, Court ID 34, with 5 jurors; the preset broadcasts.",
+  testnet: `Pass arbitrum-one or arbitrum-sepolia-testnet as chain.\n${sends(8, 5, "arbitrum-sepolia-testnet")}`,
+  live: `Pass arbitrum-one or arbitrum-sepolia-testnet as chain.\n${sends(34, 5, "arbitrum-one")}`,
 };
+/** The instructions the Kleros testnet key answered on 10 November 2026, kept as received. */
+const REAL_TESTNET_INSTRUCTIONS = (
+  JSON.parse(
+    readFileSync(new URL("../fixtures/kleros/instructions-testnet.json", import.meta.url), "utf8"),
+  ) as { instructions: string }
+).instructions;
+const REAL_TESTNET_SENDS = sends(8, 5, "arbitrum-sepolia-testnet");
 
 interface Seen {
   method: string;
@@ -195,16 +205,38 @@ describe("the clean case", () => {
     },
   );
 
-  test("an instructions string naming the stage's own chain and court passes, in any spelling of the court", async () => {
+  test("the instructions the testnet key really answers pass, though their general text names every chain", async () => {
+    expect(REAL_TESTNET_INSTRUCTIONS).toContain(REAL_TESTNET_SENDS);
+    expect(REAL_TESTNET_INSTRUCTIONS).toMatch(/\barbitrum-one\b/);
+    const { fetch } = klerosFetch({ instructions: REAL_TESTNET_INSTRUCTIONS });
+    const r = await checkKleros(httpStage("testnet", fetch));
+    expect(r.problems).toEqual([]);
+    expect(r.instructions).toBe(REAL_TESTNET_INSTRUCTIONS);
+  });
+
+  test("the live key's instructions, worded as the testnet key's are, pass on the live stage", async () => {
+    const live = REAL_TESTNET_INSTRUCTIONS.replace(
+      REAL_TESTNET_SENDS,
+      sends(34, 5, "arbitrum-one"),
+    );
+    const { fetch } = klerosFetch({ instructions: live }, "live");
+    expect((await checkKleros(httpStage("live", fetch))).problems).toEqual([]);
+  });
+
+  test("the sentence is read with any spacing, a singular juror and no full stop", async () => {
     for (const text of [
-      "arbitrum-sepolia-testnet, court #8",
-      "Court ID 8 on arbitrum-sepolia-testnet",
-      "court8; the testnet deployment",
-      "no chain or court named here",
+      "this call sends them: court 8, 5 jurors, on arbitrum-sepolia-testnet",
+      "This call sends them:   court 8 ,  5 jurors , on arbitrum-sepolia-testnet.\nMore text.",
     ]) {
       const { fetch } = klerosFetch({ instructions: text });
       expect((await checkKleros(httpStage("testnet", fetch))).problems).toEqual([]);
     }
+    const { fetch } = klerosFetch({
+      instructions: "this call sends them: court 8, 1 juror, on arbitrum-sepolia-testnet.",
+    });
+    expect((await checkKleros(httpStage("testnet", fetch))).problems).toEqual([
+      expect.stringContaining("1 juror"),
+    ]);
   });
 });
 
@@ -218,43 +250,82 @@ describe("the problems", () => {
     expect(r.problems[0]).not.toContain("dispute_create");
   });
 
-  test.each([
-    ["testnet", "This key files on arbitrum-one, court 8.", "arbitrum-one"],
-    ["live", "This key files on arbitrum-sepolia-testnet, court 34.", "arbitrum-sepolia-testnet"],
-  ] as const)(
-    "%s: an instructions string naming the other deployment's chain is a problem",
-    async (mode, text, other) => {
-      const { fetch } = klerosFetch({ instructions: text }, mode);
-      const r = await checkKleros(httpStage(mode, fetch));
-      expect(r.problems).toHaveLength(1);
-      expect(r.problems[0]).toContain(other);
-      expect(r.instructions).toBe(text);
-    },
-  );
+  test("the testnet key's real instructions on the live stage: its chain and its court are both named", async () => {
+    const { fetch } = klerosFetch({ instructions: REAL_TESTNET_INSTRUCTIONS }, "live");
+    const r = await checkKleros(httpStage("live", fetch));
+    expect(r.problems).toHaveLength(2);
+    expect(r.problems[0]).toContain("arbitrum-sepolia-testnet");
+    expect(r.problems[0]).toContain("arbitrum-one");
+    expect(r.problems[1]).toContain("court 8");
+    expect(r.problems[1]).toContain("court 34");
+  });
 
-  test("the other chain counts as a whole word only", async () => {
+  test.each([
+    ["the other chain", sends(8, 5, "arbitrum-one"), "arbitrum-one"],
+    ["another court", sends(34, 5, "arbitrum-sepolia-testnet"), "court 34"],
+    ["another juror count", sends(8, 3, "arbitrum-sepolia-testnet"), "3 jurors"],
+  ])("a testnet key whose sentence names %s is a problem", async (_what, text, named) => {
+    const { fetch } = klerosFetch({ instructions: text });
+    const r = await checkKleros(httpStage("testnet", fetch));
+    expect(r.problems).toHaveLength(1);
+    expect(r.problems[0]).toContain(named);
+  });
+
+  test("on a real deployment, instructions that never say what the filing sends are a problem", async () => {
+    for (const text of [
+      "This key files on arbitrum-sepolia-testnet, court 8, with 5 jurors.",
+      REAL_TESTNET_INSTRUCTIONS.replace(REAL_TESTNET_SENDS, "The court is fixed for you."),
+    ]) {
+      const { fetch } = klerosFetch({ instructions: text });
+      const r = await checkKleros(httpStage("testnet", fetch));
+      expect(r.problems).toEqual([expect.stringContaining("this call sends them")]);
+    }
+  });
+
+  test("a chain with more after it is not read as its first part: the sentence counts as missing", async () => {
+    for (const chain of [
+      "arbitrum-sepolia-testnet_v2",
+      "arbitrum-sepolia-testnet.v2",
+      "arbitrum-sepolia-testneté",
+    ]) {
+      const { fetch } = klerosFetch({ instructions: sends(8, 5, chain) });
+      const r = await checkKleros(httpStage("testnet", fetch));
+      expect(r.problems).toEqual([expect.stringContaining("this call sends them")]);
+    }
+  });
+
+  test("the court, jurors and chain without the sentence's own words are general text", async () => {
+    const bare = klerosFetch({
+      instructions: "Example: court 8, 5 jurors, on arbitrum-sepolia-testnet.",
+    });
+    expect((await checkKleros(httpStage("testnet", bare.fetch))).problems).toEqual([
+      expect.stringContaining("this call sends them"),
+    ]);
+    const extra = klerosFetch({
+      instructions: `Example: court 34, 5 jurors, on arbitrum-one.\n${INSTRUCTIONS.testnet}`,
+    });
+    expect((await checkKleros(httpStage("testnet", extra.fetch))).problems).toEqual([]);
+  });
+
+  test("the chain in any case and the numbers with leading zeros are the same sentence", async () => {
     const { fetch } = klerosFetch({
-      instructions: "court 8; see arbitrum-one-archive for history",
+      instructions: `${sends(8, 5, "arbitrum-sepolia-testnet")}\nthis call sends them: court 008, 05 jurors, on ARBITRUM-SEPOLIA-TESTNET.`,
     });
     expect((await checkKleros(httpStage("testnet", fetch))).problems).toEqual([]);
   });
 
-  test.each([
-    ["court 34", "34"],
-    ["Court ID 34", "34"],
-    ["court #9", "9"],
-  ])("an instructions string naming another court (%s) is a problem", async (phrase, named) => {
-    const { fetch } = klerosFetch({ instructions: `arbitrum-sepolia-testnet, ${phrase}` });
+  test("two sentences that disagree are a problem, even when one matches the stage", async () => {
+    const { fetch } = klerosFetch({
+      instructions: `${sends(8, 5, "arbitrum-sepolia-testnet")}\n${sends(34, 5, "arbitrum-one")}`,
+    });
     const r = await checkKleros(httpStage("testnet", fetch));
-    expect(r.problems).toHaveLength(1);
-    expect(r.problems[0]).toContain(`court ${named}`);
-    expect(r.problems[0]).toContain("court 8");
+    expect(r.problems).toEqual([expect.stringContaining("more than once")]);
   });
 
   test("a court id overridden in config is the one the instructions must name", async () => {
-    const { fetch, seen } = klerosFetch({ instructions: "arbitrum-sepolia-testnet, court 8" });
+    const { fetch, seen } = klerosFetch({ instructions: INSTRUCTIONS.testnet });
     const r = await checkKleros(httpStage("testnet", fetch, { courtId: 9 }));
-    expect(r.problems).toEqual([expect.stringContaining("court 8")]);
+    expect(r.problems).toEqual([expect.stringMatching(/court 8.*court 9|court 9.*court 8/)]);
     expect(seen.at(-1)?.args).toEqual({ chain: "arbitrum-sepolia-testnet", id: "9" });
   });
 

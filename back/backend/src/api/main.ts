@@ -98,6 +98,7 @@ import { SqliteFormationPartyRepository } from "../persistence/formationPartyRep
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
 import { SqliteIdentityRepository } from "../persistence/identityRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
 import { SqliteLegalBodyTreasuryRepository } from "../persistence/legalBodyTreasuryRepository";
@@ -105,6 +106,8 @@ import { SqliteLinkCodeStore } from "../persistence/linkCodeStore";
 import { SqliteOaAnchorRepository } from "../persistence/oaAnchorRepository";
 import { SqlitePasskeyStore } from "../persistence/passkeyStore";
 import { SqlitePaymentIdempotencyStore } from "../persistence/paymentIdempotencyStore";
+import { SqliteStatementReadRepository } from "../persistence/statementReadRepository";
+import { SqliteTenantFirstSeenRepository } from "../persistence/tenantFirstSeenRepository";
 import {
   assertCircleCoverage,
   assertFullProductCoverage,
@@ -131,6 +134,7 @@ import { buildApiApp } from "./app";
 import { ApiError } from "./errors";
 import { TokenBucket } from "./routes/agentBook";
 import { bucketsByKey } from "./routes/legalBodyOrders";
+import { StatementReadLines } from "./routes/legalBodyStatements";
 import type { PilotCaseDeps } from "./routes/pilotCases";
 import { buildWorldIdDeps } from "./routes/worldId";
 import { buildX402DemoDeps } from "./routes/x402Demo";
@@ -602,10 +606,18 @@ async function main() {
         sandboxSyntheticPii: formationCfg.sandboxSyntheticPii,
         maxPerTenant: formationCfg.maxPerTenant,
         dailyCeiling: formationCfg.dailyCeiling,
+        // FORMATION_MAX_TOTAL, the formed door's total cap on production. The config's formed
+        // door reads it from here too (`formation.companyDeps`), so the two cannot differ.
+        maxTotal: formationCfg.maxTotal,
         // The SSN keyring (§4.2). Absent everywhere except production doola, where it is a boot
         // invariant — and its absence makes the door REFUSE the field, never store it in clear.
         pii: formationCfg.pii,
         world: worldId,
+        // The formed door's gates (`createCompany` step 0): the guardian identity record built
+        // above, and the network's environment, which with doola's pin decides the door's own
+        // (`formedDoorEnvironment`). No `invites` until PR 2b: a production formed door refuses.
+        identity,
+        legalBodyEnvironment: legalBodyEnvironment(cfg),
         // With payment on, `createCompany` lands the company `draft` and writes its quote in the
         // same transaction. Absent = the beta shape, where every company lands `ready`.
         payment: formationPayment,
@@ -655,6 +667,8 @@ async function main() {
     legalBodies && cfg.legalBodyFactory && legalBodyChain
       ? {
           repo: legalBodies,
+          // The guardians' adoptions of their orders' agreements: the link doors require one.
+          adoptions: new SqliteLegalBodyAdoptionRepository(db),
           companies,
           declarations: companyDeclarations,
           checks: companyChecks,
@@ -676,6 +690,7 @@ async function main() {
           maxOrdersPerTenantPerDay: legalBodyFlow.maxOrdersPerTenantPerDay,
           maxCreatesPerTenantPerDay: legalBodyFlow.maxCreatesPerTenantPerDay,
           maxCreatesPerDay: legalBodyFlow.maxCreatesPerDay,
+          adoptionMaxAgeSeconds: legalBodyFlow.adoptionMaxAgeSeconds,
           doorBudget: new TokenBucket(20, 1),
           tenantBucket: bucketsByKey(5, 1 / 10),
           identityBucket: bucketsByKey(3, 1 / 20),
@@ -896,6 +911,11 @@ async function main() {
             transaction: <T>(fn: () => T) => repo.transaction(fn),
           }
         : undefined,
+    // The refund-overdue leg (F-A-2a): FORMATION_REFUND_DAYS, and the payment repository wired
+    // whether or not this deployment charges now, since a refund is owed on a payment already
+    // taken.
+    refundDays: formationCfg.refundDays,
+    payments: formationPayments,
     intervalMs: cfg.formation?.sweepMs ?? 60_000,
     // The anchor sub-saga (design §7). The SAME `anchors` repo the saga writes the v1 row with
     // and the SAME `arc` adapter the saga mints through — a second adapter would be a second
@@ -1174,11 +1194,26 @@ async function main() {
         }
       : undefined;
 
+  // The statement reads' once-a-minute ops lines: built here so the shutdown below prints what
+  // they still hold.
+  const statementReadLines = cfg.funnel?.salt ? new StatementReadLines() : undefined;
   const foundingEnv = foundingFromEnv(process.env);
 
   const app = buildApiApp({
     webOrigin: cfg.webOrigin,
     nonceStore,
+    // The funnel's first stage: every box records an account's first sign-in.
+    tenantFirstSeen: new SqliteTenantFirstSeenRepository(db),
+    // The funnel's last stage, only where FUNNEL_SALT is set: without the salt no statement read
+    // is recorded (a production box cannot boot without it, `assertFunnelConfig`). The boot time
+    // is kept as the day reads are recorded since, so the weeks before a first read print 0.
+    statementReads: cfg.funnel?.salt
+      ? {
+          repo: new SqliteStatementReadRepository(db, { bootedAt: Date.now() }),
+          salt: cfg.funnel.salt,
+          lines: statementReadLines,
+        }
+      : undefined,
     siweDomain: cfg.siweDomain,
     chainId: cfg.chainId,
     identityRegistry: cfg.identityRegistry,
@@ -1427,6 +1462,7 @@ async function main() {
       ],
       tasks: doolaTasks,
       server,
+      flush: statementReadLines ? [statementReadLines] : [],
     });
 }
 

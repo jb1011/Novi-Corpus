@@ -3,6 +3,8 @@ import { type Address, type Hex, getAddress, keccak256, toHex } from "viem";
 import { vi } from "vitest";
 import type { LegalBodyChainPort } from "../../src/adapters/arc/legalBodyChain";
 import { signSession } from "../../src/auth/session";
+import { adoptionDigest, buildAdoptionMessage, recordAdoption } from "../../src/legalBody/adoption";
+import { readVerifiedAgreement } from "../../src/legalBody/agreement";
 import { type BindingView, toBindingView } from "../../src/legalBody/binding";
 import type { LinkChainPort } from "../../src/legalBody/checkLink";
 import { CUSTOMER_COMPANY_PLACEHOLDER } from "../../src/legalBody/customerCompany";
@@ -33,6 +35,7 @@ import {
   SqliteCompanyRepository,
 } from "../../src/persistence/companyRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteLegalBodyAdoptionRepository } from "../../src/persistence/legalBodyAdoptionRepository";
 import {
   type LegalBodyRecord,
   SqliteLegalBodyRepository,
@@ -73,6 +76,7 @@ export interface LegalBodyStores {
   checks: SqliteCompanyCheckRepository;
   store: SqliteWorldStore;
   repo: SqliteLegalBodyRepository;
+  adoptions: SqliteLegalBodyAdoptionRepository;
   docStore: MemoryDocumentStore;
 }
 
@@ -87,6 +91,7 @@ export function openLegalBodyStores(
     checks: new SqliteCompanyCheckRepository(db),
     store: new SqliteWorldStore(db),
     repo: new SqliteLegalBodyRepository(db),
+    adoptions: new SqliteLegalBodyAdoptionRepository(db),
     docStore,
   };
 }
@@ -110,6 +115,7 @@ export function legalBodyOrderDeps(
   const requests = new SqliteFormationRepository(s.db);
   return {
     repo: s.repo,
+    adoptions: s.adoptions,
     companies: s.companies,
     declarations: s.declarations,
     checks: s.checks,
@@ -126,6 +132,7 @@ export function legalBodyOrderDeps(
     maxOrdersPerTenantPerDay: 10,
     maxCreatesPerTenantPerDay: 5,
     maxCreatesPerDay: 100,
+    adoptionMaxAgeSeconds: 600,
     doorBudget: { take: () => true },
     tenantBucket: () => ({ take: () => true }),
     identityBucket: () => ({ take: () => true }),
@@ -138,7 +145,7 @@ export function legalBodyOrderDeps(
 /** The order's view as a door answers it for the row as stored now, its facts read from the
  *  stores. */
 export function orderViewOf(
-  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations" | "companies">,
+  deps: Pick<LegalBodyOrderDeps, "repo" | "adoptions" | "declarations" | "companies">,
   row: LegalBodyRecord,
 ): LegalBodyOrderView {
   return toOrderView(row, orderViewFacts(deps, row));
@@ -147,10 +154,48 @@ export function orderViewOf(
 /** The order's binding as a door answers it for the row as stored now, its facts read from the
  *  stores. */
 export function bindingViewOf(
-  deps: Pick<LegalBodyOrderDeps, "repo" | "declarations" | "companies">,
+  deps: Pick<LegalBodyOrderDeps, "repo" | "adoptions" | "declarations" | "companies">,
   row: LegalBodyRecord,
 ): BindingView {
   return toBindingView(row, orderViewFacts(deps, row));
+}
+
+/** The signature `adoptFor` records: a placeholder of the one accepted shape, 65 bytes. */
+export const PLACEHOLDER_ADOPTION_SIGNATURE = `0x${"ad".repeat(65)}` as Hex;
+
+/**
+ * Records the guardian's adoption of the order's frozen agreement as the adoption door records
+ * one (`recordAdoption`): the row and its `agreement_adopted` event, in one transaction, and
+ * answers the adoption's time in unix seconds. The message is built from the stored agreement and
+ * its digest computed over it; the signature is a placeholder of the right shape, since the link
+ * doors read only that an adoption is recorded. The adoption door's own tests sign for real.
+ */
+export function adoptFor(
+  s: Pick<LegalBodyStores, "repo" | "adoptions" | "docStore">,
+  order: { legalBodyId: string },
+  nowMs: number = Date.now(),
+): number {
+  const row = s.repo.findById(order.legalBodyId);
+  if (row === undefined) throw new Error(`order ${order.legalBodyId} is not stored`);
+  if (row.oaManifestHash === null) throw new Error(`order ${row.legalBodyId} has no agreement`);
+  const verified = readVerifiedAgreement(s.docStore, row.legalBodyId, row.oaManifestHash);
+  if (verified === undefined) throw new Error(`order ${row.legalBodyId}: unreadable agreement`);
+  const nowSec = Math.floor(nowMs / 1000);
+  const message = buildAdoptionMessage(row, verified.terms, BigInt(nowSec));
+  return recordAdoption(
+    { repo: s.repo, adoptions: s.adoptions, transaction: (fn) => s.repo.transaction(fn) },
+    {
+      legalBodyId: row.legalBodyId,
+      manifestHash: message.manifestHash,
+      textId: message.textId,
+      textVersion: message.textVersion,
+      guardian: message.guardian,
+      issuedAt: nowSec,
+      signature: PLACEHOLDER_ADOPTION_SIGNATURE,
+      digest: adoptionDigest(row.chainId, row.factory, message),
+      adoptedAt: nowSec,
+    },
+  );
 }
 
 /** Appends a check with this result, as the operator records one. */

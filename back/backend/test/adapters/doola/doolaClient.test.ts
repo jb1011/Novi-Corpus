@@ -16,7 +16,11 @@
  * does not exist.
  */
 import { expect, test, vi } from "vitest";
-import { DoolaApiError, buildDoolaApi } from "../../../src/adapters/doola/doolaClient";
+import {
+  DoolaApiError,
+  buildDoolaApi,
+  describeDoolaError,
+} from "../../../src/adapters/doola/doolaClient";
 import { DOOLA_BASE_URLS } from "../../../src/config/env";
 
 interface Recorded {
@@ -193,6 +197,50 @@ test("request shape: creates POST JSON, reads GET, ISO-3 country and 2-letter st
   expect(calls[2]!.method).toBe("GET");
   expect(calls[2]!.body).toBeUndefined();
   expect(calls[2]!.headers["Content-Type"]).toBeUndefined();
+});
+
+test("doola's per-field refusal survives the wire into describeDoolaError, without the value", async () => {
+  // The envelope as doola sends it: the refused field keyed under `error.fields`, with a
+  // `{code, message}` of its own. Before 2026-11-11 the client kept the map and no reader ever
+  // looked at it, so a refusal said "one or more fields are invalid" and never which one.
+  const tooLong = "x".repeat(109);
+  const validation = fakeFetch([
+    {
+      status: 400,
+      body: {
+        error: {
+          code: "E_VALIDATION_FAILED",
+          message: "one or more fields are invalid",
+          fields: {
+            description: {
+              code: "E_FIELD_TOO_LONG",
+              message: "size must be between 1 and 50",
+              value: tooLong,
+            },
+          },
+          requestId: "req_fields",
+        },
+        payload: null,
+      },
+    },
+  ]);
+  const api = buildDoolaApi({
+    apiKey: "dk_test",
+    baseUrl: "https://doola.test",
+    environment: "sandbox",
+    fetchImpl: validation.fetchImpl,
+  });
+  const err = await api.createCompany({ ...COMPANY, description: tooLong }, "k").catch((e) => e);
+  const described = describeDoolaError(err);
+  expect(described).toEqual({
+    message: "E_VALIDATION_FAILED: one or more fields are invalid (description: E_FIELD_TOO_LONG)",
+    code: "E_VALIDATION_FAILED",
+    requestId: "req_fields",
+    fieldErrors: [
+      { field: "description", code: "E_FIELD_TOO_LONG", message: "size must be between 1 and 50" },
+    ],
+  });
+  expect(JSON.stringify(described)).not.toContain(tooLong);
 });
 
 test("errors map to DoolaApiError carrying code + requestId; validation != internal", async () => {

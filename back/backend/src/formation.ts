@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { type Config, canFormEntities } from "./config/env";
 import { describeIndustryLabels } from "./formation/naicsLabels";
 import { deriveFormationStatus, hasLivePayment } from "./formation/status";
@@ -182,6 +181,15 @@ export function companyNameCharsetMessage(position: number, char: string): strin
  *  name in it at all, and would be filed as "LLC LLC". */
 export function companyNameEndingOnlyMessage(position: number): string {
   return `names[${position - 1}] must contain something other than an entity ending`;
+}
+
+/**
+ * The formed door's refusal of a name option typed with its entity ending: the filing adds the
+ * one ending itself, so an option that carries one would be filed with it twice, or as a name
+ * the guardian did not mean. Position is 1-based, as the form numbers the options.
+ */
+export function companyNameEndingRefusedMessage(position: number): string {
+  return `company name option ${position}: leave out the entity ending (LLC, L.L.C., Limited Liability Company): it is added when the company is filed`;
 }
 
 /** Wyoming reserves this word to licensed or chartered entities (see wyRestrictedWords.ts). */
@@ -532,15 +540,6 @@ export function warnIfNearLimit(
 
 // ── PII intake (design §3/§5) ────────────────────────────────────────────────────────────────
 
-export interface FormationPartyIntakeDeps {
-  parties: import("./persistence/formationPartyRepository").FormationPartyRepository;
-  /** True = this deployment refuses real PII and files with the labeled sandbox fixture. */
-  sandboxSyntheticPii: boolean;
-}
-
-/** Either the handle, or the single-sourced refusal both surfaces render. */
-export type FormationPartyIntakeResult = { partyId: string } | { error: string };
-
 /**
  * THE WIRE SHAPE → THE COLUMN SHAPE, once (design §5/§7).
  *
@@ -553,13 +552,15 @@ export type FormationPartyIntakeResult = { partyId: string } | { error: string }
  *
  * One function, so the mapping is reviewed once and the doors cannot disagree about what an
  * omitted optional means.
+ *
+ * The contact and the address only: the NAMES are not a mapping. The intake writes them from the
+ * identity record on production and from the body on a sandbox (`createFormationParty`), and the
+ * edit door never rewrites them.
  */
 export function partyFieldsOf(
-  parsed: import("./policy/agentSpec").FormationPartyInput,
+  parsed: Pick<import("./policy/agentSpec").FormationPartyInput, "email" | "phone" | "address">,
 ): import("./persistence/formationPartyRepository").EditablePartyFields {
   return {
-    legalFirstName: parsed.legalFirstName,
-    legalLastName: parsed.legalLastName,
     email: parsed.email,
     phone: parsed.phone,
     line1: parsed.address.line1,
@@ -573,44 +574,20 @@ export function partyFieldsOf(
 }
 
 /**
- * Create a formation party from a validated body, or from the sandbox shortcut.
- *
- * Shared by `POST /formation-party` and the `create_formation_party` MCP tool so the two intake
- * surfaces cannot accept different things — the same reason the door gate is one function.
- *
- * The synthetic rule is a REFUSAL in both directions, never a substitution (§3, audit H7):
- *  - on a sandbox deployment, real names and addresses are refused outright and never reach
- *    doola's development environment. Quietly swapping in a fixture would leave the caller
- *    believing their data had been filed, and would still have accepted (and stored) it;
- *  - on a production deployment, the synthetic shortcut is refused because it would file a real
- *    Wyoming LLC naming a person who does not exist.
+ * Whether a party body names the person: a `legalFirstName` or a `legalLastName` key, whatever its
+ * value. On a production door such a body is refused with `party_name_is_written_by_novi`: the
+ * names are written from the guardian's identity record. Asked of the raw body by the doors,
+ * before anything else, and of the parsed body by `createFormationParty`, after its gates.
  */
-export function createFormationParty(
-  deps: FormationPartyIntakeDeps,
-  tenantId: string,
-  body: { synthetic?: unknown; parsed?: import("./policy/agentSpec").FormationPartyInput },
-): FormationPartyIntakeResult {
-  if (body.synthetic === true) {
-    if (!deps.sandboxSyntheticPii) return { error: syntheticPiiRefusedMessage() };
-    // The id is minted HERE rather than by the repository because the fixture's email embeds it
-    // (`sandbox+<partyId>@novicorpus.com`) — which is what keeps each sandbox filing
-    // distinguishable in doola's portal, and unmistakably ours.
-    const partyId = randomUUID();
-    deps.parties.create({
-      tenantId,
-      ...syntheticFormationParty(partyId),
-      synthetic: true,
-      partyId,
-    });
-    return { partyId };
-  }
-  if (deps.sandboxSyntheticPii) return { error: syntheticPiiRequiredMessage() };
-  if (!body.parsed) return { error: "a formation party body is required" };
-  return {
-    // The SAME mapping the edit doors use — see `partyFieldsOf`. `synthetic` is the deployment's,
-    // never the caller's, which is why it is added here rather than being part of the shape.
-    partyId: deps.parties.create({ tenantId, ...partyFieldsOf(body.parsed), synthetic: false }),
-  };
+export function partyBodyNamesThePerson(body: unknown): boolean {
+  if (typeof body !== "object" || body === null) return false;
+  const named = body as { legalFirstName?: unknown; legalLastName?: unknown };
+  return named.legalFirstName !== undefined || named.legalLastName !== undefined;
+}
+
+/** A sandbox door that takes test bodies: the body names the person, with both names. */
+export function partyNamesRequiredMessage(): string {
+  return "legalFirstName and legalLastName are both required on this deployment";
 }
 
 /**

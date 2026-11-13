@@ -18,6 +18,7 @@ import { OnboardingRunner } from "../workflow/runner";
 import { registerCompanyCheckCommands } from "./companyChecks";
 import { type CliContext, buildContext } from "./context";
 import { registerFormedCompanyCommands } from "./formedCompanies";
+import { registerFunnelCommands } from "./funnel";
 import { registerIdentityCommands } from "./identity";
 import { registerPilotCommands } from "./pilot";
 import { registerSchedulerCommands } from "./scheduler";
@@ -792,7 +793,8 @@ export function buildCli(
   // DB-only, like the formation commands: each opens the configured database itself.
   registerCompanyCheckCommands(program);
 
-  // ── company:dao-supplement, company:filed-name — what doola settles by hand for a formed company
+  // ── company:dao-supplement, company:filed-name — what doola settles by hand for a formed company;
+  //    formation:record-filed, formation:record-ein — the assisted completion of a paid one.
   // DB-only, like the company commands: each opens the configured database itself.
   registerFormedCompanyCommands(program);
 
@@ -806,6 +808,10 @@ export function buildCli(
   // ── scheduler:* — the API's in-process scheduler: its jobs, and one run now by hand ───────────
   // DB-only, like the identity commands: each opens the configured database itself.
   registerSchedulerCommands(program);
+
+  // ── funnel:export — the formed door's funnel per week, counts only; read-only ──────────────────
+  // DB-only, like the identity commands: it opens the configured database itself, query-only.
+  registerFunnelCommands(program);
 
   return program;
 }

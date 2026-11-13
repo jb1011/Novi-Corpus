@@ -43,6 +43,7 @@ import {
   JWT_SECRET,
   type Json,
   type LegalBodyStores,
+  adoptFor,
   answerOf,
   asChainPort,
   bindingViewOf,
@@ -87,6 +88,7 @@ const ORDER_VIEW_KEYS = [
   "supersededBy",
   "replacedBy",
   "companyName",
+  "adoptedAt",
 ];
 
 let db: Database.Database;
@@ -216,6 +218,7 @@ const NO_FACTS = {
   revoked: false,
   supersededBy: null,
   replacedBy: null,
+  adoptedAt: null,
 };
 
 // ── The facts, read from the event log ──────────────────────────────────────────────────────
@@ -360,7 +363,7 @@ describe("the order view", () => {
     revoke(row.legalBodyId);
     const view = orderViewOf(s, rowOf(row.legalBodyId));
     expect(Object.keys(view)).toEqual(ORDER_VIEW_KEYS);
-    expect(ORDER_VIEW_KEYS).toHaveLength(23);
+    expect(ORDER_VIEW_KEYS).toHaveLength(24);
     expect(JSON.parse(JSON.stringify(view))).toEqual(view);
     expect(view).toMatchObject({
       state: "superseded",
@@ -552,13 +555,14 @@ describe("every door that answers a view carries the facts", () => {
     const app = makeApp(deps);
     const { companyId, companyName } = company();
     const view = createOrder(deps, tenant.address, { companyId });
+    const adoptedAt = adoptFor(s, rowOf(view.id));
     const signed = await signedLink(linkFor(rowOf(view.id)));
 
     const submitted = await callTool(app, "submit_link", { orderId: view.id, ...signed });
     expect(submitted.isError).toBe(false);
     expect(submitted.body.status).toBe("reserved");
     expect(submitted.body.order).toEqual(orderViewOf(s, rowOf(view.id)));
-    expect(submitted.body.order).toMatchObject({ ...NO_FACTS, companyName });
+    expect(submitted.body.order).toMatchObject({ ...NO_FACTS, companyName, adoptedAt });
 
     const { first, second } = replacedPair();
     const binding = await callTool(app, "get_binding", { orderId: first.legalBodyId });
@@ -595,6 +599,7 @@ describe("the reads a view makes per row", () => {
       orderViewFacts(
         {
           repo: counting(s.repo, EVENT_READS, events),
+          adoptions: s.adoptions,
           declarations: counting(s.declarations, ["find"], finds),
           companies: counting(s.companies, ["find"], companyFinds),
         },

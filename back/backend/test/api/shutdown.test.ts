@@ -84,6 +84,39 @@ test("shutdown runs in order: stop the sweeper, drain the tasks, close the serve
   ]);
 });
 
+test("what the last requests left held is flushed after the server closes, right before exit, and a flush that throws still exits", async () => {
+  const order: string[] = [];
+  const p = fakeProc();
+  const shutdown = installShutdownHandlers({
+    proc: p.proc,
+    server: {
+      close: (cb) => {
+        order.push("server.close");
+        cb?.();
+      },
+    },
+    flush: [
+      {
+        flush: () => {
+          order.push("flush.broken");
+          throw new Error("a line that cannot be written");
+        },
+      },
+      {
+        flush: () => {
+          order.push("flush.lines");
+        },
+      },
+    ],
+    exit: () => {
+      order.push("exit");
+    },
+  });
+
+  await shutdown("SIGTERM");
+  expect(order).toEqual(["server.close", "flush.broken", "flush.lines", "exit"]);
+});
+
 test("a wedged background task cannot hang the deploy — the drain is bounded", async () => {
   const p = fakeProc();
   let exited = false;

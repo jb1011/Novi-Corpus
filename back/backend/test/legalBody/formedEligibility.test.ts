@@ -37,6 +37,7 @@ import { seedCompany } from "../helpers/formationFakes";
 import {
   type LegalBodyStores,
   REGISTRY,
+  adoptFor,
   appendCheck,
   customerCompany,
   legalBodyOrderDeps,
@@ -327,6 +328,7 @@ describe("a formed company the operator revoked", () => {
     const deps = orderDeps();
     const companyId = formedCompany();
     const order = createOrder(deps, tenant, { companyId });
+    adoptFor(s, { legalBodyId: order.id });
     const never = {
       create: async () => {
         throw new Error("the create is never reached");
@@ -411,5 +413,67 @@ describe("a declared company, as before", () => {
     const companyId = declaredCompany({ checks: [], filingNumber: "TEST-0002" });
     expect(companyEligible(deps, companyId)).toBe(false);
     expect(companyNamesForOrder(deps, companyId)).toBeNull();
+  });
+});
+
+describe("a filing number in the sandbox stand-in space, on a production company", () => {
+  /** The company's own pin, which the wall reads: the deployment here stays a sandbox. */
+  const pinProduction = (companyId: string) =>
+    s.db
+      .prepare("UPDATE companies SET environment = 'production' WHERE company_id = ?")
+      .run(companyId);
+  const RESERVED = LEGAL_BODY_SENTENCES.filing_number_reserved;
+
+  test.each([
+    "TEST-STANDIN-D36A9A6177333DB7",
+    "TEST-STAND-IN-0001",
+    "TEST-STANDIND36A9A6177333DB7",
+    "test-standin-0001",
+  ])(
+    "a formed company holding %s: 409 filing_number_reserved, and no agreement is printed",
+    (filingNumber) => {
+      const deps = orderDeps();
+      const companyId = formedCompany({ filingNumber });
+      pinProduction(companyId);
+      // Eligible and printable: only the wall refuses it.
+      expect(companyEligible(deps, companyId)).toBe(true);
+      const err = refusalOf(() => createOrder(deps, tenant, { companyId }));
+      expect(err.code).toBe("filing_number_reserved");
+      expect(err.status).toBe(409);
+      expect(err.message).toBe(
+        "This company's filing number is in the range kept for sandbox test numbers, and no agreement of a production company prints one: the State's number must be recorded first.",
+      );
+      expect(err.message).toBe(RESERVED);
+      expect(rowCount()).toBe(0);
+      expect(s.docStore.files.size).toBe(0);
+    },
+  );
+
+  test("a declared production company holding one is refused too: its agreement would print the declared number", () => {
+    const deps = orderDeps();
+    const companyId = declaredCompany({ filingNumber: "TEST-STANDIN-0001" });
+    pinProduction(companyId);
+    expect(companyEligible(deps, companyId)).toBe(true);
+    expect(refusalOf(() => createOrder(deps, tenant, { companyId })).code).toBe(
+      "filing_number_reserved",
+    );
+    expect(rowCount()).toBe(0);
+  });
+
+  test("a sandbox company's stand-in is printed as any number", () => {
+    const deps = orderDeps();
+    const companyId = formedCompany({ filingNumber: "TEST-STANDIN-D36A9A6177333DB7" });
+    const view = createOrder(deps, tenant, { companyId });
+    expect(view.state).toBe("draft");
+    expect(s.docStore.get(agreementDocNames(view.id).terms)).toContain(
+      'with filing number "TEST-STANDIN-D36A9A6177333DB7"',
+    );
+  });
+
+  test("a production company with a State filing number is ordered as before", () => {
+    const deps = orderDeps();
+    const companyId = formedCompany();
+    pinProduction(companyId);
+    expect(createOrder(deps, tenant, { companyId }).state).toBe("draft");
   });
 });

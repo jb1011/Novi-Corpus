@@ -5,6 +5,8 @@ type Tone = "ink" | "paper";
 type Props = {
   className?: string;
   tone?: Tone;
+  /** Keep the full name visible. The header swaps to the mark on a phone. */
+  full?: boolean;
 };
 
 const LOCKUP: Record<Tone, string> = {
@@ -25,15 +27,25 @@ function Mark({ tone = "ink" }: { tone?: Tone }) {
   );
 }
 
-export function Wordmark({ className = "", tone = "ink" }: Props) {
+export function Wordmark({ className = "", tone = "ink", full = false }: Props) {
   return (
     <Link
       href="/"
-      className={`group inline-flex items-center ${className}`}
+      className={`group inline-flex shrink-0 items-center ${className}`}
       aria-label="Novi Corpus home"
     >
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={LOCKUP[tone]} alt="" className="h-8 w-auto" />
+      {full ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={LOCKUP[tone]} alt="" className="h-8 w-auto" />
+      ) : (
+        <>
+          <span className="sm:hidden">
+            <Mark tone={tone} />
+          </span>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={LOCKUP[tone]} alt="" className="hidden h-8 w-auto sm:block" />
+        </>
+      )}
     </Link>
   );
 }

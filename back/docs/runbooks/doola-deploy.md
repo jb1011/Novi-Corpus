@@ -149,6 +149,8 @@ the park and hand doola a retry of the exact body it refused. The freeze also ri
 ⚠ **`GET /formation/industries` was RENAMED to `GET /formation/rules`** in the same phase, and it
 now serves the four intake limits (`nameOptionCount`, `nameMaxLength`, `purposeMaxLength`,
 `nameCharset`) beside the labels — the interface used to mirror those as constants of its own.
+`purposeMaxLength` is **50** since 2026-11-11 (doola's `description` limit; see "The business
+purpose" below).
 Wyoming's restricted words stay server-only: the matcher is the rule, not the data. The route is
 ETag-validated, and the Vercel proxy forwards `if-none-match`/`etag` for that one path.
 
@@ -233,6 +235,21 @@ Since A1 the two count different things, on purpose:
 - the **daily ceiling** counts `create_provider` ROWS — where the fee is actually incurred —
   including FAILED ones, deliberately: a create that failed after doola committed has already cost
   a real company and a real fee.
+
+`FORMATION_MAX_TOTAL` (default 10, a whole number from 1) is the formed door's lifetime cap: how
+many formed legal-body companies (`POST /companies` with `for: "legal_body"`) the deployment takes
+in all, over every tenant. It applies **on production only**: a box where both doola's pin and the
+network are sandbox forms demo companies without a limit. It counts companies with provider doola and
+purpose `legal_body` that are `ready`, plus drafts with a live quote (`quoted` or `settling`). A
+draft nobody pays for and an `abandoned` company take no place, so abandoning one frees it.
+Companies for agents are never counted. A create past the cap answers 409
+`formation_cap_reached`, and `/config.legalBodies.formedDoor` reads `cap_reached` (when every
+other gate of the door holds). Both read the same figure from the create door's deps. The cap is
+checked after the per-tenant quota and again inside the mint transaction, so two people creating
+at once cannot both take the last place. Each refusal writes one ops line,
+`formation_cap_reached`, with `level: "warn"`, `check` (`count` or `mint`, the check that
+refused), `maxTotal` and `counted`, and no tenant or name. The mainnet box's figure is set when
+the box is configured.
 
 `FORMATION_MAX_AGENTS_PER_COMPANY` (default 10) bounds how many agents may share one filing. Each
 attached agent is its own anchor sequence per late fact — two sponsored on-chain writes through
@@ -363,6 +380,54 @@ reads it whole from **`GET /formation/rules`** — public, day-cacheable, ETag-v
 `/config` field, since `/config` is fetched by every page before auth and cached for the life of
 the tab.
 
+## The business purpose: at most 50 characters (2026-11-11)
+
+The purpose is filed VERBATIM as doola's `CreateCompanyRequest.description`, and doola's published
+OpenAPI document gives that field `maxLength: 50` (`minLength: 1`). No other field of the create
+body has a length rule there. Until 2026-11-11 the intake allowed 500, on the belief that doola
+documented no maximum, so a 109-character purpose passed the door and doola refused the create
+with `E_VALIDATION_FAILED` after the customer was created. The company parked correctly, but no
+log line said which field.
+
+Now one constant, `DOOLA_DESCRIPTION_MAX_LENGTH = 50` (`src/adapters/doola/types.ts`), is
+`PURPOSE_MAX_LENGTH`, and every door reads it:
+
+| Door | What it does with a 51-character purpose |
+|---|---|
+| `POST /companies` | 400, `businessPurpose is longer than 50 characters` |
+| `PATCH /companies/:companyId` | the same 400, and the stored purpose is untouched |
+| MCP `create_company` | the same sentence as a tool error; the tool description states the limit |
+| `GET /formation/rules` | serves `purposeMaxLength: 50` to the form |
+
+The onboarding door (`POST /onboard`, MCP `onboard_agent`) takes no purpose: it attaches an agent
+to a company that already exists. The fallback sent when a company has no purpose at all,
+`DEFAULT_DESCRIPTION`, is now "Operates autonomous software agents." (36 characters).
+
+**Companies stored before the limit are not cut.** A purpose over 50 characters that a company
+already holds goes out as stored: shortening a legal description at send time would file a
+sentence nobody wrote. doola refuses it, the filing parks under `awaitingIntakeEdit`, the
+`formation_stale` line (CRITICAL, `reason: create_rejected_awaiting_intake_edit`) names
+`description` in its `message` and its `fieldErrors`, `GET /companies/:companyId` reports
+`park.refusedFields: ["description"]`, and the owner's edit through `PATCH /companies/:companyId`
+(held to 50) re-arms exactly one retry. To find such companies before they are filed:
+
+```bash
+sqlite3 /var/lib/legalbody/legalbody.db \
+  "SELECT c.company_id, c.status, length(c.business_purpose) AS purpose_length
+     FROM companies c
+     LEFT JOIN formation_requests f
+       ON f.company_id = c.company_id AND f.step = 'create_provider'
+    WHERE c.provider = 'doola'
+      AND c.status != 'abandoned'
+      AND length(c.business_purpose) > 50
+      AND f.provider_ref IS NULL;"
+```
+
+The interface keeps a fallback of its own (`FALLBACK_INTAKE_RULES.purposeMaxLength: 500` in
+`interface/src/lib/formation/companyIntake.ts`), used only while `GET /formation/rules` is in
+flight. The served 50 replaces it, and the door refuses either way; the fallback is the interface
+owner's to align.
+
 ## A2: the SSN wire shape cannot be smoke-tested
 
 Every other consequential doola contract here was settled by a sandbox probe. The SSN cannot be: a
@@ -379,10 +444,14 @@ test in this repo makes a live doola call.
 
 1. **`npx tsx scripts/doola-filed-name-probe.mts`** — files a sandbox company with THREE distinct
    name candidates, completes it through the playground, and prints which surface actually
-   carries the accepted name (list item `.name` / full `.nameOptions` / the AOO document). Until
-   this is recorded, the §5 matcher is pointed at the list item on the strength of one 2026-08-27
-   observation, and `legal_name_filed` stays NULL whenever it does not match — which is honest,
-   but it means `manifest.legal.companyName` never appears.
+   carries the accepted name (list item `.name` / full `.nameOptions` / the AOO document). Since
+   2026-11-11 the processor reads the list item's `name`, the only name doola reports (its full
+   company answer has none), for a legal-body company only, and stores it only when it matches a
+   stored option. The open question has moved to doola: is the list's name the State-accepted one
+   when the State took a lower-ranked option? This probe cannot settle it on sandbox, where the
+   playground always files the first. Until doola answers, `company:filed-name --replace` is the
+   correction path (`formed-companies.md`). A company for agents reads no name at all, so its
+   `manifest.legal.companyName` still never appears.
 2. **`npx tsx scripts/doola-idempotency-reorder-probe.mts`** — one request settles whether
    doola's idempotency comparison is byte-wise or semantic: same key, same values, keys
    reordered. A `409` means the stored body must be replayed VERBATIM, which is what makes
@@ -529,6 +598,16 @@ There is **no fund-moving refund path in the software, by design.** To refund a 
    env invariant that `PLATFORM_OUTFLOW_CEILING_USDC >= FORMATION_FEE_USDC`.
 6. The company stays `ready` and its filing is untouched. Refunding does not un-file a Wyoming
    LLC, and pretending otherwise in the data would be the dishonest part.
+
+**A refund owed and overdue.** A paid company that is `abandoned` (by its tenant before anything
+reached doola, by the sweeper when its create gave up, or by `formation:abandon`) keeps its payment
+`settled`: only the procedure above refunds it. `FORMATION_REFUND_DAYS` (default 14, a whole number
+from 1 to 60) is the delay the terms promise. When a settled payment of an `abandoned` company has
+no refund recorded that many days after the abandon (counted from the company's `updated_at`, which
+the abandon stamps), the sweeper writes a CRITICAL `formation_refund_overdue` line `{ companyId,
+paymentId, daysOverdue }`, once per company per UTC day (again after a restart) until
+`formation:refund` records the transfer. `daysOverdue` is 0 on the first day. The line carries no
+amount and no address: read them from the payment as in step 2.
 
 ### Reconciling ONE payment against the chain
 

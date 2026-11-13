@@ -1,8 +1,9 @@
 /**
- * The legal-body flow's settings: the amendment delay every new body is created with, and the caps
- * on a tenant's open orders, its orders per day, its creates per day and the deployment's creates
- * per day. Each is checked at every load, the feature on or off: blank is unset, and any other
- * value outside its range refuses boot, naming the setting.
+ * The legal-body flow's settings: the amendment delay every new body is created with, the caps on
+ * a tenant's open orders, its orders per day, its creates per day and the deployment's creates per
+ * day, and the greatest age of a signed adoption of an order's agreement. Each is checked at every
+ * load, the feature on or off: blank is unset, and any other value outside its range refuses boot,
+ * naming the setting.
  */
 import { expect, test } from "vitest";
 import { LEGAL_BODY_FLOW_DEFAULTS, loadConfig } from "../../src/config/env";
@@ -36,6 +37,7 @@ test("unset, each setting takes its default, the feature on or off", () => {
     maxOrdersPerTenantPerDay: 10,
     maxCreatesPerTenantPerDay: 5,
     maxCreatesPerDay: 100,
+    adoptionMaxAgeSeconds: 600,
   });
   for (const env of [BASE, FEATURE_ON])
     expect(loadConfig(env).legalBodyFlow).toEqual(LEGAL_BODY_FLOW_DEFAULTS);
@@ -49,6 +51,7 @@ test("each setting takes a value in its range", () => {
     LEGAL_BODY_MAX_ORDERS_PER_TENANT_PER_DAY: "12",
     LEGAL_BODY_MAX_CREATES_PER_TENANT_PER_DAY: "6",
     LEGAL_BODY_MAX_CREATES_PER_DAY: "250",
+    LEGAL_BODY_ADOPTION_MAX_AGE_SECONDS: "900",
   });
   expect(cfg.legalBodyFlow).toEqual({
     amendmentDelaySeconds: 604_800,
@@ -56,7 +59,19 @@ test("each setting takes a value in its range", () => {
     maxOrdersPerTenantPerDay: 12,
     maxCreatesPerTenantPerDay: 6,
     maxCreatesPerDay: 250,
+    adoptionMaxAgeSeconds: 900,
   });
+});
+
+test("the adoption's greatest age is a whole number of seconds from 1 to 86400, blank is unset", () => {
+  const age = (value: string) =>
+    loadConfig({ ...FEATURE_ON, LEGAL_BODY_ADOPTION_MAX_AGE_SECONDS: value }).legalBodyFlow
+      ?.adoptionMaxAgeSeconds;
+  expect(age("")).toBe(600);
+  expect(age("1")).toBe(1);
+  expect(age("86400")).toBe(86_400);
+  for (const refused of ["0", "-1", "1.5", "86401", "ten"])
+    expect(() => age(refused), refused).toThrow(/LEGAL_BODY_ADOPTION_MAX_AGE_SECONDS/);
 });
 
 test("the amendment delay is a whole number of seconds from 48 hours to 30 days, both ends included", () => {

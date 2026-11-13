@@ -32,6 +32,8 @@ const MAINNET = {
   CONTROLLER_DEPLOY_BLOCK: "10",
   FACTORY_ADDRESS: "0x2222222222222222222222222222222222222222",
   ARC_NETWORK: "mainnet",
+  // The funnel's salt: a production deployment refuses to boot without one.
+  FUNNEL_SALT: "0f".repeat(32),
   ARC_CHAIN_ID: "8004",
   WORLD_APP_ID: "app_1",
   WORLD_RP_ID: "app.example",

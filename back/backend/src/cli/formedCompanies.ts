@@ -1,11 +1,19 @@
 import { readFileSync, statSync } from "node:fs";
 import type Database from "better-sqlite3";
 import type { Command } from "commander";
+import { isIntakeFrozen } from "../formation/freeze";
 import { hasEntityEnding } from "../formation/intake";
-import { companyFiled, stepStateOf } from "../formation/status";
-import { COMPANY_NAME } from "../legalBody/companyFields";
+import { eraseSsnLogged } from "../formation/ssnErasure";
+import {
+  MANUAL_REF_PREFIX,
+  companyFiled,
+  isManualRef,
+  providerRefOf,
+  stepStateOf,
+} from "../formation/status";
+import { COMPANY_NAME, FILING_NUMBER, isStandInFilingNumber } from "../legalBody/companyFields";
 import { sha256Of, startsAsPdf } from "../legalBody/evidence";
-import { type FieldProblem, applyTextRule } from "../legalBody/textRules";
+import { type FieldProblem, type TextRule, applyTextRule } from "../legalBody/textRules";
 import { opsLog } from "../observability/opsLog";
 import { type CompanyRecord, SqliteCompanyRepository } from "../persistence/companyRepository";
 import {
@@ -15,14 +23,27 @@ import {
   documentStoreName,
 } from "../persistence/documentIndexRepository";
 import { FileDocumentStore } from "../persistence/documentStore";
-import { SqliteFormationRepository } from "../persistence/formationRepository";
+import { SqliteEntityRepository } from "../persistence/entityRepository";
+import { SqliteFormationPartyRepository } from "../persistence/formationPartyRepository";
+import {
+  FORMATION_STEP_ORDER,
+  type FormationRequestRecord,
+  SqliteFormationRepository,
+  parseDetail,
+} from "../persistence/formationRepository";
 import {
   type LegalBodyRecord,
   SqliteLegalBodyRepository,
   isDraftExpired,
 } from "../persistence/legalBodyRepository";
 import type { FormationPin } from "../types";
-import { matchFiledNameAgainst } from "../workflow/formationProcessor";
+import { isCalendarDate } from "../util/wyomingCalendar";
+import {
+  type REQUIRED_DOCUMENT_TYPES,
+  filingDateToUnix,
+  matchFiledNameAgainst,
+} from "../workflow/formationProcessor";
+import { recordCompanyEvent } from "../workflow/formationStep";
 import { OPERATOR_NAME, osUser, parseOperator, print, refuse, withDatabase } from "./operator";
 
 /**
@@ -32,7 +53,11 @@ import { OPERATOR_NAME, osUser, parseOperator, print, refuse, withDatabase } fro
  *    company's articles) as an operator document of the company;
  *  - `company:filed-name` sets the company's filed name from the State's record, when doola's
  *    reported name matched none of the stored options (so the processor stored none), or corrects
- *    it before any agreement prints it.
+ *    it before any agreement prints it;
+ *  - `formation:record-filed` and `formation:record-ein` are the ASSISTED COMPLETION of a paid
+ *    company whose filing doola did by hand, outside its API: they write the rows the saga writes
+ *    for an API filing, under the provider ref `manual:<operator>`, so the saga never polls the
+ *    company afterwards (design F25, §6.13).
  *
  * Every command opens the database itself, through the configuration, prints ONE JSON object on
  * success and throws on a refusal (the entry point prints the message and exits non-zero). The
@@ -55,7 +80,7 @@ const RESERVED_OPERATOR = { name: "system", purpose: "what the platform records 
 const NEXT = "nothing was written: run the same command with --yes to record this";
 
 /** The largest document the operator records, in bytes: 10 MiB. */
-export const DAO_SUPPLEMENT_MAX_BYTES = 10 * 1024 * 1024;
+export const OPERATOR_DOCUMENT_MAX_BYTES = 10 * 1024 * 1024;
 
 interface Stores {
   db: Database.Database;
@@ -63,6 +88,8 @@ interface Stores {
   requests: SqliteFormationRepository;
   documents: SqliteDocumentIndexRepository;
   bodies: SqliteLegalBodyRepository;
+  parties: SqliteFormationPartyRepository;
+  entities: SqliteEntityRepository;
 }
 
 function storesOf(db: Database.Database): Stores {
@@ -72,15 +99,16 @@ function storesOf(db: Database.Database): Stores {
     requests: new SqliteFormationRepository(db),
     documents: new SqliteDocumentIndexRepository(db),
     bodies: new SqliteLegalBodyRepository(db),
+    parties: new SqliteFormationPartyRepository(db),
+    entities: new SqliteEntityRepository(db),
   };
 }
 
 /**
- * The company, held to what both commands need of it: filed through doola, for a legal body, not
- * abandoned (the order door never takes an abandoned company, `companyEligible`), and filed by the
- * State (`await_filing` confirmed, `companyFiled`, the rule the order door reads).
+ * The company, held to what every command here needs of it: filed through doola, for a legal body,
+ * and not abandoned (the order door never takes an abandoned company, `companyEligible`).
  */
-function formedLegalBodyCompany(s: Stores, companyId: string): CompanyRecord {
+function legalBodyCompany(s: Stores, companyId: string): CompanyRecord {
   const company = s.companies.find(companyId);
   if (!company) refuse(`no company ${companyId}`);
   if (company.provider !== DOOLA)
@@ -91,6 +119,15 @@ function formedLegalBodyCompany(s: Stores, companyId: string): CompanyRecord {
     refuse(`company ${companyId} was formed for agents, not for a legal body`);
   if (company.status === "abandoned")
     refuse(`company ${companyId} is abandoned: nothing can be recorded on it`);
+  return company;
+}
+
+/**
+ * `legalBodyCompany`, filed by the State as well (`await_filing` confirmed, `companyFiled`, the
+ * rule the order door reads): what `company:dao-supplement` and `company:filed-name` take.
+ */
+function formedLegalBodyCompany(s: Stores, companyId: string): CompanyRecord {
+  const company = legalBodyCompany(s, companyId);
   const steps = s.requests.stepsOf(companyId);
   if (!companyFiled(steps))
     refuse(
@@ -108,32 +145,36 @@ interface SupplementOptions {
   yes?: boolean;
 }
 
-/** A file system call on `--document`, its failure refused by its code: never by the path. */
-function readable<T>(read: () => T): T {
+/** The flag a command takes an operator's document under. */
+type DocumentFlag = "--document" | "--articles";
+
+/** A file system call on the document's flag, its failure refused by its code, not the path. */
+function readable<T>(flag: DocumentFlag, read: () => T): T {
   try {
     return read();
   } catch (err) {
     return refuse(
-      `--document cannot be read (${(err as NodeJS.ErrnoException).code ?? "unknown error"})`,
+      `${flag} cannot be read (${(err as NodeJS.ErrnoException).code ?? "unknown error"})`,
     );
   }
 }
 
 /**
- * The document's bytes: a file, not empty, at most 10 MiB, starting with the five bytes every PDF
- * starts with. Like a customer's upload, it is never parsed beyond those five bytes and its hash.
- * The size is asked before the file is read, so an oversized file is never read into memory, and
- * once more after, in case the file grew in between.
+ * The bytes of a document an operator records (`--document`, `--articles`): a file, not empty, at
+ * most 10 MiB, starting with the five bytes every PDF starts with. Like a customer's upload, it is
+ * never parsed beyond those five bytes and its hash. The size is asked before the file is read, so
+ * an oversized file is never read into memory, and once more after, in case the file grew in
+ * between. A refusal names the flag, never the path.
  */
-function readSupplement(path: string): Buffer {
-  const stat = readable(() => statSync(path));
-  if (!stat.isFile()) refuse("--document must name a file");
-  const over = () => refuse("--document is over 10 MiB");
-  if (stat.size > DAO_SUPPLEMENT_MAX_BYTES) over();
-  const bytes = readable(() => readFileSync(path));
-  if (bytes.length === 0) refuse("--document is empty");
-  if (bytes.length > DAO_SUPPLEMENT_MAX_BYTES) over();
-  if (!startsAsPdf(bytes)) refuse("--document is not a PDF: its bytes do not start with %PDF-");
+function readPdfDocument(flag: DocumentFlag, path: string): Buffer {
+  const stat = readable(flag, () => statSync(path));
+  if (!stat.isFile()) refuse(`${flag} must name a file`);
+  const over = () => refuse(`${flag} is over 10 MiB`);
+  if (stat.size > OPERATOR_DOCUMENT_MAX_BYTES) over();
+  const bytes = readable(flag, () => readFileSync(path));
+  if (bytes.length === 0) refuse(`${flag} is empty`);
+  if (bytes.length > OPERATOR_DOCUMENT_MAX_BYTES) over();
+  if (!startsAsPdf(bytes)) refuse(`${flag} is not a PDF: its bytes do not start with %PDF-`);
   return bytes;
 }
 
@@ -162,7 +203,7 @@ function recordDaoSupplement(companyId: string, opts: SupplementOptions): void {
   withDatabase((db, docStoreDir) => {
     const s = storesOf(db);
     formedLegalBodyCompany(s, companyId);
-    const bytes = readSupplement(opts.document);
+    const bytes = readPdfDocument("--document", opts.document);
     const sha256 = sha256Of(bytes);
     const providerDocId = `operator:${DAO_SUPPLEMENT_DOC_TYPE}:${sha256}`;
     const docId = documentIndexId(companyId, providerDocId);
@@ -246,9 +287,11 @@ const NO_STORED_OPTION =
 const NO_ENTITY_ENDING =
   "no entity ending (LLC, L.L.C., Limited Liability Company): the State's record of an LLC carries its ending; check the name";
 /** The order door holds a formed company to its filed name AND its filing number
- *  (`filedCompanyNames`); this build has no command that records the number. */
+ *  (`filedCompanyNames`). The processor writes the number from doola's poll (`healFilingFacts`
+ *  heals a filing confirmed without one); `formation:record-filed` writes it for a filing done by
+ *  hand. */
 const NO_FILING_NUMBER =
-  "the company has no filing number: it cannot be ordered until one is recorded";
+  "the company has no filing number: the API's next poll fills it for a company doola filed; for a filing done by hand, formation:record-filed records it";
 
 interface FiledNameOptions {
   name: string;
@@ -258,23 +301,27 @@ interface FiledNameOptions {
 }
 
 /**
- * The name as the State's record prints it, held to the agreement's field rule for a company name
- * (`COMPANY_NAME`, the rule the order door holds a filed name to before its agreement prints it):
- * a name the rule refuses is refused with the rule's reason, and one the rule would change (a
- * space at an end, a run of spaces, a character NFC rewrites) is refused too, never cleaned, since
- * the order door prints a filed name only as it stands (`passesAsItStands`). What passes is stored
- * exactly as typed.
+ * A filed fact as the State's record prints it, held to the agreement's field rule for it (the
+ * rule the order door holds the fact to before its agreement prints it): a value the rule refuses
+ * is refused with the rule's reason, and one the rule would change (a space at an end, a run of
+ * spaces, a character NFC rewrites) is refused too, never cleaned, since the order door prints a
+ * filed fact only as it stands (`passesAsItStands`). What passes is stored exactly as typed.
  */
-function parseFiledName(value: string): string {
+function heldAsTyped(flag: string, value: string, rule: TextRule): string {
   const problems: FieldProblem[] = [];
-  const held = applyTextRule("--name", value, COMPANY_NAME, problems);
+  const held = applyTextRule(flag, value, rule, problems);
   const [problem] = problems;
   if (problem !== undefined) refuse(`${problem.field} ${problem.problem}`);
   if (held !== value)
     refuse(
-      "--name would be changed by the agreement's field rule (a space at an end, a run of spaces, or a character NFC rewrites): type it exactly as the State's record prints it",
+      `${flag} would be changed by the agreement's field rule (a space at an end, a run of spaces, or a character NFC rewrites): type it exactly as the State's record prints it`,
     );
   return value;
+}
+
+/** The company's full legal name as the State's record prints it (`COMPANY_NAME`). */
+function parseFiledName(value: string, flag: "--name" | "--legal-name" = "--name"): string {
+  return heldAsTyped(flag, value, COMPANY_NAME);
 }
 
 /**
@@ -433,6 +480,440 @@ function recordFiledName(companyId: string, opts: FiledNameOptions): void {
   });
 }
 
+// ── formation:record-filed and formation:record-ein: the assisted completion ──────────────────
+//
+// A paid formed company whose filing doola did by hand, outside its API (doola's amended articles,
+// a filing made through the portal, an API outage). The operator records what the State's record
+// says, and the commands write the rows the saga writes for an API filing (`advanceFiling`,
+// `advanceDocuments`, `advanceEin` in `workflow/formationProcessor.ts`), with one difference by
+// design: the provider ref is `manual:<operator>`, which names no company at doola. The poll
+// due-set and the sweeper skip every company that carries one (`manuallyRecorded`), so the saga
+// never polls, retries or abandons it afterwards.
+
+/** The Articles' doc type: doola's own `documentType`, so every reader of the index (the view,
+ *  the processor's required types) reads the operator's copy as the same document. */
+const ARTICLES_DOC_TYPE: (typeof REQUIRED_DOCUMENT_TYPES)[number] = "ArticlesOfOrganization";
+const EIN = /^\d{2}-\d{7}$/;
+const RECORD_FILED_NEXT = "formation:record-ein when the IRS letter arrives";
+
+/**
+ * `legalBodyCompany`, paid and with its responsible party: what both assisted commands take. Paid
+ * is `ready`: a `draft` company has nothing settled, and the filer files nothing for it. The party
+ * is bound to the company and not erased, as the filer requires before it sends anything.
+ */
+function paidLegalBodyCompany(s: Stores, companyId: string): CompanyRecord {
+  const company = legalBodyCompany(s, companyId);
+  if (company.status !== "ready")
+    refuse(
+      `company ${companyId} is not paid (status ${company.status}): only a paid company is filed`,
+    );
+  if (s.parties.findByCompanyId(companyId) === undefined)
+    refuse(
+      `company ${companyId} has no formation party: a paid formed company always has one; find out why before recording`,
+    );
+  return company;
+}
+
+/** The operator a `manual:` ref names. */
+const recorder = (ref: string): string => ref.slice(MANUAL_REF_PREFIX.length);
+
+/** Where `formation:record-filed` takes `create_provider` from, and whether its create was frozen
+ *  (see `recordableFrom`). */
+interface Recordable {
+  from: "unopened" | "pending" | "failed";
+  frozenCreate: boolean;
+}
+
+/**
+ * Where `formation:record-filed` takes the company's formation rows from, or a refusal:
+ *  - `unopened`: no row at all, the saga never opened the filing; the write opens all four
+ *    (`claimAllSteps`);
+ *  - `pending` or `failed`: `create_provider` in that state with no provider ref, so no company
+ *    exists at doola under it; the three later steps are `pending`, as the saga left them.
+ * Refused: a filing already recorded by hand (any row carries a `manual:` ref); a create being sent
+ * (`submitted`), which may still return a company; a create the API confirmed; a create doola
+ * answered with a company id, which the saga adopts; an abandoned create; and a later step that is
+ * not `pending`, which no API filing of an unconfirmed create leaves.
+ *
+ * And a FROZEN create (`isIntakeFrozen`) unless the operator passes `--doola-confirmed-no-company`:
+ * a company body went out under the attempt's live key and its answer was lost (an outage, which
+ * never burns the attempt), or its detail cannot be read, which proves nothing either way. doola
+ * may hold that company. If it does, a record by hand would stop the saga from ever adopting it;
+ * if it does not, the saga's same-key re-send after the outage would file a company on top of the
+ * hand filing, unless the record wins first. Only doola can say which, so only the operator's
+ * confirmation that doola holds none lets the record through.
+ */
+function recordableFrom(
+  companyId: string,
+  steps: FormationRequestRecord[],
+  doolaConfirmedNoCompany: boolean,
+): Recordable {
+  if (steps.length === 0) return { from: "unopened", frozenCreate: false };
+  const manual = steps.find((row) => isManualRef(row.providerRef))?.providerRef;
+  if (manual)
+    refuse(`the filing of company ${companyId} is already recorded by ${recorder(manual)}`);
+  const create = steps.find((row) => row.step === "create_provider");
+  if (create === undefined)
+    refuse(
+      `company ${companyId} has formation rows but no create_provider row: find out why before recording`,
+    );
+  if (create.state === "submitted") refuse("a create is being sent to doola: wait for it");
+  if (create.state === "confirmed") refuse("the API filed this company: nothing to record");
+  if (create.providerRef !== null)
+    refuse(
+      `doola holds a company for company ${companyId} (create_provider has a provider ref): the saga adopts it; nothing to record`,
+    );
+  if (create.state === "abandoned")
+    refuse(`the filing of company ${companyId} was abandoned: nothing can be recorded on it`);
+  const frozenCreate = isIntakeFrozen(create);
+  if (frozenCreate && !doolaConfirmedNoCompany)
+    refuse(
+      `a create went out to doola for company ${companyId} and its answer was lost: doola may hold the company. Ask doola whether it holds one for this company's customer. If it does, do not record: the saga's next retry re-sends the same key and doola answers with that company, or its lookup by the customer finds it, and the saga adopts it. If doola confirms it holds none, run again with --doola-confirmed-no-company`,
+    );
+  for (const step of FORMATION_STEP_ORDER) {
+    if (step === "create_provider") continue;
+    const state = stepStateOf(steps, step);
+    if (state !== "pending")
+      refuse(
+        `the ${step} step of company ${companyId} is ${state ?? "missing"}, not pending: find out why before recording`,
+      );
+  }
+  return { from: create.state, frozenCreate };
+}
+
+/** `--filed-at`: a date of the calendar (`Date.parse` reads 2026-02-30 as 2 March, which
+ *  `isCalendarDate` refuses), not before 1970-01-01 (the unix seconds `filed_at` holds, which the
+ *  statement reads back only from zero, `calendarDateOfUtcMidnight`) and not after today's date in
+ *  UTC, as unix seconds at UTC midnight: the value the processor writes from doola's
+ *  `formationFilingDate` (`filingDateToUnix`). */
+function parseFiledAt(value: string, nowMs: number): number {
+  if (!isCalendarDate(value))
+    refuse("--filed-at must be a date of the calendar, written YYYY-MM-DD");
+  if (value < "1970-01-01")
+    refuse("--filed-at is before 1970-01-01: check it against the State's record");
+  const today = new Date(nowMs).toISOString().slice(0, 10);
+  if (value > today)
+    refuse(
+      `--filed-at is after today's date in UTC (${today}): the State cannot have filed the company yet`,
+    );
+  const filedAt = filingDateToUnix(value);
+  // Unreachable: a calendar date written YYYY-MM-DD always parses.
+  if (filedAt === null) throw new Error("--filed-at: a calendar date did not parse");
+  return filedAt;
+}
+
+/** Advice, never a refusal: doola may file before Novi's company row exists (a filing it began by
+ *  hand), so an earlier date may be the State's record; it is more often a typo. */
+const FILED_BEFORE_CREATED =
+  "the filing date is before the company was created at Novi: check it against the State's record";
+
+interface RecordFiledOptions {
+  filingNumber: string;
+  filedAt: string;
+  legalName: string;
+  articles: string;
+  operator: string;
+  doolaConfirmedNoCompany?: boolean;
+  yes?: boolean;
+}
+
+/**
+ * Records a paid formed company's filing done by hand, in ONE immediate transaction:
+ *  - `create_provider` confirmed under `manual:<operator>`, its detail `{ recordedBy, recordedAt }`;
+ *  - `await_filing` confirmed, its detail `{ filingNumber, filingDate, filedAt, recordedBy }`: the
+ *    processor's `AwaitFilingDetail` keys (`filingDate` as typed, yyyy-MM-dd), and `filed_at`'s
+ *    unix seconds;
+ *  - `fetch_documents` confirmed, its detail the processor's `FetchDocumentsDetail`,
+ *    `{ stored: [{ docId, type, sha256 }], missing: [] }` with `recordedBy` beside it: the Articles
+ *    are the documents, recorded by hand, listed by their provider document id as the processor
+ *    lists an index row;
+ *  - `await_ein` left `pending` under the same manual ref, never polled (`formation:record-ein`
+ *    confirms it);
+ *  - the filing facts on the company through `recordFilingFacts`, the writer the processor uses,
+ *    the name exactly as typed (the State's record is the truth);
+ *  - the Articles' index row (`source = operator`), and the `formationFiled` event as the
+ *    processor records it (it reaches no entity: a legal-body company has none attached);
+ *  - the party's SSN erased (`eraseSsnLogged`, reason `provider_persisted`), as the filer erases
+ *    it in the transaction that persists doola's company id: the filing is done, so nothing may
+ *    send it again;
+ *  - the Articles' bytes LAST, as `recordDaoSupplement` writes them.
+ *
+ * Every rule is checked before the file is read, so a wrong company is refused as such whatever
+ * `--articles` names, and again inside the transaction, since the check before it holds no lock.
+ * A create the sweeper starts in between moves `create_provider` first, and the transaction's
+ * check then refuses.
+ */
+function recordFiled(companyId: string, opts: RecordFiledOptions): void {
+  const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
+  const operatorOsUser = osUser();
+  const filingNumber = heldAsTyped("--filing-number", opts.filingNumber, FILING_NUMBER);
+  const filedAt = parseFiledAt(opts.filedAt, Date.now());
+  const legalNameFiled = parseFiledName(opts.legalName, "--legal-name");
+  const providerRef = `${MANUAL_REF_PREFIX}${operator}`;
+
+  withDatabase((db, docStoreDir) => {
+    const s = storesOf(db);
+    const confirmed = opts.doolaConfirmedNoCompany === true;
+    const pinned = paidLegalBodyCompany(s, companyId);
+    // A stand-in is a sandbox's test value, never a State filing number: a production company's
+    // filing is recorded with the State's (`isStandInFilingNumber`, on the filing key). The pin
+    // never changes, so this one look holds for the transaction below too.
+    if (pinned.environment === "production" && isStandInFilingNumber(filingNumber))
+      refuse(
+        "--filing-number is in the range kept for sandbox stand-ins (TEST-STANDIN-): record a production company's filing with the number on the State's record",
+      );
+    recordableFrom(companyId, s.requests.stepsOf(companyId), confirmed);
+    const bytes = readPdfDocument("--articles", opts.articles);
+    const sha256 = sha256Of(bytes);
+    const providerDocId = `operator:${ARTICLES_DOC_TYPE}:${sha256}`;
+    const docId = documentIndexId(companyId, providerDocId);
+    // The whole hash in the name, without its 0x, as `company:dao-supplement` names its file.
+    const path = documentStoreName(companyId, ARTICLES_DOC_TYPE, sha256.slice(2));
+    const document = { docId, sha256, size: bytes.length };
+    const docStore = new FileDocumentStore(docStoreDir);
+    const found = db
+      .transaction(() => {
+        const company = paidLegalBodyCompany(s, companyId);
+        const { from, frozenCreate } = recordableFrom(
+          companyId,
+          s.requests.stepsOf(companyId),
+          confirmed,
+        );
+        const matched = matchFiledNameAgainst(company.nameOptions, legalNameFiled) !== null;
+        // `created_at` is SQLite's UTC "YYYY-MM-DD HH:MM:SS": its day against the typed day.
+        const filedBeforeCreated = opts.filedAt < company.createdAt.slice(0, 10);
+        const facts = { matched, frozenCreate, filedBeforeCreated };
+        if (opts.yes !== true) return { written: false as const, ...facts };
+        // Unreachable when false: no row existed, in this transaction.
+        if (from === "unopened" && !s.requests.claimAllSteps(companyId))
+          throw new Error(`company ${companyId}: its formation rows were opened twice`);
+        const moved =
+          s.requests.transition(
+            companyId,
+            "create_provider",
+            from === "unopened" ? "pending" : from,
+            "confirmed",
+            {
+              providerRef,
+              detail: JSON.stringify({ recordedBy: operator, recordedAt: Date.now() }),
+              error: null,
+            },
+          ) &&
+          s.requests.transition(companyId, "await_filing", "pending", "confirmed", {
+            detail: JSON.stringify({
+              filingNumber,
+              filingDate: opts.filedAt,
+              filedAt,
+              recordedBy: operator,
+            }),
+            error: null,
+          }) &&
+          // The processor's `FetchDocumentsDetail`: each stored document by its provider document
+          // id, type and hash, as it maps the index rows, and nothing missing.
+          s.requests.transition(companyId, "fetch_documents", "pending", "confirmed", {
+            detail: JSON.stringify({
+              stored: [{ docId: providerDocId, type: ARTICLES_DOC_TYPE, sha256 }],
+              missing: [],
+              recordedBy: operator,
+            }),
+            error: null,
+          }) &&
+          // The same ref on the step the company waits on, and no fact: nothing is known yet.
+          s.requests.transition(companyId, "await_ein", "pending", "pending", {
+            providerRef,
+            touchFacts: false,
+          });
+        // Unreachable: every row was read in its state above, in this transaction.
+        if (!moved) throw new Error(`company ${companyId}: a formation row moved while recording`);
+        // Unreachable when false: the company held no filing facts, in this transaction.
+        if (!s.companies.recordFilingFacts(companyId, { filedAt, filingNumber, legalNameFiled }))
+          throw new Error(`company ${companyId}: the filing facts did not change`);
+        const inserted = s.documents.insert({
+          id: docId,
+          companyId,
+          docType: ARTICLES_DOC_TYPE,
+          sha256,
+          contentType: "application/pdf",
+          size: bytes.length,
+          providerDocId,
+          path,
+          source: "operator",
+        });
+        // Unreachable: an unfiled company has no Articles indexed, in this transaction.
+        if (!inserted) throw new Error(`document index: ${docId} was indexed twice`);
+        recordCompanyEvent(
+          s.entities,
+          companyId,
+          "formationFiled",
+          JSON.stringify({ providerRef, filingNumber, filedAt, environment: company.environment }),
+        );
+        // The filer's own erase and its audit line (`persistRefAndEraseSsn`), in this transaction.
+        eraseSsnLogged(s.parties, companyId, "provider_persisted", company.environment);
+        // Last: see `recordDaoSupplement`.
+        docStore.putBytes(path, bytes);
+        return { written: true as const, ...facts };
+      })
+      .immediate();
+
+    const advice = [
+      ...(found.matched ? [] : [NO_STORED_OPTION]),
+      ...(hasEntityEnding(legalNameFiled) ? [] : [NO_ENTITY_ENDING]),
+      ...(found.filedBeforeCreated ? [FILED_BEFORE_CREATED] : []),
+    ];
+    const warnings = advice.length === 0 ? {} : { warnings: advice };
+    if (!found.written) {
+      print({
+        recorded: false,
+        companyId,
+        wouldRecord: { legalNameFiled, filingNumber, filedAt, providerRef, document },
+        matched: found.matched,
+        ...warnings,
+        next: NEXT,
+      });
+      return;
+    }
+    // Never the name, the number or a path: ids, booleans and the operator only. `frozenCreate`
+    // marks a record made over a create doola may have held, on the operator's confirmation.
+    opsLog("formation_recorded_filed", {
+      companyId,
+      matched: found.matched,
+      ...(found.frozenCreate ? { frozenCreate: true } : {}),
+      operator,
+      operatorOsUser,
+    });
+    print({
+      recorded: true,
+      companyId,
+      legalNameFiled,
+      filingNumber,
+      filedAt,
+      matched: found.matched,
+      ...warnings,
+      document,
+      operator,
+      operatorOsUser,
+      next: RECORD_FILED_NEXT,
+    });
+  });
+}
+
+/**
+ * What `formation:record-ein` does with the company's `await_ein` row, or a refusal. The row is
+ * under a `manual:` ref, which only `formation:record-filed` writes: a company doola filed through
+ * the API has its EIN read by the processor (`advanceEin`), never recorded by hand.
+ *  - `confirm`: the row is `pending`; it is confirmed, with the EIN when `--ein` gives one;
+ *  - `add`: the row was confirmed without a value and the company holds no EIN; `--ein` stores it.
+ * A company that already holds an EIN takes no second one, whatever its value.
+ */
+function einRecordable(
+  company: CompanyRecord,
+  steps: FormationRequestRecord[],
+  ein: string | null,
+): { row: FormationRequestRecord; act: "confirm" | "add" } {
+  const { companyId } = company;
+  const row = steps.find((r) => r.step === "await_ein");
+  if (row === undefined || !isManualRef(row.providerRef)) {
+    const ref = providerRefOf(steps);
+    if (ref !== null && !isManualRef(ref))
+      refuse("the API tracks this company's EIN: nothing to record");
+    refuse(
+      `company ${companyId} has no filing recorded by hand: formation:record-filed records it first`,
+    );
+  }
+  if (ein !== null && company.ein !== null)
+    refuse(`company ${companyId} already holds an EIN: nothing to record`);
+  if (row.state === "confirmed") {
+    if (ein === null)
+      refuse(
+        `the EIN step of company ${companyId} is already recorded (await_ein is confirmed): pass --ein to store the EIN it lacks`,
+      );
+    return { row, act: "add" };
+  }
+  if (row.state !== "pending")
+    refuse(
+      `the await_ein step of company ${companyId} is ${row.state}, not pending: find out why before recording`,
+    );
+  // Unreachable through the commands: `formation:record-filed` confirms the filing with the ref.
+  if (!companyFiled(steps))
+    refuse(
+      `the State's filing of company ${companyId} is not confirmed yet (await_filing is ${stepStateOf(steps, "await_filing") ?? "missing"})`,
+    );
+  return { row, act: "confirm" };
+}
+
+interface RecordEinOptions {
+  ein?: string;
+  operator: string;
+  yes?: boolean;
+}
+
+/**
+ * Confirms the EIN step of a company recorded by hand, when the IRS letter arrives, in ONE
+ * immediate transaction: `await_ein` confirmed with `{ recordedBy, observedAt }` (`observedAt` in
+ * unix ms, as the processor writes it), the EIN on the company through `recordEin` when `--ein`
+ * gives it (the processor's writer; without it, the step is confirmed with no value), and the
+ * `formationEin` event as the processor records it, which carries no EIN. A step confirmed without
+ * a value takes the EIN later, once: the EIN alone is written, and the step and its event stay as
+ * they were. No line it prints carries the EIN: the output and the ops line say only whether one
+ * was stored.
+ */
+function recordEin(companyId: string, opts: RecordEinOptions): void {
+  const operator = parseOperator(opts.operator, RESERVED_OPERATOR);
+  const operatorOsUser = osUser();
+  if (opts.ein !== undefined && !EIN.test(opts.ein))
+    refuse("--ein must be written NN-NNNNNNN: two digits, a hyphen and seven digits");
+  const ein = opts.ein ?? null;
+  const withValue = ein !== null;
+
+  withDatabase((db) => {
+    const s = storesOf(db);
+    const written = db
+      .transaction(() => {
+        const company = paidLegalBodyCompany(s, companyId);
+        const { row, act } = einRecordable(company, s.requests.stepsOf(companyId), ein);
+        if (opts.yes !== true) return false;
+        if (act === "add") {
+          // Unreachable when false: the company held no EIN, in this transaction.
+          if (ein === null || !s.companies.recordEin(companyId, ein))
+            throw new Error(`company ${companyId}: the EIN did not change`);
+          return true;
+        }
+        const moved = s.requests.transition(companyId, "await_ein", "pending", "confirmed", {
+          detail: JSON.stringify({
+            ...parseDetail<Record<string, unknown>>(row.detail),
+            recordedBy: operator,
+            observedAt: Date.now(),
+          }),
+          error: null,
+        });
+        // Unreachable: the row was read `pending` above, in this transaction.
+        if (!moved) throw new Error(`company ${companyId}: await_ein moved while recording`);
+        if (ein !== null) s.companies.recordEin(companyId, ein);
+        recordCompanyEvent(
+          s.entities,
+          companyId,
+          "formationEin",
+          JSON.stringify({ providerRef: row.providerRef, environment: company.environment }),
+        );
+        return true;
+      })
+      .immediate();
+
+    if (!written) {
+      print({
+        recorded: false,
+        companyId,
+        wouldRecord: { await_ein: "confirmed", withValue },
+        next: NEXT,
+      });
+      return;
+    }
+    // Never the EIN: whether one was stored, the id and the operator only.
+    opsLog("formation_recorded_ein", { companyId, withValue, operator, operatorOsUser });
+    print({ recorded: true, companyId, withValue, operator, operatorOsUser });
+  });
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────────────────────
 
 export function registerFormedCompanyCommands(program: Command): void {
@@ -468,4 +949,48 @@ export function registerFormedCompanyCommands(program: Command): void {
     )
     .option("--yes", "confirm: set the filed name")
     .action((companyId: string, opts: FiledNameOptions) => recordFiledName(companyId, opts));
+
+  program
+    .command("formation:record-filed")
+    .argument(
+      "<companyId>",
+      "a paid company Novi forms for a legal body, not filed through the API",
+    )
+    .description(
+      "record the filing of a paid formed company that doola did by hand, outside its API: the rows the saga writes for an API filing, under the provider ref manual:<operator>, so the saga never polls the company",
+    )
+    .requiredOption("--filing-number <n>", "the filing number on the State's record")
+    .requiredOption(
+      "--filed-at <YYYY-MM-DD>",
+      "the filing date on the State's record, not after today in UTC",
+    )
+    .requiredOption(
+      "--legal-name <text>",
+      "the full legal name as the State's record prints it, its entity ending included",
+    )
+    .requiredOption(
+      "--articles <path.pdf>",
+      "the Articles of Organization doola sent, at most 10 MiB",
+    )
+    .requiredOption("--operator <name>", `who records: ${OPERATOR_NAME.source}`)
+    .option(
+      "--doola-confirmed-no-company",
+      "doola confirmed it holds no company for this company's customer, after a create whose answer was lost",
+    )
+    .option("--yes", "confirm: record the filing")
+    .action((companyId: string, opts: RecordFiledOptions) => recordFiled(companyId, opts));
+
+  program
+    .command("formation:record-ein")
+    .argument("<companyId>", "a company whose filing formation:record-filed recorded")
+    .description(
+      "confirm the EIN step of a company recorded by hand, when the IRS letter arrives; with --ein, store the EIN as the processor stores one",
+    )
+    .option(
+      "--ein <NN-NNNNNNN>",
+      "the EIN on the IRS letter; without it, no value is stored, and a later run with it stores it once",
+    )
+    .requiredOption("--operator <name>", `who records: ${OPERATOR_NAME.source}`)
+    .option("--yes", "confirm: record the EIN step")
+    .action((companyId: string, opts: RecordEinOptions) => recordEin(companyId, opts));
 }

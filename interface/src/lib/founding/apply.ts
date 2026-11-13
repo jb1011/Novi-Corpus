@@ -49,7 +49,7 @@ export function validateApplication(
   else if (email.length > 200 || !EMAIL.test(email)) errors.email = "Enter a valid email";
 
   const handle = normalizeHandle(input.xHandle);
-  if (handle !== "" && !HANDLE.test(handle)) errors.xHandle = "Enter an X handle, without the @";
+  if (handle !== "" && !HANDLE.test(handle)) errors.xHandle = "Enter an X handle";
 
   const agentName = input.agentName.trim();
   if (!agentName) errors.agentName = "Agent name is required";
@@ -75,7 +75,7 @@ export function shareOnX(pageUrl: string): string {
   const url = new URL("https://x.com/intent/post");
   url.searchParams.set(
     "text",
-    "I applied for the Novi Corpus Arc mainnet beta. Agents with a Novi legal body, invite only.",
+    "I applied for the NoviCorpus Arc mainnet beta. Agents with a NoviCorpus legal body, invite only.",
   );
   url.searchParams.set("url", pageUrl);
   return url.toString();

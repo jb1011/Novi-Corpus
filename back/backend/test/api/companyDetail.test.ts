@@ -18,6 +18,7 @@ import { afterEach, beforeEach, expect, test } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { signSession } from "../../src/auth/session";
 import { companyNameOptions } from "../../src/formation/intake";
+import { formationSummary } from "../../src/formation/status";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
@@ -179,14 +180,73 @@ test("STATE: a ready company reports its filing status verbatim once one is open
 
 // ── the park state ──────────────────────────────────────────────────────────────────────────
 
-test("PARK: a healthy company reports all three flags false", async () => {
+test("PARK: a healthy company reports all three flags false, and no refused fields", async () => {
   const id = newCompany();
   newParty(id);
   expect((await detail(id)).park).toEqual({
     awaitingIntakeEdit: false,
     awaitingPartyEdit: false,
     awaitingSsnDecision: false,
+    refusedFields: [],
   });
+});
+
+test("PARK: the refused fields are served by PATH only, through the allowlist, while a park holds", async () => {
+  // The filer writes the paths doola named beside the flag. The view re-checks every entry, since
+  // the blob is a column: a value that is not a field path (a sentence, an email, a nine-digit
+  // run) is never served, whoever wrote it there.
+  const id = newCompany();
+  newParty(id);
+  requests.claimStep(id, "create_provider");
+  requests.transition(id, "create_provider", "pending", "failed", {
+    detail: JSON.stringify({
+      awaitingIntakeEdit: true,
+      refusedFields: [
+        "description",
+        "nameOptions[0].name",
+        "size must be between 1 and 50",
+        "person@example.test",
+        "123456789",
+        42,
+      ],
+    }),
+  });
+  expect((await detail(id)).park).toEqual({
+    awaitingIntakeEdit: true,
+    awaitingPartyEdit: false,
+    awaitingSsnDecision: false,
+    refusedFields: ["description", "nameOptions[0].name"],
+  });
+
+  // A list with NO flag set describes no park, and is not served.
+  const stale = newCompany({
+    nameOptions: companyNameOptions("Beta One", "Beta Two", "Beta Three"),
+  });
+  newParty(stale);
+  requests.claimStep(stale, "create_provider");
+  requests.transition(stale, "create_provider", "pending", "failed", {
+    detail: JSON.stringify({ refusedFields: ["description"] }),
+  });
+  expect(
+    ((await detail(stale)).park as unknown as { refusedFields: string[] }).refusedFields,
+  ).toEqual([]);
+
+  // A PARTY park is checked against the customer request's own fields: a company field, a value
+  // used as a key and a dotted name are not served.
+  const party = newCompany({
+    nameOptions: companyNameOptions("Gamma One", "Gamma Two", "Gamma Three"),
+  });
+  newParty(party);
+  requests.claimStep(party, "create_provider");
+  requests.transition(party, "create_provider", "pending", "failed", {
+    detail: JSON.stringify({
+      awaitingPartyEdit: true,
+      refusedFields: ["phoneNumber", "description", "5551234567", "john.smith", "email"],
+    }),
+  });
+  expect(
+    ((await detail(party)).park as unknown as { refusedFields: string[] }).refusedFields,
+  ).toEqual(["phoneNumber", "email"]);
 });
 
 test("PARK: the two `detail` flags are reported SEPARATELY — they have different exits", async () => {
@@ -274,6 +334,32 @@ test("the page carries the documents, the attached agents and the open required 
   // the responsible party.
   expect(body.requiredActions).toEqual(["FORMATION_NAME_OPTIONS_EXHAUSTED"]);
   expect(JSON.stringify(body)).not.toContain("Ada Lovelace");
+});
+
+test("a filing recorded by hand serves no provider ref: the operator's manual: handle stays internal, here and in the formation summary", async () => {
+  const id = newCompany({ purposeKind: "legal_body" });
+  requests.claimAllSteps(id);
+  requests.transition(id, "create_provider", "pending", "confirmed", {
+    providerRef: "manual:ops.example",
+  });
+  requests.transition(id, "await_filing", "pending", "confirmed");
+  requests.transition(id, "await_ein", "pending", "pending", {
+    providerRef: "manual:ops.example",
+    touchFacts: false,
+  });
+  const body = await detail(id);
+  expect(body.providerRef).toBeNull();
+  expect(body.formationStatus).toBe("filed");
+  expect(JSON.stringify(body)).not.toContain("ops.example");
+
+  // The summary every entity surface spreads, the public ones included.
+  const company = companies.find(id)!;
+  expect(formationSummary(company, requests.stepsOf(id))?.providerRef).toBeNull();
+  // doola's own id is served as ever.
+  const api = newCompany();
+  requests.claimAllSteps(api);
+  requests.transition(api, "create_provider", "pending", "confirmed", { providerRef: "cmp-7" });
+  expect(formationSummary(companies.find(api)!, requests.stepsOf(api))?.providerRef).toBe("cmp-7");
 });
 
 test("NO PII: a bound party's identity is nowhere in the response", async () => {

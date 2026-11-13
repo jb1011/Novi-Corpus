@@ -137,6 +137,7 @@ const ORDER_VIEW_KEYS: Record<keyof LegalBodyOrderView, true> = {
   supersededBy: true,
   replacedBy: true,
   companyName: true,
+  adoptedAt: true,
 };
 
 const BINDING_VIEW_KEYS: Record<keyof BindingView, true> = {

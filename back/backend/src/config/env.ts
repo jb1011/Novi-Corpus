@@ -53,15 +53,21 @@ export const DEFAULT_FORMATION_FILING_WORKING_DAYS = 5;
 
 /** The legal-body flow's settings when unset: the amendment delay of every new legal body (48
  *  hours, in seconds), then the caps on a tenant's open orders, its orders and its creates per 24
- *  hours, and the deployment's creates per 24 hours. Also the fallback for a config with no
- *  `legalBodyFlow` block. */
+ *  hours, the deployment's creates per 24 hours, and the greatest age of a signed adoption of an
+ *  order's agreement (600 seconds, as the statement of authority's). Also the fallback for a
+ *  config with no `legalBodyFlow` block. */
 export const LEGAL_BODY_FLOW_DEFAULTS = Object.freeze({
   amendmentDelaySeconds: 172_800,
   maxOpenPerTenant: 3,
   maxOrdersPerTenantPerDay: 10,
   maxCreatesPerTenantPerDay: 5,
   maxCreatesPerDay: 100,
+  adoptionMaxAgeSeconds: 600,
 });
+
+/** The longest an adoption message may wait for its signature: a draft is linkable for 24 hours
+ *  after it was placed, so an older message could adopt nothing that is still linkable. */
+const LEGAL_BODY_ADOPTION_MAX_AGE_LIMIT_SECONDS = 86_400;
 
 /** Milliseconds between two ticks of the legal-body sweeper when LEGAL_BODY_SWEEP_INTERVAL_MS is
  *  unset. Also the fallback for a config with no `legalBodySweepIntervalMs`. */
@@ -383,6 +389,10 @@ const EnvSchema = z.object({
    *  logic of every pre-cutover agent and is therefore just as fleet-critical. */
   MONITOR_WATCH_BEACONS: z.string().optional(),
   MONITOR_WATCH_FACTORIES: z.string().optional(),
+  /** Extra LegalBodyFactory addresses to watch, comma-separated. LEGAL_BODY_FACTORY_ADDRESS is
+   *  watched anyway; after a factory redeploy the old one goes here, so the bodies it created
+   *  stay watched. */
+  MONITOR_WATCH_LEGAL_BODY_FACTORIES: z.string().optional(),
 
   // --- doola formation provider (docs/design/2026-08-19-doola-formation-provider-design.md §2).
   // The API key and the webhook secret are ALL-OR-NOTHING (`cfg.doola`, mirroring the Circle
@@ -427,6 +437,19 @@ const EnvSchema = z.object({
     .min(1)
     .max(30)
     .default(DEFAULT_FORMATION_FILING_WORKING_DAYS),
+  /**
+   * How many formed legal-body companies the formed door takes in all: the early-access beta's
+   * lifetime cap, counted by `countChargeableFormedLegalBodies` (`ready`, or a draft with a live
+   * quote, over every tenant). A whole number from 1. Read on production only (`formedCapReached`):
+   * a sandbox forms demo companies without number. Companies for agents are never counted.
+   */
+  FORMATION_MAX_TOTAL: z.coerce.number().int().min(1).default(10),
+  /**
+   * How many days after a paid company is abandoned its refund may wait before the sweeper writes
+   * a CRITICAL `formation_refund_overdue` line, once a day until `formation:refund` records it:
+   * the delay the terms promise. A whole number of days from 1 to 60.
+   */
+  FORMATION_REFUND_DAYS: z.coerce.number().int().min(1).max(60).default(14),
   /** Tri-state, same shape as FORMATION_REQUIRED: unset = TRUE in sandbox. Real names/addresses
    *  are then neither collected nor sent to doola's development environment (§3 PII). */
   FORMATION_SANDBOX_SYNTHETIC_PII: z.string().optional(),
@@ -596,6 +619,19 @@ const EnvSchema = z.object({
     blankAsUnset,
     z.coerce.number().int().positive().default(LEGAL_BODY_FLOW_DEFAULTS.maxCreatesPerDay),
   ),
+  /** How long after it was issued, in seconds, a signed adoption of an order's agreement is still
+   *  accepted: a positive whole number, at most 86400 (24 hours). */
+  LEGAL_BODY_ADOPTION_MAX_AGE_SECONDS: z.preprocess(
+    blankAsUnset,
+    z.coerce
+      .number()
+      .int()
+      .positive()
+      .max(LEGAL_BODY_ADOPTION_MAX_AGE_LIMIT_SECONDS, {
+        message: `must be at most ${LEGAL_BODY_ADOPTION_MAX_AGE_LIMIT_SECONDS} seconds (24 hours)`,
+      })
+      .default(LEGAL_BODY_FLOW_DEFAULTS.adoptionMaxAgeSeconds),
+  ),
   /** Milliseconds between two ticks of the legal-body sweeper, which settles reserved orders and
    *  checks bindings: a positive whole number a timer can hold. */
   LEGAL_BODY_SWEEP_INTERVAL_MS: z.preprocess(
@@ -616,6 +652,15 @@ const EnvSchema = z.object({
       message: "must be a decimal from 0 to 0.05 (USDC) with at most 6 decimals",
     }),
   ),
+
+  // --- THE FUNNEL (funnel:export, design 6.14). Both optional; parsed in loadConfig, whose
+  // refusals never repeat a value. ---
+  /** The accounts the funnel never counts (the founders): wallet addresses, comma-separated. */
+  FUNNEL_EXCLUDE_TENANTS: z.string().optional(),
+  /** The salt of a statement read's caller hash: 32 bytes as 64 hex characters (`openssl rand
+   *  -hex 32`). Unset, no statement read is recorded. REQUIRED on a production deployment. A
+   *  secret: masked by redact(). */
+  FUNNEL_SALT: z.string().optional(),
 
   // --- THE KLEROS PILOT (design 2026-10-22, section 5.9). All optional. The three pilot keys are
   // all set or all unset; each Kleros key belongs to one deployment, and the mode picks the key and
@@ -844,6 +889,8 @@ export interface Config {
     maxOrdersPerTenantPerDay: number;
     maxCreatesPerTenantPerDay: number;
     maxCreatesPerDay: number;
+    /** Seconds: how long after it was issued a signed adoption is still accepted. */
+    adoptionMaxAgeSeconds: number;
   };
   /** Milliseconds between two ticks of the legal-body sweeper. Optional in the TYPE only, like
    *  `legalBodyFlow`: loadConfig always sets it, and a reader falls back to
@@ -854,6 +901,15 @@ export interface Config {
    *  wei where it is used. Optional in the TYPE only, like `legalBodyFlow`: loadConfig always sets
    *  it, and a reader falls back to "0". */
   legalBodyGasSeedUsdc?: string;
+  /**
+   * The funnel (`funnel:export`, design 6.14). `excludeTenants`: the accounts it never counts,
+   * checksummed (FUNNEL_EXCLUDE_TENANTS). `salt`: the salt of a statement read's caller hash, 64
+   * lower-case hex characters (FUNNEL_SALT); absent, no statement read is recorded, and a
+   * production deployment refuses to boot (`assertFunnelConfig`). Optional in the TYPE only, like
+   * `legalBodyFlow`: loadConfig always sets it, and a reader falls back to no exclusion and no
+   * salt.
+   */
+  funnel?: { excludeTenants: Address[]; salt: string | undefined };
   /** Explicit ENS apex target; absent => the platform signing key (today's behavior). */
   ensApexResolvesTo?: Address;
   guardianAddress?: Address;
@@ -1000,6 +1056,7 @@ export interface Config {
     dbPath: string;
     watchBeacons: Address[];
     watchFactories: Address[];
+    watchLegalBodyFactories: Address[];
   };
   /** doola formation provider credentials; present only when the API key AND the webhook secret
    *  are both set (all-or-nothing). Absent = this deployment forms nothing and every entity keeps
@@ -1032,6 +1089,12 @@ export interface Config {
      *  takes. Optional in the TYPE only (loadConfig always sets it); a reader falls back to
      *  DEFAULT_FORMATION_FILING_WORKING_DAYS. */
     filingWorkingDays?: number;
+    /** FORMATION_MAX_TOTAL: how many formed legal-body companies the formed door takes in all, on
+     *  production only (`formedCapReached`). */
+    maxTotal: number;
+    /** FORMATION_REFUND_DAYS: how many days a refund owed on an abandoned company may wait before
+     *  the sweeper's CRITICAL `formation_refund_overdue` line. */
+    refundDays: number;
     /** Sandbox files with a labeled synthetic identity instead of a real natural person. */
     sandboxSyntheticPii: boolean;
     /**
@@ -1118,6 +1181,49 @@ function parseAddressList(raw: string | undefined, varName: string): Address[] {
       throw new Error(`Invalid config: ${varName} contains "${s}" — must be a 0x address`);
     return getAddress(s) as Address;
   });
+}
+
+/**
+ * FUNNEL_EXCLUDE_TENANTS -> the accounts the funnel never counts. Blank is none. Every entry must be
+ * an address in its EIP-55 checksummed spelling (`getAddress(entry) === entry`), so a typo in a
+ * founder's address refuses boot rather than silently counting the founder. The refusal names the
+ * entry by its place, never its value: a near-miss of an address is still an address, and boot
+ * errors reach the journal.
+ */
+function parseFunnelTenants(raw: string | undefined): Address[] {
+  if (!raw?.trim()) return [];
+  return raw.split(",").map((entry, i) => {
+    const s = entry.trim();
+    if (!isAddress(s, { strict: false }) || getAddress(s) !== s)
+      throw new Error(
+        `Invalid config: FUNNEL_EXCLUDE_TENANTS must be EIP-55 checksummed wallet addresses, comma-separated (entry ${i + 1} is not one)`,
+      );
+    return s as Address;
+  });
+}
+
+/** FUNNEL_SALT -> 64 lower-case hex characters, or undefined when blank. Never repeated. */
+function parseFunnelSalt(raw: string | undefined): string | undefined {
+  const trimmed = raw?.trim();
+  if (!trimmed) return undefined;
+  if (!/^[0-9a-fA-F]{64}$/.test(trimmed))
+    throw new Error(
+      "Invalid config: FUNNEL_SALT must be 32 bytes written as 64 hex characters (generate one with: openssl rand -hex 32)",
+    );
+  return trimmed.toLowerCase();
+}
+
+/**
+ * A production deployment must hold FUNNEL_SALT: without it no statement read is recorded (an
+ * unsalted hash of a client's address would be the address to anyone who can enumerate them), and
+ * the funnel's last stage would read `not_available` on the one deployment it is for. A sandbox
+ * deployment boots without it.
+ */
+export function assertFunnelConfig(cfg: Pick<Config, "arcNetwork" | "funnel">): void {
+  if (legalBodyEnvironment(cfg) === "production" && cfg.funnel?.salt === undefined)
+    throw new Error(
+      "Invalid config: FUNNEL_SALT is required on a production deployment (ARC_NETWORK=mainnet): without it no statement read is recorded",
+    );
 }
 
 /**
@@ -1333,9 +1439,14 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       maxOrdersPerTenantPerDay: e.LEGAL_BODY_MAX_ORDERS_PER_TENANT_PER_DAY,
       maxCreatesPerTenantPerDay: e.LEGAL_BODY_MAX_CREATES_PER_TENANT_PER_DAY,
       maxCreatesPerDay: e.LEGAL_BODY_MAX_CREATES_PER_DAY,
+      adoptionMaxAgeSeconds: e.LEGAL_BODY_ADOPTION_MAX_AGE_SECONDS,
     },
     legalBodySweepIntervalMs: e.LEGAL_BODY_SWEEP_INTERVAL_MS,
     legalBodyGasSeedUsdc: e.LEGAL_BODY_GAS_SEED_USDC,
+    funnel: {
+      excludeTenants: parseFunnelTenants(e.FUNNEL_EXCLUDE_TENANTS),
+      salt: parseFunnelSalt(e.FUNNEL_SALT),
+    },
     ensApexResolvesTo: e.ENS_APEX_RESOLVES_TO,
     guardianAddress: e.GUARDIAN_ADDRESS,
     operatorPrivateKey: e.OPERATOR_PRIVATE_KEY,
@@ -1491,6 +1602,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       dbPath: `${e.DATA_DIR}/monitor.db`,
       watchBeacons: parseAddressList(e.MONITOR_WATCH_BEACONS, "MONITOR_WATCH_BEACONS"),
       watchFactories: parseAddressList(e.MONITOR_WATCH_FACTORIES, "MONITOR_WATCH_FACTORIES"),
+      watchLegalBodyFactories: parseAddressList(
+        e.MONITOR_WATCH_LEGAL_BODY_FACTORIES,
+        "MONITOR_WATCH_LEGAL_BODY_FACTORIES",
+      ),
     },
     doola,
     arcNetwork: e.ARC_NETWORK,
@@ -1503,6 +1618,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       maxAgentsPerCompany: e.FORMATION_MAX_AGENTS_PER_COMPANY,
       byoMaxOpenPerTenant: e.BYO_MAX_OPEN_PER_TENANT,
       filingWorkingDays: e.FORMATION_FILING_WORKING_DAYS,
+      maxTotal: e.FORMATION_MAX_TOTAL,
+      refundDays: e.FORMATION_REFUND_DAYS,
       sandboxSyntheticPii: boolWithDerivedDefault(
         e.FORMATION_SANDBOX_SYNTHETIC_PII,
         e.DOOLA_ENVIRONMENT === "sandbox",
@@ -2154,6 +2271,10 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     );
   }
 
+  // LAST, deliberately: a production deployment missing something more fundamental hears about
+  // that first.
+  assertFunnelConfig(cfg);
+
   return cfg;
 }
 
@@ -2273,6 +2394,14 @@ export function redact(cfg: Config): Record<string, unknown> {
           ...cfg.identity,
           blockedCountries: [...cfg.identity.blockedCountries].sort(),
           nameHmacKey: cfg.identity.nameHmacKey ? "REDACTED" : undefined,
+        }
+      : undefined,
+    // The salt is key material; the excluded accounts are the founders' wallets, which no log line
+    // names: how many there are is what an operator checks.
+    funnel: cfg.funnel
+      ? {
+          excludeTenants: cfg.funnel.excludeTenants.length,
+          salt: cfg.funnel.salt ? "REDACTED" : undefined,
         }
       : undefined,
     ens: cfg.ens ? { ...cfg.ens, signerKey: "REDACTED" } : undefined,
