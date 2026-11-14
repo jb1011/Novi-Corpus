@@ -46,13 +46,13 @@ test("a stalled request becomes an ApiError with code `timeout`", async () => {
 });
 
 test("a request that answers in time is untouched, and the budget is attached", async () => {
-  const fetchMock = vi.fn(
-    async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-  );
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    void init;
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
   vi.stubGlobal("fetch", fetchMock);
   const res = await fetchWithTimeout("/backend/healthz", {});
   expect(res.status).toBe(200);
@@ -78,7 +78,7 @@ test("the client's own calls are bounded — the 2026-09-16 infinite spinner", a
   // Through the real public surface, so the wiring inside `request()` is what is under test.
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (_url: string, _init?: RequestInit) => {
+    vi.fn(async () => {
       throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
     }),
   );
@@ -89,13 +89,13 @@ test("the client's own calls are bounded — the 2026-09-16 infinite spinner", a
 });
 
 test("every client call carries a signal", async () => {
-  const fetchMock = vi.fn(
-    async (_url: string, _init?: RequestInit) =>
-      new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      }),
-  );
+  const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+    void init;
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
   vi.stubGlobal("fetch", fetchMock);
   await healthCheck();
   expect(fetchMock.mock.calls[0]![1]!.signal).toBeInstanceOf(AbortSignal);
@@ -171,7 +171,7 @@ test("R3/I-R2: a per-call budget reaches fetch, and the slow routes use the tabl
   // wait for a receipt; on a direct-to-API deployment (NEXT_PUBLIC_API_URL set, no proxy) the 30s
   // default reported a policy schedule that was mining as a timeout.
   const fetchMock = vi.fn(
-    async (_url: string, _init?: RequestInit) =>
+    async () =>
       new Response(JSON.stringify({ txHash: "0x1" }), {
         status: 200,
         headers: { "content-type": "application/json" },

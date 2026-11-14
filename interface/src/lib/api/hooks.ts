@@ -8,6 +8,7 @@ import {
 } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { useAuth } from "@/components/onboarding/AuthProvider";
+import { filingPollInterval } from "@/lib/legalBody/polling";
 import {
   agentBookRegister,
   agentBookSession,
@@ -498,13 +499,20 @@ export function useCompaniesQuery(enabled = true) {
  */
 export function useCompanyQuery(
   companyId: string | null | undefined,
-  options?: { enabled?: boolean },
+  options?: { enabled?: boolean; pollWhileFiling?: boolean },
 ) {
   const token = useAuthToken();
+  const pollWhileFiling = options?.pollWhileFiling === true;
   return useQuery({
     queryKey: apiKeys.company(token ?? "", companyId ?? ""),
     queryFn: () => getCompany(token!, companyId!),
     enabled: (options?.enabled ?? true) && !!token && !!companyId,
+    refetchInterval: (query) => {
+      if (!pollWhileFiling) return false;
+      const state = query.state.data?.state;
+      return state ? filingPollInterval(state) : false;
+    },
+    refetchOnWindowFocus: pollWhileFiling ? true : undefined,
     // Same reasoning as the list, and it matters more here: THREE surfaces mount this query for
     // the same company (the dashboard's formation card, the wizard's confirm screen, the company
     // page), and at React Query's default `staleTime: 0` each mount is its own request for a row

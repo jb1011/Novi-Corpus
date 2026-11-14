@@ -13,6 +13,7 @@ import {
   REFRESH_WINDOW_MS,
   RESERVED_POLL_MS,
   companyPollInterval,
+  filingPollInterval,
   orderPollInterval,
   refreshPlan,
   type RefreshAction,
@@ -216,4 +217,18 @@ describe("companyPollInterval", () => {
     expect(companyPollInterval(step, "production")).toBe(false);
     expect(companyPollInterval(step, "sandbox")).toBe(false);
   });
+});
+
+describe("filingPollInterval", () => {
+  test("polls while the filing is open or waiting to open", () => {
+    expect(filingPollInterval("in_progress")).toBe(60_000);
+    expect(filingPollInterval("ready")).toBe(60_000);
+  });
+
+  test.each(["draft", "paying", "filed", "complete", "failed", "abandoned"] as const)(
+    "%s does not poll",
+    (state) => {
+      expect(filingPollInterval(state)).toBe(false);
+    },
+  );
 });

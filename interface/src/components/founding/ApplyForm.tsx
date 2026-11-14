@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState, type FormEvent } from "react";
 import { Button, Field, Textarea, TextInput } from "@/components/onboarding/primitives";
 import { ApiError } from "@/lib/api/types";
 import { submitFoundingApplication } from "@/lib/founding/api";
@@ -31,10 +31,10 @@ export function ApplyForm({ open }: { open: boolean }) {
     [],
   );
 
-  const [shareHref, setShareHref] = useState("https://x.com/intent/post");
-  useEffect(() => {
-    setShareHref(shareOnX(`${window.location.origin}/founding-5?utm_source=x&utm_medium=share`));
-  }, []);
+  const shareHref =
+    typeof window === "undefined"
+      ? "https://x.com/intent/post"
+      : shareOnX(`${window.location.origin}/founding-5?utm_source=x&utm_medium=share`);
 
   function set<K extends keyof ApplyFields>(key: K, value: ApplyFields[K]) {
     setFields((current) => ({ ...current, [key]: value }));

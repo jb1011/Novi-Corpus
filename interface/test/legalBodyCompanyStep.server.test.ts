@@ -30,6 +30,7 @@ vi.mock("@/lib/api/legalBodyHooks", () => {
 
 vi.mock("@/lib/api/hooks", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/hooks")>()),
+  useWorldIdMeQuery: () => ({ data: undefined }),
   useCompaniesQuery: () => ({
     data: { companies: [] },
     refetch: async () => {
@@ -108,6 +109,7 @@ function kit(
     remember: vi.fn(),
     startAnother: vi.fn(),
     routeSignIn: vi.fn(() => false),
+    door: "declare",
   };
 }
 

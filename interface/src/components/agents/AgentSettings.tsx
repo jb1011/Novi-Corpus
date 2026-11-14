@@ -13,7 +13,6 @@ import {
   usePatchTrustPolicyMutation,
   useSchedulePolicyUpdateMutation,
 } from "@/lib/api/hooks";
-import type { EntityView } from "@/lib/api/types";
 import { arcTestnet } from "@/lib/chain";
 import { usdcToAtomic } from "@/lib/api/spec";
 import { treasuryAbi } from "@/lib/treasuryAbi";
@@ -28,7 +27,6 @@ import {
   Field,
   SectionTitle,
   TextInput,
-  cx,
 } from "@/components/onboarding/primitives";
 import { formatUsdc, isAddress, shortAddress } from "@/components/onboarding/types";
 

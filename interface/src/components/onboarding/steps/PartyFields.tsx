@@ -25,6 +25,8 @@ export function PartyFields({
   onSsn,
   ssnCopy,
   sectionLetter = "B",
+  readOnlyNames,
+  namesNote = "From your identity verification. Not your name? Write to us before paying.",
 }: {
   party: FormationParty;
   errors: PartyFieldErrors;
@@ -51,6 +53,9 @@ export function PartyFields({
    */
   ssnCopy?: { label: string; help: string; retention: string };
   sectionLetter?: string;
+  /** Production: the server writes the names. The inputs are not shown and must not be sent. */
+  readOnlyNames?: { first: string; last: string };
+  namesNote?: string;
 }) {
   // Local to the form, because that is the only thing that can see it: "is the country one of the
   // listed ones or typed in by hand" is a fact about this `<select>`, not about the wizard. It was
@@ -69,24 +74,35 @@ export function PartyFields({
       <Card className="p-6">
         <SectionTitle n={sectionLetter}>Responsible person</SectionTitle>
         <div className="mt-5 grid grid-cols-1 gap-5 sm:grid-cols-2">
-          <Field label="Legal first name" htmlFor="party-first" error={errors.legalFirstName}>
-            <TextInput
-              id="party-first"
-              autoComplete="given-name"
-              value={party.legalFirstName}
-              invalid={!!errors.legalFirstName}
-              onChange={(e) => set("legalFirstName", e.target.value)}
-            />
-          </Field>
-          <Field label="Legal last name" htmlFor="party-last" error={errors.legalLastName}>
-            <TextInput
-              id="party-last"
-              autoComplete="family-name"
-              value={party.legalLastName}
-              invalid={!!errors.legalLastName}
-              onChange={(e) => set("legalLastName", e.target.value)}
-            />
-          </Field>
+          {readOnlyNames ? (
+            <div className="sm:col-span-2">
+              <p className="text-[14px] text-ink">
+                {readOnlyNames.first} {readOnlyNames.last}
+              </p>
+              <p className="mt-1 text-[12.5px] leading-[1.6] text-muted">{namesNote}</p>
+            </div>
+          ) : (
+            <>
+              <Field label="Legal first name" htmlFor="party-first" error={errors.legalFirstName}>
+                <TextInput
+                  id="party-first"
+                  autoComplete="given-name"
+                  value={party.legalFirstName}
+                  invalid={!!errors.legalFirstName}
+                  onChange={(e) => set("legalFirstName", e.target.value)}
+                />
+              </Field>
+              <Field label="Legal last name" htmlFor="party-last" error={errors.legalLastName}>
+                <TextInput
+                  id="party-last"
+                  autoComplete="family-name"
+                  value={party.legalLastName}
+                  invalid={!!errors.legalLastName}
+                  onChange={(e) => set("legalLastName", e.target.value)}
+                />
+              </Field>
+            </>
+          )}
           <Field label="Email" htmlFor="party-email" error={errors.email}>
             <TextInput
               id="party-email"

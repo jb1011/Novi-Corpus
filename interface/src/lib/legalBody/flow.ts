@@ -30,6 +30,7 @@ export type LegalBodyPhase =
   | "link"
   | "pointer"
   | "payment"
+  | "filing"
   | "done"
   | "closed";
 
@@ -52,6 +53,7 @@ export type LegalBodyNotice =
   | { kind: "company_revoked" }
   | { kind: "company_awaiting_check" }
   | { kind: "company_abandoned" }
+  | { kind: "formation_failed" }
   | { kind: "creating" }
   | { kind: "winding_down" }
   | { kind: "dissolved" }
@@ -138,12 +140,36 @@ function isCustomerCompany(company: CompanyView | null): company is CompanyView 
   return company !== null && company.provider === "customer";
 }
 
+/** A company Novi Corpus forms for a legal body, through doola. */
+export function isFormedCompany(
+  company: CompanyView | null,
+): company is CompanyView & { provider: "doola"; purpose: "legal_body" } {
+  return company !== null && company.provider === "doola" && company.purpose === "legal_body";
+}
+
+/** A formed company the flow can continue from. An abandoned one starts again at the form. */
+export function isOpenFormedCompany(company: CompanyView): boolean {
+  return isFormedCompany(company) && company.state !== "abandoned";
+}
+
 /** A company the flow can continue from: declared, not abandoned, and its check readable and not
  *  revoked (a revoked company can take no order). Its orders are weighed by the caller. */
 function isOpenCompany(company: CompanyView): boolean {
   if (!isCustomerCompany(company) || company.state === "abandoned") return false;
   const state = company.verification?.state;
   return state === "awaiting_check" || state === "verified" || state === "failed";
+}
+
+/** Either door's company, while it can still take the flow. */
+function isContinuable(company: CompanyView): boolean {
+  return isOpenCompany(company) || isOpenFormedCompany(company);
+}
+
+/** A formed company a draft order can move on from: the state has filed it. */
+function formedReadyForOrder(company: CompanyView | null): boolean {
+  return (
+    isFormedCompany(company) && (company.state === "filed" || company.state === "complete")
+  );
 }
 
 /** A body that stood behind its identity and was not replaced: its page is the done page. */
@@ -203,7 +229,7 @@ export function selectLegalBodyThread(input: {
 
   if (stored?.companyId) {
     const c = byId.get(stored.companyId);
-    if (c && isOpenCompany(c)) {
+    if (c && isContinuable(c)) {
       const own = ordersOf(c.companyId);
       const open = own.filter(live);
       if (open.length === 1) return { kind: "order", companyId: c.companyId, orderId: open[0].id };
@@ -216,7 +242,7 @@ export function selectLegalBodyThread(input: {
     .map((o) => ({ kind: "order", companyId: o.companyId, orderId: o.id }));
   for (const c of companies) {
     // A company with a live order is that order's thread; one with a linked body is finished.
-    if (isOpenCompany(c) && !ordersOf(c.companyId).some((o) => live(o) || linked(o)))
+    if (isContinuable(c) && !ordersOf(c.companyId).some((o) => live(o) || linked(o)))
       threads.push({ kind: "company", companyId: c.companyId });
   }
   if (threads.length === 1) return threads[0];
@@ -268,10 +294,30 @@ export function identityHasBody(
 /** The `type` the documents route serves for a control upload (`FormationDocument` has no kind). */
 export const CONTROL_UPLOAD_TYPE = "evidence_control";
 
+/** A formed company's screen, from the eight word state alone. */
+function formedPhase(company: CompanyView): LegalBodyDerivation {
+  switch (company.state) {
+    case "draft":
+    case "paying":
+      return { phase: "payment" };
+    case "ready":
+    case "in_progress":
+      return { phase: "filing" };
+    case "filed":
+    case "complete":
+      return { phase: "agreement" };
+    case "failed":
+      return { phase: "filing", notice: { kind: "formation_failed" } };
+    case "abandoned":
+      return { phase: "company", companyStep: "form", notice: { kind: "company_abandoned" } };
+  }
+}
+
 function companyPhase(
   company: CompanyView | null,
   documents: FormationDocument[] | null,
 ): LegalBodyDerivation {
+  if (isFormedCompany(company)) return formedPhase(company);
   if (!isCustomerCompany(company)) return { phase: "company", companyStep: "form" };
   if (company.state === "abandoned")
     return { phase: "company", companyStep: "form", notice: { kind: "company_abandoned" } };
@@ -334,13 +380,16 @@ export function deriveLegalBodyPhase(input: LegalBodyFlowInput): LegalBodyDeriva
       if (isDraftExpired(order, nowMs)) return { phase: "closed", notice: { kind: "expired" } };
       // The company wins while the order is a draft: the link door refuses a company that is
       // abandoned or whose latest check did not pass.
-      if (
-        !isCustomerCompany(company) ||
-        company.state === "abandoned" ||
-        company.verification?.state !== "verified"
-      ) {
-        const back = companyPhase(company, documents);
-        return back.notice ? back : { ...back, notice: { kind: "company_awaiting_check" } };
+      if (!formedReadyForOrder(company)) {
+        const declaredReady =
+          isCustomerCompany(company) &&
+          company.state !== "abandoned" &&
+          company.verification?.state === "verified";
+        if (!declaredReady) {
+          const back = companyPhase(company, documents);
+          if (isFormedCompany(company)) return back;
+          return back.notice ? back : { ...back, notice: { kind: "company_awaiting_check" } };
+        }
       }
       if (input.ownerChoice === null) return { phase: "agreement" };
       if (input.agentId === null) return { phase: "identity" };

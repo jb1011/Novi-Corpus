@@ -151,6 +151,7 @@ function kit(derivation: LegalBodyDerivation = SIGN, o: LegalBodyOrderView | nul
     remember: vi.fn(),
     startAnother: vi.fn(),
     routeSignIn: vi.fn(() => false),
+    door: "declare",
   };
 }
 

@@ -24,6 +24,8 @@ import { apiKeys } from "./keys";
 import {
   abandonCompany,
   abandonLegalBodyOrder,
+  adoptOrder,
+  adoptionMessage,
   createCustomerCompany,
   createLegalBodyOrder,
   getBinding,
@@ -142,6 +144,27 @@ export function useCreateCustomerCompanyMutation() {
   });
 }
 
+export function useAdoptionMessageMutation(orderId: string) {
+  const token = useAuthToken();
+  return useMutation({
+    mutationFn: () => adoptionMessage(requireToken(token), orderId),
+  });
+}
+
+export function useAdoptOrderMutation(orderId: string) {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useMutation({
+    mutationFn: (body: { issuedAt: string; signature: Hex }) =>
+      adoptOrder(requireToken(token), orderId, body),
+    onSuccess: async () => {
+      if (!token) return;
+      await queryClient.invalidateQueries({ queryKey: apiKeys.legalBodyOrder(token, orderId) });
+      await queryClient.invalidateQueries({ queryKey: apiKeys.legalBodyOrders(token) });
+    },
+  });
+}
+
 export function useAbandonCompanyMutation() {
   const queryClient = useQueryClient();
   const token = useAuthToken();
@@ -248,9 +271,10 @@ export function useGasSeedMutation(id: string) {
  * again in a loop against a public limiter.
  */
 export function useLegalBodyByAgentQuery(agentId: string | null | undefined, enabled: boolean) {
+  const token = useAuthToken();
   return useQuery({
     queryKey: apiKeys.legalBodyByAgent(agentId ?? ""),
-    queryFn: () => getLegalBodyByAgent(agentId!),
+    queryFn: () => getLegalBodyByAgent(agentId!, token),
     enabled: enabled && !!agentId,
     retry: false,
     staleTime: 15_000,

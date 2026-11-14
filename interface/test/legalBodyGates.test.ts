@@ -178,6 +178,24 @@ describe("legalBodyGate", () => {
     expect(legalBodyGate({ signIn: "ready", human: accepted, view: "human" })).toBe("human");
   });
 
+  test("an identity record that is required and not verified holds the human step", () => {
+    expect(
+      legalBodyGate({
+        signIn: "ready",
+        human: accepted,
+        view: null,
+        identityBlocks: true,
+      }),
+    ).toBe("human");
+  });
+
+  test("a verified identity record, and a deployment that does not require one, go on", () => {
+    expect(legalBodyGate({ signIn: "ready", human: accepted, view: null, identityBlocks: false })).toBe(
+      "flow",
+    );
+    expect(legalBodyGate({ signIn: "ready", human: accepted, view: null })).toBe("flow");
+  });
+
   test("going back to the human gate never skips sign-in", () => {
     expect(legalBodyGate({ signIn: "expired", human: accepted, view: "human" })).toBe("signin");
   });
@@ -192,6 +210,7 @@ describe("humanStepView", () => {
       verify: false,
       continue: false,
       retry: false,
+      guardianIdentity: null,
     });
   });
 
@@ -204,6 +223,7 @@ describe("humanStepView", () => {
         verify: false,
         continue: false,
         retry: false,
+        guardianIdentity: null,
       });
     }
   });
@@ -220,6 +240,7 @@ describe("humanStepView", () => {
       verify: true,
       continue: false,
       retry: false,
+      guardianIdentity: null,
     });
   });
 
@@ -231,6 +252,7 @@ describe("humanStepView", () => {
       verify: true,
       continue: false,
       retry: false,
+      guardianIdentity: null,
     });
   });
 
@@ -242,6 +264,7 @@ describe("humanStepView", () => {
       verify: false,
       continue: true,
       retry: false,
+      guardianIdentity: null,
     });
   });
 });

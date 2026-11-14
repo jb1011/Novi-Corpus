@@ -69,6 +69,23 @@ describe("the phases", () => {
     ]);
   });
 
+  test("the formed door shows filing after payment, and payment only when the deployment charges", () => {
+    expect(visibleLegalBodyPhases(config(), "form").map((p) => p.id)).toEqual([
+      "signin",
+      "human",
+      "company",
+      "filing",
+      "agreement",
+      "identity",
+      "link",
+      "pointer",
+      "done",
+    ]);
+    const charged = visibleLegalBodyPhases(config({ paymentRequired: true }), "form").map((p) => p.id);
+    expect(charged.indexOf("payment")).toBe(charged.indexOf("company") + 1);
+    expect(charged.indexOf("filing")).toBe(charged.indexOf("payment") + 1);
+  });
+
   test("a charging deployment shows nine, payment just before done", () => {
     const ids = visibleLegalBodyPhases(config({ paymentRequired: true })).map((p) => p.id);
     expect(ids).toHaveLength(9);

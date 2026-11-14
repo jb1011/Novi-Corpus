@@ -334,7 +334,9 @@ export function legalBodyBranch(
   chosenMode: "attach" | "create" | null,
   pickedCompanyId: string | null,
 ): { mode: "attach" | "create" | "loading"; attachable: CompanyView[]; selected: string | null } {
-  const attachable = (companies ?? []).filter(canAttach);
+  const attachable = (companies ?? []).filter(
+    (company) => canAttach(company) && company.purpose !== "legal_body",
+  );
   const picked = attachable.some((c) => c.companyId === pickedCompanyId) ? pickedCompanyId : null;
   const mode =
     chosenMode ?? (companies === undefined ? "loading" : attachable.length > 0 ? "attach" : "create");

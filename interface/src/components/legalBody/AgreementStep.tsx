@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { useSignTypedData, useSwitchChain } from "wagmi";
 import { StepNav } from "@/components/onboarding/OnboardingFlow";
 import {
   AmberPill,
@@ -12,11 +13,13 @@ import {
   StepHeader,
 } from "@/components/onboarding/primitives";
 import {
+  useAdoptOrderMutation,
+  useAdoptionMessageMutation,
   useCreateLegalBodyOrderMutation,
   useLegalBodyAgreementQuery,
   useLegalBodyOrdersQuery,
 } from "@/lib/api/legalBodyHooks";
-import type { LegalBodyAgreement, LegalBodyOrderView } from "@/lib/api/types";
+import { ApiError, type LegalBodyAgreement, type LegalBodyOrderView } from "@/lib/api/types";
 import {
   agreementFacts,
   agreementOnScreen,
@@ -30,6 +33,7 @@ import {
   termsParagraphs,
 } from "@/lib/legalBody/agreement";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
+import { toWagmiAdoptionTypedData } from "@/lib/legalBody/typedData";
 import { flowNowMs } from "@/lib/legalBody/resume";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
 
@@ -283,11 +287,36 @@ export function CheckedAgreement({
   onContinue: () => void;
 }) {
   const [read, setRead] = useState(false);
+  const [adopted, setAdopted] = useState(order.adoptedAt != null);
+  const [adopting, setAdopting] = useState(false);
+  const [adoptError, setAdoptError] = useState<string | null>(null);
   const [nowMs] = useState(() => Date.now());
+  const adoptionMessage = useAdoptionMessageMutation(order.id);
+  const adopt = useAdoptOrderMutation(order.id);
+  const { signTypedDataAsync } = useSignTypedData();
+  const { switchChainAsync } = useSwitchChain();
   const shown = agreementOnScreen(agreement);
   const facts = agreementFacts(order, nowMs);
   const expiry = expiryLine(facts);
   const paragraphs = termsParagraphs(agreement.termsDoc);
+  const adoptedNow = adopted || order.adoptedAt != null;
+
+  async function signAdoption() {
+    if (!read || adopting || adoptedNow) return;
+    setAdopting(true);
+    setAdoptError(null);
+    try {
+      const message = await adoptionMessage.mutateAsync();
+      await switchChainAsync({ chainId: message.typedData.domain.chainId });
+      const signature = await signTypedDataAsync(toWagmiAdoptionTypedData(message.typedData));
+      await adopt.mutateAsync({ issuedAt: message.issuedAt, signature });
+      setAdopted(true);
+    } catch (e) {
+      setAdoptError(e instanceof ApiError ? e.message : "The agreement was not adopted.");
+    } finally {
+      setAdopting(false);
+    }
+  }
 
   return (
     <>
@@ -327,11 +356,22 @@ export function CheckedAgreement({
         <span className="text-muted">{A.readCheckbox}</span>
       </label>
 
+      {adoptError && (
+        <Callout tone="warn" className="mt-6">
+          {adoptError}
+        </Callout>
+      )}
       <StepNav>
-        <Button onClick={onContinue} disabled={!read || !canContinue}>
+        {!adoptedNow && (
+          <Button onClick={() => void signAdoption()} disabled={!read} loading={adopting}>
+            {A.adopt}
+          </Button>
+        )}
+        <Button onClick={onContinue} disabled={!read || !canContinue || !adoptedNow}>
           {A.continue}
         </Button>
       </StepNav>
+      <p className="mt-3 text-right text-[12px] text-muted-2">{A.adoptSentence}</p>
       {!canContinue && <p className="mt-3 text-right text-[12px] text-muted-2">{A.cannotContinue}</p>}
     </>
   );

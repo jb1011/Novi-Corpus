@@ -16,6 +16,7 @@
  */
 import type {
   Address,
+  AdoptionTypedDataWire,
   CustomerStatementInput,
   Hex,
   LegalBodyAgreement,
@@ -26,7 +27,7 @@ import type {
   StatementMessageAnswer,
   StatementTypedDataWire,
 } from "@/lib/api/types";
-import { EIP712_DOMAIN_FIELDS, LINK_FIELDS } from "@/lib/api/types";
+import { ADOPTION_FIELDS, EIP712_DOMAIN_FIELDS, LINK_FIELDS } from "@/lib/api/types";
 import type { Refusal } from "./chain";
 import { sameAddress } from "./flow";
 
@@ -386,6 +387,24 @@ export function toWagmiStatementTypedData(td: StatementTypedDataWire): WagmiStat
       filingNumber: m.filingNumber,
       guardian: m.guardian,
       wordingVersion: m.wordingVersion,
+      issuedAt: BigInt(m.issuedAt),
+    },
+  };
+}
+
+/** The adoption in the form wagmi signs. `issuedAt` becomes a bigint. `EIP712Domain` is left out. */
+export function toWagmiAdoptionTypedData(td: AdoptionTypedDataWire) {
+  const m = td.message;
+  return {
+    domain: copyDomain(td.domain),
+    types: { OperatingAgreementAdoption: ADOPTION_FIELDS },
+    primaryType: "OperatingAgreementAdoption" as const,
+    message: {
+      orderId: m.orderId,
+      manifestHash: m.manifestHash,
+      textId: m.textId,
+      textVersion: m.textVersion,
+      guardian: m.guardian,
       issuedAt: BigInt(m.issuedAt),
     },
   };

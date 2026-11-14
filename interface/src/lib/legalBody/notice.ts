@@ -65,6 +65,8 @@ export function noticeSentence(
       };
     case "company_abandoned":
       return { ...N.company_abandoned, wayOut: "new_company" };
+    case "formation_failed":
+      return { ...N.formation_failed, wayOut: "none" };
     case "creating":
       return { ...N.creating, wayOut: "none" };
     case "winding_down":

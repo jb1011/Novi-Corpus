@@ -3,11 +3,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Reveal } from "./Reveal";
 import { SectionLabel } from "./SectionLabel";
-import {
-  CREATE_COMPANY_CTA,
-  ONBOARDING_STEP_COUNT,
-  ONBOARDING_STEPS_HEADING,
-} from "./copy";
+import { ONBOARDING_STEP_COUNT, ONBOARDING_STEPS_HEADING } from "./copy";
 
 const steps = [
   {

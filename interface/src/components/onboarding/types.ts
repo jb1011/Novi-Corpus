@@ -439,11 +439,15 @@ const US_STATE_RE = /^[A-Za-z]{2}$/;
  * object that gets persisted. Client-side validation is a courtesy either way — the backend
  * schema is the authority, and it is `.strict()`.
  */
-export function validateParty(party: FormationParty): PartyFieldErrors {
+export function validateParty(
+  party: FormationParty,
+  options?: { names?: boolean },
+): PartyFieldErrors {
   const errors: PartyFieldErrors = {};
+  const names = options?.names !== false;
 
-  if (!party.legalFirstName.trim()) errors.legalFirstName = "Enter the legal first name.";
-  if (!party.legalLastName.trim()) errors.legalLastName = "Enter the legal last name.";
+  if (names && !party.legalFirstName.trim()) errors.legalFirstName = "Enter the legal first name.";
+  if (names && !party.legalLastName.trim()) errors.legalLastName = "Enter the legal last name.";
   if (!EMAIL_RE.test(party.email.trim())) errors.email = "Enter a valid email address.";
   // Not "optional but recommended": a filing without it is refused, so the wizard refuses first.
   if (!party.phone.trim()) errors.phone = "A phone number is required — a filing without one is refused.";
@@ -463,8 +467,8 @@ export function validateParty(party: FormationParty): PartyFieldErrors {
   return errors;
 }
 
-export function isPartyValid(party: FormationParty): boolean {
-  return Object.keys(validateParty(party)).length === 0;
+export function isPartyValid(party: FormationParty, options?: { names?: boolean }): boolean {
+  return Object.keys(validateParty(party, options)).length === 0;
 }
 
 /**
@@ -473,12 +477,20 @@ export function isPartyValid(party: FormationParty): boolean {
  * Blank optionals are OMITTED rather than sent empty: the backend address schema is `.strict()`
  * with `min(1)` on `line2`/`region`, so an empty string is a 400 while an absent key is correct.
  */
-export function toFormationPartyInput(party: FormationParty): FormationPartyInput {
+export function toFormationPartyInput(
+  party: FormationParty,
+  options?: { omitNames?: boolean; marketingConsent?: boolean },
+): FormationPartyInput {
   const line2 = party.line2.trim();
   const region = party.region.trim();
   return {
-    legalFirstName: party.legalFirstName.trim(),
-    legalLastName: party.legalLastName.trim(),
+    ...(options?.omitNames
+      ? {}
+      : {
+          legalFirstName: party.legalFirstName.trim(),
+          legalLastName: party.legalLastName.trim(),
+        }),
+    ...(options?.marketingConsent ? { marketingConsent: true as const } : {}),
     email: party.email.trim(),
     phone: party.phone.trim(),
     address: {

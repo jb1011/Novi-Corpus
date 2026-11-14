@@ -1,7 +1,7 @@
 import type { Address } from "@/lib/api/types";
 
 /**
- * The legal-body flow's local memory: five opaque values per wallet, and nothing a person typed.
+ * The legal-body flow's local memory: opaque values per wallet, and nothing a person typed.
  *
  * The flow handles a company name, a filing number, a declarant's name and title, a statement,
  * the typed data behind it and a signature. None of that is written to a browser store. What
@@ -24,9 +24,15 @@ export const PERSISTED_LEGAL_BODY_KEYS = [
   "orderId",
   "ownerChoice",
   "agentId",
+  "door",
+  "identityChoice",
+  "signer",
+  "suggestedAgentId",
 ] as const satisfies readonly (keyof LegalBodyMemory)[];
 
 export type OwnerChoice = "this-wallet" | "elsewhere";
+export type DoorChoice = "declare" | "form";
+export type IdentityChoice = "has-one" | "not-yet";
 
 export type LegalBodyMemory = {
   /** The signed-in wallet the memory belongs to. */
@@ -37,6 +43,14 @@ export type LegalBodyMemory = {
   ownerChoice: OwnerChoice | null;
   /** The identity picked or registered, draft only. */
   agentId: string | null;
+  /** The entrance's company door. Null until the person answers, or when the door is hidden. */
+  door: DoorChoice | null;
+  /** The entrance's answer about the agent's identity. Not the identity itself. */
+  identityChoice: IdentityChoice | null;
+  /** The entrance's answer about who holds the key. It does not skip the agreement. */
+  signer: OwnerChoice | null;
+  /** An identity number the entrance offered. The identity step confirms it. */
+  suggestedAgentId: string | null;
 };
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -45,6 +59,8 @@ const HANDLE = /^[A-Za-z0-9_-]{1,80}$/;
 /** A uint256 in decimal: no sign, no leading zero, at most 78 digits. */
 const AGENT_ID = /^(?:0|[1-9][0-9]{0,77})$/;
 const OWNER_CHOICES: readonly OwnerChoice[] = ["this-wallet", "elsewhere"];
+const DOORS: readonly DoorChoice[] = ["declare", "form"];
+const IDENTITY_CHOICES: readonly IdentityChoice[] = ["has-one", "not-yet"];
 
 function isAddress(value: unknown): value is Address {
   return typeof value === "string" && ADDRESS.test(value);
@@ -56,6 +72,14 @@ function matching(value: unknown, shape: RegExp): string | null {
 
 function ownerChoiceOf(value: unknown): OwnerChoice | null {
   return OWNER_CHOICES.find((choice) => choice === value) ?? null;
+}
+
+function doorOf(value: unknown): DoorChoice | null {
+  return DOORS.find((door) => door === value) ?? null;
+}
+
+function identityChoiceOf(value: unknown): IdentityChoice | null {
+  return IDENTITY_CHOICES.find((choice) => choice === value) ?? null;
 }
 
 /** An own property only: nothing inherited is picked. */
@@ -80,6 +104,10 @@ export function buildLegalBodyMemory(
     orderId: matching(own(state, "orderId"), HANDLE),
     ownerChoice: ownerChoiceOf(own(state, "ownerChoice")),
     agentId: matching(own(state, "agentId"), AGENT_ID),
+    door: doorOf(own(state, "door")),
+    identityChoice: identityChoiceOf(own(state, "identityChoice")),
+    signer: ownerChoiceOf(own(state, "signer")),
+    suggestedAgentId: matching(own(state, "suggestedAgentId"), AGENT_ID),
   };
 }
 

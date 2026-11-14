@@ -156,8 +156,13 @@ export type FormationDocument = {
  * no phone, so a party without one is an identity that can never be filed.
  */
 export type FormationPartyInput = {
-  legalFirstName: string;
-  legalLastName: string;
+  /** Omitted on a production door: the server writes both from the identity record, and a body
+   *  that carries either name is refused. */
+  legalFirstName?: string;
+  legalLastName?: string;
+  /** The person's own consent to be emailed about Novi Corpus. Sent only when they tick the box.
+   *  Absent stores no consent. */
+  marketingConsent?: boolean;
   email: string;
   phone: string;
   address: {
@@ -644,7 +649,32 @@ export type WorldIdMe = {
   /** Whether the legal-body doors' real-human check accepts this guardian, by that check's own
    *  rule. Absent where this deployment mounts no legal-body door. */
   realHuman?: boolean;
+  /** The guardian identity record. Absent on a backend from before that record. Required on
+   *  production; the names and times are present only when `state` is `verified`. */
+  identity?: GuardianIdentityView;
 };
+
+/** The guardian identity record's state, as `GET /world-id/me` serves it. */
+export type GuardianIdentityState =
+  | "none"
+  | "pending"
+  | "needs_review"
+  | "failed"
+  | "verified"
+  | "expired"
+  | "revoked";
+
+/** `GET /world-id/me`'s `identity` block. No provider, document, or country. */
+export interface GuardianIdentityView {
+  required: boolean;
+  state: GuardianIdentityState;
+  firstName?: string;
+  lastName?: string;
+  /** Unix milliseconds. Present only when `verified`. */
+  verifiedAt?: number;
+  /** Unix milliseconds. Present only when `verified`. */
+  expiresAt?: number;
+}
 
 /** Params for the identity-attestation widget (the step-up uses its own World action). */
 export type WorldIdAttestContext = {
@@ -909,13 +939,15 @@ export type CompanyView = {
   agents: number;
   /** EPOCH MILLISECONDS — what `formatDate` takes, with no reconstruction at the edge. */
   createdAt: number;
-  /**
-   * A customer's OWN company (declared, not filed through formation) carries three keys more;
-   * a formation company has none of them, so its key set is unchanged.
-   */
-  provider?: "customer";
+  /** What the company is for. `agent` companies are the ones an agent attaches to. */
+  purpose?: "agent" | "legal_body";
+  /** Where the company came from. Absent on a backend from before formed companies. */
+  provider?: "customer" | "doola";
+  /** The DAO supplement, once an operator records it. `recordedAt` is unix seconds. */
+  daoSupplement?: { recordedAt: number; sha256: string } | null;
   /** What the guardian declared, as typed, and the version of the wording signed. Never the
-   *  declarant's name or title. Null when the declaration could not be read. */
+   *  declarant's name or title. Null when the declaration could not be read. A customer's own
+   *  company carries this and `verification`. A company filed through formation has neither. */
   declared?: { companyName: string; filingNumber: string; wordingVersion: string } | null;
   /** The operator's latest check: `checkedAt` is unix SECONDS (like `filedAt`), not ms. Null
    *  when this surface could not read the checks, never "not checked yet": that is
@@ -1082,6 +1114,8 @@ export type ComplianceView = {
   events: ComplianceEventView[];
   /** The Wyoming annual report — a PLACEHOLDER and an admission, not provider data. */
   annualReport: { label: string; due: string; handledBy: string; note: string };
+  /** The filing was recorded by hand, so an empty calendar is not "nothing is due". */
+  recordedByHand?: boolean;
 };
 
 /** The production create-company intake (§5). Three ranked candidates, the company's own purpose,
@@ -1097,6 +1131,8 @@ export type CompanyIntakeInput = {
   /** The sandbox deployment's marker, checked against the box's own setting — never a claim the
    *  caller gets to make about a production filing. */
   synthetic?: true;
+  /** A company formed for a legal body. Absent, the company is for an agent. */
+  for?: "legal_body";
 };
 
 /** `PATCH /companies/:companyId` — the §4.7 edit-and-retry, with a fresh SSN capture. */
@@ -1460,6 +1496,43 @@ export const LINK_MESSAGE_RESULT_KEYS = [
   "deadline",
 ] as const satisfies readonly (keyof LinkMessageResult)[];
 
+/** The adoption's fields, in the order of its type string. `issuedAt` is a uint256. */
+export const ADOPTION_FIELDS = [
+  { name: "orderId", type: "string" },
+  { name: "manifestHash", type: "bytes32" },
+  { name: "textId", type: "string" },
+  { name: "textVersion", type: "string" },
+  { name: "guardian", type: "address" },
+  { name: "issuedAt", type: "uint256" },
+] as const;
+
+/** The adoption typed data as served. `issuedAt` is a decimal string. */
+export type AdoptionTypedDataWire = {
+  domain: { name: string; version: string; chainId: number; verifyingContract: Address };
+  types: {
+    EIP712Domain: typeof EIP712_DOMAIN_FIELDS;
+    OperatingAgreementAdoption: typeof ADOPTION_FIELDS;
+  };
+  primaryType: "OperatingAgreementAdoption";
+  message: {
+    orderId: string;
+    manifestHash: Hex;
+    textId: string;
+    textVersion: string;
+    guardian: Address;
+    issuedAt: string;
+  };
+};
+
+/** `POST /legal-body-orders/:id/adoption-message`. */
+export type AdoptionMessageResult = {
+  typedData: AdoptionTypedDataWire;
+  issuedAt: string;
+};
+
+/** `POST /legal-body-orders/:id/adoption`. `adoptedAt` is unix seconds. */
+export type AdoptionResult = { adoptedAt: number };
+
 /** The link door's flat 422, not the house error envelope: before the reservation the order is
  *  still `draft`, after it `lapsed`. `detail` holds hex values and the factory's error names. */
 export type LinkRefusal = {
@@ -1541,6 +1614,8 @@ export type LegalBodyByAgent =
       links: { transparency: string };
       checkedAt: string;
       statement: null;
+      /** Production only, beside the statement, unsigned. Absent on sandbox. */
+      guardianIdentityVerified?: boolean;
     }
   | {
       agentId: string;
@@ -1551,6 +1626,8 @@ export type LegalBodyByAgent =
       links: { transparency: string; statement: string };
       checkedAt: string;
       statement: SignedStatementJson;
+      /** Production only, beside the statement, unsigned. Absent on sandbox. */
+      guardianIdentityVerified?: boolean;
     };
 
 /** The public routes' flat refusal: `error` is a STRING here, not the house error envelope. */
@@ -1569,7 +1646,7 @@ export type TransparencyLegalBody = {
   filingNumber: string;
   jurisdiction: "WY";
   entityType: "LLC";
-  source: "customer";
+  source: "customer" | "novi";
   environment: "sandbox" | "production";
   standing: "active";
   /** ISO 8601: when the binding check first saw the current link. */

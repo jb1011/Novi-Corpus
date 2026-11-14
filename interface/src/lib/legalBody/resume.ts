@@ -1,6 +1,7 @@
 import type { Address, CompanyView, LegalBodyOrderView } from "@/lib/api/types";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import {
+  isFormedCompany,
   isLiveOrder,
   sameAddress,
   type LegalBodyThread,
@@ -20,7 +21,16 @@ import type { LegalBodyMemory, OwnerChoice } from "@/lib/legalBody/storage";
 
 type Memo = Omit<LegalBodyMemory, "tenant">;
 
-const EMPTY: Memo = { companyId: null, orderId: null, ownerChoice: null, agentId: null };
+const EMPTY: Memo = {
+  companyId: null,
+  orderId: null,
+  ownerChoice: null,
+  agentId: null,
+  door: null,
+  identityChoice: null,
+  signer: null,
+  suggestedAgentId: null,
+};
 
 /** The company and order a screen reads for a thread; null for a chooser, which has none yet. */
 export function threadRefsOf(
@@ -52,6 +62,10 @@ export function mergeLegalBodyMemory(
     orderId: b.orderId,
     ownerChoice: b.ownerChoice,
     agentId: b.agentId,
+    door: b.door,
+    identityChoice: b.identityChoice,
+    signer: b.signer,
+    suggestedAgentId: b.suggestedAgentId,
   };
   return { ...kept, ...patch, tenant };
 }
@@ -79,13 +93,21 @@ export function memoryAfterThread(p: {
     orderId,
     ownerChoice: sameOrder ? base.ownerChoice : null,
     agentId: sameOrder ? base.agentId : null,
+    door: base.door,
+    identityChoice: base.identityChoice,
+    signer: base.signer,
+    suggestedAgentId: base.suggestedAgentId,
   };
   const unchanged =
     sameAddress(base.tenant, next.tenant) &&
     base.companyId === next.companyId &&
     base.orderId === next.orderId &&
     base.ownerChoice === next.ownerChoice &&
-    base.agentId === next.agentId;
+    base.agentId === next.agentId &&
+    base.door === next.door &&
+    base.identityChoice === next.identityChoice &&
+    base.signer === next.signer &&
+    base.suggestedAgentId === next.suggestedAgentId;
   return unchanged ? null : next;
 }
 
@@ -255,6 +277,25 @@ export function chooserRows(
     companies.find((c) => c.companyId === companyId)?.declared?.companyName ?? null;
   return threads.map((ref) => {
     if (ref.kind === "company") {
+      const company = companies.find((c) => c.companyId === ref.companyId) ?? null;
+      if (isFormedCompany(company)) {
+        const state = company.state;
+        const detail =
+          state === "failed"
+            ? C.formedFailed
+            : state === "filed" || state === "complete"
+              ? C.formedFiled
+              : C.formedFiling;
+        const filed = company.legalNameFiled;
+        const first = company.nameOptions[0]?.name;
+        return {
+          key: `company:${ref.companyId}`,
+          ref,
+          title: filed || first || C.formedUnnamed,
+          detail,
+          identity: null,
+        };
+      }
       return {
         key: `company:${ref.companyId}`,
         ref,

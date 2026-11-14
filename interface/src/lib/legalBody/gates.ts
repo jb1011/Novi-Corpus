@@ -1,4 +1,9 @@
-import { ApiError, type Hex, type LegalBodyConfig } from "@/lib/api/types";
+import {
+  ApiError,
+  type GuardianIdentityView,
+  type Hex,
+  type LegalBodyConfig,
+} from "@/lib/api/types";
 import { walletKindOf } from "@/lib/legalBody/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import type { LegalBodyDerivation } from "@/lib/legalBody/flow";
@@ -98,13 +103,20 @@ export type LegalBodyGate = "signin" | "human" | "flow";
  * unless the person went back to it or is acting on it, so a reload with a live session and an
  * accepted person lands on the thread's own step. Going back to the person never skips sign-in.
  */
+/** The identity record holds the human step when production requires it and it is not verified.
+ *  A `/me` with no block, and a deployment that does not require it, hold nothing. */
+export function identityBlocksGate(identity: GuardianIdentityView | null | undefined): boolean {
+  return identity?.required === true && identity.state !== "verified";
+}
+
 export function legalBodyGate(p: {
   signIn: SignInStepState;
   human: WorldIdGateState;
   view: GateView;
+  identityBlocks?: boolean;
 }): LegalBodyGate {
   if (p.signIn !== "ready" || p.view === "signin") return "signin";
-  if (p.human.kind !== "accepted" || p.view === "human") return "human";
+  if (p.human.kind !== "accepted" || p.view === "human" || p.identityBlocks === true) return "human";
   return "flow";
 }
 
@@ -121,6 +133,8 @@ export type HumanStepView = {
   verify: boolean;
   continue: boolean;
   retry: boolean;
+  /** The identity card's state, or null when this deployment does not require the record. */
+  guardianIdentity: GuardianIdentityView["state"] | null;
 };
 
 /**
@@ -128,8 +142,20 @@ export type HumanStepView = {
  * record the real-human check refuses offers Verify and never Continue; a deployment without World
  * ID says so and offers no button at all.
  */
-export function humanStepView(state: WorldIdGateState): HumanStepView {
-  const none = { title: "ask", points: false, verify: false, continue: false, retry: false } as const;
+export function humanStepView(
+  state: WorldIdGateState,
+  identity?: GuardianIdentityView | null,
+): HumanStepView {
+  const guardianIdentity = identity?.required === true ? identity.state : null;
+  const identityOpen = guardianIdentity === null || guardianIdentity === "verified";
+  const none = {
+    title: "ask" as const,
+    points: false,
+    verify: false,
+    continue: false,
+    retry: false,
+    guardianIdentity,
+  };
   switch (state.kind) {
     case "loading":
       return { ...none, line: "checking" };
@@ -144,7 +170,7 @@ export function humanStepView(state: WorldIdGateState): HumanStepView {
     case "not_accepted":
       return { ...none, line: "record", points: true, verify: true };
     case "accepted":
-      return { ...none, title: "accepted", line: "record", continue: true };
+      return { ...none, title: "accepted", line: "record", continue: identityOpen };
   }
 }
 
