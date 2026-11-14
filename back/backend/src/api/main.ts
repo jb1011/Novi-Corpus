@@ -69,7 +69,7 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../legalBody/sweeper";
-import { STATEMENT_OF_AUTHORITY } from "../legalBody/texts/statementOfAuthority";
+import { assertSetUsable, servedLegalTexts } from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { opsLog } from "../observability/opsLog";
 import { AGENT_BOOK_CAIP2, createAgentBookReader } from "../payments/agentBookReader";
@@ -663,6 +663,13 @@ async function main() {
           multicall3: MULTICALL3_BY_CHAIN[cfg.chainId],
         })
       : undefined;
+  /**
+   * The pair of legal texts this deployment serves, chosen once here: the order doors read its
+   * agreement and the customer company doors its declaration. A pair no order can be placed on
+   * stops the boot.
+   */
+  const legalTexts = servedLegalTexts();
+  assertSetUsable(legalTexts);
   const legalBodyOrders =
     legalBodies && cfg.legalBodyFactory && legalBodyChain
       ? {
@@ -684,6 +691,7 @@ async function main() {
           docStore,
           deployment: { chainId: cfg.chainId, factory: cfg.legalBodyFactory },
           identityRegistry: cfg.identityRegistry,
+          texts: legalTexts,
           environment: legalBodyEnvironment(cfg),
           amendmentDelaySeconds: legalBodyFlow.amendmentDelaySeconds,
           maxOpenPerTenant: legalBodyFlow.maxOpenPerTenant,
@@ -763,7 +771,7 @@ async function main() {
           // The guardian identity record built above: on production the doors require a verified
           // one and write the declarant's name from it; a sandbox never reads it.
           identity,
-          text: STATEMENT_OF_AUTHORITY,
+          text: legalTexts.declaration,
           maxOpenPerTenant: cfg.formation?.byoMaxOpenPerTenant ?? DEFAULT_BYO_MAX_OPEN_PER_TENANT,
           // The switch of the payment config built above: charging, a new company lands `draft`.
           paymentRequired: formationPayment.required,

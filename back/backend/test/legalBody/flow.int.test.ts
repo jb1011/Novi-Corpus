@@ -97,6 +97,7 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../../src/legalBody/sweeper";
+import { servedLegalTexts } from "../../src/legalBody/texts/sets";
 import { buildOutflowMeter } from "../../src/payments/outflowMeter";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyCheckRepository } from "../../src/persistence/companyCheckRepository";
@@ -335,6 +336,7 @@ function deploy(opts: { charging?: boolean; gasSeedUsdc?: string } = {}): Deploy
     docStore,
     deployment,
     identityRegistry: stack.registry,
+    texts: servedLegalTexts(),
     // The agreement's wording is a draft, which only a sandbox serves.
     environment: "sandbox",
     ...LEGAL_BODY_FLOW_DEFAULTS,

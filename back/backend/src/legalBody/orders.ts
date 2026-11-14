@@ -24,10 +24,10 @@ import type {
 import { buildAgreement, storeAgreement } from "./agreement";
 import { filedCompanyNames, publicCompanyNames } from "./attestation";
 import { filedNamesPrintable, isStandInFilingNumber } from "./companyFields";
+import { assertDraftsServable } from "./draftTextRefusal";
 import { CUSTOMER_PROVIDER, companySourceOf } from "./provider";
 import { refusal } from "./sentences";
-import { LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
-import { LEGAL_BODY_OPERATING_AGREEMENT } from "./texts/operatingAgreement";
+import type { LegalTextSet } from "./texts/sets";
 
 /**
  * LEGAL-BODY ORDERS: what a guardian orders, and the rules every door of the flow shares.
@@ -69,6 +69,8 @@ export interface LegalBodyOrderDeps {
   deployment: Deployment;
   /** The ERC-8004 identity registry the agreement names. */
   identityRegistry: Address;
+  /** The pair of texts this deployment serves: every door reads this one, never a constant. */
+  texts: LegalTextSet;
   environment: "sandbox" | "production";
   /** Seconds: the amendment delay of every new order. */
   amendmentDelaySeconds: number;
@@ -325,7 +327,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *  1b. on production, a verified guardian identity record (`assertIdentityVerified`), the record
  *     the declared door holds the guardian to: World ID proves one real person; the identity
  *     check says who. A sandbox reads nothing here;
- *  2. the agreement's wording can be served (a production deployment refuses a draft);
+ *  2. the agreement's wording, the one of the pair this deployment serves (`deps.texts`), can be
+ *     served (a production deployment refuses a draft);
  *  3. the company is the tenant's (one 404 for unknown and not-yours) and eligible;
  *  4. the agreement is built, before anything is written. It names the company by the names
  *     `companyNamesForOrder` reads, and nothing else: a customer's company by the declared name
@@ -357,12 +360,7 @@ export function createOrder(
   assertIdentityVerified(deps.identity, deps.world, tenantId, deps.environment);
 
   // 2.
-  try {
-    assertTextsServable(deps.environment, [LEGAL_BODY_OPERATING_AGREEMENT]);
-  } catch (err) {
-    if (err instanceof LegalTextNotApprovedError) throw refusal("legal_text_not_approved", 503);
-    throw err;
-  }
+  assertDraftsServable(deps.environment, [deps.texts.agreement.text]);
 
   // 3.
   const companyId = typeof input?.companyId === "string" ? input.companyId : undefined;
@@ -383,6 +381,11 @@ export function createOrder(
   //    agreement prints its declared number too. Read on the company's own pin, as every pin rule.
   if (owned.environment === "production" && isStandInFilingNumber(names.filingNumber))
     throw refusal("filing_number_reserved", 409);
+  //    The agreement is the one of the pair this deployment serves. A Charter is rendered with
+  //    its Schedule A, the order's grant, which this door does not take yet.
+  const agreement = deps.texts.agreement;
+  if (agreement.kind === "charter")
+    throw new Error("legal body orders: an order on the Charter needs its grant");
   const built = buildAgreement(
     {
       companyName: names.legalName,
@@ -394,7 +397,7 @@ export function createOrder(
       factory: deps.deployment.factory,
       identityRegistry: deps.identityRegistry,
     },
-    LEGAL_BODY_OPERATING_AGREEMENT,
+    agreement.text,
     { source: companySourceOf(owned.provider) },
   );
 

@@ -91,8 +91,8 @@ export interface CustomerCompanyDeps {
    *  name from it (absent there, every door answers 503 `identity_unavailable`); a sandbox never
    *  reads it. */
   identity: IdentityDeps | undefined;
-  /** The wording new declarations are made under: the composition passes STATEMENT_OF_AUTHORITY.
-   *  Every step reads this one, never the constant. */
+  /** The wording new declarations are made under: the composition passes the declaration of the
+   *  pair it serves. Every step reads this one, never a constant. */
   text: LegalText<StatementFields>;
   maxOpenPerTenant: number;
   /** True: a new company lands `draft`, owing its payment. False: it lands `ready`. */

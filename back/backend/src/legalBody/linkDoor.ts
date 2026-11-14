@@ -41,8 +41,7 @@ import {
 } from "./orders";
 import { resolveOrder } from "./resolver";
 import { refusal } from "./sentences";
-import { LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
-import { LEGAL_BODY_OPERATING_AGREEMENT } from "./texts/operatingAgreement";
+import { type LegalText, LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
 
 /**
  * THE LINK DOOR: the message an identity's owner signs to authorise a legal body for an order,
@@ -122,10 +121,10 @@ const FACTORY_ERROR_NAMES: ReadonlySet<string> = new Set(
 /**
  * The rule every door that acts on a draft shares, the link's rule 1 but for the adoption: a frozen
  * draft of this deployment, created less than 24 hours ago, not revoked, for a company still
- * eligible, whose stored agreement re-verifies and was written on the current text, which this
- * deployment serves. In that order, each its own refusal. Answers the frozen hash, and the text id
- * and version the stored manifest states, the ones the adoption signs (`adoption.ts`), so a draft
- * the link would refuse is never adopted.
+ * eligible, whose stored agreement re-verifies and was written on the current text, the agreement
+ * of the pair this deployment serves (`deps.texts`), which it may serve. In that order, each its
+ * own refusal. Answers the frozen hash, and the text id and version the stored manifest states,
+ * the ones the adoption signs (`adoption.ts`), so a draft the link would refuse is never adopted.
  */
 export function assertOpenDraft(
   deps: LegalBodyOrderDeps,
@@ -141,11 +140,11 @@ export function assertOpenDraft(
   // A failure has already written its error line, naming the order and a fixed reason.
   const verified = readVerifiedAgreement(deps.docStore, row.legalBodyId, hash);
   if (verified === undefined) throw refusal("agreement_unreadable", 500);
-  const current = LEGAL_BODY_OPERATING_AGREEMENT;
+  const current = deps.texts.agreement.text;
   if (
     verified.terms.textId !== current.id ||
     verified.terms.textVersion !== current.version ||
-    !servable(deps.environment)
+    !servable(deps.environment, current)
   )
     throw refusal("agreement_outdated", 409);
   return {
@@ -171,10 +170,10 @@ function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, now
   return hash;
 }
 
-/** Whether this deployment serves the current agreement text. */
-function servable(environment: LegalBodyOrderDeps["environment"]): boolean {
+/** Whether this deployment serves `text`, the agreement of the pair it serves. */
+function servable(environment: LegalBodyOrderDeps["environment"], text: LegalText<never>): boolean {
   try {
-    assertTextsServable(environment, [LEGAL_BODY_OPERATING_AGREEMENT]);
+    assertTextsServable(environment, [text]);
     return true;
   } catch (err) {
     if (err instanceof LegalTextNotApprovedError) return false;

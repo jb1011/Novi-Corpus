@@ -21,6 +21,7 @@ import {
   toOrderView,
 } from "../../src/legalBody/orders";
 import { CUSTOMER_PROVIDER } from "../../src/legalBody/provider";
+import { servedLegalTexts } from "../../src/legalBody/texts/sets";
 import {
   type CompanyCheckRepository,
   type CompanyCheckResult,
@@ -126,6 +127,8 @@ export function legalBodyOrderDeps(
     docStore: s.docStore,
     deployment: { chainId: CHAIN_ID, factory: FACTORY },
     identityRegistry: REGISTRY,
+    // Read when the deps are built, so a test that replaces a served text is read at that moment.
+    texts: servedLegalTexts(),
     environment: "sandbox",
     amendmentDelaySeconds: 172_800,
     maxOpenPerTenant: 3,
