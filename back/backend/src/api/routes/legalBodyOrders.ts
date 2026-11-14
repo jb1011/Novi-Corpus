@@ -7,6 +7,7 @@ import { adoptAgreement, adoptionMessage } from "../../legalBody/adoption";
 import { readVerifiedAgreement } from "../../legalBody/agreement";
 import { type BindingView, checkBinding, readBinding } from "../../legalBody/binding";
 import { type GasSeedDeps, requestGasSeed } from "../../legalBody/gasSeed";
+import { grantForm, orderGrant, previewGrant } from "../../legalBody/grantDoors";
 import { linkMessage, submitLinkAndCreate } from "../../legalBody/linkDoor";
 import {
   type LegalBodyOrderDeps,
@@ -38,9 +39,16 @@ import { assertRealHuman } from "./worldId";
  * THE LEGAL-BODY ORDER DOORS: a guardian orders a legal body for a company it declared and the
  * operator checked, and follows the order.
  *
- *  - `POST /legal-body-orders` with `{ companyId }` orders one: 201 with the order's view;
+ *  - `POST /legal-body-orders` with `{ companyId, grant? }` orders one: 201 with the order's view;
+ *  - `GET /legal-body-orders/grant-form` serves what the form of a grant must hold on this
+ *    deployment, or `{ takesGrant: false }` where its agreement takes none. It proposes no value;
+ *  - `POST /legal-body-orders/grant-preview` with `{ grant }` serves the grant as the Charter would
+ *    state it, numbered as an order placed now would number it, or the order's own refusal. It
+ *    writes nothing;
  *  - `GET /legal-body-orders` lists the tenant's orders, newest first;
  *  - `GET /legal-body-orders/:id` reads one, as stored (no chain read);
+ *  - `GET /legal-body-orders/:id/grant` reads the order's grant, checked against its frozen
+ *    agreement: `{ grant }`, null where that agreement takes none;
  *  - `GET /legal-body-orders/:id/agreement` serves the agreement the link will anchor, from the
  *    stored bytes, re-verified: the caller can check keccak256 of `manifest` against the hash its
  *    link signs, and the manifest's `terms.hash` against keccak256 of `termsDoc`;
@@ -77,13 +85,14 @@ import { assertRealHuman } from "./worldId";
  *    wallet its agent pays from, once the registry shows it as the agent's wallet. 200 with the
  *    block the lookups serve (`TreasuryBlock`). Mounted where the deployment wires the record.
  *
- * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/adoption.ts`,
- * `legalBody/linkDoor.ts`, `legalBody/resolver.ts`, `legalBody/binding.ts`,
- * `legalBody/gasSeed.ts`, `legalBody/treasury.ts`); these handlers decide only what is a
- * well-formed request, and the refresh which of the domain's two passes to run. Every door starts
- * with the real-human check (a verified credential, never a waiver), the reads included; the
- * domain functions of the order door, the two adoption doors, the two link doors and the binding
- * door (`readBinding`, which the `get_binding` tool calls too) make that check first themselves.
+ * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/grantDoors.ts`,
+ * `legalBody/adoption.ts`, `legalBody/linkDoor.ts`, `legalBody/resolver.ts`,
+ * `legalBody/binding.ts`, `legalBody/gasSeed.ts`, `legalBody/treasury.ts`); these handlers decide
+ * only what is a well-formed request, and the refresh which of the domain's two passes to run.
+ * Every door starts with the real-human check (a verified credential, never a waiver), the reads
+ * included; the domain functions of the order door, the three grant doors, the two adoption doors,
+ * the two link doors and the binding door (`readBinding`, which the `get_binding` tool calls too)
+ * make that check first themselves.
  * The one exception is the gas seed: while it is off, it answers before that check, reading
  * nothing and spending no token; on, `requestGasSeed` makes the check first.
  * Mounted under their own session protection, and only where the deployment wires the feature.
@@ -183,9 +192,29 @@ export function mountLegalBodyOrderRoutes(
     door("order", async () => {
       const body = await readJson(c);
       // `createOrder` checks the real human first, and reads anything but a string `companyId`
-      // as an id no company holds: the same 404 as an id that is not the tenant's.
-      const view = createOrder(deps, c.get("tenantId"), body as { companyId: string });
+      // as an id no company holds: the same 404 as an id that is not the tenant's. Any value under
+      // `grant` is held to the agreement this deployment serves: refused where it takes none.
+      const view = createOrder(
+        deps,
+        c.get("tenantId"),
+        body as { companyId: string; grant?: unknown },
+      );
       return c.json(view, 201);
+    }),
+  );
+
+  // The two static paths of the grant doors are registered before `GET /legal-body-orders/:id`:
+  // the router tries routes in the order they were added, so registered after it, `grant-form`
+  // would be read as an order's id and answered the read door's 404. Each grant door checks the
+  // real human first itself, writes nothing, and takes no token.
+  app.get("/legal-body-orders/grant-form", (c) =>
+    door("grant_form", () => c.json(grantForm(deps, c.get("tenantId")))),
+  );
+
+  app.post("/legal-body-orders/grant-preview", limit, (c) =>
+    door("grant_preview", async () => {
+      const body = (await readJson(c)) as { grant?: unknown } | null;
+      return c.json(previewGrant(deps, c.get("tenantId"), { grant: body?.grant }));
     }),
   );
 
@@ -237,6 +266,10 @@ export function mountLegalBodyOrderRoutes(
       };
       return c.json(answer);
     }),
+  );
+
+  app.get("/legal-body-orders/:id/grant", (c) =>
+    door("order_grant", () => c.json(orderGrant(deps, c.get("tenantId"), c.req.param("id")))),
   );
 
   app.post("/legal-body-orders/:id/abandon", limit, (c) =>

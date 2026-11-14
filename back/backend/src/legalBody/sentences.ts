@@ -135,12 +135,13 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // `order_revoked` speaks of linking an order.
   legal_body_revoked:
     "This legal body was revoked by the operator: nothing more can be declared on it.",
-  // `POST /legal-body-orders` on a deployment whose agreement takes a grant, for a grant the form's
-  // rules or the product's offer refuse: its details list each field and the rule it breaks.
+  // `POST /legal-body-orders` and its grant preview, on a deployment whose agreement takes a grant,
+  // for a grant the form's rules or the product's offer refuse: its details list each field and
+  // the rule it breaks.
   grant_not_valid:
     "The grant is not valid: each field named in the details breaks the rule given beside it, and no order was placed.",
-  // `POST /legal-body-orders` with a `grant` key, whatever its value, on a deployment whose
-  // agreement takes none.
+  // `POST /legal-body-orders` with a `grant` key, whatever its value, and the grant preview,
+  // whatever its body, on a deployment whose agreement takes none.
   grant_not_taken: "This deployment's agreement takes no grant: leave out grant.",
   // The adoption and link doors, for an order whose grant's last day has begun by the moment its
   // legal body could be created: now at the adoption, the link's deadline at the link.

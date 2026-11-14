@@ -28,6 +28,7 @@ const SRC = join(import.meta.dirname, "..", "..", "src");
 const ANSWERING_MODULES = [
   "legalBody/orders.ts",
   "legalBody/orderGrant.ts",
+  "legalBody/grantDoors.ts",
   "legalBody/adoption.ts",
   "legalBody/linkDoor.ts",
   "legalBody/create.ts",
