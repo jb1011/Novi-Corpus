@@ -11,8 +11,12 @@
  * `grantEndProblem` is the end rule, an end day after today. `parseGrantChoices` reads both in one
  * pass. A value is refused, never cleaned or converted, so one set of choices has one spelling.
  *
- * `buildGrant` numbers those choices, `grantDigest` is their fingerprint, and `renderScheduleA`
- * writes them as the Charter's Schedule A, in fixed sentences.
+ * A `Grant` is made only here: by `buildGrant`, the one checked constructor, which numbers those
+ * choices, or by `grantFromCanonical`, which reads one back from its canonical form. A grant holds
+ * its canonical form, its fingerprint and its Schedule A, the Charter's Schedule A written in fixed
+ * sentences; nothing else in the code produces a fingerprint or a Schedule A. Its Schedule A is the
+ * wording of the Charter version `SCHEDULE_A_WORDING` names, and a later Charter version with other
+ * words adds a second wording beside this one.
  */
 import { type Hex, keccak256, stringToBytes } from "viem";
 import { canonicalizeJcs } from "../oa/manifest";
@@ -430,18 +434,49 @@ export function utcDay(nowMs: number): string {
 // ── The grant, its fingerprint and its Schedule A ─────────────────────────────────────────────
 
 export const GRANT_SCHEMA = "novi.legal-body-grant/1";
+/** The id of the Schedule A wording this module writes: the one of Charter draft 4. */
+export const SCHEDULE_A_WORDING = "2026-11-draft-4";
 
-export type Grant = {
+/** What the fingerprint is taken over. */
+export type GrantValue = {
   schema: typeof GRANT_SCHEMA;
   number: number;
   version: number;
   choices: GrantChoices;
 };
 
+/** A grant: built only by `buildGrant` or `grantFromCanonical`, frozen all the way down. */
+export interface Grant {
+  readonly value: GrantValue;
+  /** The RFC 8785 form of `value` (`canonicalizeJcs`), with no trailing newline. */
+  readonly canonical: string;
+  /** keccak256 of the UTF-8 bytes of `canonical`, lower-case. */
+  readonly digest: Hex;
+  /** The Charter's `scheduleA` field, in the wording `SCHEDULE_A_WORDING` names. No trailing
+   *  newline. */
+  readonly scheduleA: string;
+}
+
+/** The keys of a `GrantValue`, the only keys its canonical form holds at its root. */
+const VALUE_KEYS = ["schema", "number", "version", "choices"] as const;
+
+/** Freezes `o` and every object under it, and returns it. */
+function deepFreeze<T>(o: T): T {
+  if (typeof o === "object" && o !== null) {
+    for (const v of Object.values(o)) deepFreeze(v);
+    Object.freeze(o);
+  }
+  return o;
+}
+
 /**
- * Numbers a set of choices, which must come from `checkGrantChoices` or `parseGrantChoices`.
- * Throws unless `number` and `version` are each a whole number of at least 1; that guard and the
- * ones of `renderScheduleA` catch the worst cases, not every value that is not canonical.
+ * The one checked constructor of a grant. Each refusal throws, as it is a bug in the caller, never
+ * an answer: the caller checks the guardian's choices first and answers from that check. In this
+ * order: `number` and `version` must each be a whole number of at least 1; the choices must be in
+ * canonical form (`checkGrantChoices`, which has no clock, so a past end day builds); and they must
+ * allow something. The value is built from the checked copy, never from the object given, and is
+ * frozen all the way down; its canonical form, its fingerprint and its Schedule A are computed
+ * once, here.
  */
 export function buildGrant(
   choices: GrantChoices,
@@ -449,13 +484,48 @@ export function buildGrant(
 ): Grant {
   if (!isWholeFromOne(number) || !isWholeFromOne(version))
     throw new Error("grant: number and version must each be a whole number of at least 1");
-  return { schema: GRANT_SCHEMA, number, version, choices };
+  const checked = checkGrantChoices(choices);
+  if (!("choices" in checked)) throw new Error("grant: the choices are not in canonical form");
+  if (grantAllowsNothing(checked.choices))
+    throw new Error("grant: the choices allow nothing, and a grant allows something");
+  const value: GrantValue = deepFreeze({
+    schema: GRANT_SCHEMA,
+    number,
+    version,
+    choices: checked.choices,
+  });
+  const canonical = canonicalizeJcs(value);
+  const digest = keccak256(stringToBytes(canonical));
+  return Object.freeze({ value, canonical, digest, scheduleA: writeScheduleA(value, digest) });
 }
 
-/** keccak256 of the UTF-8 bytes of the grant's RFC 8785 form (`canonicalizeJcs`), with no trailing
- *  newline. */
-export function grantDigest(grant: Grant): Hex {
-  return keccak256(stringToBytes(canonicalizeJcs(grant)));
+/** `JSON.parse`, or undefined when the text is not JSON. */
+function parseJson(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The grant a canonical text states, or undefined when the text is not the canonical form of a
+ *  grant. Never throws. */
+export function grantFromCanonical(canonical: string): Grant | undefined {
+  const o = parseJson(canonical);
+  if (!isFields(o)) return undefined;
+  if (Object.keys(o).length !== VALUE_KEYS.length || !VALUE_KEYS.every((k) => Object.hasOwn(o, k)))
+    return undefined;
+  if (o.schema !== GRANT_SCHEMA) return undefined;
+  let grant: Grant;
+  try {
+    grant = buildGrant(o.choices as GrantChoices, {
+      number: o.number as number,
+      version: o.version as number,
+    });
+  } catch {
+    return undefined;
+  }
+  return grant.canonical === canonical ? grant : undefined;
 }
 
 /** True when none of the seven kinds is allowed and each act of section 5.6 is set to not_allowed. */
@@ -466,6 +536,8 @@ export function grantAllowsNothing(choices: GrantChoices): boolean {
   );
 }
 
+/** The words of a Schedule A when no grant is in force. A `Grant` never writes them: `buildGrant`
+ *  refuses choices that allow nothing. */
 export const NO_GRANT_IN_FORCE = "No grant is in force.";
 
 const NOT_ALLOWED = "not allowed";
@@ -475,8 +547,11 @@ const COUNTERPARTY_WORDS: Record<GrantChoices["counterparties"], string> = {
   active_legal_body:
     "only a party whose own legal body reads active in Novi Corpus's record at the time of the act",
 };
-const CLOSING =
-  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.";
+/** The closing line's first sentence, written only when the grant names an amount. */
+const IN_US_DOLLARS =
+  "Amounts are in US dollars (USD); one USDC counts as one US dollar (section 5.2).";
+const DECLARED =
+  "Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.";
 const MONTHS = [
   "January",
   "February",
@@ -494,8 +569,9 @@ const MONTHS = [
 
 /**
  * A whole number with a comma between groups of three digits: `1,250,000`. Written here rather
- * than by `toLocaleString`, whose output depends on the machine's locale data. Throws unless `n`
- * is a whole number of at least 1.
+ * than by `toLocaleString`, whose output depends on the machine's locale data. Every amount it is
+ * given has been checked; it still throws unless `n` is a whole number of at least 1, so a Schedule
+ * A never holds a wrong figure.
  */
 function groupDigits(n: number): string {
   if (!isWholeFromOne(n))
@@ -510,7 +586,7 @@ function groupDigits(n: number): string {
 }
 
 const aloneUpTo = (perAct: number, unit: string): string =>
-  `the agent alone, up to ${groupDigits(perAct)} USDC per ${unit}`;
+  `the agent alone, up to USD ${groupDigits(perAct)} per ${unit}`;
 const aboveWords = (above: GrantAbove): string =>
   above === "guardian_signature" ? WITH_GUARDIAN_SIGNATURE : NOT_ALLOWED;
 
@@ -523,7 +599,7 @@ function actWords(setting: GrantActSetting, unit: string, afterUnit = ""): strin
 /** An act of section 5.2 that spends: an amount per act and one per thirty days. */
 function spendWords(setting: GrantSpendSetting, unit: string): string {
   if (!setting.allowed) return NOT_ALLOWED;
-  return `${aloneUpTo(setting.perAct, unit)} and ${groupDigits(setting.per30Days)} USDC per thirty days; above those amounts, ${aboveWords(setting.above)}`;
+  return `${aloneUpTo(setting.perAct, unit)} and USD ${groupDigits(setting.per30Days)} per thirty days; above those amounts, ${aboveWords(setting.above)}`;
 }
 
 /** An act of section 5.6: above the agent's own amount, it always needs the guardian's signature. */
@@ -533,8 +609,8 @@ function heavyWords(setting: GrantHeavySetting, unit: string): string {
   return `${aloneUpTo(setting.perAct, unit)}; above that amount, ${WITH_GUARDIAN_SIGNATURE}`;
 }
 
-/** `revoked`, or the end of the last day, as `31 December 2027`. Throws unless `endsOn` is a day
- *  that exists in the calendar. */
+/** `revoked`, or the end of the last day, as `31 December 2027`. Every end day it is given has
+ *  been checked; it still throws unless `endsOn` is a day that exists in the calendar. */
 function endWords(endsOn: string | null): string {
   if (endsOn === null) return "revoked";
   const m = DATE.exec(endsOn);
@@ -544,20 +620,25 @@ function endWords(endsOn: string | null): string {
   return `the end of ${Number(m[3])} ${month} ${m[1]} (UTC), unless revoked earlier`;
 }
 
+/** True when the grant names an amount: one of the six kinds of section 5.2 that carry one is
+ *  allowed, or an act of section 5.6 is left to the agent alone. */
+function namesAnAmount(choices: GrantChoices): boolean {
+  return (
+    GRANT_ACT_KINDS.some((kind) => kind !== "receivePayment" && choices.acts[kind].allowed) ||
+    GRANT_HEAVY_ACTS.some((act) => choices.heavyActs[act].mode === "alone")
+  );
+}
+
 /** The items of a list: each ends with a semicolon, the last with a full stop. */
 const listItems = (items: string[]): string[] =>
   items.map((item, i) => `${item}${i === items.length - 1 ? "." : ";"}`);
 
-/**
- * The Charter's `scheduleA` field. No trailing newline. The grant's choices must come from
- * `checkGrantChoices` or `parseGrantChoices`: an amount or an end day that cannot be written
- * throws here, which catches the worst cases, not every value that is not canonical.
- */
-export function renderScheduleA(grant: Grant): string {
-  const { acts, heavyActs, counterparties, endsOn } = grant.choices;
-  if (grantAllowsNothing(grant.choices)) return NO_GRANT_IN_FORCE;
+/** The Schedule A of a checked value whose fingerprint is `digest`, in the wording
+ *  `SCHEDULE_A_WORDING` names. No trailing newline. Only `buildGrant` calls it. */
+function writeScheduleA(value: GrantValue, digest: Hex): string {
+  const { acts, heavyActs, counterparties, endsOn } = value.choices;
   return [
-    `Grant ${grant.number}, version ${grant.version}. Digest ${grantDigest(grant)}. In force from the creation of the Legal Body until ${endWords(endsOn)}. Counterparties: ${COUNTERPARTY_WORDS[counterparties]}.`,
+    `Grant ${value.number}, version ${value.version}. Digest ${digest}. In force from the time stated in section 5.3(a) until ${endWords(endsOn)}. Counterparties: ${COUNTERPARTY_WORDS[counterparties]}.`,
     "",
     "Acts of section 5.2:",
     "",
@@ -580,6 +661,6 @@ export function renderScheduleA(grant: Grant): string {
       `- (k) transferring or encumbering the Company's property, other than paying within this grant: ${heavyWords(heavyActs.transferProperty, "transfer")}`,
     ]),
     "",
-    CLOSING,
+    namesAnAmount(value.choices) ? `${IN_US_DOLLARS} ${DECLARED}` : DECLARED,
   ].join("\n");
 }

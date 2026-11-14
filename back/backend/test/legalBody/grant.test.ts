@@ -1,13 +1,15 @@
 /**
  * A grant's choices, parsed into one canonical value or refused field by field: an amount is a
  * plain whole number of US dollars, one choice has one spelling, an end is a future calendar day,
- * and a hostile shape is a list of problems, never a throw. Then the grant built from them: its
- * fingerprint, and the Schedule A written from it, compared character for character with three
- * golden texts.
+ * and a hostile shape is a list of problems, never a throw. Then the grant built from them by its
+ * one checked constructor: its canonical form, its fingerprint, and the Schedule A written from
+ * it, compared character for character with three golden texts, and the grant read back from its
+ * canonical form.
  *
  * Every amount and date here is a made-up fixture.
  */
 import { createHash } from "node:crypto";
+import { keccak256, stringToBytes } from "viem";
 import { expect, test } from "vitest";
 import {
   GRANT_ACT_KINDS,
@@ -15,14 +17,14 @@ import {
   GRANT_HEAVY_ACTS,
   GRANT_PROBLEMS_MAX,
   type GrantChoices,
+  SCHEDULE_A_WORDING,
   buildGrant,
   checkGrantChoices,
   grantAllowsNothing,
-  grantDigest,
   grantEndProblem,
+  grantFromCanonical,
   grantLastDayStartsAt,
   parseGrantChoices,
-  renderScheduleA,
   utcDay,
 } from "../../src/legalBody/grant";
 import { A, B } from "../helpers/grantFixtures";
@@ -483,20 +485,21 @@ test("the eleven keys are one exported list", () => {
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
-/** The Schedule A of fixture `A`, then of fixture `B`, as the reference texts write them: copied
- *  from those texts, never retyped. Each has no trailing newline. */
+/** The Schedule A of fixture `A`, then of fixture `B`, then of `coSigned` below, in the wording of
+ *  Charter draft 4, as the reference texts write them: copied from those texts, never retyped.
+ *  Each has no trailing newline. */
 const GOLDEN_A = [
-  "Grant 1, version 1. Digest 0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1. In force from the creation of the Legal Body until revoked. Counterparties: anyone.",
+  "Grant 1, version 1. Digest 0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1. In force from the time stated in section 5.3(a) until revoked. Counterparties: anyone.",
   "",
   "Acts of section 5.2:",
   "",
-  "- (a) entering agreements for services the Company provides: the agent alone, up to 2,000 USDC per agreement; above that amount, only with the Guardian Wallet's signature beside the agent's;",
-  "- (b) accepting engagements: the agent alone, up to 2,000 USDC per engagement; above that amount, only with the Guardian Wallet's signature beside the agent's;",
-  "- (c) issuing invoices in the Company's name: the agent alone, up to 2,000 USDC per invoice, payable only to the wallet named in Schedule B; above that amount, not allowed;",
+  "- (a) entering agreements for services the Company provides: the agent alone, up to USD 2,000 per agreement; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (b) accepting engagements: the agent alone, up to USD 2,000 per engagement; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (c) issuing invoices in the Company's name: the agent alone, up to USD 2,000 per invoice, payable only to the wallet named in Schedule B; above that amount, not allowed;",
   "- (d) receiving payment to the wallet named in Schedule B: allowed;",
-  "- (e) buying goods or services: the agent alone, up to 200 USDC per purchase and 1,000 USDC per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's;",
-  "- (f) paying: the agent alone, up to 200 USDC per payment and 1,000 USDC per thirty days; above those amounts, not allowed;",
-  "- (g) engaging a contractor for work: the agent alone, up to 500 USDC per engagement and 1,000 USDC per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's.",
+  "- (e) buying goods or services: the agent alone, up to USD 200 per purchase and USD 1,000 per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's;",
+  "- (f) paying: the agent alone, up to USD 200 per payment and USD 1,000 per thirty days; above those amounts, not allowed;",
+  "- (g) engaging a contractor for work: the agent alone, up to USD 500 per engagement and USD 1,000 per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's.",
   "",
   "Acts of section 5.6:",
   "",
@@ -505,34 +508,32 @@ const GOLDEN_A = [
   "- (j) guaranteeing anyone's obligation: not allowed;",
   "- (k) transferring or encumbering the Company's property, other than paying within this grant: only with the Guardian Wallet's signature beside the agent's.",
   "",
-  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+  "Amounts are in US dollars (USD); one USDC counts as one US dollar (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
 ].join("\n");
 const GOLDEN_B = [
-  "Grant 1, version 1. Digest 0xb9ed4f5f32f26a3c0ca454e9810af42b9a1397ba68be335090cf03283e6ec11b. In force from the creation of the Legal Body until the end of 31 December 2027 (UTC), unless revoked earlier. Counterparties: only a party whose own legal body reads active in Novi Corpus's record at the time of the act.",
+  "Grant 1, version 1. Digest 0xb9ed4f5f32f26a3c0ca454e9810af42b9a1397ba68be335090cf03283e6ec11b. In force from the time stated in section 5.3(a) until the end of 31 December 2027 (UTC), unless revoked earlier. Counterparties: only a party whose own legal body reads active in Novi Corpus's record at the time of the act.",
   "",
   "Acts of section 5.2:",
   "",
-  "- (a) entering agreements for services the Company provides: the agent alone, up to 1,250,000 USDC per agreement; above that amount, not allowed;",
+  "- (a) entering agreements for services the Company provides: the agent alone, up to USD 1,250,000 per agreement; above that amount, not allowed;",
   "- (b) accepting engagements: not allowed;",
   "- (c) issuing invoices in the Company's name: not allowed;",
   "- (d) receiving payment to the wallet named in Schedule B: not allowed;",
   "- (e) buying goods or services: not allowed;",
-  "- (f) paying: the agent alone, up to 1 USDC per payment and 1 USDC per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's;",
+  "- (f) paying: the agent alone, up to USD 1 per payment and USD 1 per thirty days; above those amounts, only with the Guardian Wallet's signature beside the agent's;",
   "- (g) engaging a contractor for work: not allowed.",
   "",
   "Acts of section 5.6:",
   "",
-  "- (h) employing a person: the agent alone, up to 3,000 USDC per employment; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (h) employing a person: the agent alone, up to USD 3,000 per employment; above that amount, only with the Guardian Wallet's signature beside the agent's;",
   "- (i) borrowing: only with the Guardian Wallet's signature beside the agent's;",
-  "- (j) guaranteeing anyone's obligation: the agent alone, up to 1 USDC per guarantee; above that amount, only with the Guardian Wallet's signature beside the agent's;",
+  "- (j) guaranteeing anyone's obligation: the agent alone, up to USD 1 per guarantee; above that amount, only with the Guardian Wallet's signature beside the agent's;",
   "- (k) transferring or encumbering the Company's property, other than paying within this grant: not allowed.",
   "",
-  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+  "Amounts are in US dollars (USD); one USDC counts as one US dollar (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
 ].join("\n");
-/** The Schedule A of `coSigned` below, as its reference text writes it: copied from that text,
- *  never retyped. It has no trailing newline. */
 const GOLDEN_CO_SIGNED = [
-  "Grant 1, version 1. Digest 0x65e5d3aad6a2995070d7cac1d54b5cf8c4ff651403367c187cefbb2f4883bcf5. In force from the creation of the Legal Body until the end of 31 December 2027 (UTC), unless revoked earlier. Counterparties: only a party whose own legal body reads active in Novi Corpus's record at the time of the act.",
+  "Grant 1, version 1. Digest 0x65e5d3aad6a2995070d7cac1d54b5cf8c4ff651403367c187cefbb2f4883bcf5. In force from the time stated in section 5.3(a) until the end of 31 December 2027 (UTC), unless revoked earlier. Counterparties: only a party whose own legal body reads active in Novi Corpus's record at the time of the act.",
   "",
   "Acts of section 5.2:",
   "",
@@ -551,8 +552,13 @@ const GOLDEN_CO_SIGNED = [
   "- (j) guaranteeing anyone's obligation: not allowed;",
   "- (k) transferring or encumbering the Company's property, other than paying within this grant: not allowed.",
   "",
-  "Amounts are in USDC, or the same value at the time of the act (section 5.2). Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+  "Every limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
 ].join("\n");
+/** The canonical form of the grant of fixture `B`, number 1 and version 1, as its reference text
+ *  writes it: written by hand, key by key, and never produced by a function in this test. It has no
+ *  trailing newline. */
+const CANONICAL_B =
+  '{"choices":{"acts":{"acceptEngagement":{"allowed":false},"buy":{"allowed":false},"engageContractor":{"allowed":false},"issueInvoice":{"allowed":false},"pay":{"above":"guardian_signature","allowed":true,"per30Days":1,"perAct":1},"provideServices":{"above":"not_allowed","allowed":true,"perAct":1250000},"receivePayment":{"allowed":false}},"counterparties":"active_legal_body","endsOn":"2027-12-31","heavyActs":{"borrow":{"mode":"guardian_signature"},"employ":{"mode":"alone","perAct":3000},"guarantee":{"mode":"alone","perAct":1},"transferProperty":{"mode":"not_allowed"}}},"number":1,"schema":"novi.legal-body-grant/1","version":1}';
 
 const grantA = buildGrant(A, { number: 1, version: 1 });
 const grantB = buildGrant(B, { number: 1, version: 1 });
@@ -579,8 +585,7 @@ coSigned.heavyActs.borrow = { mode: "guardian_signature" };
 const grantCoSigned = buildGrant(coSigned, { number: 1, version: 1 });
 
 const BAD_NUMBER = "grant: number and version must each be a whole number of at least 1";
-const BAD_AMOUNT = "grant: an amount must be a whole number of US dollars of at least 1";
-const BAD_END = "grant: the end date is not a calendar date";
+const NOT_CANONICAL = "grant: the choices are not in canonical form";
 
 test.each([[0], [-1], [1.5], ["1" as never], [Number.NaN]])(
   "a grant's number that is not a whole number of at least 1 is refused when the grant is built: %s",
@@ -593,50 +598,125 @@ test("a grant's version of 0 is refused when the grant is built", () => {
   expect(() => buildGrant(A, { number: 1, version: 0 })).toThrow(new Error(BAD_NUMBER));
 });
 
-test.each([[-100], [0], ["200" as never]])(
-  "Schedule A refuses to write an amount that is not a whole number of US dollars of at least 1: %s",
-  (bad) => {
-    const choices = structuredClone(A);
-    choices.acts.buy = { allowed: true, perAct: bad, per30Days: 1000, above: "guardian_signature" };
-    expect(() => renderScheduleA(buildGrant(choices, { number: 1, version: 1 }))).toThrow(
-      new Error(BAD_AMOUNT),
-    );
-  },
-);
+test("a grant holds its value, its canonical form, its fingerprint and its Schedule A, each computed once", () => {
+  expect(grantA.value).toEqual({
+    schema: "novi.legal-body-grant/1",
+    number: 1,
+    version: 1,
+    choices: A,
+  });
+  expect(grantA.digest).toBe("0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1");
+  expect(grantB.digest).toBe("0xb9ed4f5f32f26a3c0ca454e9810af42b9a1397ba68be335090cf03283e6ec11b");
+  expect(Object.keys(grantA).sort()).toEqual(["canonical", "digest", "scheduleA", "value"]);
+  expect(SCHEDULE_A_WORDING).toBe("2026-11-draft-4");
+});
 
-test("Schedule A refuses to write a missing amount", () => {
+test("the canonical form is the one written by hand, and the fingerprint is the keccak256 of its bytes", () => {
+  expect(grantB.canonical).toBe(CANONICAL_B);
+  expect(keccak256(stringToBytes(CANONICAL_B))).toBe(grantB.digest);
+});
+
+test("a grant shares nothing with the choices it was built from, and cannot be changed", () => {
   const choices = structuredClone(A);
-  Reflect.deleteProperty(choices.acts.buy, "perAct");
-  expect(() => renderScheduleA(buildGrant(choices, { number: 1, version: 1 }))).toThrow(
-    new Error(BAD_AMOUNT),
-  );
+  const grant = buildGrant(choices, { number: 1, version: 1 });
+  (choices.acts.pay as { perAct: number }).perAct = 999;
+  expect(grant.value.choices).toEqual(A);
+  expect(Object.isFrozen(grant)).toBe(true);
+  expect(Object.isFrozen(grant.value)).toBe(true);
+  expect(Object.isFrozen(grant.value.choices.acts.pay)).toBe(true);
+  expect(() => {
+    (grant.value.choices.acts.pay as { perAct: number }).perAct = 1;
+  }).toThrow(TypeError);
 });
 
-test.each([["2027-02-30"], ["2027-02-31"], ["2027-03-00"]])(
-  "Schedule A refuses an end day that does not exist in its month: %s",
-  (endsOn) => {
-    expect(() => renderScheduleA(buildGrant({ ...A, endsOn }, { number: 1, version: 1 }))).toThrow(
-      new Error(BAD_END),
+/** A change `edit` applies: typed by `edit` itself, so no second `any` is written. */
+type Change = Parameters<typeof edit>[0];
+const NOT_CANONICAL_CASES: [string, Change][] = [
+  [
+    "one key more",
+    (c) => {
+      c.note = "x";
+    },
+  ],
+  [
+    "an amount as text",
+    (c) => {
+      c.acts.buy.perAct = "200";
+    },
+  ],
+  [
+    "an amount of zero",
+    (c) => {
+      c.acts.buy.perAct = 0;
+    },
+  ],
+  [
+    "a missing amount",
+    (c) => {
+      Reflect.deleteProperty(c.acts.buy, "perAct");
+    },
+  ],
+  [
+    "an act not allowed that carries an amount",
+    (c) => {
+      c.acts.buy = { allowed: false, perAct: 5 };
+    },
+  ],
+  [
+    "a day that does not exist",
+    (c) => {
+      c.endsOn = "2027-02-30";
+    },
+  ],
+  [
+    "a month that does not exist",
+    (c) => {
+      c.endsOn = "2027-13-01";
+    },
+  ],
+  [
+    "a missing kind",
+    (c) => {
+      Reflect.deleteProperty(c.acts, "pay");
+    },
+  ],
+];
+test.each(NOT_CANONICAL_CASES)(
+  "choices that are not in canonical form build no grant: %s",
+  (_name, change) => {
+    expect(() => buildGrant(edit(change) as GrantChoices, { number: 1, version: 1 })).toThrow(
+      new Error(NOT_CANONICAL),
     );
   },
 );
 
-test("Schedule A refuses an end month that does not exist, and writes a leap day", () => {
-  expect(() =>
-    renderScheduleA(buildGrant({ ...A, endsOn: "2027-13-01" }, { number: 1, version: 1 })),
-  ).toThrow(new Error(BAD_END));
-  expect(
-    renderScheduleA(buildGrant({ ...A, endsOn: "2028-02-29" }, { number: 1, version: 1 })),
-  ).toContain("until the end of 29 February 2028 (UTC), unless revoked earlier.");
+test("choices that allow nothing build no grant", () => {
+  expect(grantAllowsNothing(none)).toBe(true);
+  expect(() => buildGrant(none, { number: 1, version: 1 })).toThrow(
+    new Error("grant: the choices allow nothing, and a grant allows something"),
+  );
+  expect(grantAllowsNothing(A)).toBe(false);
 });
 
-test("the fingerprint of a grant is the keccak256 of its canonical form", () => {
-  expect(grantA).toEqual({ schema: "novi.legal-body-grant/1", number: 1, version: 1, choices: A });
-  expect(grantDigest(grantA)).toBe(
-    "0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1",
+test.each(GRANT_HEAVY_ACTS.map((act) => [act] as const))(
+  "one act of section 5.6 allowed, whichever it is and however, is a grant: %s",
+  (act) => {
+    const withSignature = structuredClone(none);
+    withSignature.heavyActs[act] = { mode: "guardian_signature" };
+    expect(grantAllowsNothing(withSignature)).toBe(false);
+    const alone = structuredClone(none);
+    alone.heavyActs[act] = { mode: "alone", perAct: 1 };
+    expect(grantAllowsNothing(alone)).toBe(false);
+  },
+);
+
+test("a grant whose end day has passed still builds: the shape has no clock", () => {
+  const ended = buildGrant(
+    { ...structuredClone(A), endsOn: "1999-01-01" },
+    { number: 1, version: 1 },
   );
-  expect(grantDigest(grantB)).toBe(
-    "0xb9ed4f5f32f26a3c0ca454e9810af42b9a1397ba68be335090cf03283e6ec11b",
+  expect(ended.scheduleA).toContain(
+    "until the end of 1 January 1999 (UTC), unless revoked earlier. Counterparties: anyone.",
   );
 });
 
@@ -649,31 +729,53 @@ test("the fingerprint does not depend on the order of keys, and changes with any
       acts: A.acts,
     }),
   );
-  expect(grantDigest(buildGrant(reordered, { number: 1, version: 1 }))).toBe(grantDigest(grantA));
+  expect(buildGrant(reordered, { number: 1, version: 1 }).digest).toBe(grantA.digest);
   const changed = structuredClone(A);
   (changed.acts.pay as { perAct: number }).perAct = 201;
-  expect(grantDigest(buildGrant(changed, { number: 1, version: 1 }))).not.toBe(grantDigest(grantA));
-  expect(grantDigest(buildGrant(A, { number: 2, version: 1 }))).not.toBe(grantDigest(grantA));
-  expect(grantDigest(buildGrant(A, { number: 1, version: 2 }))).not.toBe(grantDigest(grantA));
+  expect(buildGrant(changed, { number: 1, version: 1 }).digest).not.toBe(grantA.digest);
+  expect(buildGrant(A, { number: 2, version: 1 }).digest).not.toBe(grantA.digest);
+  expect(buildGrant(A, { number: 1, version: 2 }).digest).not.toBe(grantA.digest);
 });
 
 test("Schedule A is written from the choices, character for character", () => {
-  expect(renderScheduleA(grantA)).toBe(GOLDEN_A);
-  expect(renderScheduleA(grantB)).toBe(GOLDEN_B);
-  expect(sha256(renderScheduleA(grantA))).toBe(
-    "24c1b56b51dbbf408b74c47448271aec26ee6ebbab4f386dd90053600fef6467",
+  expect(grantA.scheduleA).toBe(GOLDEN_A);
+  expect(grantB.scheduleA).toBe(GOLDEN_B);
+  expect(grantCoSigned.scheduleA).toBe(GOLDEN_CO_SIGNED);
+  expect(sha256(grantA.scheduleA)).toBe(
+    "738f0a878a3e630e697d9b670bab395e80dbfa241fcdb22eed9338c21d509685",
   );
-  expect(sha256(renderScheduleA(grantB))).toBe(
-    "5b57b600bf5c70fdbbf5a118335c3a2ffb794252e036f6872732752613ce6edc",
+  expect(sha256(grantB.scheduleA)).toBe(
+    "461c01994cde9d6099a97d99e01c80ece57399423cf3a578bdce680c8e2a2517",
+  );
+  expect(sha256(grantCoSigned.scheduleA)).toBe(
+    "905ff1e85dc023f83738d25c02edb9d6195b7c5865c4f82b0a4c6ca549c643ca",
+  );
+  expect(grantCoSigned.digest).toBe(
+    "0x65e5d3aad6a2995070d7cac1d54b5cf8c4ff651403367c187cefbb2f4883bcf5",
+  );
+});
+
+test("a grant that names no amount does not speak of amounts", () => {
+  expect(
+    grantCoSigned.scheduleA.endsWith(
+      "\n\nEvery limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+    ),
+  ).toBe(true);
+  expect(grantCoSigned.scheduleA).not.toMatch(/USD|US dollar/);
+  // One act of section 5.6 left to the agent alone names an amount.
+  const alone = structuredClone(coSigned);
+  alone.heavyActs.guarantee = { mode: "alone", perAct: 1 };
+  expect(buildGrant(alone, { number: 1, version: 1 }).scheduleA).toContain(
+    "\n\nAmounts are in US dollars (USD); one USDC counts as one US dollar (section 5.2). Every limit in this grant is declared",
   );
 });
 
 test("Schedule A holds only ASCII, no brace and no trailing newline, and never says enforced", () => {
   for (const text of [
-    renderScheduleA(grantA),
-    renderScheduleA(grantB),
-    renderScheduleA(grantGreatest),
-    renderScheduleA(grantCoSigned),
+    grantA.scheduleA,
+    grantB.scheduleA,
+    grantGreatest.scheduleA,
+    grantCoSigned.scheduleA,
   ]) {
     expect(text).toMatch(/^[\n\x20-\x7e]+$/);
     expect(text).not.toMatch(/[{}]/);
@@ -683,37 +785,40 @@ test("Schedule A holds only ASCII, no brace and no trailing newline, and never s
 });
 
 test("the greatest amount is written in full, with its commas", () => {
-  expect(renderScheduleA(grantGreatest)).toContain(
-    "- (e) buying goods or services: the agent alone, up to 999 USDC per purchase and 1,000,000,000 USDC per thirty days; above those amounts, not allowed;",
+  expect(grantGreatest.scheduleA).toContain(
+    "- (e) buying goods or services: the agent alone, up to USD 999 per purchase and USD 1,000,000,000 per thirty days; above those amounts, not allowed;",
   );
 });
 
 test("an end date is written as a day, without a leading zero", () => {
   const dated = { ...structuredClone(A), endsOn: "2027-01-01" };
-  expect(renderScheduleA(buildGrant(dated, { number: 1, version: 1 }))).toContain(
+  expect(buildGrant(dated, { number: 1, version: 1 }).scheduleA).toContain(
     "until the end of 1 January 2027 (UTC), unless revoked earlier. Counterparties: anyone.",
   );
 });
 
-test("a grant that allows nothing is no grant", () => {
-  expect(grantAllowsNothing(none)).toBe(true);
-  expect(renderScheduleA(buildGrant(none, { number: 1, version: 1 }))).toBe(
-    "No grant is in force.",
+test("a leap day builds, and is written as its day", () => {
+  expect(buildGrant({ ...A, endsOn: "2028-02-29" }, { number: 1, version: 1 }).scheduleA).toContain(
+    "until the end of 29 February 2028 (UTC), unless revoked earlier.",
   );
-  expect(grantAllowsNothing(A)).toBe(false);
-  // One act of section 5.6 left to the agent alone is a grant.
-  const alone = structuredClone(none);
-  alone.heavyActs.guarantee = { mode: "alone", perAct: 1 };
-  expect(grantAllowsNothing(alone)).toBe(false);
 });
 
-test("an act of section 5.6 allowed only with the Guardian Wallet's signature is a grant", () => {
-  expect(grantAllowsNothing(coSigned)).toBe(false);
-  expect(grantDigest(grantCoSigned)).toBe(
-    "0x65e5d3aad6a2995070d7cac1d54b5cf8c4ff651403367c187cefbb2f4883bcf5",
-  );
-  expect(renderScheduleA(grantCoSigned)).toBe(GOLDEN_CO_SIGNED);
-  expect(sha256(renderScheduleA(grantCoSigned))).toBe(
-    "324ea0ef524f8cd352a2f03c175f6a31a2fb94ac8b1674330c449388acede130",
-  );
+test("a grant read back from its canonical form is the same grant, and anything else is none", () => {
+  const read = grantFromCanonical(grantB.canonical);
+  expect(read).toEqual(grantB);
+  expect(Object.isFrozen(read)).toBe(true);
+  for (const bad of [
+    "",
+    "not json",
+    "null",
+    "[]",
+    `${grantB.canonical}\n`,
+    ` ${grantB.canonical}`,
+    JSON.stringify(grantB.value), // the same value, keys not in canonical order
+    grantB.canonical.replace('"version":1', '"version":1,"x":1'), // one key more
+    grantB.canonical.replace("novi.legal-body-grant/1", "novi.legal-body-grant/2"),
+    grantB.canonical.replace('"number":1', '"number":"1"'),
+    grantB.canonical.replace('"perAct":3000', '"perAct":3000.5'),
+  ])
+    expect(grantFromCanonical(bad), bad.slice(0, 40)).toBeUndefined();
 });

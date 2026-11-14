@@ -5,8 +5,8 @@ import {
   readVerifiedAgreement,
   storeAgreement,
 } from "../../src/legalBody/agreement";
-import { buildGrant, grantDigest, renderScheduleA } from "../../src/legalBody/grant";
-import { LEGAL_BODY_CHARTER_2026_11_DRAFT_2 } from "../../src/legalBody/texts/legalBodyCharter";
+import { buildGrant } from "../../src/legalBody/grant";
+import { LEGAL_BODY_CHARTER_2026_11_DRAFT_4 } from "../../src/legalBody/texts/legalBodyCharter";
 import type { AgreementFields } from "../../src/legalBody/texts/operatingAgreement";
 import { computeOaHash } from "../../src/oa/generator";
 import { MemoryDocumentStore } from "../helpers/formationFakes";
@@ -30,32 +30,32 @@ const FIELDS: AgreementFields = {
 
 const grant = buildGrant(A, { number: 1, version: 1 });
 const built = (scheduleA: string) =>
-  buildAgreement({ ...FIELDS, scheduleA }, LEGAL_BODY_CHARTER_2026_11_DRAFT_2, {
+  buildAgreement({ ...FIELDS, scheduleA }, LEGAL_BODY_CHARTER_2026_11_DRAFT_4, {
     source: "customer",
   });
 
 test("the manifest hash the guardian adopts commits to the grant", () => {
-  const a = built(renderScheduleA(grant));
-  expect(a.manifestHash).toBe("0xa93d1303350208d003ae61ae76d0d2ddbc002a8ec8ae6605a86ce32fddb0b481");
-  expect(a.termsDoc).toContain(`Grant 1, version 1. Digest ${grantDigest(grant)}.`);
+  const a = built(grant.scheduleA);
+  expect(a.manifestHash).toBe("0x62f09c16ecf045d5c6452f4ec51df1b05cf6eb65817b75b6d6afa0e9475f6584");
+  expect(a.termsDoc).toContain(`Grant 1, version 1. Digest ${grant.digest}.`);
   expect(JSON.parse(a.manifest).terms).toMatchObject({
     textId: "legal-body-operating-agreement",
-    textVersion: "2026-11-draft-2",
+    textVersion: "2026-11-draft-4",
     textStatus: "draft",
     hash: computeOaHash(a.termsDoc),
   });
 });
 
-test("one USDC more in one limit is another agreement", () => {
+test("one dollar more in one limit is another agreement", () => {
   const changed = structuredClone(A);
   (changed.acts.pay as { perAct: number }).perAct = 201;
-  const b = built(renderScheduleA(buildGrant(changed, { number: 1, version: 1 })));
-  expect(b.manifestHash).toBe("0xb40af922e24d57c93e2a66f176ac05704cef1075d30a0aa2574f5880afc7c3ed");
+  const b = built(buildGrant(changed, { number: 1, version: 1 }).scheduleA);
+  expect(b.manifestHash).toBe("0x71e3796895c66a04ae25a641e352533cae9a8bb6b8dae2851f99a1fa34940404");
 });
 
 test("the stored Charter reads back as the agreement it was frozen with", () => {
   const store = new MemoryDocumentStore();
-  const a = built(renderScheduleA(grant));
+  const a = built(grant.scheduleA);
   storeAgreement(store, "lb_00000000-0000-4000-8000-000000000001", a);
   const read = readVerifiedAgreement(
     store,
@@ -63,5 +63,5 @@ test("the stored Charter reads back as the agreement it was frozen with", () => 
     a.manifestHash,
   );
   expect(read?.termsDoc).toBe(a.termsDoc);
-  expect(read?.terms.textVersion).toBe("2026-11-draft-2");
+  expect(read?.terms.textVersion).toBe("2026-11-draft-4");
 });
