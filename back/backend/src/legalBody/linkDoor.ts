@@ -17,6 +17,7 @@ import {
 import { readVerifiedAgreement } from "./agreement";
 import { type LinkCheck, type LinkRefusalCode, checkLink } from "./checkLink";
 import { CreateCapError, submitCreateFor } from "./create";
+import type { Grant } from "./grant";
 import {
   DEFAULT_LINK_TTL_SECONDS,
   type LegalBodyLink,
@@ -27,6 +28,7 @@ import {
   linkFromWire,
   linkTypedDataWire,
 } from "./link";
+import { assertGrantOutlasts, readOrderGrant } from "./orderGrant";
 import {
   type LegalBodyOrderDeps,
   type LegalBodyOrderView,
@@ -122,15 +124,17 @@ const FACTORY_ERROR_NAMES: ReadonlySet<string> = new Set(
  * The rule every door that acts on a draft shares, the link's rule 1 but for the adoption: a frozen
  * draft of this deployment, created less than 24 hours ago, not revoked, for a company still
  * eligible, whose stored agreement re-verifies and was written on the current text, the agreement
- * of the pair this deployment serves (`deps.texts`), which it may serve. In that order, each its
- * own refusal. Answers the frozen hash, and the text id and version the stored manifest states,
- * the ones the adoption signs (`adoption.ts`), so a draft the link would refuse is never adopted.
+ * of the pair this deployment serves (`deps.texts`), which it may serve, and whose stored grant,
+ * when its agreement takes one, reads back as the one that agreement states (`readOrderGrant`). In
+ * that order, each its own refusal. Answers the frozen hash, the text id and version the stored
+ * manifest states, the ones the adoption signs (`adoption.ts`), so a draft the link would refuse
+ * is never adopted, and the grant read back (null for an agreement that takes none).
  */
 export function assertOpenDraft(
   deps: LegalBodyOrderDeps,
   row: LegalBodyRecord,
   nowMs: number,
-): { hash: Hex; frozen: { textId: string; textVersion: string } } {
+): { hash: Hex; frozen: { textId: string; textVersion: string }; grant: Grant | null } {
   const hash = row.oaManifestHash;
   if (row.bindingState !== "draft" || hash === null) throw refusal("order_closed", 409);
   assertThisDeployment(deps, row);
@@ -147,9 +151,12 @@ export function assertOpenDraft(
     !servable(deps.environment, current)
   )
     throw refusal("agreement_outdated", 409);
+  // A failure has already written its error line, naming the order and a fixed reason.
+  const grant = readOrderGrant(deps, row.legalBodyId, verified);
   return {
     hash,
     frozen: { textId: verified.terms.textId, textVersion: verified.terms.textVersion },
+    grant,
   };
 }
 
@@ -157,17 +164,22 @@ export function assertOpenDraft(
  * Rule 1, shared by both functions, on the tenant's order: the draft rule every door shares
  * (`assertOpenDraft`), and then the guardian's adoption of that agreement (`adoption.ts`), on
  * every deployment alike: an adoption stored for the order, over the order's own frozen manifest
- * hash. A row over any other hash adopts nothing this order links.
+ * hash. A row over any other hash adopts nothing this order links. Answers the frozen hash and the
+ * grant read back, whose end each function checks against its link's deadline.
  */
-function assertLinkableDraft(deps: LegalBodyOrderDeps, row: LegalBodyRecord, nowMs: number): Hex {
-  const { hash } = assertOpenDraft(deps, row, nowMs);
+function assertLinkableDraft(
+  deps: LegalBodyOrderDeps,
+  row: LegalBodyRecord,
+  nowMs: number,
+): { hash: Hex; grant: Grant | null } {
+  const { hash, grant } = assertOpenDraft(deps, row, nowMs);
   // The link binds the agreement too, but it is the identity owner's signature, who need not be
   // the member: the agreement is adopted by the guardian's own. Both hashes are stored lower-case;
   // compared so anyway, as a hash's letter case is not information.
   const adoption = deps.adoptions.find(row.legalBodyId);
   if (adoption === undefined || adoption.manifestHash.toLowerCase() !== hash.toLowerCase())
     throw refusal("agreement_not_adopted", 409);
-  return hash;
+  return { hash, grant };
 }
 
 /** Whether this deployment serves `text`, the agreement of the pair it serves. */
@@ -190,7 +202,8 @@ function servable(environment: LegalBodyOrderDeps["environment"], text: LegalTex
  *     seconds from `MIN_SERVED_LINK_TTL_SECONDS` to `MAX_SERVED_LINK_TTL_SECONDS`;
  *  3. the head, then the identity's owner at that head: none is a 422 `identity_not_found`;
  *  4. the link: this agent, the tenant as guardian, the order's delay and agreement, and a
- *     deadline counted from the CHAIN's time.
+ *     deadline counted from the CHAIN's time; a deadline from the first second of the grant's last
+ *     day on is a 409 `grant_ends_too_soon` (`assertGrantOutlasts`).
  * Writes nothing.
  */
 export async function linkMessage(
@@ -207,7 +220,7 @@ export async function linkMessage(
 
   // 1.
   const row = requireOwnedOrder(deps, tenantId, id);
-  const agreementHash = assertLinkableDraft(deps, row, nowMs);
+  const { hash: agreementHash, grant } = assertLinkableDraft(deps, row, nowMs);
 
   // 2.
   const agentId = canonicalAgentId(input?.agentId);
@@ -231,6 +244,7 @@ export async function linkMessage(
     operatingAgreementHash: agreementHash,
     deadline: linkDeadline(head.timestamp, ttl),
   };
+  assertGrantOutlasts(grant, link.deadline);
   return {
     typedData: linkTypedDataWire({
       chainId: deps.deployment.chainId,
@@ -274,7 +288,9 @@ class ReserveRefused extends Error {
  *  2. by state: `reserved`, `deployed` or `linked` answers that state with the order (a repeated
  *     submit changes nothing); a draft goes on with the rest of rule 1; anything else is a 409;
  *  3. the message is the served shape (400 `malformed_link`), the signature whole bytes of hex,
- *     at most `MAX_LINK_SIGNATURE_BYTES` (400 `malformed_signature`; an empty `0x` is read);
+ *     at most `MAX_LINK_SIGNATURE_BYTES` (400 `malformed_signature`; an empty `0x` is read); a
+ *     deadline from the first second of the grant's last day on is a 409 `grant_ends_too_soon`
+ *     (`assertGrantOutlasts`), before the identity's bucket is touched or the chain is read;
  *  4. one token from the identity's bucket, keyed `chainId:agentId:tenantId` so that a stranger
  *     cannot empty the bucket the owner's tenant needs;
  *  5. the create caps, per tenant (429) and for the deployment (503), counted over 24 hours,
@@ -310,7 +326,7 @@ export async function submitLink(
     const state = row.bindingState;
     if (state === "reserved" || state === "deployed" || state === "linked")
       return { status: state, order: toOrderView(row, orderViewFacts(deps, row)) };
-    const agreementHash = assertLinkableDraft(deps, row, nowMs);
+    const { hash: agreementHash, grant } = assertLinkableDraft(deps, row, nowMs);
 
     // 3.
     let link: LegalBodyLink;
@@ -327,6 +343,7 @@ export async function submitLink(
       !WHOLE_BYTES_HEX.test(signature)
     )
       throw refusal("malformed_signature", 400);
+    assertGrantOutlasts(grant, link.deadline);
 
     // 4.
     const identityKey = `${deps.deployment.chainId}:${link.agentId}:${getAddress(tenantId)}`;

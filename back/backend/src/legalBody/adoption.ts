@@ -4,7 +4,9 @@ import { withKeyedLock } from "../payments/keyedMutex";
 import type { NewAgreementAdoption } from "../persistence/legalBodyAdoptionRepository";
 import { ECDSA_SIGNATURE } from "../persistence/legalBodyInput";
 import type { LegalBodyRecord } from "../persistence/legalBodyRepository";
+import type { Grant } from "./grant";
 import { assertOpenDraft } from "./linkDoor";
+import { assertGrantOutlasts } from "./orderGrant";
 import {
   type LegalBodyOrderDeps,
   assertThisDeployment,
@@ -250,23 +252,27 @@ export function recordAdoption(
  * The rule both adoption doors share, on the tenant's order, once the tenant passed the
  * real-human check: the tenant's order (the uniform 404), then the draft rule the link applies
  * (`assertOpenDraft`), so a draft the link would refuse is never adopted, with the same code.
- * Answers the order and the text its agreement was frozen with. The adoption door applies the two
- * itself (`adoptAgreement`): an order adopted before its link is answered between them.
+ * Answers the order, the text its agreement was frozen with, and the grant read back. The adoption
+ * door applies the two itself (`adoptAgreement`): an order adopted before its link is answered
+ * between them.
  */
 function adoptableDraft(
   deps: LegalBodyOrderDeps,
   tenantId: Address,
   id: string,
   nowMs: number,
-): { row: LegalBodyRecord; frozen: FrozenAgreementText } {
+): { row: LegalBodyRecord; frozen: FrozenAgreementText; grant: Grant | null } {
   const row = requireOwnedOrder(deps, tenantId, id);
-  return { row, frozen: assertOpenDraft(deps, row, nowMs).frozen };
+  const { frozen, grant } = assertOpenDraft(deps, row, nowMs);
+  return { row, frozen, grant };
 }
 
 /**
  * The typed data the guardian signs to adopt its order's agreement, issued now by the server's
- * clock: a real human (never a waiver), then the shared rule (`adoptableDraft`). It writes
- * nothing and takes no token, as the agreement's read takes none.
+ * clock: a real human (never a waiver), then the shared rule (`adoptableDraft`), then the grant's
+ * end: from the first second of its last day on, now is a 409 `grant_ends_too_soon`
+ * (`assertGrantOutlasts`). It writes nothing and takes no token, as the agreement's read takes
+ * none.
  */
 export function adoptionMessage(
   deps: LegalBodyOrderDeps,
@@ -275,8 +281,10 @@ export function adoptionMessage(
 ): AdoptionMessageResult {
   const nowMs = (deps.now ?? Date.now)();
   assertRealHuman(deps.world, tenantId, deps.environment);
-  const { row, frozen } = adoptableDraft(deps, tenantId, id, nowMs);
-  const message = buildAdoptionMessage(row, frozen, BigInt(Math.floor(nowMs / 1000)));
+  const { row, frozen, grant } = adoptableDraft(deps, tenantId, id, nowMs);
+  const issuedAt = BigInt(Math.floor(nowMs / 1000));
+  assertGrantOutlasts(grant, issuedAt);
+  const message = buildAdoptionMessage(row, frozen, issuedAt);
   return {
     typedData: adoptionTypedDataWire(deps.deployment.chainId, deps.deployment.factory, message),
     issuedAt: message.issuedAt.toString(),
@@ -315,10 +323,12 @@ function storedAdoption(deps: LegalBodyOrderDeps, row: LegalBodyRecord): number 
  *  - any other order passes the draft rule (`assertOpenDraft`, each refusal as before), and an
  *    open draft already adopted answers its stored adoption;
  * neither checks the signature or writes anything, so a re-post after the window, or with another
- * signature, answers the stored time. Else `verifyAdoption`, on this deployment's chain and
- * factory and within its `adoptionMaxAgeSeconds`; then, under the order's lock and in one
- * transaction, the order read again (one abandoned since is 409 `order_closed`) and
- * `recordAdoption`, which keeps a first adoption stored in between.
+ * signature, or once the grant's last day has begun, answers the stored time. Else the grant's
+ * end: from the first second of its last day on, now is a 409 `grant_ends_too_soon`
+ * (`assertGrantOutlasts`), before the signature is read. Then `verifyAdoption`, on this
+ * deployment's chain and factory and within its `adoptionMaxAgeSeconds`; then, under the order's
+ * lock and in one transaction, the order read again (one abandoned since is 409 `order_closed`)
+ * and `recordAdoption`, which keeps a first adoption stored in between.
  */
 export async function adoptAgreement(
   deps: LegalBodyOrderDeps,
@@ -337,9 +347,10 @@ export async function adoptAgreement(
     if (adoptedAt === undefined) throw refusal("order_closed", 409);
     return { adoptedAt };
   }
-  const { frozen } = assertOpenDraft(deps, row, nowMs);
+  const { frozen, grant } = assertOpenDraft(deps, row, nowMs);
   const adoptedBefore = storedAdoption(deps, row);
   if (adoptedBefore !== undefined) return { adoptedAt: adoptedBefore };
+  assertGrantOutlasts(grant, BigInt(nowSec));
   const issuedAt = input?.issuedAt as string;
   const { digest } = await verifyAdoption({
     chainId: deps.deployment.chainId,
