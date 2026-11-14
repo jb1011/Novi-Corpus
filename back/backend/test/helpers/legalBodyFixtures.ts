@@ -22,6 +22,7 @@ import {
 } from "../../src/legalBody/orders";
 import { CUSTOMER_PROVIDER } from "../../src/legalBody/provider";
 import { servedLegalTexts } from "../../src/legalBody/texts/sets";
+import { SqliteCharterGrantRepository } from "../../src/persistence/charterGrantRepository";
 import {
   type CompanyCheckRepository,
   type CompanyCheckResult,
@@ -78,6 +79,7 @@ export interface LegalBodyStores {
   store: SqliteWorldStore;
   repo: SqliteLegalBodyRepository;
   adoptions: SqliteLegalBodyAdoptionRepository;
+  grants: SqliteCharterGrantRepository;
   docStore: MemoryDocumentStore;
 }
 
@@ -93,6 +95,7 @@ export function openLegalBodyStores(
     store: new SqliteWorldStore(db),
     repo: new SqliteLegalBodyRepository(db),
     adoptions: new SqliteLegalBodyAdoptionRepository(db),
+    grants: new SqliteCharterGrantRepository(db),
     docStore,
   };
 }
