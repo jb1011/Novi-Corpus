@@ -16,10 +16,8 @@
  * nullifier is an invention, the keys constant test keys.
  */
 import { mkdtempSync, rmSync } from "node:fs";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Worker } from "node:worker_threads";
 import type DatabaseType from "better-sqlite3";
 import { getAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -45,6 +43,7 @@ import {
   worldFor,
 } from "../helpers/customerCompanyFixtures";
 import { fakeChain, paymentCfg } from "../helpers/formationPayment";
+import { holdWriteLock } from "../helpers/writeLock";
 import { startMcpTestClient } from "../mcp/helpers";
 
 const texts = vi.hoisted(() => ({ agreement: "approved" as LegalTextStatus }));
@@ -216,40 +215,6 @@ function anotherPersonsCompany(n: number): string {
   });
 }
 
-/**
- * Another connection to the same file, in a worker thread, that takes the write lock
- * (BEGIN IMMEDIATE), writes, holds the lock for HOLD_MS and commits. Resolves once the lock is
- * held; `released()` once the worker has committed and exited.
- */
-function holdWriteLock(): { flag: Int32Array; released: () => Promise<void> } {
-  const flag = new Int32Array(new SharedArrayBuffer(8));
-  const driver = createRequire(import.meta.url).resolve("better-sqlite3");
-  const worker = new Worker(
-    `
-    const { workerData } = require("node:worker_threads");
-    const Database = require(workerData.driver);
-    const flag = new Int32Array(workerData.flag);
-    const db = new Database(workerData.path);
-    db.exec("BEGIN IMMEDIATE");
-    db.prepare("INSERT INTO lock_probe (n) VALUES (1)").run();
-    Atomics.store(flag, 0, 1);
-    Atomics.notify(flag, 0);
-    Atomics.wait(flag, 1, 0, workerData.holdMs);
-    db.exec("COMMIT");
-    Atomics.store(flag, 0, 2);
-    db.close();
-    `,
-    { eval: true, workerData: { driver, path, flag: flag.buffer, holdMs: HOLD_MS } },
-  );
-  const exited = new Promise<void>((resolve, reject) => {
-    worker.once("error", reject);
-    worker.once("exit", () => resolve());
-  });
-  // Block this thread until the worker holds the lock (or five seconds pass).
-  Atomics.wait(flag, 0, 0, 5000);
-  return { flag, released: () => exited };
-}
-
 // ── the formed create's transaction ──────────────────────────────────────────────────────────
 
 describe("the formed create takes the write lock first", () => {
@@ -257,7 +222,8 @@ describe("the formed create takes the write lock first", () => {
     const application = app(10);
     const partyId = newParty();
 
-    const lock = holdWriteLock();
+    // Another connection to this file takes the write lock and holds it for HOLD_MS.
+    const lock = holdWriteLock(path, HOLD_MS);
     expect(Atomics.load(lock.flag, 0)).toBe(1);
     const started = Date.now();
     const res = await post(application, "/companies", formedIntake(partyId));
@@ -271,22 +237,6 @@ describe("the formed create takes the write lock first", () => {
     expect(waited).toBeGreaterThanOrEqual(100);
     expect(Atomics.load(lock.flag, 0)).toBe(2);
     expect(db.prepare("SELECT COUNT(*) AS n FROM lock_probe").get()).toEqual({ n: 1 });
-  });
-
-  test("inside an outer transaction the immediate variant is a savepoint: it commits with the outer one, and a failure rolls back only its own writes", () => {
-    const rows = () =>
-      (db.prepare("SELECT n FROM lock_probe ORDER BY n").all() as { n: number }[]).map((r) => r.n);
-    repo.transaction(() => {
-      repo.immediateTransaction(() => db.prepare("INSERT INTO lock_probe (n) VALUES (1)").run());
-      expect(() =>
-        repo.immediateTransaction(() => {
-          db.prepare("INSERT INTO lock_probe (n) VALUES (2)").run();
-          throw new Error("the inner write fails");
-        }),
-      ).toThrow("the inner write fails");
-      db.prepare("INSERT INTO lock_probe (n) VALUES (3)").run();
-    });
-    expect(rows()).toEqual([1, 3]);
   });
 });
 

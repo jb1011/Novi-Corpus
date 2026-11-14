@@ -18,6 +18,12 @@ export function openDatabase(path: string): Database.Database {
   // so a lost final commit is acceptable. Do not raise to FULL without re-measuring the pay path.
   db.pragma("synchronous = NORMAL");
   db.pragma("foreign_keys = ON");
+  // How long a write waits for another connection's write lock before SQLITE_BUSY: the API, the
+  // payments authority and operator commands share this file. Set here rather than left to the
+  // driver's default (also 5000 ms), because the IMMEDIATE transactions of the entity, legal-body,
+  // identity and case repositories, and the World ID counters, rely on this wait to succeed
+  // instead of failing at once. Do not lower it without re-reading those repositories.
+  db.pragma("busy_timeout = 5000");
   return db;
 }
 

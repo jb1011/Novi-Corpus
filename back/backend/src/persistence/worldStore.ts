@@ -446,7 +446,7 @@ export class SqliteWorldStore implements WorldStore {
     now: number,
     windowMs?: number,
   ): { allowed: boolean; used: number; resetAt?: number } {
-    return this.db.transaction(() => {
+    const counted = this.db.transaction(() => {
       const row = this.db
         .prepare(
           "SELECT used, paid_attempts, updated_at FROM world_usage WHERE human_id = ? AND resource = ?",
@@ -472,7 +472,12 @@ export class SqliteWorldStore implements WorldStore {
         )
         .run(humanId, resource, now, used + 1, paid);
       return { allowed: true, used: used + 1, resetAt };
-    })();
+    });
+    // IMMEDIATE, as `SqliteEntityRepository.transaction`: the row is read before it is written,
+    // and a deferred transaction that has read cannot wait for another connection's write lock
+    // (its write fails at once with SQLITE_BUSY). The peek, a limit of zero or below, returns
+    // before any write (`used >= limit`), so it reads in a deferred one and takes no lock.
+    return limit > 0 ? counted.immediate() : counted.deferred();
   }
 
   tryConsumePaidAttempt(
@@ -481,7 +486,7 @@ export class SqliteWorldStore implements WorldStore {
     now: number,
     windowMs?: number,
   ): { allowed: boolean; paidAttempts: number; unitsCharged: number } {
-    return this.db.transaction(() => {
+    const claimed = this.db.transaction(() => {
       const row = this.db
         .prepare(
           "SELECT used, paid_attempts, updated_at FROM world_usage WHERE human_id = ? AND resource = ?",
@@ -502,7 +507,9 @@ export class SqliteWorldStore implements WorldStore {
         .prepare("UPDATE world_usage SET paid_attempts = ? WHERE human_id = ? AND resource = ?")
         .run(paidAttempts + 1, humanId, resource);
       return { allowed: true, paidAttempts: paidAttempts + 1, unitsCharged };
-    })();
+    });
+    // IMMEDIATE, as `tryIncrementUsage` and for its reason: the row is read, then written.
+    return claimed.immediate();
   }
 
   getCachedHuman(agentAddress: string, now: number, ttlMs: number): string | undefined {

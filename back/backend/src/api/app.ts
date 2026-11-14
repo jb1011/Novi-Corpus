@@ -681,14 +681,15 @@ export function buildApiApp(deps: ApiDeps) {
   // A customer's own company: under the `/companies/*` requireAuth above, and only where the
   // deployment wires the doors.
   // The abandon door among them takes a company formed for a legal body too, with the formed
-  // door's own deps and its write-lock (IMMEDIATE) transaction, the one the formed create takes.
+  // door's own deps and the entity repository's transaction, the one the formed create takes,
+  // which takes the write lock at BEGIN (IMMEDIATE).
   if (deps.customerCompanies)
     mountCustomerCompanyRoutes(
       app,
       deps.customerCompanies,
       deps.formation && {
         companyDeps: deps.formation.companyDeps,
-        transaction: (fn) => deps.repo.immediateTransaction(fn),
+        transaction: (fn) => deps.repo.transaction(fn),
       },
     );
   // The legal-body order doors: their protection and their routes together, and only where the

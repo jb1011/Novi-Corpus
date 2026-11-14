@@ -4,7 +4,8 @@
  * The route reads the tenant's own company (unknown and another tenant's are one 404). A customer's
  * own declared company goes to `abandonCustomerCompany`, exactly as before; a company formed
  * through doola for a legal body goes to `abandonFormedCompany`; anything else is a 409. The
- * formed abandon runs in the write lock's transaction (IMMEDIATE), the one the formed create takes.
+ * formed abandon runs in the entity repository's transaction, the one the formed create takes, which
+ * takes the write lock at BEGIN (IMMEDIATE).
  *
  * The database is real (in memory). The keys are anvil's published test accounts; every name and
  * company is an invention.
@@ -64,8 +65,8 @@ let parties: SqliteFormationPartyRepository;
 let requests: SqliteFormationRepository;
 let payments: SqliteFormationPaymentRepository;
 let nowMs: number;
-/** How many transactions of each kind the formed door's deps were asked for. */
-let opened: { immediate: number; deferred: number };
+/** How many transactions the entity repository, the formed door's deps, was asked for. */
+let opened: number;
 
 beforeEach(() => {
   db = openDatabase(":memory:");
@@ -79,7 +80,7 @@ beforeEach(() => {
   requests = new SqliteFormationRepository(db);
   payments = new SqliteFormationPaymentRepository(db);
   nowMs = Math.floor(Date.now() / 1000) * 1000;
-  opened = { immediate: 0, deferred: 0 };
+  opened = 0;
   vi.spyOn(console, "log").mockImplementation(() => {});
   recordHuman(store, owner.address, "1001", nowMs);
 });
@@ -108,15 +109,12 @@ function makeApp(opts: { formation?: boolean } = {}) {
     dailyCeiling: 100,
     payment: paymentCfg(payments),
   };
-  // The entity repository's two transactions, counted: the formed abandon must take the lock.
+  // The entity repository's transactions, counted: the formed abandon must take the lock, and the
+  // entity repository's transaction is the one that takes it at BEGIN.
   const counted = Object.assign(Object.create(repo), {
     transaction: <T>(fn: () => T): T => {
-      opened.deferred += 1;
+      opened += 1;
       return repo.transaction(fn);
-    },
-    immediateTransaction: <T>(fn: () => T): T => {
-      opened.immediate += 1;
-      return repo.immediateTransaction(fn);
     },
   }) as SqliteEntityRepository;
   const deps: Partial<ApiDeps> = {
@@ -241,7 +239,7 @@ describe("the abandon door dispatches by provider", () => {
     expect(companies.find(companyId)!.status).toBe("abandoned");
     expect(declarations.find(companyId)!.declarantName).toBeNull();
     // The customer abandon runs in its own deps' transaction, not the formed door's.
-    expect(opened.immediate).toBe(0);
+    expect(opened).toBe(0);
   });
 
   test("a company formed for a legal body goes to the formed abandon, in the write lock's transaction", async () => {
@@ -255,7 +253,7 @@ describe("the abandon door dispatches by provider", () => {
     expect(companies.find(companyId)!.status).toBe("abandoned");
     expect(parties.findByCompanyId(companyId)).toBeUndefined();
     expect(parties.findOwned(owner.address, partyId)).toBeUndefined();
-    expect(opened).toEqual({ immediate: 1, deferred: 0 });
+    expect(opened).toBe(1);
   });
 
   test("the formed abandon's refusals reach the caller: a filing being sent is a 409", async () => {

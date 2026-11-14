@@ -1246,10 +1246,10 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         try {
           const result = createCompany(
             // The composition root's ONE dependency set; this door supplies only its transaction,
-            // an IMMEDIATE one, as `POST /companies` does.
+            // the entity repository's IMMEDIATE one, as `POST /companies` does.
             {
               ...deps.formation!.companyDeps,
-              transaction: (fn) => deps.repo.immediateTransaction(fn),
+              transaction: (fn) => deps.repo.transaction(fn),
             },
             tenantId,
             {
