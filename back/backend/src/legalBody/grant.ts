@@ -2,12 +2,14 @@
  * A GRANT: the company's written permission for its agent, saying which acts the agent may make in
  * the company's name and up to which amount. The guardian chooses it in a form, and it is written
  * into the Charter's Schedule A before the guardian adopts the Charter. Every amount is a whole
- * number of USDC. Every limit is declared: written into the Charter, for the agent and for anyone
- * who deals with it to read.
+ * number of US dollars, and one USDC counts as one US dollar (the Charter's section 5.2). Every
+ * limit is declared: written into the Charter, for the agent and for anyone who deals with it to
+ * read.
  *
- * `parseGrantChoices` turns the guardian's choices into one canonical value, or refuses them field
- * by field, every broken rule in one pass. A value is refused, never cleaned or converted, so one
- * set of choices has one spelling.
+ * `checkGrantChoices` turns the guardian's choices into one canonical value, or refuses them field
+ * by field, every broken rule in one pass, with no clock: every rule but the end rule.
+ * `grantEndProblem` is the end rule, an end day after today. `parseGrantChoices` reads both in one
+ * pass. A value is refused, never cleaned or converted, so one set of choices has one spelling.
  *
  * `buildGrant` numbers those choices, `grantDigest` is their fingerprint, and `renderScheduleA`
  * writes them as the Charter's Schedule A, in fixed sentences.
@@ -16,7 +18,11 @@ import { type Hex, keccak256, stringToBytes } from "viem";
 import { canonicalizeJcs } from "../oa/manifest";
 import type { FieldProblem } from "./textRules";
 
-export const GRANT_AMOUNT_MAX = 1_000_000_000; // whole USDC
+/** The greatest amount, in whole US dollars; one USDC counts as one US dollar (the Charter's
+ *  section 5.2). */
+export const GRANT_AMOUNT_MAX = 1_000_000_000;
+/** The most problems one answer lists. */
+export const GRANT_PROBLEMS_MAX = 20;
 
 export type GrantAbove = "guardian_signature" | "not_allowed";
 /** A kind of act with one amount, per act. */
@@ -54,8 +60,8 @@ export type GrantChoices = {
   endsOn: string | null;
 };
 
-const ROOT_KEYS = ["acts", "heavyActs", "counterparties", "endsOn"] as const;
-const ACT_KINDS = [
+/** The seven kinds of the Charter's section 5.2 and the four acts of its section 5.6: the one list. */
+export const GRANT_ACT_KINDS = [
   "provideServices",
   "acceptEngagement",
   "issueInvoice",
@@ -64,13 +70,18 @@ const ACT_KINDS = [
   "pay",
   "engageContractor",
 ] as const;
-const HEAVY_ACTS = ["employ", "borrow", "guarantee", "transferProperty"] as const;
+export const GRANT_HEAVY_ACTS = ["employ", "borrow", "guarantee", "transferProperty"] as const;
+export type GrantActKind = (typeof GRANT_ACT_KINDS)[number];
+export type GrantHeavyAct = (typeof GRANT_HEAVY_ACTS)[number];
+
+const ROOT_KEYS = ["acts", "heavyActs", "counterparties", "endsOn"] as const;
 const ACT_SETTING_KEYS = ["allowed", "perAct", "above"] as const;
 const SPEND_SETTING_KEYS = ["allowed", "perAct", "per30Days", "above"] as const;
 const RECEIVE_PAYMENT_KEYS = ["allowed"] as const;
 const HEAVY_SETTING_KEYS = ["mode", "perAct"] as const;
 const ABOVE = ["guardian_signature", "not_allowed"] as const;
 const MODES = ["not_allowed", "guardian_signature", "alone"] as const;
+export type GrantHeavyMode = (typeof MODES)[number];
 const COUNTERPARTIES = ["anyone", "active_legal_body"] as const;
 
 const MUST_BE_AN_OBJECT = "must be an object";
@@ -78,7 +89,7 @@ const NOT_A_FIELD = "is not a field of a grant";
 const REQUIRED = "is required";
 const TRUE_OR_FALSE = "must be true or false";
 /** Names `GRANT_AMOUNT_MAX`, written out. */
-const AMOUNT = "must be a whole number of USDC from 1 to 1,000,000,000";
+const AMOUNT = "must be a whole number of US dollars from 1 to 1,000,000,000";
 const AT_LEAST_PER_ACT = "must be at least the amount per act";
 const ABOVE_PROBLEM = "must be guardian_signature or not_allowed";
 const ABSENT_WHEN_NOT_ALLOWED = "must be absent when the act is not allowed";
@@ -88,6 +99,7 @@ const ABSENT_UNLESS_ALONE = "must be absent unless the mode is alone";
 const COUNTERPARTIES_PROBLEM = "must be anyone or active_legal_body";
 const DATE_PROBLEM = "must be null or a calendar date written YYYY-MM-DD";
 const AFTER_TODAY = "must be after today (UTC)";
+const MORE_PROBLEMS = `has more problems than the ${GRANT_PROBLEMS_MAX} listed`;
 
 type Fields = Record<string, unknown>;
 /**
@@ -101,7 +113,14 @@ const isFields = (v: unknown): v is Fields =>
   typeof v === "object" && v !== null && !Array.isArray(v);
 /** The value `o` holds as its own under `key`; never an inherited one. */
 const own = (o: Fields, key: string): unknown => (Object.hasOwn(o, key) ? o[key] : undefined);
-const at = (path: string, key: string): string => (path === "" ? key : `${path}.${key}`);
+/** A key a field may name: a short plain name. Any other key is written `(unnamed)`, so a problem
+ *  never echoes a long or strange key back. */
+const NAMEABLE_KEY = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/;
+/** The field of `key` under `path`: the one place a key becomes a segment of a field. */
+const at = (path: string, key: string): string => {
+  const segment = NAMEABLE_KEY.test(key) ? key : "(unnamed)";
+  return path === "" ? segment : `${path}.${segment}`;
+};
 const refuse = (problems: FieldProblem[], field: string, problem: string): undefined => {
   problems.push({ field, problem });
   return undefined;
@@ -222,7 +241,7 @@ const allowedOf = (acts: Fields, kind: string): unknown => {
 };
 
 const readActs: Reader<GrantChoices["acts"]> = (field, raw, problems) => {
-  const o = container(field, raw, ACT_KINDS, problems);
+  const o = container(field, raw, GRANT_ACT_KINDS, problems);
   if (o === undefined) return undefined;
   const provideServices = member(o, field, "provideServices", readAct, problems);
   const acceptEngagement = member(o, field, "acceptEngagement", readAct, problems);
@@ -274,7 +293,7 @@ const readHeavyAct: Reader<GrantHeavySetting> = (field, raw, problems) => {
 };
 
 const readHeavyActs: Reader<GrantChoices["heavyActs"]> = (field, raw, problems) => {
-  const o = container(field, raw, HEAVY_ACTS, problems);
+  const o = container(field, raw, GRANT_HEAVY_ACTS, problems);
   if (o === undefined) return undefined;
   const employ = member(o, field, "employ", readHeavyAct, problems);
   const borrow = member(o, field, "borrow", readHeavyAct, problems);
@@ -307,38 +326,100 @@ function isCalendarDate(s: string): boolean {
   return last !== undefined && day >= 1 && day <= last;
 }
 
-/** `null`, or a calendar day after `todayUtc`. Two days written `YYYY-MM-DD` compare as text. */
+/** A `todayUtc` that is not a calendar day is a bug in the caller, never an answer: it throws. */
+function checkToday(todayUtc: string): void {
+  if (!isCalendarDate(todayUtc))
+    throw new Error("grant: today must be a calendar date written YYYY-MM-DD");
+}
+
+/** The end rule: no end, or an end day after `todayUtc`. Two days written `YYYY-MM-DD` compare as
+ *  text. */
+const endsAfterToday = (endsOn: string | null, todayUtc: string): boolean =>
+  endsOn === null || endsOn > todayUtc;
+
+/** `null`, or a calendar day; with `todayUtc`, a day after it too. */
 const readEndsOn =
-  (todayUtc: string): Reader<string | null> =>
+  (todayUtc: string | undefined): Reader<string | null> =>
   (field, raw, problems) => {
     if (raw === null) return null;
     if (typeof raw !== "string" || !isCalendarDate(raw))
       return refuse(problems, field, DATE_PROBLEM);
-    return raw > todayUtc ? raw : refuse(problems, field, AFTER_TODAY);
+    return todayUtc === undefined || endsAfterToday(raw, todayUtc)
+      ? raw
+      : refuse(problems, field, AFTER_TODAY);
   };
 
-/** `todayUtc` is `YYYY-MM-DD`. Never throws for any value `JSON.parse` can produce; a getter or a
- *  Proxy is outside that. */
-export function parseGrantChoices(
+/** The root of a grant's choices and every value under it; with `todayUtc`, the end rule too. */
+function readRoot(
   raw: unknown,
-  todayUtc: string,
-): { choices: GrantChoices } | { problems: FieldProblem[] } {
-  if (!isFields(raw)) return { problems: [{ field: "grant", problem: MUST_BE_AN_OBJECT }] };
-  const problems: FieldProblem[] = [];
+  todayUtc: string | undefined,
+  problems: FieldProblem[],
+): GrantChoices | undefined {
+  if (!isFields(raw)) return refuse(problems, "grant", MUST_BE_AN_OBJECT);
   checkKeys("", raw, ROOT_KEYS, ROOT_KEYS, problems);
   const acts = member(raw, "", "acts", readActs, problems);
   const heavyActs = member(raw, "", "heavyActs", readHeavyActs, problems);
   const counterparties = member(raw, "", "counterparties", readCounterparties, problems);
   const endsOn = member(raw, "", "endsOn", readEndsOn(todayUtc), problems);
   if (
-    problems.length > 0 ||
     acts === undefined ||
     heavyActs === undefined ||
     counterparties === undefined ||
     endsOn === undefined
   )
-    return { problems };
-  return { choices: { acts, heavyActs, counterparties, endsOn } };
+    return undefined;
+  return { acts, heavyActs, counterparties, endsOn };
+}
+
+/** The one reader behind `checkGrantChoices` and `parseGrantChoices`, so the two never disagree on
+ *  the shape. Lists the first `GRANT_PROBLEMS_MAX` problems found, then one last line when there
+ *  are more: the one place a list of problems is returned. */
+function readChoices(
+  raw: unknown,
+  todayUtc: string | undefined,
+): { choices: GrantChoices } | { problems: FieldProblem[] } {
+  const problems: FieldProblem[] = [];
+  const choices = readRoot(raw, todayUtc, problems);
+  if (choices !== undefined && problems.length === 0) return { choices };
+  if (problems.length <= GRANT_PROBLEMS_MAX) return { problems };
+  return {
+    problems: [
+      ...problems.slice(0, GRANT_PROBLEMS_MAX),
+      { field: "grant", problem: MORE_PROBLEMS },
+    ],
+  };
+}
+
+/** The canonical shape, with no clock: every rule of a grant's choices but "after today". Never
+ *  throws for any value `JSON.parse` can produce; a getter or a Proxy is outside that. */
+export function checkGrantChoices(
+  raw: unknown,
+): { choices: GrantChoices } | { problems: FieldProblem[] } {
+  return readChoices(raw, undefined);
+}
+
+/** The end rule at `todayUtc` (`YYYY-MM-DD`): the problem, or null when the choices have no end
+ *  or end after today. Throws when `todayUtc` is not a calendar date. */
+export function grantEndProblem(choices: GrantChoices, todayUtc: string): FieldProblem | null {
+  checkToday(todayUtc);
+  return endsAfterToday(choices.endsOn, todayUtc)
+    ? null
+    : { field: "endsOn", problem: AFTER_TODAY };
+}
+
+/** Both, in one pass, as before. Throws when `todayUtc` is not a calendar date. */
+export function parseGrantChoices(
+  raw: unknown,
+  todayUtc: string,
+): { choices: GrantChoices } | { problems: FieldProblem[] } {
+  checkToday(todayUtc);
+  return readChoices(raw, todayUtc);
+}
+
+/** The first unix second of the grant's last day (00:00:00 UTC of `endsOn`), or null when it has
+ *  no end. */
+export function grantLastDayStartsAt(choices: GrantChoices): number | null {
+  return choices.endsOn === null ? null : Date.parse(`${choices.endsOn}T00:00:00Z`) / 1000;
 }
 
 /** The UTC calendar day of a time in milliseconds, `YYYY-MM-DD`. */
@@ -358,9 +439,9 @@ export type Grant = {
 };
 
 /**
- * Numbers a set of choices, which must come from `parseGrantChoices`. Throws unless `number` and
- * `version` are each a whole number of at least 1; that guard and the ones of `renderScheduleA`
- * catch the worst cases, not every value that is not canonical.
+ * Numbers a set of choices, which must come from `checkGrantChoices` or `parseGrantChoices`.
+ * Throws unless `number` and `version` are each a whole number of at least 1; that guard and the
+ * ones of `renderScheduleA` catch the worst cases, not every value that is not canonical.
  */
 export function buildGrant(
   choices: GrantChoices,
@@ -380,8 +461,8 @@ export function grantDigest(grant: Grant): Hex {
 /** True when none of the seven kinds is allowed and each act of section 5.6 is set to not_allowed. */
 export function grantAllowsNothing(choices: GrantChoices): boolean {
   return (
-    ACT_KINDS.every((kind) => !choices.acts[kind].allowed) &&
-    HEAVY_ACTS.every((act) => choices.heavyActs[act].mode === "not_allowed")
+    GRANT_ACT_KINDS.every((kind) => !choices.acts[kind].allowed) &&
+    GRANT_HEAVY_ACTS.every((act) => choices.heavyActs[act].mode === "not_allowed")
   );
 }
 
@@ -418,7 +499,7 @@ const MONTHS = [
  */
 function groupDigits(n: number): string {
   if (!isWholeFromOne(n))
-    throw new Error("grant: an amount must be a whole number of USDC of at least 1");
+    throw new Error("grant: an amount must be a whole number of US dollars of at least 1");
   const digits = String(n);
   let out = "";
   for (let i = 0; i < digits.length; i++) {
@@ -469,8 +550,8 @@ const listItems = (items: string[]): string[] =>
 
 /**
  * The Charter's `scheduleA` field. No trailing newline. The grant's choices must come from
- * `parseGrantChoices`: an amount or an end day that cannot be written throws here, which catches
- * the worst cases, not every value that is not canonical.
+ * `checkGrantChoices` or `parseGrantChoices`: an amount or an end day that cannot be written
+ * throws here, which catches the worst cases, not every value that is not canonical.
  */
 export function renderScheduleA(grant: Grant): string {
   const { acts, heavyActs, counterparties, endsOn } = grant.choices;

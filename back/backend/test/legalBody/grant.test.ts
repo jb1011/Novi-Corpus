@@ -1,7 +1,7 @@
 /**
  * A grant's choices, parsed into one canonical value or refused field by field: an amount is a
- * plain whole number of USDC, one choice has one spelling, an end is a future calendar day, and a
- * hostile shape is a list of problems, never a throw. Then the grant built from them: its
+ * plain whole number of US dollars, one choice has one spelling, an end is a future calendar day,
+ * and a hostile shape is a list of problems, never a throw. Then the grant built from them: its
  * fingerprint, and the Schedule A written from it, compared character for character with three
  * golden texts.
  *
@@ -10,11 +10,17 @@
 import { createHash } from "node:crypto";
 import { expect, test } from "vitest";
 import {
+  GRANT_ACT_KINDS,
   GRANT_AMOUNT_MAX,
+  GRANT_HEAVY_ACTS,
+  GRANT_PROBLEMS_MAX,
   type GrantChoices,
   buildGrant,
+  checkGrantChoices,
   grantAllowsNothing,
   grantDigest,
+  grantEndProblem,
+  grantLastDayStartsAt,
   parseGrantChoices,
   renderScheduleA,
   utcDay,
@@ -54,7 +60,7 @@ test.each([
   [null],
   [true],
 ])(
-  "an amount that is not a whole number of USDC in range is refused, never converted: %s",
+  "an amount that is not a whole number of US dollars in range is refused, never converted: %s",
   (bad) => {
     expect(
       problemsOf(
@@ -65,7 +71,7 @@ test.each([
     ).toEqual([
       {
         field: "acts.buy.perAct",
-        problem: "must be a whole number of USDC from 1 to 1,000,000,000",
+        problem: "must be a whole number of US dollars from 1 to 1,000,000,000",
       },
     ]);
   },
@@ -183,7 +189,7 @@ test("a heavy act alone needs its amount", () => {
   ).toEqual([
     {
       field: "heavyActs.employ.perAct",
-      problem: "must be a whole number of USDC from 1 to 1,000,000,000",
+      problem: "must be a whole number of US dollars from 1 to 1,000,000,000",
     },
   ]);
   expect(
@@ -261,7 +267,7 @@ test("a rule between two values is checked only when both values are valid", () 
   ).toEqual([
     {
       field: "acts.pay.perAct",
-      problem: "must be a whole number of USDC from 1 to 1,000,000,000",
+      problem: "must be a whole number of US dollars from 1 to 1,000,000,000",
     },
   ]);
   expect(
@@ -352,6 +358,125 @@ test("hostile keys are fields like any other, and no prototype is touched", () =
 test("the UTC day of a time", () => {
   expect(utcDay(Date.UTC(2026, 10, 11, 23, 59, 59))).toBe("2026-11-11");
   expect(utcDay(Date.UTC(2027, 0, 1, 0, 0, 0))).toBe("2027-01-01");
+});
+
+test("the shape is checked without a clock: a past end day is a valid shape, and the end rule is its own step", () => {
+  const past = edit((c) => {
+    c.endsOn = "1999-01-01";
+  });
+  expect(checkGrantChoices(past)).toEqual({ choices: { ...A, endsOn: "1999-01-01" } });
+  expect(problemsOf(past)).toEqual([{ field: "endsOn", problem: "must be after today (UTC)" }]);
+  expect(grantEndProblem({ ...A, endsOn: "2026-11-11" }, "2026-11-11")).toEqual({
+    field: "endsOn",
+    problem: "must be after today (UTC)",
+  });
+  expect(grantEndProblem({ ...A, endsOn: "2026-11-12" }, "2026-11-11")).toBeNull();
+  expect(grantEndProblem(A, "2026-11-11")).toBeNull();
+});
+
+test("the shape check refuses what the parser refuses, the end rule aside", () => {
+  expect(
+    checkGrantChoices(
+      edit((c) => {
+        c.acts.buy.perAct = "200";
+      }),
+    ),
+  ).toEqual({
+    problems: [
+      {
+        field: "acts.buy.perAct",
+        problem: "must be a whole number of US dollars from 1 to 1,000,000,000",
+      },
+    ],
+  });
+  expect(
+    checkGrantChoices(
+      edit((c) => {
+        c.endsOn = "2027-02-30";
+      }),
+    ),
+  ).toEqual({
+    problems: [{ field: "endsOn", problem: "must be null or a calendar date written YYYY-MM-DD" }],
+  });
+  expect(checkGrantChoices(null)).toEqual({
+    problems: [{ field: "grant", problem: "must be an object" }],
+  });
+});
+
+test.each([[""], ["11/11/2026"], ["2026-11-31"], ["2026-11-11T00:00:00Z"]])(
+  "a today that is not a calendar day is a bug in the caller, and throws: %s",
+  (bad) => {
+    const error = new Error("grant: today must be a calendar date written YYYY-MM-DD");
+    expect(() => parseGrantChoices(structuredClone(A), bad)).toThrow(error);
+    expect(() => grantEndProblem(A, bad)).toThrow(error);
+  },
+);
+
+test("the first second of a grant's last day", () => {
+  expect(grantLastDayStartsAt({ ...A, endsOn: "2027-01-15" })).toBe(1_799_971_200);
+  expect(grantLastDayStartsAt({ ...A, endsOn: "2027-01-16" })).toBe(1_800_057_600);
+  expect(grantLastDayStartsAt({ ...A, endsOn: "2028-02-29" })).toBe(1_835_395_200);
+  expect(grantLastDayStartsAt(A)).toBeNull();
+});
+
+test("at most twenty problems are listed, then one line says there are more", () => {
+  const raw = edit((c) => {
+    for (let i = 0; i < 50; i++) c[`k${i}`] = 1;
+  });
+  const r = parseGrantChoices(raw, TODAY) as { problems: { field: string; problem: string }[] };
+  expect(r.problems).toHaveLength(GRANT_PROBLEMS_MAX + 1);
+  expect(r.problems.slice(0, 20)).toEqual(
+    Array.from({ length: 20 }, (_, i) => ({
+      field: `k${i}`,
+      problem: "is not a field of a grant",
+    })),
+  );
+  expect(r.problems.at(-1)).toEqual({
+    field: "grant",
+    problem: "has more problems than the 20 listed",
+  });
+  // Twenty problems are listed whole, with no last line.
+  const twenty = edit((c) => {
+    for (let i = 0; i < 20; i++) c[`k${i}`] = 1;
+  });
+  expect((parseGrantChoices(twenty, TODAY) as { problems: unknown[] }).problems).toHaveLength(20);
+});
+
+test("an unknown key is named only when it is a short plain name", () => {
+  expect(
+    problemsOf(
+      edit((c) => {
+        c["x".repeat(41)] = 1;
+        c["a b"] = 1;
+      }),
+    ),
+  ).toEqual([
+    { field: "(unnamed)", problem: "is not a field of a grant" },
+    { field: "(unnamed)", problem: "is not a field of a grant" },
+  ]);
+  expect(
+    problemsOf(
+      edit((c) => {
+        c.acts["<script>"] = 1;
+        c.heavyActs[`y${"z".repeat(100_000)}`] = 1;
+      }),
+    ),
+  ).toEqual([
+    { field: "acts.(unnamed)", problem: "is not a field of a grant" },
+    { field: "heavyActs.(unnamed)", problem: "is not a field of a grant" },
+  ]);
+  expect(
+    problemsOf(
+      edit((c) => {
+        c["x".repeat(40)] = 1;
+      }),
+    ),
+  ).toEqual([{ field: "x".repeat(40), problem: "is not a field of a grant" }]);
+});
+
+test("the eleven keys are one exported list", () => {
+  expect(GRANT_ACT_KINDS).toEqual(Object.keys(A.acts));
+  expect(GRANT_HEAVY_ACTS).toEqual(Object.keys(A.heavyActs));
 });
 
 // ── The grant, its fingerprint and its Schedule A ─────────────────────────────────────────────
@@ -454,7 +579,7 @@ coSigned.heavyActs.borrow = { mode: "guardian_signature" };
 const grantCoSigned = buildGrant(coSigned, { number: 1, version: 1 });
 
 const BAD_NUMBER = "grant: number and version must each be a whole number of at least 1";
-const BAD_AMOUNT = "grant: an amount must be a whole number of USDC of at least 1";
+const BAD_AMOUNT = "grant: an amount must be a whole number of US dollars of at least 1";
 const BAD_END = "grant: the end date is not a calendar date";
 
 test.each([[0], [-1], [1.5], ["1" as never], [Number.NaN]])(
@@ -469,7 +594,7 @@ test("a grant's version of 0 is refused when the grant is built", () => {
 });
 
 test.each([[-100], [0], ["200" as never]])(
-  "Schedule A refuses to write an amount that is not a whole number of USDC of at least 1: %s",
+  "Schedule A refuses to write an amount that is not a whole number of US dollars of at least 1: %s",
   (bad) => {
     const choices = structuredClone(A);
     choices.acts.buy = { allowed: true, perAct: bad, per30Days: 1000, above: "guardian_signature" };
