@@ -4,7 +4,11 @@ import { beforeEach, expect, test } from "vitest";
 import { derivePocketKey } from "../../src/adapters/x402/pocketDerivation";
 import { migrate } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
-import { assertCircleCoverage, backfillPocketAddresses } from "../../src/persistence/tier0";
+import {
+  assertCircleCoverage,
+  assertFullProductCoverage,
+  backfillPocketAddresses,
+} from "../../src/persistence/tier0";
 import type { Hex } from "../../src/types";
 
 const SEED = `0x${"ab".repeat(32)}` as Hex;
@@ -65,4 +69,18 @@ test("fail-closed boot: circle-path agents present but no circle config -> refus
 test("fail-closed boot: turnkey-only fleet needs no circle config", () => {
   seed("t:t1");
   expect(() => assertCircleCoverage(db, undefined)).not.toThrow();
+});
+
+test("fail-closed boot: full-product agents present but no FACTORY_ADDRESS -> refuses", () => {
+  seed("t:f1");
+  expect(() => assertFullProductCoverage(db, undefined)).toThrow(
+    /1 full-product agent\(s\) are recorded but FACTORY_ADDRESS is not configured/,
+  );
+  expect(() =>
+    assertFullProductCoverage(db, "0x1234567890AbcdEF1234567890aBcdef12345678"),
+  ).not.toThrow();
+});
+
+test("fail-closed boot: an empty entities table needs no FACTORY_ADDRESS (Minimal-only)", () => {
+  expect(() => assertFullProductCoverage(db, undefined)).not.toThrow();
 });

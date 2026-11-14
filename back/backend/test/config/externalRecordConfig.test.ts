@@ -28,6 +28,8 @@ const RECORD = {
 const MAINNET = {
   ...BASE,
   CONTROLLER_ADDRESS: "0x1111111111111111111111111111111111111111",
+  CONTROLLER_DEPLOY_TX: `0x${"ab".repeat(32)}`,
+  CONTROLLER_DEPLOY_BLOCK: "10",
   FACTORY_ADDRESS: "0x2222222222222222222222222222222222222222",
   ARC_NETWORK: "mainnet",
   // The funnel's salt: a production deployment refuses to boot without one.

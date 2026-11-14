@@ -236,3 +236,17 @@ test("fundToTarget funds only the shortfall when float is partially drained", as
   expect(fund).toHaveBeenCalledWith(200_000n);
   expect(hashes).toEqual(["0xa", "0xb", "0xc"]);
 });
+
+import { FullProductDisabledError } from "../../src/adapters/arc/arcAdapter";
+import { buildLiveAgentRunner } from "../../src/agent/liveRunner";
+import { loadConfig } from "../../src/config/env";
+
+test("buildLiveAgentRunner: a deployment with no FACTORY_ADDRESS refuses before any setup", async () => {
+  // A treasury-backed agent exists only in the full product; the refusal comes first, ahead of
+  // the missing ANTHROPIC_API_KEY and CUSTOMER_PRIVATE_KEY this config also lacks.
+  const cfg = loadConfig({
+    ARC_TESTNET_RPC_URL: "https://rpc.example/arc",
+    PLATFORM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+  });
+  await expect(buildLiveAgentRunner(cfg)).rejects.toBeInstanceOf(FullProductDisabledError);
+});

@@ -81,6 +81,7 @@ const API_REGISTRY: Address = "0x00000000000000000000000000000000000A8004";
 const PREVIOUS_CONFIG = {
   walletProviderDefault: "turnkey",
   circleCustodyAvailable: false,
+  fullProductAvailable: true,
   turnkeyCustodyAvailable: true,
   formationAvailable: false,
   formationEnvironment: null,
@@ -174,6 +175,7 @@ function makeApp(o: AppOptions = {}) {
     platformManagerAddress: "0x000000000000000000000000000000000000000A",
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: false,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
   };
   return buildApiApp(deps as ApiDeps);

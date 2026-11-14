@@ -8,6 +8,8 @@ const base = {
   ARC_TESTNET_RPC_URL: "https://rpc.example/arc",
   PLATFORM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
   CONTROLLER_ADDRESS: CONTROLLER,
+  CONTROLLER_DEPLOY_TX: `0x${"ab".repeat(32)}`,
+  CONTROLLER_DEPLOY_BLOCK: "10",
   FACTORY_ADDRESS: FACTORY,
 };
 

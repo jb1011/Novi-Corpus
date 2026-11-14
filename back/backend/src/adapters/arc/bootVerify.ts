@@ -123,7 +123,7 @@ export function selectorRole(selector: Hex): Hex {
 }
 
 /** Anything that failed to READ is a verification outage, not a misconfiguration. */
-function unreadable(what: string, err: unknown): Error {
+export function unreadable(what: string, err: unknown): Error {
   return new Error(
     `boot: could not verify ${what} on-chain (RPC read failed against ARC_TESTNET_RPC_URL) — the deployment may be fine, but it cannot be confirmed; fix connectivity and restart`,
     { cause: err },
@@ -232,6 +232,65 @@ export async function assertControllerWiring(
           ", ",
         )} — an unpinned registry selector may be relayed at any contract; set it via controller.setBoundTarget from the admin`,
     );
+}
+
+/**
+ * Minimal-only mode (a controller with no FACTORY_ADDRESS): prove the controller carries none of
+ * the full product's standing authority. The executor must hold none of the seven full-product
+ * grants and neither registry selector may be pinned. A controller that still has them is a
+ * full-product controller, and pointing a Minimal-only deployment at it would leave live grants
+ * this box neither uses nor watches. Throws naming every offending selector.
+ */
+export async function assertNoFullProductGrants(
+  publicClient: PublicClient,
+  p: { controller: Address; executor: Address },
+): Promise<void> {
+  let grants: readonly boolean[];
+  let pins: readonly Address[];
+  try {
+    [grants, pins] = await Promise.all([
+      Promise.all(
+        CONTROLLER_GRANTED_SELECTORS.map(
+          (s) =>
+            publicClient.readContract({
+              address: p.controller,
+              abi: noviControllerAbi,
+              functionName: "hasRole",
+              args: [selectorRole(s.selector), p.executor],
+            }) as Promise<boolean>,
+        ),
+      ),
+      Promise.all(
+        CONTROLLER_PINNED_SELECTORS.map(
+          (s) =>
+            publicClient.readContract({
+              address: p.controller,
+              abi: noviControllerAbi,
+              functionName: "boundTarget",
+              args: [s.selector],
+            }) as Promise<Address>,
+        ),
+      ),
+    ]);
+  } catch (err) {
+    throw unreadable(`the absence of full-product grants (controller ${p.controller})`, err);
+  }
+
+  const held = CONTROLLER_GRANTED_SELECTORS.filter((_, i) => grants[i] !== false);
+  const pinned = CONTROLLER_PINNED_SELECTORS.map((s, i) => ({ s, actual: pins[i] })).filter(
+    ({ actual }) => !actual || !isAddressEqual(actual, zeroAddress),
+  );
+  if (held.length === 0 && pinned.length === 0) return;
+  const parts: string[] = [];
+  if (held.length > 0)
+    parts.push(
+      `executor ${p.executor} (the address of PLATFORM_PRIVATE_KEY) holds ${held.map((s) => `${s.name} (${s.selector})`).join(", ")}`,
+    );
+  if (pinned.length > 0)
+    parts.push(`${pinned.map(({ s, actual }) => `${s.name} is pinned to ${actual}`).join(", ")}`);
+  throw new Error(
+    `boot: CONTROLLER_ADDRESS ${p.controller} carries full-product authority while FACTORY_ADDRESS is unset: ${parts.join("; ")} — this deployment is pointed at a full-product controller; deploy a Minimal-only controller, or set FACTORY_ADDRESS to run the full product`,
+  );
 }
 
 /**

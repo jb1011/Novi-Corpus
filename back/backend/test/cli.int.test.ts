@@ -50,7 +50,13 @@ beforeAll(async () => {
   // The anvil chain id is overridden on the CONFIG, not through ARC_CHAIN_ID: `ARC_NETWORK` and
   // `ARC_CHAIN_ID` are cross-validated at boot (a box naming testnet while pointing at a foreign
   // chain is a real misconfiguration), and a local fork is exactly the case that is neither.
-  const mergedCfg = { ...cfg, usdc: stack.usdc, chainId: anvilChain.id };
+  // The factory goes on the config too: create-entity refuses on a deployment without one.
+  const mergedCfg = {
+    ...cfg,
+    usdc: stack.usdc,
+    chainId: anvilChain.id,
+    factoryAddress: stack.factory,
+  };
   const repo = new SqliteEntityRepository(db);
   const docStore = new FileDocumentStore(mkdtempSync(join(tmpdir(), "cli-docs-")));
   ctx = {

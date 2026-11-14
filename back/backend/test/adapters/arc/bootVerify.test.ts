@@ -9,13 +9,14 @@
  *  2. every wiring mismatch throws NAMING the failing check and the env vars involved, and a plain
  *     RPC outage is reported as "could not verify", never as a misconfiguration.
  */
-import { type Address, type PublicClient, toFunctionSelector } from "viem";
+import { type Address, type PublicClient, toFunctionSelector, zeroAddress } from "viem";
 import { expect, test, vi } from "vitest";
 import {
   CONTROLLER_GRANTED_SELECTORS,
   CONTROLLER_PINNED_SELECTORS,
   assertControllerWiring,
   assertLegacyFactoryOwner,
+  assertNoFullProductGrants,
   selectorRole,
 } from "../../../src/adapters/arc/bootVerify";
 
@@ -142,6 +143,49 @@ test("an RPC outage reads as 'could not verify', never as a misconfiguration", a
   const err = await assertControllerWiring(client({ throws: outage }), wiring).catch((e) => e);
   expect(err.message).toMatch(/could not verify.*RPC read failed/s);
   expect(err.message).not.toMatch(/is owned by|missing .* selector grants/);
+  expect(err.cause).toBe(outage);
+});
+
+// ── Minimal-only mode: no full-product authority on the controller ────────
+
+const minimal = { controller: CONTROLLER, executor: EXECUTOR };
+
+test("Minimal-only: a controller with no full-product grants and no registry pins verifies clean", async () => {
+  await expect(
+    assertNoFullProductGrants(client({ grants: false, pins: zeroAddress }), minimal),
+  ).resolves.toBeUndefined();
+});
+
+test("Minimal-only: a held full-product grant refuses the boot, naming it", async () => {
+  const grants = CONTROLLER_GRANTED_SELECTORS.map((_, i) => i === 4); // createEntity still granted
+  const err = await assertNoFullProductGrants(client({ grants, pins: zeroAddress }), minimal).catch(
+    (e) => e,
+  );
+  expect(err.message).toMatch(
+    /CONTROLLER_ADDRESS.*full-product authority while FACTORY_ADDRESS is unset/s,
+  );
+  expect(err.message).toMatch(/holds LegalManagerFactory\.createEntity/);
+  expect(err.message).toContain(EXECUTOR);
+  expect(err.message).not.toMatch(/AgentTreasury/);
+  expect(err.message).toMatch(/pointed at a full-product controller/);
+});
+
+test("Minimal-only: a set registry pin refuses the boot, naming it", async () => {
+  const err = await assertNoFullProductGrants(
+    client({ grants: false, pins: [zeroAddress, REGISTRY] }),
+    minimal,
+  ).catch((e) => e);
+  expect(err.message).toMatch(
+    new RegExp(`IdentityRegistry\\.setMetadata is pinned to ${REGISTRY}`),
+  );
+  expect(err.message).not.toMatch(/setAgentWallet/);
+});
+
+test("Minimal-only: a read failure is 'could not verify', never a misconfiguration", async () => {
+  const outage = new Error("socket hang up");
+  const err = await assertNoFullProductGrants(client({ throws: outage }), minimal).catch((e) => e);
+  expect(err.message).toMatch(/could not verify.*RPC read failed/s);
+  expect(err.message).not.toMatch(/full-product authority/);
   expect(err.cause).toBe(outage);
 });
 

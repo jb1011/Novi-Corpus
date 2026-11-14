@@ -77,6 +77,7 @@ function buildTestApp() {
     platformManagerAddress: "0x000000000000000000000000000000000000000E",
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: true,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
     formation: {
       environment: "sandbox",

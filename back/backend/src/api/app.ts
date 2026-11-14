@@ -201,6 +201,11 @@ export interface ApiDeps extends EntityViewDeps {
   circleCustodyAvailable: boolean;
   /** Mirror flag for turnkey: false on deployments (e.g. mainnet) that ship no Turnkey config. */
   turnkeyCustodyAvailable: boolean;
+  /** Whether this deployment has the full-product factory (FACTORY_ADDRESS). False on a
+   *  Minimal-only box: POST /onboard refuses before any claim, and the MCP onboard_agent tool is
+   *  not registered, because the entity it would create can never reach the chain and a failed
+   *  entity row stops every later boot. */
+  fullProductAvailable: boolean;
   /** doola formation (design §2). ONE optional object, not a bag of parallel flags: an
    *  "available" boolean and an environment that could disagree is exactly the drift the honesty
    *  invariant forbids, so availability is DERIVED from the object's presence at the route.
@@ -542,6 +547,9 @@ export function buildApiApp(deps: ApiDeps) {
       walletProviderDefault: deps.walletProviderDefault,
       circleCustodyAvailable: deps.circleCustodyAvailable,
       turnkeyCustodyAvailable: deps.turnkeyCustodyAvailable,
+      // False on a Minimal-only deployment: the wizard must not offer full-product onboarding,
+      // which this box refuses at the door.
+      fullProductAvailable: deps.fullProductAvailable,
       // Formation (design §2). Both fields are projections of ONE dep, so "available with no
       // environment" — a sandbox filing renderable without its "demo" qualifier — is not a state
       // this route can produce. The wizard labels a sandbox filing amber off this value.

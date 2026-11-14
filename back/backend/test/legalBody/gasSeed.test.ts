@@ -774,6 +774,7 @@ function makeApp(d: GasSeedDeps) {
     platformManagerAddress: "0x000000000000000000000000000000000000000A",
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: false,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
   };
   return buildApiApp(deps as ApiDeps);
@@ -918,6 +919,8 @@ describe("LEGAL_BODY_GAS_SEED_USDC", () => {
   const FEATURE_ON = {
     ...BASE,
     CONTROLLER_ADDRESS: "0x1111111111111111111111111111111111111111",
+    CONTROLLER_DEPLOY_TX: `0x${"ab".repeat(32)}`,
+    CONTROLLER_DEPLOY_BLOCK: "10",
     FACTORY_ADDRESS: "0x2222222222222222222222222222222222222222",
     LEGAL_BODY_FACTORY_ADDRESS: "0x3333333333333333333333333333333333333333",
   };

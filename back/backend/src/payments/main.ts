@@ -17,6 +17,10 @@ import { buildAuthorityService } from "./service";
 
 async function main() {
   const cfg = loadConfig();
+  if (!cfg.factoryAddress)
+    throw new Error(
+      "FACTORY_ADDRESS required to run the Authority: the payments worker is a full-product service",
+    );
   if (!cfg.pocketMasterSeed) throw new Error("POCKET_MASTER_SEED required to run the Authority");
   const treasury = (process.env.TREASURY_ADDRESS ?? "") as Address;
   if (!treasury) throw new Error("TREASURY_ADDRESS required (the live entity's AgentTreasury)");
@@ -33,7 +37,7 @@ async function main() {
     // so we pass a sentinel here intentionally rather than thread an unnecessary live wallet.
     managerWallet: undefined as never,
     chainId: cfg.chainId,
-    factory: (cfg.factoryAddress ?? "0x0") as Address,
+    factory: cfg.factoryAddress,
     identityRegistry: cfg.identityRegistry,
   });
 

@@ -416,6 +416,7 @@ function deploy(opts: { charging?: boolean; gasSeedUsdc?: string } = {}): Deploy
     platformManagerAddress: "0x000000000000000000000000000000000000000A",
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: false,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
   };
   const sweeper = new LegalBodySweeper({

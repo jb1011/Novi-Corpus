@@ -7,6 +7,7 @@ import type { DemoResult } from "../agent/demo";
 import { buildLiveAgentRunner } from "../agent/liveRunner";
 import { toJobView } from "../api/jobViews";
 import { loadConfig } from "../config/env";
+import { fullProductUnavailableMessage } from "../custody";
 import { legacyDoorRefusalMessage, legacyDoorRefused } from "../formation";
 import { outcomeJson } from "../jobs/refund";
 import { withKeyedLock } from "../payments/keyedMutex";
@@ -84,6 +85,10 @@ export function buildCli(
       // no PII intake, so on a deployment where formation is MANDATORY it refuses at COMMAND
       // time rather than minting an entity that owes a filing it can never make.
       if (legacyDoorRefused(ctx.cfg)) throw new Error(legacyDoorRefusalMessage());
+      // Minimal-only deployment: no full-product factory, so the entity could never be created on
+      // chain. Refused at command time, before runOnboarding claims a row or provisions custody: a
+      // `failed` entity row would stop every later API boot.
+      if (!ctx.cfg.factoryAddress) throw new Error(fullProductUnavailableMessage());
       const spec = parseAgentSpec(JSON.parse(readFileSync(opts.config, "utf8")));
       const idempotencyKey = opts.id ?? spec.name;
       const rec = await runOnboarding({

@@ -55,7 +55,12 @@ test("the CLI is UNCHANGED on a deployment where formation is not mandatory", as
   // command reaches its own argument handling exactly as it did before — proven by the spec file
   // being what fails, rather than the gate.
   const ctx = {
-    cfg: cfgWith({ doola, formation: { required: false } as never }),
+    cfg: cfgWith({
+      doola,
+      formation: { required: false } as never,
+      // A full-product deployment, so the Minimal-only refusal does not answer first.
+      factoryAddress: "0x00000000000000000000000000000000000000f1",
+    }),
     repo: {} as never,
     anchors: {} as never,
     docStore: {} as never,

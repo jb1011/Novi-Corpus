@@ -130,6 +130,7 @@ function buildTestApp(
     platformManagerAddress: PLATFORM_MANAGER,
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: custody.circle ?? true,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: custody.turnkey ?? true,
     formation: formation
       ? {

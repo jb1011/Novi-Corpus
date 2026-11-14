@@ -198,6 +198,7 @@ function makeApp(d: Deployment) {
     platformManagerAddress: "0x000000000000000000000000000000000000000A",
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: false,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
   };
   return buildApiApp(deps as ApiDeps);

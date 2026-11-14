@@ -82,10 +82,12 @@ const EXTERNAL_RECORD_OFF = { externalRecord: { available: false, providerName: 
 
 let db: Database.Database;
 let repo: SqliteEntityRepository;
+let sagaRuns = 0;
 beforeEach(() => {
   db = openDatabase(":memory:");
   migrate(db);
   repo = new SqliteEntityRepository(db);
+  sagaRuns = 0;
 });
 afterEach(() => db.close());
 
@@ -94,10 +96,16 @@ function makeApp(opts: {
   turnkeyAvailable?: boolean;
   def?: "turnkey" | "circle";
   formation?: { environment: "sandbox" | "production"; required?: boolean };
+  /** False = a Minimal-only deployment (no full-product factory). */
+  fullProduct?: boolean;
 }) {
   const runner = new OnboardingRunner({
     repo,
-    runSaga: async (i: { idempotencyKey: string }) => repo.findByIdempotencyKey(i.idempotencyKey)!,
+    // Stands in for the onboarding saga, which is where custody wallets are provisioned.
+    runSaga: async (i: { idempotencyKey: string }) => {
+      sagaRuns++;
+      return repo.findByIdempotencyKey(i.idempotencyKey)!;
+    },
     fundCaps: TEST_FUND_CAPS,
   });
   return buildApiApp({
@@ -110,6 +118,7 @@ function makeApp(opts: {
     platformManagerAddress: "0x000000000000000000000000000000000000000A",
     walletProviderDefault: opts.def ?? "turnkey",
     circleCustodyAvailable: opts.circleAvailable,
+    fullProductAvailable: opts.fullProduct ?? true,
     turnkeyCustodyAvailable: opts.turnkeyAvailable ?? true,
     // ⚠ TYPED, not cast (finding B11). The whole deps object below is still `as never` for the
     // half-dozen collaborators this file has no use for, and that cast used to swallow the
@@ -237,6 +246,38 @@ test("custody omitted → the platform default is claimed", async () => {
   expect(repo.listByTenant(account.address)[0]!.walletProvider).toBe("turnkey");
 });
 
+// ── Minimal-only deployment: no full-product factory, so nothing may be claimed or provisioned.
+// A claimed row would end `failed` at the broadcast, and a failed full-product row stops every
+// later boot of a box without FACTORY_ADDRESS.
+
+test("a Minimal-only deployment refuses POST /onboard before any claim or custody provisioning", async () => {
+  const app = makeApp({ circleAvailable: true, fullProduct: false });
+  const token = await login(app);
+  const res = await postOnboard(app, token, { custody: "circle" });
+  expect(res.status).toBe(400);
+  expect((await res.json()).error.message).toBe(
+    "full-product onboarding is not available on this deployment: it has no full-product factory; use the legal-body routes",
+  );
+  expect(db.prepare("SELECT COUNT(*) AS n FROM entities").get()).toEqual({ n: 0 });
+  // Let any work the runner might have scheduled run, then check none did.
+  await new Promise((r) => setTimeout(r, 10));
+  expect(sagaRuns).toBe(0);
+});
+
+test("the Minimal-only refusal comes before the custody gate", async () => {
+  // Circle unavailable too: the caller learns the deployment has no full product at all, not
+  // that a custody choice would fix it.
+  const app = makeApp({ circleAvailable: false, fullProduct: false });
+  const token = await login(app);
+  const res = await postOnboard(app, token, { custody: "circle" });
+  expect((await res.json()).error.message).toMatch(/full-product onboarding is not available/);
+});
+
+test("GET /config reports fullProductAvailable: false on a Minimal-only deployment", async () => {
+  const minimal = makeApp({ circleAvailable: true, fullProduct: false });
+  expect((await (await minimal.request("/config")).json()).fullProductAvailable).toBe(false);
+});
+
 // ── Turnkey availability gate (mirror of the circle gate; mainnet ships circle-only by simply
 // not configuring Turnkey, so the deployment must be able to REFUSE turnkey, not crash mid-saga).
 
@@ -264,6 +305,7 @@ test("GET /config is public and reports this deployment's custody capabilities",
   expect(await res.json()).toEqual({
     walletProviderDefault: "circle",
     circleCustodyAvailable: true,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
     ...FORMATION_OFF,
     ...AGENTBOOK_OFF,
@@ -277,6 +319,7 @@ test("GET /config is public and reports this deployment's custody capabilities",
   expect(await (await without.request("/config")).json()).toEqual({
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: false,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
     ...FORMATION_OFF,
     ...AGENTBOOK_OFF,
@@ -291,6 +334,7 @@ test("GET /config is public and reports this deployment's custody capabilities",
   expect(await (await bare.request("/config")).json()).toEqual({
     walletProviderDefault: "turnkey",
     circleCustodyAvailable: false,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: false,
     ...FORMATION_OFF,
     ...AGENTBOOK_OFF,
@@ -304,6 +348,7 @@ test("GET /config is public and reports this deployment's custody capabilities",
   expect(await (await circleOnly.request("/config")).json()).toEqual({
     walletProviderDefault: "circle",
     circleCustodyAvailable: true,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: false,
     ...FORMATION_OFF,
     ...AGENTBOOK_OFF,
@@ -323,6 +368,7 @@ test("GET /config reports formation availability and its ENVIRONMENT (honesty in
   expect(await (await sandbox.request("/config")).json()).toEqual({
     walletProviderDefault: "circle",
     circleCustodyAvailable: true,
+    fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
     formationAvailable: true,
     formationEnvironment: "sandbox",
