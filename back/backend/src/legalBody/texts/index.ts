@@ -19,7 +19,7 @@ export interface LegalText<F> {
   readonly status: LegalTextStatus;
   /** The sentence with its `{field}` placeholders: what the version pins. */
   readonly template: string;
-  render(fields: F): string;
+  readonly render: (fields: F) => string;
 }
 
 export class LegalTextNotApprovedError extends Error {

@@ -6,7 +6,7 @@ import {
   storeAgreement,
 } from "../../src/legalBody/agreement";
 import { buildGrant, grantDigest, renderScheduleA } from "../../src/legalBody/grant";
-import { LEGAL_BODY_CHARTER } from "../../src/legalBody/texts/legalBodyCharter";
+import { LEGAL_BODY_CHARTER_2026_11_DRAFT_2 } from "../../src/legalBody/texts/legalBodyCharter";
 import type { AgreementFields } from "../../src/legalBody/texts/operatingAgreement";
 import { computeOaHash } from "../../src/oa/generator";
 import { MemoryDocumentStore } from "../helpers/formationFakes";
@@ -30,7 +30,9 @@ const FIELDS: AgreementFields = {
 
 const grant = buildGrant(A, { number: 1, version: 1 });
 const built = (scheduleA: string) =>
-  buildAgreement({ ...FIELDS, scheduleA }, LEGAL_BODY_CHARTER, { source: "customer" });
+  buildAgreement({ ...FIELDS, scheduleA }, LEGAL_BODY_CHARTER_2026_11_DRAFT_2, {
+    source: "customer",
+  });
 
 test("the manifest hash the guardian adopts commits to the grant", () => {
   const a = built(renderScheduleA(grant));

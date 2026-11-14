@@ -2,8 +2,9 @@ import type { Address } from "../../types";
 import { type LegalText, defineLegalText } from "./index";
 import {
   type CharterFields,
-  LEGAL_BODY_CHARTER,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
 } from "./legalBodyCharter";
 
 /**
@@ -76,7 +77,8 @@ export const LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS: readonly LegalText<Charter
   Object.freeze([
     OPERATING_AGREEMENT_2026_10_DRAFT_1,
     LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
-    LEGAL_BODY_CHARTER,
+    LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
+    LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
   ]);
 
 /**
