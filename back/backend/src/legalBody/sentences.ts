@@ -1,6 +1,7 @@
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { ApiError } from "../errors";
 import type { BindingState } from "../persistence/legalBodyRepository";
+import type { FieldProblem } from "./textRules";
 
 /**
  * One fixed sentence for every code the legal-body flow answers.
@@ -134,6 +135,21 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // `order_revoked` speaks of linking an order.
   legal_body_revoked:
     "This legal body was revoked by the operator: nothing more can be declared on it.",
+  // `POST /legal-body-orders` on a deployment whose agreement takes a grant, for a grant the form's
+  // rules or the product's offer refuse: its details list each field and the rule it breaks.
+  grant_not_valid:
+    "The grant is not valid: each field named in the details breaks the rule given beside it, and no order was placed.",
+  // `POST /legal-body-orders` with a `grant` key, whatever its value, on a deployment whose
+  // agreement takes none.
+  grant_not_taken: "This deployment's agreement takes no grant: leave out grant.",
+  // The adoption and link doors, for an order whose grant's last day has begun by the moment its
+  // legal body could be created: now at the adoption, the link's deadline at the link.
+  grant_ends_too_soon:
+    "The grant in this order's agreement ends too soon for a legal body to be created under it: place a new order with a later end, or with none.",
+  // The doors that read an order's stored grant, when it no longer reads back as the grant its
+  // frozen agreement states.
+  grant_unreadable:
+    "This order's stored grant no longer reads back as the grant its agreement was frozen with, so it is not served.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */
@@ -153,7 +169,7 @@ export function sentenceFor(code: string): string {
 export function refusal(
   code: string,
   status: ContentfulStatusCode,
-  details?: Record<string, string>,
+  details?: Record<string, string> | readonly FieldProblem[],
 ): ApiError {
   return new ApiError(code, status, sentenceFor(code), details);
 }

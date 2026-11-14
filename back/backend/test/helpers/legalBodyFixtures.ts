@@ -120,6 +120,7 @@ export function legalBodyOrderDeps(
   return {
     repo: s.repo,
     adoptions: s.adoptions,
+    grants: s.grants,
     companies: s.companies,
     declarations: s.declarations,
     checks: s.checks,

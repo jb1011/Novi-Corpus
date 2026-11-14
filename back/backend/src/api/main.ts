@@ -86,6 +86,7 @@ import { SqliteAgentRunStore } from "../persistence/agentRunStore";
 import { SqliteApiKeyStore } from "../persistence/apiKeyStore";
 import { SqliteBridgeLegRepository } from "../persistence/bridgeLegRepository";
 import { SqliteChallengeStore } from "../persistence/challengeStore";
+import { SqliteCharterGrantRepository } from "../persistence/charterGrantRepository";
 import { SqliteCompanyCheckRepository } from "../persistence/companyCheckRepository";
 import { SqliteCompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
 import { SqliteCompanyRepository } from "../persistence/companyRepository";
@@ -676,6 +677,9 @@ async function main() {
           repo: legalBodies,
           // The guardians' adoptions of their orders' agreements: the link doors require one.
           adoptions: new SqliteLegalBodyAdoptionRepository(db),
+          // The grants of orders on the Charter, over the same handle the order's transaction
+          // writes through, so a grant is written in that transaction.
+          grants: new SqliteCharterGrantRepository(db),
           companies,
           declarations: companyDeclarations,
           checks: companyChecks,
