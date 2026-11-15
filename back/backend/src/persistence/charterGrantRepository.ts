@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 import type { Hex } from "viem";
-import { type Grant, SCHEDULE_A_WORDING } from "../legalBody/grant";
+import { type Grant, SCHEDULE_A_WORDING, grantFromCanonical } from "../legalBody/grant";
 import { LegalBodyInputError, isIntegerWithin, requireHash } from "./legalBodyInput";
 
 /**
@@ -32,9 +32,10 @@ export interface CharterGrantRow {
 }
 
 export interface CharterGrantRepository {
-  /** Writes `grant` for the order, in the wording SCHEDULE_A_WORDING names. The database refuses a row
-   *  that is not after the order's latest (so a second row of the same number and version too), and
-   *  an order that does not exist. */
+  /** Writes `grant` for the order, in the wording SCHEDULE_A_WORDING names, from the grant its
+   *  canonical form states: a grant whose number, version or fingerprint is not that one's is
+   *  refused. The database refuses a row that is not after the order's latest (so a second row of
+   *  the same number and version too), and an order that does not exist. */
   insert(legalBodyId: string, grant: Grant): void;
   /** The order's rows, by number, then version. */
   list(legalBodyId: string): CharterGrantRow[];
@@ -99,12 +100,26 @@ export class SqliteCharterGrantRepository implements CharterGrantRepository {
       throw new LegalBodyInputError(
         `canonical must be 2 to ${MAX_CANONICAL_LENGTH} characters of printable ASCII`,
       );
+    requireWholeFromOne("number", grant.value.number);
+    requireWholeFromOne("version", grant.value.version);
+    requireHash("digest", grant.digest);
+    // The row is written from the grant its canonical form states, never from the object given: a
+    // `Grant` is a structural type, so an object whose key or fingerprint disagrees with its
+    // canonical form is one to the compiler, and a row is never corrected.
+    const stated = grantFromCanonical(grant.canonical);
+    if (
+      stated === undefined ||
+      stated.digest !== grant.digest ||
+      stated.value.number !== grant.value.number ||
+      stated.value.version !== grant.value.version
+    )
+      throw new LegalBodyInputError("grant must be the grant its canonical form states");
     this.stmts.insert.run({
       legal_body_id: legalBodyId,
-      grant_number: requireWholeFromOne("number", grant.value.number),
-      grant_version: requireWholeFromOne("version", grant.value.version),
-      canonical: grant.canonical,
-      digest: requireHash("digest", grant.digest),
+      grant_number: stated.value.number,
+      grant_version: stated.value.version,
+      canonical: stated.canonical,
+      digest: stated.digest,
       wording: SCHEDULE_A_WORDING,
     });
   }

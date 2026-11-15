@@ -7,9 +7,10 @@
  * read.
  *
  * `checkGrantChoices` turns the guardian's choices into one canonical value, or refuses them field
- * by field, every broken rule in one pass, with no clock: every rule but the end rule.
- * `grantEndProblem` is the end rule, an end day after today. `parseGrantChoices` reads both in one
- * pass. A value is refused, never cleaned or converted, so one set of choices has one spelling.
+ * by field, the first twenty broken rules it finds, in one pass, with no clock: every rule but the
+ * end rule. `grantEndProblem` is the end rule, an end day after today. `parseGrantChoices` reads
+ * both in one pass. A value is refused, never cleaned or converted, so one set of choices has one
+ * spelling.
  *
  * A `Grant` is made only here: by `buildGrant`, the one checked constructor, which numbers those
  * choices, or by `grantFromCanonical`, which reads one back from its canonical form. A grant holds

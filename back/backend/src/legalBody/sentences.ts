@@ -141,7 +141,7 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   grant_not_valid:
     "The grant is not valid: each field named in the details breaks the rule given beside it, and no order was placed.",
   // `POST /legal-body-orders` with a `grant` key, whatever its value, and the grant preview,
-  // whatever its body, on a deployment whose agreement takes none.
+  // whatever grant its body holds, on a deployment whose agreement takes none.
   grant_not_taken: "This deployment's agreement takes no grant: leave out grant.",
   // The adoption and link doors, for an order whose grant's last day has begun by the moment its
   // legal body could be created: now at the adoption, the link's deadline at the link.

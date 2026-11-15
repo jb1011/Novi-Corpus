@@ -11,7 +11,7 @@
  * invention, and every key is one of anvil's published test accounts.
  */
 import { type Address, getAddress } from "viem";
-import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError } from "../../src/errors";
 import { adoptAgreement, adoptionMessage } from "../../src/legalBody/adoption";
 import { readVerifiedAgreement } from "../../src/legalBody/agreement";
@@ -52,6 +52,15 @@ import {
 
 /** The guardian of every order here, a verified human. */
 const tenant: Address = getAddress(ANVIL_ACCOUNT_2.address);
+
+// The clock stands at 12:00:00 UTC of the real day while this file runs, so a run that crosses
+// 00:00 UTC still reads one day. Only `Date` is mocked, not the timers: what is placed or adopted
+// "by the real clock" reads that noon, and every other moment is an explicit `now` or the fake
+// chain's time.
+vi.setSystemTime(Date.parse(`${utcDay(Date.now())}T12:00:00Z`));
+afterAll(() => {
+  vi.useRealTimers();
+});
 
 const today = utcDay(Date.now());
 const tomorrowStartsMs = Date.parse(`${today}T00:00:00Z`) + DAY_MS;

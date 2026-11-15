@@ -403,6 +403,21 @@ test("the shape check refuses what the parser refuses, the end rule aside", () =
   expect(checkGrantChoices(null)).toEqual({
     problems: [{ field: "grant", problem: "must be an object" }],
   });
+  // A past end beside another problem: the parser lists both in one pass, the shape check the
+  // other alone.
+  const pastAndBadAmount = edit((c) => {
+    c.endsOn = "1999-01-01";
+    c.acts.buy.perAct = "200";
+  });
+  const badAmount = {
+    field: "acts.buy.perAct",
+    problem: "must be a whole number of US dollars from 1 to 1,000,000,000",
+  };
+  expect(problemsOf(pastAndBadAmount)).toEqual([
+    badAmount,
+    { field: "endsOn", problem: "must be after today (UTC)" },
+  ]);
+  expect(checkGrantChoices(pastAndBadAmount)).toEqual({ problems: [badAmount] });
 });
 
 test.each([[""], ["11/11/2026"], ["2026-11-31"], ["2026-11-11T00:00:00Z"]])(
@@ -768,6 +783,21 @@ test("a grant that names no amount does not speak of amounts", () => {
   expect(buildGrant(alone, { number: 1, version: 1 }).scheduleA).toContain(
     "\n\nAmounts are in US dollars (USD); one USDC counts as one US dollar (section 5.2). Every limit in this grant is declared",
   );
+});
+
+test("a grant that allows only receiving payment names no amount", () => {
+  const receiveOnly = structuredClone(none);
+  receiveOnly.acts.receivePayment = { allowed: true };
+  const scheduleA = buildGrant(receiveOnly, { number: 1, version: 1 }).scheduleA;
+  expect(scheduleA).toContain(
+    "- (d) receiving payment to the wallet named in Schedule B: allowed;",
+  );
+  expect(
+    scheduleA.endsWith(
+      "\n\nEvery limit in this grant is declared (section 5.5): nothing of Novi Corpus's stops the agent from exceeding it.",
+    ),
+  ).toBe(true);
+  expect(scheduleA).not.toMatch(/USD|US dollar/);
 });
 
 test("Schedule A holds only ASCII, no brace and no trailing newline, and never says enforced", () => {

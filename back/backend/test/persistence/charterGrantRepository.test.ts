@@ -154,5 +154,22 @@ describe("charter_grants", () => {
     ] as const)
       expect(() => s.grants.insert(legalBodyId, grant)).toThrow(LegalBodyInputError);
     expect(s.grants.list(id)).toEqual([]);
+    // Each value in shape, but the key or the fingerprint is not the one the canonical form states.
+    const lastDigit = grantA.digest.slice(-1) === "0" ? "1" : "0";
+    for (const grant of [
+      { ...grantA, value: { ...grantA.value, version: 7 } },
+      { ...grantA, digest: `${grantA.digest.slice(0, -1)}${lastDigit}` as Hex },
+    ]) {
+      expect(grantFromCanonical(grant.canonical)?.value.version).toBe(1);
+      let caught: unknown;
+      try {
+        s.grants.insert(id, grant);
+      } catch (err) {
+        caught = err;
+      }
+      expect(caught).toBeInstanceOf(LegalBodyInputError);
+      expect((caught as Error).message).toBe("grant must be the grant its canonical form states");
+    }
+    expect(s.grants.list(id)).toEqual([]);
   });
 });
