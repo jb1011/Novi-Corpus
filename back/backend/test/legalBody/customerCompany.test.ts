@@ -1154,6 +1154,24 @@ describe("abandoning a customer company", () => {
     }
   });
 
+  test("a company that is not a sandbox one is kept by any open legal body", async () => {
+    const { companyId } = await createCustomerCompany(deps(), owner.address, await signed(TYPED));
+    const declared = declarations.find(companyId);
+    const d = deps({ hasOpenLegalBody: () => true, hasOpenLegalBodyHere: () => false });
+
+    expect(refusalOfCall(() => abandonCustomerCompany(d, owner.address, companyId))).toMatchObject({
+      code: "conflict",
+      status: 409,
+    });
+    // Nothing moved, and nothing was erased.
+    expect(companies.find(companyId)?.status).toBe("draft");
+    expect(declarations.find(companyId)).toEqual(declared);
+    expect(declarations.find(companyId)).toMatchObject({
+      declarantName: DECLARANT_OF_RECORD,
+      piiErasedAt: null,
+    });
+  });
+
   test("an unknown company and another tenant's get the same 404", async () => {
     recordHuman(second.address, SECOND_NULLIFIER);
     const theirs = (

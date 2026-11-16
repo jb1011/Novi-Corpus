@@ -556,6 +556,40 @@ test("hasOpenForCompany: a fresh draft, a reserved, a deployed or a linked row; 
   expect(repo.hasOpenForCompany("co_lnk", now)).toBe(false);
 });
 
+test("hasOpenForCompanyOn counts only the rows of the chain and the factory it is given", () => {
+  const now = Date.now();
+  for (const c of ["co_here", "co_there", "co_both", "co_old"]) company(c);
+  linked("81", { company: "co_here" });
+  linked("82", { company: "co_there", factory: OTHER_FACTORY });
+  linked("83", { company: "co_both" });
+  linked("84", { company: "co_both", factory: OTHER_FACTORY });
+  backdatedDraft(25 * HOUR, now, { company: "co_old" });
+  const here: Deployment = { chainId: CHAIN, factory: FACTORY };
+  const there: Deployment = { chainId: CHAIN, factory: OTHER_FACTORY };
+  for (const c of ["co_here", "co_both"])
+    expect(repo.hasOpenForCompanyOn(here, c, now), c).toBe(true);
+  for (const c of ["co_there", "co_old", "co_unknown"])
+    expect(repo.hasOpenForCompanyOn(here, c, now), c).toBe(false);
+  for (const c of ["co_there", "co_both"])
+    expect(repo.hasOpenForCompanyOn(there, c, now), c).toBe(true);
+  expect(repo.hasOpenForCompanyOn(there, "co_here", now)).toBe(false);
+  // Another chain holds none of these rows.
+  const otherChain: Deployment = { chainId: CHAIN + 1, factory: FACTORY };
+  for (const c of ["co_here", "co_there", "co_both", "co_old"])
+    expect(repo.hasOpenForCompanyOn(otherChain, c, now), c).toBe(false);
+  // hasOpenForCompany still counts the rows of every factory.
+  for (const c of ["co_here", "co_there", "co_both"])
+    expect(repo.hasOpenForCompany(c, now), c).toBe(true);
+  // A fresh draft counts on the deployment it was made on, and only there.
+  newBody({ company: "co_old" });
+  expect(repo.hasOpenForCompanyOn(here, "co_old", now)).toBe(true);
+  expect(repo.hasOpenForCompanyOn(there, "co_old", now)).toBe(false);
+  // A factory that is not an address is refused, as the due listings refuse it.
+  expect(() =>
+    repo.hasOpenForCompanyOn(as({ chainId: CHAIN, factory: "nope" }), "co_here", now),
+  ).toThrow(LegalBodyInputError);
+});
+
 test("countOpenByTenant counts a draft under 24 hours, a reserved row, and a deployed row for 7 days after deployedAt", () => {
   const now = Date.now();
   const nowSeconds = Math.floor(now / 1000);

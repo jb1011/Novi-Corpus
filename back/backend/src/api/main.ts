@@ -773,6 +773,13 @@ async function main() {
     ? { repo: new SqliteLegalBodyTreasuryRepository(db), registry: arc }
     : undefined;
 
+  // Whether a company stands behind an open legal body created on this chain by `factory`, and by
+  // no other: read for a sandbox company's abandon only. A missing store keeps every company, as
+  // `hasOpenLegalBody` below does.
+  const hasOpenLegalBodyOn = (factory: Address) => (companyId: string) =>
+    legalBodies === undefined ||
+    legalBodies.hasOpenForCompanyOn({ chainId: cfg.chainId, factory }, companyId, Date.now());
+
   /**
    * The CUSTOMER COMPANY doors' dependencies (declare an existing Wyoming LLC, abandon it, upload
    * its evidence), built ONCE and only where `customerDoorsEnabled`: the legal-body factory is set
@@ -812,6 +819,8 @@ async function main() {
           // would read as standing behind one, which only keeps it from being abandoned.
           hasOpenLegalBody: (companyId: string) =>
             legalBodies === undefined || legalBodies.hasOpenForCompany(companyId, Date.now()),
+          // The same, counting only the open legal bodies the factory above created.
+          hasOpenLegalBodyHere: hasOpenLegalBodyOn(cfg.legalBodyFactory),
           transaction: <T>(fn: () => T) => repo.transaction(fn),
           // The evidence uploads, through the index and the file store the document routes read.
           documents: formationDocuments,
