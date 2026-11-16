@@ -454,12 +454,13 @@ const CANCELLABLE_DISSOLUTION_CODE_MAX_AMENDMENT_DELAY = 31_536_000n;
  * Proves on chain what a pair's agreement says of the legal body's contract; else throws.
  *
  * Run at start, after the factory's wiring, for a pair whose agreement states such facts. Each
- * refusal names the version, the factory and the fact that does not hold. A read of 1, 2 or 4 that
- * the contract refused (no code at the address, or no such function) is that fact's refusal; any
- * other read that fails is `unreadable`, a verification outage.
+ * refusal names the version, the factory and the fact that does not hold. A read the contract
+ * refused, at any of the reads (no code at the address, or no such function), is a refusal with
+ * that read's message. Only a read the node could not answer is a fault: `unreadable`, a
+ * verification outage.
  *
- * `fixed_copy_cancellable_dissolution`, the one set of facts a version states today, in four reads
- * and one local computation, in this order:
+ * Each named set of facts has its own proof, and a name with none does not compile.
+ * `fixed_copy_cancellable_dissolution`, in four reads and one local computation, in this order:
  * 1. `implementation()` on the factory: the address of the code its legal bodies run.
  * 2. `predictLegalBody` on the factory, with a salt of 32 zero bytes, against the address computed
  *    here: the CREATE2 address of a minimal proxy (EIP-1167) to that code, created by the factory
@@ -475,6 +476,10 @@ export async function assertLegalBodyContractFacts(
   publicClient: PublicClient,
   p: { factory: Address; facts: LegalBodyContractFacts; agreementVersion: string },
 ): Promise<void> {
+  if (p.facts !== "fixed_copy_cancellable_dissolution") {
+    const unknown: never = p.facts;
+    throw new Error(`boot: no proof is written for the contract facts ${String(unknown)}`);
+  }
   const notServable = (fact: string, cause?: unknown) =>
     new Error(
       `boot: LEGAL_BODY_AGREEMENT_VERSION ${p.agreementVersion} cannot be served: ${fact}`,
@@ -537,7 +542,11 @@ export async function assertLegalBodyContractFacts(
       }) as Promise<bigint>,
     ]);
   } catch (err) {
-    throw unreadable(what, err);
+    if (!contractRefusal(err)) throw unreadable(what, err);
+    throw notServable(
+      `LEGAL_BODY_FACTORY_ADDRESS ${p.factory} does not answer the bounds of its amendment delay, and this version states ${STATED_MIN_AMENDMENT_DELAY} to ${STATED_MAX_AMENDMENT_DELAY}`,
+      err,
+    );
   }
   if (minDelay !== STATED_MIN_AMENDMENT_DELAY || maxDelay !== STATED_MAX_AMENDMENT_DELAY)
     throw notServable(

@@ -362,9 +362,10 @@ const readKey = (address: string, functionName: string, args: readonly unknown[]
 /**
  * A chain that answers by address, function name and arguments: the factory's four functions at
  * the factory, `MAX_AMENDMENT_DELAY()` at the code, `predictLegalBody` only for a salt of 32 zero
- * bytes. Every other read reverts, as a contract without that function answers.
+ * bytes. Every other read reverts, as a contract without that function answers. `calls`, when
+ * given, records each read as `<address> <function>`, in the order it was made.
  */
-function factsChain(v: Vector, over: Partial<FactAnswers> = {}): PublicClient {
+function factsChain(v: Vector, over: Partial<FactAnswers> = {}, calls?: string[]): PublicClient {
   const a: FactAnswers = {
     implementation: v.code,
     predictLegalBody: v.predicted,
@@ -386,6 +387,7 @@ function factsChain(v: Vector, over: Partial<FactAnswers> = {}): PublicClient {
     functionName: string;
     args?: readonly unknown[];
   }) => {
+    calls?.push(`${call.address.toLowerCase()} ${call.functionName}`);
     const answer = answers.get(readKey(call.address, call.functionName, call.args ?? []));
     if (answer instanceof Error) throw answer;
     if (answer !== undefined && answer !== REVERTS) return answer;
@@ -463,4 +465,74 @@ test("a node that cannot answer is a fault, not a refusal", async () => {
     expect(failed.message).not.toContain("cannot be served");
     expect(failed.cause).toBe(down);
   }
+});
+
+/** What the node throws when the transport fails, for a read of `functionName` at `address`. */
+const transportFault = (functionName: string, address: Address) =>
+  new ContractFunctionExecutionError(
+    new HttpRequestError({ url: "http://127.0.0.1:1", details: "fetch failed" }),
+    { abi: [], functionName, contractAddress: address },
+  );
+
+/** The error the check fails with. Fails if it passes. */
+async function factsFailure(over: Partial<FactAnswers>, v: Vector = VECTORS[0]): Promise<Error> {
+  return assertLegalBodyContractFacts(factsChain(v, over), factsOf(v)).then(
+    () => {
+      throw new Error("expected the boot check to fail, but it passed");
+    },
+    (err: unknown) => err as Error,
+  );
+}
+
+test("a contract refusal at the second read is the second row's refusal", async () => {
+  const failed = await factsFailure({ predictLegalBody: REVERTS });
+  expect(failed.message).toBe(
+    "boot: LEGAL_BODY_AGREEMENT_VERSION 2026-11-draft-5 cannot be served: LEGAL_BODY_FACTORY_ADDRESS 0x5FbDB2315678afecb367f032d93F642f64180aa3 does not create each legal body as a fixed copy of the code at 0xe7f1725E7734CE288F8367e1Bb143E90bb3F0512, and this version is written for legal bodies whose code is never replaced",
+  );
+  expect(failed.cause).toBeInstanceOf(ContractFunctionExecutionError);
+});
+
+test("a contract refusal at the third read is a refusal, not a fault", async () => {
+  for (const over of [{ factoryMinDelay: REVERTS }, { factoryMaxDelay: REVERTS }] as const) {
+    const failed = await factsFailure(over);
+    expect(failed.message, Object.keys(over)[0]).toBe(
+      "boot: LEGAL_BODY_AGREEMENT_VERSION 2026-11-draft-5 cannot be served: LEGAL_BODY_FACTORY_ADDRESS 0x5FbDB2315678afecb367f032d93F642f64180aa3 does not answer the bounds of its amendment delay, and this version states 172800 to 2592000",
+    );
+    expect(failed.cause, Object.keys(over)[0]).toBeInstanceOf(ContractFunctionExecutionError);
+  }
+});
+
+test.each<[string, Partial<FactAnswers>]>([
+  ["2", { predictLegalBody: transportFault("predictLegalBody", VECTORS[0].factory) }],
+  ["3", { factoryMinDelay: transportFault("MIN_AMENDMENT_DELAY", VECTORS[0].factory) }],
+  ["4", { codeMaxDelay: transportFault("MAX_AMENDMENT_DELAY", VECTORS[0].code) }],
+])("a node that cannot answer read %s is a fault, not a refusal", async (_, over) => {
+  const down = Object.values(over)[0];
+  const failed = await factsFailure(over);
+  expect(failed.message).toMatch(/could not verify.*RPC read failed/s);
+  expect(failed.message).not.toContain("cannot be served");
+  expect(failed.cause).toBe(down);
+});
+
+test("the reads are made in order, and a refusal stops them", async () => {
+  const v = VECTORS[0];
+  const at = (address: Address, functionName: string) => `${address.toLowerCase()} ${functionName}`;
+  const calls: string[] = [];
+  await assertLegalBodyContractFacts(factsChain(v, {}, calls), factsOf(v));
+  expect(calls).toHaveLength(5);
+  expect(calls.slice(0, 2)).toEqual([
+    at(v.factory, "implementation"),
+    at(v.factory, "predictLegalBody"),
+  ]);
+  // The factory's two bounds are read together, so their order between them is not fixed.
+  expect(new Set(calls.slice(2, 4))).toEqual(
+    new Set([at(v.factory, "MIN_AMENDMENT_DELAY"), at(v.factory, "MAX_AMENDMENT_DELAY")]),
+  );
+  expect(calls[4]).toBe(at(v.code, "MAX_AMENDMENT_DELAY"));
+
+  const stopped: string[] = [];
+  await expect(
+    assertLegalBodyContractFacts(factsChain(v, { implementation: REVERTS }, stopped), factsOf(v)),
+  ).rejects.toThrow(/does not answer implementation\(\)/);
+  expect(stopped).toEqual([at(v.factory, "implementation")]);
 });
