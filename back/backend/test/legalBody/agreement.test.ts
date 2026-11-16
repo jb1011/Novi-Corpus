@@ -5,6 +5,7 @@ import {
   type BuiltAgreement,
   LEGAL_BODY_MANIFEST_SCHEMA,
   agreementDocNames,
+  agreementNotice,
   buildAgreement,
   readVerifiedAgreement,
   storeAgreement,
@@ -105,6 +106,26 @@ test("each version's template is pinned by its sha256, and no version leaves the
   );
   // The served version is one of the listed versions; which one a deployment serves is not this list's order.
   expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS).toContain(LEGAL_BODY_OPERATING_AGREEMENT);
+});
+
+test("the notice of each version", () => {
+  const NOTICE =
+    "Notice: this document is a fixed form. It is not a substitute for the advice of an attorney. Novi Corpus is not a law firm and does not give legal advice (section 12).";
+  expect(
+    Object.fromEntries(
+      LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.map((t) => [t.version, agreementNotice(t.template)]),
+    ),
+  ).toEqual({
+    "2026-10-draft-1": null,
+    "2026-11-draft-1": null,
+    "2026-11-draft-2": null,
+    "2026-11-draft-4": NOTICE,
+    "2026-11-draft-5": NOTICE,
+  });
+  expect(agreementNotice("Notice: a\n## 1. x\n")).toBe("Notice: a");
+  // A line after the first section is not the notice.
+  expect(agreementNotice("## 1. x\nNotice: late\n")).toBeNull();
+  expect(agreementNotice("")).toBeNull();
 });
 
 test("a field that holds a placeholder is not substituted again", () => {

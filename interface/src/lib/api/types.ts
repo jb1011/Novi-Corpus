@@ -1320,11 +1320,13 @@ export type StatementMessageAnswer = {
   typedData: StatementTypedDataWire;
   wordingVersion: string;
   textStatus: "draft" | "approved";
+  adoptionRule?: string | null;
 };
 export const STATEMENT_MESSAGE_ANSWER_KEYS = [
   "typedData",
   "wordingVersion",
   "textStatus",
+  "adoptionRule",
 ] as const satisfies readonly (keyof StatementMessageAnswer)[];
 
 /** An order as the API shows it. Times: `linkDeadline`, `deployedAt` and `pointerSeenAt` are unix
@@ -1444,6 +1446,8 @@ export type LegalBodyAgreement = {
   textId: string;
   textVersion: string;
   textStatus: "draft" | "approved";
+  notice?: string | null;
+  adoptionStatement?: string | null;
 };
 export const LEGAL_BODY_AGREEMENT_KEYS = [
   "termsDoc",
@@ -1452,6 +1456,8 @@ export const LEGAL_BODY_AGREEMENT_KEYS = [
   "textId",
   "textVersion",
   "textStatus",
+  "notice",
+  "adoptionStatement",
 ] as const satisfies readonly (keyof LegalBodyAgreement)[];
 
 /** The five link fields, in the order of the contract's type string. */

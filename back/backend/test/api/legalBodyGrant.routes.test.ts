@@ -20,6 +20,7 @@ import { agreementDocNames } from "../../src/legalBody/agreement";
 import type { GrantChoices } from "../../src/legalBody/grant";
 import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import { CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
 import { CHARTER_LEGAL_TEXTS, type LegalTextSet } from "../../src/legalBody/texts/sets";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -67,6 +68,9 @@ const agreementPath = (id: string) => `${ORDERS}/${id}/agreement`;
 const DIGEST_A = "0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1";
 /** sha256 of the Schedule A of fixture `A` as grant 1, version 1. */
 const SCHEDULE_A_SHA256 = "738f0a878a3e630e697d9b670bab395e80dbfa241fcdb22eed9338c21d509685";
+/** The notice Charter draft 5 states before its first section, written out here on its own. */
+const NOTICE =
+  "Notice: this document is a fixed form. It is not a substitute for the advice of an attorney. Novi Corpus is not a law firm and does not give legal advice (section 12).";
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -198,6 +202,7 @@ describe("the form of a grant", () => {
         guarantee: ["not_allowed", "guardian_signature", "alone"],
         transferProperty: ["not_allowed", "guardian_signature"],
       },
+      notice: NOTICE,
     });
 
     const october = await answerOf(await call(octoberApp(), "GET", FORM, token));
@@ -303,6 +308,9 @@ describe("an order's grant", () => {
     expect(agreement.status).toBe(200);
     expect(agreement.body.textVersion).toBe("2026-11-draft-5");
     expect(agreement.body.termsDoc).toContain(read.body.grant.scheduleA);
+    // The notice its stored terms state, and the words its adoption is signed with.
+    expect(agreement.body.notice).toBe(NOTICE);
+    expect(agreement.body.adoptionStatement).toBe(CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1);
 
     // The order's view is the one an October order has: no new key.
     const october = await answerOf(

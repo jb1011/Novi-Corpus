@@ -69,7 +69,7 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../legalBody/sweeper";
-import { assertSetUsable, octoberLegalTexts } from "../legalBody/texts/sets";
+import { adoptionRuleOfVersion, assertSetUsable, octoberLegalTexts } from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { opsLog } from "../observability/opsLog";
 import { AGENT_BOOK_CAIP2, createAgentBookReader } from "../payments/agentBookReader";
@@ -779,6 +779,9 @@ async function main() {
           // one and write the declarant's name from it; a sandbox never reads it.
           identity,
           text: legalTexts.declaration,
+          // What the adoption of the agreement served asks of the company, said with the statement
+          // to sign: null where its adoption asks nothing in words.
+          adoptionRule: adoptionRuleOfVersion(legalTexts.agreement.text.version),
           maxOpenPerTenant: cfg.formation?.byoMaxOpenPerTenant ?? DEFAULT_BYO_MAX_OPEN_PER_TENANT,
           // The switch of the payment config built above: charging, a new company lands `draft`.
           paymentRequired: formationPayment.required,

@@ -94,6 +94,9 @@ export interface CustomerCompanyDeps {
   /** The wording new declarations are made under: the composition passes the declaration of the
    *  pair it serves. Every step reads this one, never a constant. */
   text: LegalText<StatementFields>;
+  /** What the adoption of the agreement this deployment serves asks of the company, served with
+   *  the statement to sign. Absent or null: nothing. */
+  adoptionRule?: string | null;
   maxOpenPerTenant: number;
   /** True: a new company lands `draft`, owing its payment. False: it lands `ready`. */
   paymentRequired: boolean;

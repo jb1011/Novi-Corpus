@@ -334,8 +334,20 @@ describe("the doors", () => {
     const res = await answerOf(await call(app, "GET", agreementPath(view.id), token));
     expect(res.status).toBe(200);
     expect(Object.keys(res.body).sort()).toEqual(
-      ["termsDoc", "manifest", "manifestHash", "textId", "textVersion", "textStatus"].sort(),
+      [
+        "termsDoc",
+        "manifest",
+        "manifestHash",
+        "textId",
+        "textVersion",
+        "textStatus",
+        "notice",
+        "adoptionStatement",
+      ].sort(),
     );
+    // The October text states no notice and is adopted by the adoption's fields alone.
+    expect(res.body.notice).toBeNull();
+    expect(res.body.adoptionStatement).toBeNull();
     // What the caller checks: the manifest against the hash its link signs, the text against
     // the hash the manifest commits to.
     expect(res.body.manifestHash).toBe(view.agreement?.hash);

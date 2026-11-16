@@ -1,6 +1,6 @@
 import type { Address, Hex } from "viem";
 import { assertRealHuman } from "../api/routes/worldId";
-import { readVerifiedAgreement } from "./agreement";
+import { agreementNotice, readVerifiedAgreement } from "./agreement";
 import { assertDraftsServable } from "./draftTextRefusal";
 import {
   GRANT_AMOUNT_MAX,
@@ -63,6 +63,8 @@ export type GrantFormView =
       amountMax: number;
       /** The settings offered for each act of section 5.6. */
       heavyActModes: Readonly<Record<GrantHeavyAct, readonly GrantHeavyMode[]>>;
+      /** The notice the served agreement states before its first section, or null. */
+      notice: string | null;
     };
 
 /** The rules of the form on the agreement this deployment serves (`deps.texts`): none where that
@@ -80,6 +82,7 @@ export function grantForm(deps: LegalBodyOrderDeps, tenantId: Address): GrantFor
     schema: GRANT_SCHEMA,
     amountMax: GRANT_AMOUNT_MAX,
     heavyActModes: GRANT_HEAVY_MODES_OFFERED,
+    notice: agreementNotice(agreement.text.template),
   };
 }
 

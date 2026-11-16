@@ -1,5 +1,8 @@
 import { SCHEDULE_A_WORDING } from "../grant";
-import { CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1 } from "./adoptionStatement";
+import {
+  CHARTER_ADOPTION_RULE_2026_11_DRAFT_1,
+  CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1,
+} from "./adoptionStatement";
 import type { LegalText } from "./index";
 import { type CharterFields, LEGAL_BODY_CHARTER_2026_11_DRAFT_5 } from "./legalBodyCharter";
 import {
@@ -112,6 +115,15 @@ export function agreementTextOfVersion(version: string): AgreementText | undefin
 export function adoptionStatementOfVersion(version: string): string | null {
   const entry = agreementTextOfVersion(version);
   return entry?.kind === "charter" ? entry.adoptionStatement : null;
+}
+
+/** What the adoption of a text of this version asks of the company, or null: its adoption asks
+ *  nothing in words, or this build does not know the version. */
+export function adoptionRuleOfVersion(version: string): string | null {
+  // The rule belongs to the words of adoption: other words bring their own rule, or none.
+  return adoptionStatementOfVersion(version) === CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1
+    ? CHARTER_ADOPTION_RULE_2026_11_DRAFT_1
+    : null;
 }
 
 /** The two texts a deployment serves together. Paired here by name, never by equal version

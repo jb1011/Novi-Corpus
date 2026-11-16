@@ -3,7 +3,10 @@ import { join, relative } from "node:path";
 import { expect, test } from "vitest";
 import { assertDraftsServable } from "../../src/legalBody/draftTextRefusal";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
-import { CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
+import {
+  CHARTER_ADOPTION_RULE_2026_11_DRAFT_1,
+  CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1,
+} from "../../src/legalBody/texts/adoptionStatement";
 import { LEGAL_BODY_CHARTER_2026_11_DRAFT_5 } from "../../src/legalBody/texts/legalBodyCharter";
 import {
   LEGAL_BODY_OPERATING_AGREEMENT,
@@ -13,6 +16,7 @@ import {
   AGREEMENT_TEXTS,
   type AgreementText,
   CHARTER_LEGAL_TEXTS,
+  adoptionRuleOfVersion,
   adoptionStatementOfVersion,
   agreementTextOfVersion,
   assertSetUsable,
@@ -88,6 +92,26 @@ test("a version's words of adoption are read by its name", () => {
     expect(adoptionStatementOfVersion(version), version).toBeNull();
 });
 
+test("a version's rule of adoption is read by its name", () => {
+  expect(adoptionRuleOfVersion("2026-11-draft-5")).toBe(CHARTER_ADOPTION_RULE_2026_11_DRAFT_1);
+  for (const version of [
+    "2026-10-draft-1",
+    "2026-11-draft-1",
+    "2026-11-draft-2",
+    "2026-11-draft-4",
+    "2099-01-draft-1",
+  ])
+    expect(adoptionRuleOfVersion(version), version).toBeNull();
+});
+
+test("the rule of adoption, whole", () => {
+  expect(CHARTER_ADOPTION_RULE_2026_11_DRAFT_1).toBe(
+    "The Legal Body Charter is adopted by a Guardian who signs that they are the only member of the company. A company with several members, or whose only member is not its Guardian, cannot adopt it yet.",
+  );
+  expect(CHARTER_ADOPTION_RULE_2026_11_DRAFT_1).toHaveLength(198);
+  expect(CHARTER_ADOPTION_RULE_2026_11_DRAFT_1).toMatch(/^[\x20-\x7e]+$/);
+});
+
 test("no order is placed on a Charter version that has no words of adoption", () => {
   const charter = CHARTER_LEGAL_TEXTS.agreement;
   if (charter.kind !== "charter") throw new Error("the Charter pair holds a Charter");
@@ -121,6 +145,10 @@ test("nothing in src selects the Charter pair, and the doors read the pair they 
     "legalBody/texts/statementOfAuthority.ts",
   ]);
   expect(naming("CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1").sort()).toEqual([
+    "legalBody/texts/adoptionStatement.ts",
+    "legalBody/texts/sets.ts",
+  ]);
+  expect(naming("CHARTER_ADOPTION_RULE_2026_11_DRAFT_1").sort()).toEqual([
     "legalBody/texts/adoptionStatement.ts",
     "legalBody/texts/sets.ts",
   ]);

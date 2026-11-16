@@ -177,6 +177,7 @@ const STATEMENT_MESSAGE_ANSWER_KEYS: Record<keyof StatementMessageAnswer, true> 
   typedData: true,
   wordingVersion: true,
   textStatus: true,
+  adoptionRule: true,
 };
 
 const LEGAL_BODY_AGREEMENT_KEYS: Record<keyof LegalBodyAgreementAnswer, true> = {
@@ -186,6 +187,8 @@ const LEGAL_BODY_AGREEMENT_KEYS: Record<keyof LegalBodyAgreementAnswer, true> = 
   textId: true,
   textVersion: true,
   textStatus: true,
+  notice: true,
+  adoptionStatement: true,
 };
 
 const LINK_MESSAGE_RESULT_KEYS: Record<keyof LinkMessageResult, true> = {
