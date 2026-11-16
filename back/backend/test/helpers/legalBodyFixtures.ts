@@ -155,7 +155,7 @@ export function legalTextsWithStatus(over: {
   agreement?: LegalTextStatus;
   declaration?: LegalTextStatus;
 }): LegalTextSet {
-  const { agreement, declaration } = octoberLegalTexts();
+  const { agreement, declaration, contractFacts, productionNeeds } = octoberLegalTexts();
   if (agreement.kind !== "plain") throw new Error("the October agreement is a plain text");
   return Object.freeze({
     agreement: Object.freeze({
@@ -163,6 +163,8 @@ export function legalTextsWithStatus(over: {
       text: Object.freeze({ ...agreement.text, status: over.agreement ?? agreement.text.status }),
     }),
     declaration: Object.freeze({ ...declaration, status: over.declaration ?? declaration.status }),
+    contractFacts,
+    productionNeeds,
   });
 }
 

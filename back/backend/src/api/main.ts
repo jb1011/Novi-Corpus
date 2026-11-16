@@ -9,6 +9,7 @@ import {
   LEGAL_BODY_GRANTED_SELECTORS,
   assertControllerWiring,
   assertLegacyFactoryOwner,
+  assertLegalBodyContractFacts,
   assertLegalBodyFactoryWiring,
   assertNoFullProductGrants,
 } from "../adapters/arc/bootVerify";
@@ -69,7 +70,13 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../legalBody/sweeper";
-import { adoptionRuleOfVersion, assertSetUsable, octoberLegalTexts } from "../legalBody/texts/sets";
+import {
+  PRODUCTION_NEEDS_BUILT,
+  adoptionRuleOfVersion,
+  assertProductionNeedsBuilt,
+  assertSetUsable,
+  legalTextsOf,
+} from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { opsLog } from "../observability/opsLog";
 import { AGENT_BOOK_CAIP2, createAgentBookReader } from "../payments/agentBookReader";
@@ -143,6 +150,19 @@ import { installShutdownHandlers, shouldInstallSignalHandlers } from "./shutdown
 
 async function main() {
   const cfg = loadConfig();
+  /**
+   * The pair of legal texts this deployment serves, chosen once here by the setting
+   * LEGAL_BODY_AGREEMENT_VERSION: the order doors and the formed door read its agreement, the
+   * customer company doors its declaration. A name that is not a selectable version, a pair no
+   * order can be placed on, or a pair a production deployment cannot serve yet stops the boot
+   * before the database is opened.
+   */
+  const legalTexts = legalTextsOf(cfg.legalBodyAgreementVersion);
+  assertSetUsable(legalTexts);
+  assertProductionNeedsBuilt(legalTexts, legalBodyEnvironment(cfg), PRODUCTION_NEEDS_BUILT);
+  console.log(
+    `[boot] legal texts: agreement ${legalTexts.agreement.text.version} (${legalTexts.agreement.text.status}), declaration ${legalTexts.declaration.version} (${legalTexts.declaration.status})`,
+  );
   // A full-product factory, a legal-body factory, or both. With only the legal-body factory this is
   // a Minimal-only deployment: the full product is off and the adapter refuses to create entities.
   if (!cfg.factoryAddress && !cfg.legalBodyFactory)
@@ -260,6 +280,16 @@ async function main() {
     console.log(
       `[boot] legal-body factory wiring verified on-chain: owner, registry, typed-data domain on chain ${cfg.chainId}, ${LEGAL_BODY_GRANTED_SELECTORS.length} pinned executor grants`,
     );
+    if (legalTexts.contractFacts !== null) {
+      await assertLegalBodyContractFacts(publicClient, {
+        factory: cfg.legalBodyFactory,
+        facts: legalTexts.contractFacts,
+        agreementVersion: legalTexts.agreement.text.version,
+      });
+      console.log(
+        `[boot] legal-body contract facts verified on-chain for agreement ${legalTexts.agreement.text.version}: fixed copies of one code, amendment delay bounds, a dissolution its starter can cancel`,
+      );
+    }
   }
 
   const arc = new ArcAdapter({
@@ -597,14 +627,6 @@ async function main() {
         `⚠ FORMATION SETTLE SUBMITTER IS LOW ON GAS (${balance}) — top ${submitter} up with USDC, or settles will stall with guardians' authorizations already signed`,
       );
   }
-
-  /**
-   * The pair of legal texts this deployment serves, chosen once here: the order doors and the
-   * formed door read its agreement, the customer company doors its declaration. A pair no order
-   * can be placed on stops the boot.
-   */
-  const legalTexts = octoberLegalTexts();
-  assertSetUsable(legalTexts);
 
   const companyDeps = formationDeployment
     ? {

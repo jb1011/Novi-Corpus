@@ -126,11 +126,38 @@ export function adoptionRuleOfVersion(version: string): string | null {
     : null;
 }
 
+/** What a pair's agreement says of the legal body's contract, by name. Proved on chain at start. */
+export type LegalBodyContractFacts = "fixed_copy_cancellable_dissolution";
+
+/** What a production deployment must have built before it serves a pair. */
+export const PRODUCTION_NEEDS = [
+  "presence_check_at_grant",
+  "email_notice_at_grant",
+  "guardian_notice_before_adoption",
+  "guardian_residence_scope",
+] as const;
+export type ProductionNeed = (typeof PRODUCTION_NEEDS)[number];
+
+/** The needs this build has built. None yet: the step that builds one adds its name here. */
+export const PRODUCTION_NEEDS_BUILT: ReadonlySet<ProductionNeed> = new Set<ProductionNeed>();
+
+/** How a refusal names each need a production deployment has not built. */
+const PHRASE_OF_NEED: Readonly<Record<ProductionNeed, string>> = Object.freeze({
+  presence_check_at_grant: "the presence check before a grant is served for signature",
+  email_notice_at_grant: "the notice by email before a grant is served for signature",
+  guardian_notice_before_adoption: "the Guardian's notice shown before the adoption",
+  guardian_residence_scope: "the check of where the Guardian lives",
+});
+
 /** The two texts a deployment serves together. Paired here by name, never by equal version
  *  names. */
 export interface LegalTextSet {
   readonly agreement: AgreementText;
   readonly declaration: LegalText<StatementFields>;
+  /** What the agreement says of the legal body's contract, or null: nothing a start check reads. */
+  readonly contractFacts: LegalBodyContractFacts | null;
+  /** What a production deployment must have built before it serves this pair. */
+  readonly productionNeeds: readonly ProductionNeed[];
 }
 
 /** The October agreement and the October statement: the pair a deployment serves when it names none. */
@@ -138,14 +165,62 @@ export function octoberLegalTexts(): LegalTextSet {
   return Object.freeze({
     agreement: Object.freeze({ kind: "plain", text: LEGAL_BODY_OPERATING_AGREEMENT }),
     declaration: STATEMENT_OF_AUTHORITY,
+    contractFacts: null,
+    productionNeeds: Object.freeze([]),
   });
 }
 
-/** Charter draft 5 with declaration draft 2. Selected by nothing in `src`. */
+/** Charter draft 5 with declaration draft 2. Selected only by its agreement's version, at start. */
 export const CHARTER_LEGAL_TEXTS: LegalTextSet = Object.freeze({
   agreement: tagged(LEGAL_BODY_CHARTER_2026_11_DRAFT_5),
   declaration: DECLARATION_OF_AUTHORITY_2026_11_DRAFT_2,
+  contractFacts: "fixed_copy_cancellable_dissolution",
+  productionNeeds: Object.freeze([...PRODUCTION_NEEDS]),
 });
+
+/**
+ * The pairs a deployment can name, by their agreement's version, in the list's order. A later pair
+ * is one more entry.
+ */
+const PAIR_OF_VERSION: ReadonlyMap<string, () => LegalTextSet> = new Map<
+  string,
+  () => LegalTextSet
+>([
+  ["2026-10-draft-1", octoberLegalTexts],
+  ["2026-11-draft-5", () => CHARTER_LEGAL_TEXTS],
+]);
+
+/** The agreement versions a deployment can name, in the list's order. */
+export const SELECTABLE_AGREEMENT_VERSIONS: readonly string[] = Object.freeze([
+  ...PAIR_OF_VERSION.keys(),
+]);
+
+/** The pair a deployment serves: the one whose agreement has this version; the October pair when
+ *  no version is named. Throws for any other name. */
+export function legalTextsOf(version: string | undefined): LegalTextSet {
+  if (version === undefined) return octoberLegalTexts();
+  const pair = PAIR_OF_VERSION.get(version);
+  if (pair === undefined)
+    throw new Error(
+      `Invalid config: LEGAL_BODY_AGREEMENT_VERSION must be one of: ${SELECTABLE_AGREEMENT_VERSIONS.join(", ")}`,
+    );
+  return pair();
+}
+
+/** Throws unless `environment` may serve `set`: a production deployment needs every one of the
+ *  pair's production needs built. */
+export function assertProductionNeedsBuilt(
+  set: LegalTextSet,
+  environment: "sandbox" | "production",
+  built: ReadonlySet<ProductionNeed>,
+): void {
+  if (environment !== "production") return;
+  const missing = set.productionNeeds.filter((need) => !built.has(need));
+  if (missing.length === 0) return;
+  throw new Error(
+    `Invalid config: LEGAL_BODY_AGREEMENT_VERSION ${set.agreement.text.version} cannot be served on a production deployment yet. Not built: ${missing.map((need) => PHRASE_OF_NEED[need]).join("; ")}`,
+  );
+}
 
 /** Throws unless an order can be placed on `set`: a Charter must be written with
  *  SCHEDULE_A_WORDING, and must have words of adoption. */

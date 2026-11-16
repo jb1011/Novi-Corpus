@@ -16,10 +16,16 @@ import {
   AGREEMENT_TEXTS,
   type AgreementText,
   CHARTER_LEGAL_TEXTS,
+  PRODUCTION_NEEDS,
+  PRODUCTION_NEEDS_BUILT,
+  type ProductionNeed,
+  SELECTABLE_AGREEMENT_VERSIONS,
   adoptionRuleOfVersion,
   adoptionStatementOfVersion,
   agreementTextOfVersion,
+  assertProductionNeedsBuilt,
   assertSetUsable,
+  legalTextsOf,
   octoberLegalTexts,
 } from "../../src/legalBody/texts/sets";
 import { STATEMENT_OF_AUTHORITY } from "../../src/legalBody/texts/statementOfAuthority";
@@ -71,7 +77,14 @@ test("no order is placed on a Charter version that has no Schedule A wording", (
     [AGREEMENT_TEXTS[3] as AgreementText, "2026-11-draft-4"],
   ];
   for (const [agreement, version] of retired)
-    expect(() => assertSetUsable({ agreement, declaration: STATEMENT_OF_AUTHORITY })).toThrow(
+    expect(() =>
+      assertSetUsable({
+        agreement,
+        declaration: STATEMENT_OF_AUTHORITY,
+        contractFacts: null,
+        productionNeeds: [],
+      }),
+    ).toThrow(
       new Error(
         `legal texts: version "${version}" of the agreement has no Schedule A wording this deployment writes`,
       ),
@@ -122,11 +135,91 @@ test("no order is placed on a Charter version that has no words of adoption", ()
   );
 });
 
-test("nothing in src selects the Charter pair, and the doors read the pair they are given", () => {
+test("a deployment that names no version serves the October pair", () => {
+  expect(legalTextsOf(undefined)).toEqual(octoberLegalTexts());
+  expect(legalTextsOf("2026-10-draft-1")).toEqual(octoberLegalTexts());
+  expect(legalTextsOf("2026-11-draft-5")).toBe(CHARTER_LEGAL_TEXTS);
+});
+
+test("each selectable pair is found by its agreement's version, and can take an order", () => {
+  expect(SELECTABLE_AGREEMENT_VERSIONS).toEqual(["2026-10-draft-1", "2026-11-draft-5"]);
+  for (const version of SELECTABLE_AGREEMENT_VERSIONS) {
+    const set = legalTextsOf(version);
+    expect(set.agreement.text.version, version).toBe(version);
+    expect(() => assertSetUsable(set), version).not.toThrow();
+  }
+});
+
+test.each([
+  [""],
+  ["2026-11-draft-4"],
+  ["2026-11-draft-2"],
+  ["2026-11-DRAFT-5"],
+  [" 2026-11-draft-5"],
+  ["latest"],
+])("a name that is not a selectable version refuses the start: %s", (name) => {
+  expect(() => legalTextsOf(name)).toThrow(
+    new Error(
+      "Invalid config: LEGAL_BODY_AGREEMENT_VERSION must be one of: 2026-10-draft-1, 2026-11-draft-5",
+    ),
+  );
+});
+
+test("what each pair needs", () => {
+  const october = octoberLegalTexts();
+  expect(october.contractFacts).toBeNull();
+  expect(october.productionNeeds).toEqual([]);
+  expect(CHARTER_LEGAL_TEXTS.contractFacts).toBe("fixed_copy_cancellable_dissolution");
+  expect(CHARTER_LEGAL_TEXTS.productionNeeds).toEqual([
+    "presence_check_at_grant",
+    "email_notice_at_grant",
+    "guardian_notice_before_adoption",
+    "guardian_residence_scope",
+  ]);
+  expect(CHARTER_LEGAL_TEXTS.productionNeeds).toEqual([...PRODUCTION_NEEDS]);
+  expect(PRODUCTION_NEEDS_BUILT.size).toBe(0);
+});
+
+test("a production deployment serves the Charter only once every need is built", () => {
+  expect(() => assertProductionNeedsBuilt(CHARTER_LEGAL_TEXTS, "production", new Set())).toThrow(
+    new Error(
+      "Invalid config: LEGAL_BODY_AGREEMENT_VERSION 2026-11-draft-5 cannot be served on a production deployment yet. Not built: the presence check before a grant is served for signature; the notice by email before a grant is served for signature; the Guardian's notice shown before the adoption; the check of where the Guardian lives",
+    ),
+  );
+  const firstThree = new Set<ProductionNeed>([
+    "presence_check_at_grant",
+    "email_notice_at_grant",
+    "guardian_notice_before_adoption",
+  ]);
+  expect(() => assertProductionNeedsBuilt(CHARTER_LEGAL_TEXTS, "production", firstThree)).toThrow(
+    new Error(
+      "Invalid config: LEGAL_BODY_AGREEMENT_VERSION 2026-11-draft-5 cannot be served on a production deployment yet. Not built: the check of where the Guardian lives",
+    ),
+  );
+  const all = new Set<ProductionNeed>(PRODUCTION_NEEDS);
+  expect(() => assertProductionNeedsBuilt(CHARTER_LEGAL_TEXTS, "production", all)).not.toThrow();
+  expect(() => assertProductionNeedsBuilt(CHARTER_LEGAL_TEXTS, "sandbox", new Set())).not.toThrow();
+  expect(() =>
+    assertProductionNeedsBuilt(octoberLegalTexts(), "production", new Set()),
+  ).not.toThrow();
+});
+
+test("the pair is chosen once, at start, by the setting", () => {
   const files = sourcesUnder(SRC);
   const naming = (name: string) =>
     files.filter((f) => new RegExp(`\\b${name}\\b`).test(readFileSync(join(SRC, f), "utf8")));
   expect(naming("CHARTER_LEGAL_TEXTS")).toEqual(["legalBody/texts/sets.ts"]);
+  expect(naming("legalTextsOf").sort()).toEqual(["api/main.ts", "legalBody/texts/sets.ts"]);
+  expect(naming("octoberLegalTexts")).toEqual(["legalBody/texts/sets.ts"]);
+  expect(naming("assertLegalBodyContractFacts").sort()).toEqual([
+    "adapters/arc/bootVerify.ts",
+    "api/main.ts",
+  ]);
+  expect(naming("assertProductionNeedsBuilt").sort()).toEqual([
+    "api/main.ts",
+    "legalBody/texts/sets.ts",
+  ]);
+  expect(naming("legalBodyAgreementVersion").sort()).toEqual(["api/main.ts", "config/env.ts"]);
   expect(naming("LEGAL_BODY_OPERATING_AGREEMENT").sort()).toEqual([
     "legalBody/texts/operatingAgreement.ts",
     "legalBody/texts/sets.ts",
