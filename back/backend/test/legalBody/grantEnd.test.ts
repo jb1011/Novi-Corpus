@@ -187,7 +187,7 @@ describe("the adoption doors", () => {
     const row = order(tomorrow);
 
     const served = adoptionMessage(at(tomorrowStartsMs - 1000), tenant, row.legalBodyId);
-    expect(served.typedData.primaryType).toBe("OperatingAgreementAdoption");
+    expect(served.typedData.primaryType).toBe("LegalBodyCharterAdoption");
     expect(served.typedData.message.orderId).toBe(row.legalBodyId);
     expect(served.issuedAt).toBe(String(tomorrowStartsMs / 1000 - 1));
 

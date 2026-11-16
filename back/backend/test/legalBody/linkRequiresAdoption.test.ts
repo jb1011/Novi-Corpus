@@ -223,6 +223,7 @@ describe("the adoption must name the order's own agreement", () => {
       signature: PLACEHOLDER_ADOPTION_SIGNATURE,
       digest: H("d"),
       adoptedAt: Math.floor(Date.now() / 1000),
+      statement: null,
     });
     expect(H("e")).not.toBe(row.oaManifestHash);
     const before = snapshot();

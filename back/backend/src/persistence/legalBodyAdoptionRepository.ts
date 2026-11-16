@@ -13,7 +13,8 @@ import {
  * guardian signs the adoption of the agreement frozen for it (`legalBody/adoption.ts`). The link
  * doors read only whether the row exists; the row itself is evidence, holding exactly what the
  * guardian signed (the manifest hash, the text id and version, the guardian, the time it was
- * issued) and the signature and digest, so the signature can be checked again from the row alone.
+ * issued, and the words when the adoption was signed in the form that carries them) and the
+ * signature and digest, so the signature can be checked again from the row alone.
  *
  * The table and the guards the database itself holds (one row per order, no update, no delete, no
  * replace) are `agreement_adoptions` in db.ts.
@@ -37,6 +38,8 @@ export interface AgreementAdoption {
   adoptedAt: number;
   /** UTC, `YYYY-MM-DD HH:MM:SS`. */
   createdAt: string;
+  /** The words that were signed, or null: an adoption signed by its six fields alone. */
+  statement: string | null;
 }
 
 export type NewAgreementAdoption = Omit<AgreementAdoption, "createdAt">;
@@ -63,6 +66,7 @@ interface Row {
   digest: string;
   adopted_at: number;
   created_at: string;
+  statement: string | null;
 }
 
 function toAdoption(r: Row): AgreementAdoption {
@@ -77,12 +81,21 @@ function toAdoption(r: Row): AgreementAdoption {
     digest: r.digest as Hex,
     adoptedAt: r.adopted_at,
     createdAt: r.created_at,
+    statement: r.statement,
   };
 }
 
 function requireText(field: string, value: unknown): string {
   if (typeof value !== "string" || value.length === 0)
     throw new LegalBodyInputError(`${field} must be a non-empty string`);
+  return value;
+}
+
+/** The words of an adoption: null, or 1 to 2,000 characters of text, as the column holds them. */
+function requireStatement(value: unknown): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length < 1 || value.length > 2000)
+    throw new LegalBodyInputError("statement must be null or 1 to 2000 characters of text");
   return value;
 }
 
@@ -94,9 +107,9 @@ export class SqliteLegalBodyAdoptionRepository implements LegalBodyAdoptionRepos
       insert: db.prepare(
         `INSERT INTO agreement_adoptions
            (legal_body_id, manifest_hash, text_id, text_version, guardian, issued_at, signature,
-            digest, adopted_at)
+            digest, adopted_at, statement)
          VALUES (@legal_body_id, @manifest_hash, @text_id, @text_version, @guardian, @issued_at,
-                 @signature, @digest, @adopted_at)`,
+                 @signature, @digest, @adopted_at, @statement)`,
       ),
       find: db.prepare("SELECT * FROM agreement_adoptions WHERE legal_body_id = ?"),
     };
@@ -120,6 +133,7 @@ export class SqliteLegalBodyAdoptionRepository implements LegalBodyAdoptionRepos
       signature: a.signature.toLowerCase(),
       digest: requireHash("digest", a.digest),
       adopted_at: requireSeconds("adoptedAt", a.adoptedAt),
+      statement: requireStatement(a.statement),
     });
   }
 }

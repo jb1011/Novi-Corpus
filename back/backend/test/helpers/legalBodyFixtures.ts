@@ -218,6 +218,7 @@ export function adoptFor(
       signature: PLACEHOLDER_ADOPTION_SIGNATURE,
       digest: adoptionDigest(row.chainId, row.factory, message),
       adoptedAt: nowSec,
+      statement: message.statement,
     },
   );
 }
