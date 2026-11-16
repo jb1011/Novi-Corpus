@@ -467,7 +467,7 @@ const GET_LINK_MESSAGE_DESCRIPTION = [
   "Before the link, the order's guardian adopts its agreement in the web app: until then this answers agreement_not_adopted.",
   "agentId is the identity's id, as a decimal string.",
   `ttlSeconds, if given, is how long the message stays signable: a whole number of seconds from ${MIN_SERVED_LINK_TTL_SECONDS} to ${MAX_SERVED_LINK_TTL_SECONDS} (${DEFAULT_LINK_TTL_SECONDS} if omitted).`,
-  "Where the order's agreement states a grant with an end, a deadline on or after the first second of the grant's last day answers link_outlasts_grant: ask again with a smaller ttlSeconds.",
+  "Where the order's agreement states a grant with an end, a deadline on or after the first second of the grant's last day answers link_outlasts_grant: ask again with a smaller ttlSeconds, or, when the shortest lifetime is still too long, have the guardian place a new order in the web app.",
   "The answer is typedData, the EIP-712 typed data to sign (the three uint256 fields of its message are decimal strings); identityOwner, the address that must sign it, which the identity registry names as the owner now; and deadline, in unix seconds of chain time.",
   "It writes nothing.",
   "Sign typedData with the identity owner's key, then pass typedData.message and the signature to submit_link.",

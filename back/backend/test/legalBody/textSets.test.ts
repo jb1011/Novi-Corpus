@@ -23,6 +23,7 @@ import {
   adoptionRuleOfVersion,
   adoptionStatementOfVersion,
   agreementTextOfVersion,
+  assertContractFactsProvable,
   assertProductionNeedsBuilt,
   assertSetUsable,
   legalTextsOf,
@@ -204,6 +205,18 @@ test("a production deployment serves the Charter only once every need is built",
   ).not.toThrow();
 });
 
+test("a pair that states contract facts is served only where a legal-body factory is named", () => {
+  expect(() => assertContractFactsProvable(CHARTER_LEGAL_TEXTS, undefined)).toThrow(
+    new Error(
+      "Invalid config: LEGAL_BODY_AGREEMENT_VERSION 2026-11-draft-5 needs LEGAL_BODY_FACTORY_ADDRESS: what this version says of the legal body's contract is proved against that factory at start",
+    ),
+  );
+  expect(() =>
+    assertContractFactsProvable(CHARTER_LEGAL_TEXTS, "0x3333333333333333333333333333333333333333"),
+  ).not.toThrow();
+  expect(() => assertContractFactsProvable(octoberLegalTexts(), undefined)).not.toThrow();
+});
+
 test("the pair is chosen once, at start, by the setting", () => {
   const files = sourcesUnder(SRC);
   const naming = (name: string) =>
@@ -216,6 +229,10 @@ test("the pair is chosen once, at start, by the setting", () => {
     "api/main.ts",
   ]);
   expect(naming("assertProductionNeedsBuilt").sort()).toEqual([
+    "api/main.ts",
+    "legalBody/texts/sets.ts",
+  ]);
+  expect(naming("assertContractFactsProvable").sort()).toEqual([
     "api/main.ts",
     "legalBody/texts/sets.ts",
   ]);
@@ -245,6 +262,13 @@ test("the pair is chosen once, at start, by the setting", () => {
     "legalBody/texts/adoptionStatement.ts",
     "legalBody/texts/sets.ts",
   ]);
+});
+
+test("no file of src outside the texts names a version of a text", () => {
+  const naming = sourcesUnder(SRC)
+    .filter((f) => !f.startsWith("legalBody/texts/") && f !== "legalBody/grant.ts")
+    .filter((f) => /DRAFT_[0-9]|draft-[0-9]/.test(readFileSync(join(SRC, f), "utf8")));
+  expect(naming).toEqual([]);
 });
 
 test("a draft text is one refusal, through one helper", () => {

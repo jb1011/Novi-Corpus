@@ -1172,6 +1172,35 @@ describe("abandoning a customer company", () => {
     });
   });
 
+  test("which legal bodies keep a company is read on the company's own environment, never the deployment's", async () => {
+    const production = (await createCustomerCompany(deps(), owner.address, await signed(TYPED)))
+      .companyId;
+    const onSandbox = sandboxDeps({
+      hasOpenLegalBody: () => true,
+      hasOpenLegalBodyHere: () => false,
+    });
+    expect(
+      refusalOfCall(() => abandonCustomerCompany(onSandbox, owner.address, production)),
+    ).toMatchObject({
+      code: "conflict",
+      status: 409,
+      message: "this company stands behind an open legal body",
+    });
+    expect(companies.find(production)?.status).toBe("draft");
+    expect(declarations.find(production)?.piiErasedAt).toBeNull();
+
+    const sandbox = (
+      await createCustomerCompany(
+        sandboxDeps(),
+        owner.address,
+        await signed({ ...SANDBOX_TYPED, filingNumber: "TEST-0002" }),
+      )
+    ).companyId;
+    const onProduction = deps({ hasOpenLegalBody: () => true, hasOpenLegalBodyHere: () => false });
+    expect(() => abandonCustomerCompany(onProduction, owner.address, sandbox)).not.toThrow();
+    expect(companies.find(sandbox)?.status).toBe("abandoned");
+  });
+
   test("an unknown company and another tenant's get the same 404", async () => {
     recordHuman(second.address, SECOND_NULLIFIER);
     const theirs = (

@@ -384,11 +384,10 @@ export function createOrder(
 
   // 3a. Read on the company's own provider, as step 4 reads it: only a customer's own company has
   //     a declaration. One made under another wording version than the pair's declaration is
-  //     refused, and so is none at all.
-  if (
-    owned.provider === CUSTOMER_PROVIDER &&
-    deps.declarations.find(companyId)?.wordingVersion !== deps.texts.declaration.version
-  )
+  //     refused here. A customer's company with no declaration names nothing: step 4 refuses it.
+  const declared =
+    owned.provider === CUSTOMER_PROVIDER ? deps.declarations.find(companyId) : undefined;
+  if (declared !== undefined && declared.wordingVersion !== deps.texts.declaration.version)
     throw refusal("declaration_outdated", 409);
 
   // 3b. Any value under the key counts as given, `null` included: an agreement that takes no grant

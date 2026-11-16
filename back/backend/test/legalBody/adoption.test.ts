@@ -773,6 +773,23 @@ describe("the adoption in words", () => {
         ),
       ).toBe(false);
     }
+    // A row rewritten whole, its words and its digest together: the digest agrees with the row, and
+    // the signature, made over the words that were signed, no longer recovers to the guardian.
+    const rewritten = adoptionDigest(CHAIN_ID, FACTORY, {
+      orderId: inWords.legalBodyId,
+      manifestHash: inWords.manifestHash,
+      textId: inWords.textId,
+      textVersion: inWords.textVersion,
+      guardian: inWords.guardian,
+      issuedAt: BigInt(inWords.issuedAt),
+      statement: OTHER_WORDS,
+    });
+    expect(
+      await storedAdoptionChecks(
+        { ...inWords, statement: OTHER_WORDS, digest: rewritten },
+        deployment,
+      ),
+    ).toBe(false);
   });
 
   test("a database made before the words gains the column once, and its rows read back with none", () => {

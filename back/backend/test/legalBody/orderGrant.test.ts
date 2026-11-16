@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { ApiError } from "../../src/errors";
 import { companyNameOptions } from "../../src/formation/intake";
 import { readVerifiedAgreement } from "../../src/legalBody/agreement";
+import { CUSTOMER_COMPANY_PLACEHOLDER } from "../../src/legalBody/customerCompany";
 import { buildGrant } from "../../src/legalBody/grant";
 import { GRANT_HEAVY_MODES_OFFERED, grantOfferProblems } from "../../src/legalBody/orderGrant";
 import {
@@ -22,6 +23,7 @@ import {
   type LegalBodyOrderView,
   createOrder,
 } from "../../src/legalBody/orders";
+import { CUSTOMER_PROVIDER } from "../../src/legalBody/provider";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import type { FieldProblem } from "../../src/legalBody/textRules";
 import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
@@ -32,6 +34,7 @@ import { seedCompany } from "../helpers/formationFakes";
 import { A, B } from "../helpers/grantFixtures";
 import {
   type LegalBodyStores,
+  appendCheck,
   customerCompany,
   legalBodyOrderDeps,
   openLegalBodyStores,
@@ -402,6 +405,33 @@ describe("the declaration of a declared company", () => {
       }),
     );
     expect(err).toMatchObject({ code: "company_not_eligible", status: 409 });
+  });
+
+  test("a customer's company with no declaration is not eligible, on either pair", () => {
+    const companyId = s.companies.create({
+      tenantId: guardian,
+      status: "ready",
+      provider: CUSTOMER_PROVIDER,
+      environment: "sandbox",
+      synthetic: true,
+      nameOptions: [{ name: "Example Holdings LLC", entityTypeEnding: "", position: 1 }],
+      businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
+      industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
+      intakeSynthesized: false,
+      purposeKind: "legal_body",
+    });
+    appendCheck(s.checks, companyId, "passed");
+    expect(s.declarations.find(companyId)).toBeUndefined();
+
+    const onOctober = refusedWith(() =>
+      createOrder(legalBodyOrderDeps(s), guardian, { companyId }),
+    );
+    const onCharter = refusedWith(() =>
+      createOrder(charterDeps(), guardian, { companyId, grant: structuredClone(A) }),
+    );
+    for (const err of [onOctober, onCharter])
+      expect(err).toMatchObject({ code: "company_not_eligible", status: 409 });
+    expect(orderRows()).toEqual({ n: 0 });
   });
 
   test("the rule is the same on the October pair", () => {

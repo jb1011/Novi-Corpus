@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { getAddress } from "viem";
+import { type Address, getAddress } from "viem";
 import { beforeEach, expect, test } from "vitest";
 import { migrate } from "../../src/persistence/db";
 import {
@@ -584,6 +584,9 @@ test("hasOpenForCompanyOn counts only the rows of the chain and the factory it i
   newBody({ company: "co_old" });
   expect(repo.hasOpenForCompanyOn(here, "co_old", now)).toBe(true);
   expect(repo.hasOpenForCompanyOn(there, "co_old", now)).toBe(false);
+  // The factory is compared in the one spelling rows hold, whatever letter case is given.
+  const upper = `0x${FACTORY.slice(2).toUpperCase()}` as Address;
+  expect(repo.hasOpenForCompanyOn({ chainId: CHAIN, factory: upper }, "co_here", now)).toBe(true);
   // A factory that is not an address is refused, as the due listings refuse it.
   expect(() =>
     repo.hasOpenForCompanyOn(as({ chainId: CHAIN, factory: "nope" }), "co_here", now),

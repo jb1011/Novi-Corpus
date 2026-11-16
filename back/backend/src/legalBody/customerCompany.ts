@@ -534,10 +534,10 @@ function conflict(message: string): ApiError {
 /**
  * The tenant abandons its own customer company, while nobody has checked it, no payment is live or
  * settled and no legal body stands open on it. A sandbox's automatic check is evidence of nothing,
- * so it does not keep a company; any check after it does. Whether a check is the automatic one is
- * read on the company's own environment, never the deployment's. For a sandbox company, only the
- * legal bodies this deployment's factory created keep it, since one that another factory created
- * is never checked again here; read on the company's own environment, as the automatic check is.
+ * so it does not keep a company; any check after it does. For a sandbox company, only the open
+ * legal bodies this deployment's chain and factory created keep it: one that another factory
+ * created is never checked again here. Both rules are read on the company's own environment,
+ * never the deployment's.
  * In one transaction, the status moves to `abandoned` by compare-and-set from the one it has, and
  * the declarant's personal data is erased; if either fails, neither happens.
  *

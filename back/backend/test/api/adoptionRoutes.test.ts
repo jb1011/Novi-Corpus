@@ -698,5 +698,6 @@ describe("the adoption in words", () => {
     const res = await adopt(app, id, { issuedAt, signature });
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ adoptedAt: Math.floor(nowMs / 1000) });
+    expect(s.adoptions.find(id)?.statement).toBe(CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1);
   });
 });

@@ -452,6 +452,9 @@ const CANCELLABLE_DISSOLUTION_CODE_MAX_AMENDMENT_DELAY = 31_536_000n;
 
 /**
  * Proves on chain what a pair's agreement says of the legal body's contract; else throws.
+ * Each fact is read from the contracts' own answers. So the proof tells a factory of another kind
+ * from this one, and it does not test a contract written to answer falsely: which contract stands
+ * at LEGAL_BODY_FACTORY_ADDRESS is the operator's to know.
  *
  * Run at start, after the factory's wiring, for a pair whose agreement states such facts. Each
  * refusal names the version, the factory and the fact that does not hold. A read the contract
@@ -464,8 +467,8 @@ const CANCELLABLE_DISSOLUTION_CODE_MAX_AMENDMENT_DELAY = 31_536_000n;
  * 1. `implementation()` on the factory: the address of the code its legal bodies run.
  * 2. `predictLegalBody` on the factory, with a salt of 32 zero bytes, against the address computed
  *    here: the CREATE2 address of a minimal proxy (EIP-1167) to that code, created by the factory
- *    with that salt. Equal, the factory creates each legal body as a fixed copy: its bytecode holds
- *    the code's address, and no call can point it at other code.
+ *    with that salt. Equal, the factory says it creates each legal body as a fixed copy: its
+ *    bytecode holds the code's address, and no call can point it at other code.
  * 3. `MIN_AMENDMENT_DELAY()` and `MAX_AMENDMENT_DELAY()` on the factory: the bounds of the
  *    amendment delay a legal body is created with are the ones the version states.
  * 4. `MAX_AMENDMENT_DELAY()` on the code: a constant the contract gained in the same change as the

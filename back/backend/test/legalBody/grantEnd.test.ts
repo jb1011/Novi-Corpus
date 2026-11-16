@@ -22,7 +22,11 @@ import {
   linkMessage,
   submitLink,
 } from "../../src/legalBody/linkDoor";
-import { assertGrantOutlasts, readOrderGrant } from "../../src/legalBody/orderGrant";
+import {
+  assertGrantOutlasts,
+  assertLinkWithinGrant,
+  readOrderGrant,
+} from "../../src/legalBody/orderGrant";
 import { type LegalBodyOrderDeps, createOrder } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
@@ -384,5 +388,10 @@ describe("the stored grant", () => {
       await refusedAsync(() => assertGrantOutlasts(ending, atSec), "grant_ends_too_soon", 409);
     for (const grant of [open, null])
       expect(() => assertGrantOutlasts(grant, 2n ** 256n - 1n)).not.toThrow();
+    expect(() => assertLinkWithinGrant(ending, dayAfterStarts - 1n)).not.toThrow();
+    for (const deadline of [dayAfterStarts, 2n ** 256n - 1n])
+      await refusedAsync(() => assertLinkWithinGrant(ending, deadline), "link_outlasts_grant", 409);
+    for (const grant of [open, null])
+      expect(() => assertLinkWithinGrant(grant, 2n ** 256n - 1n)).not.toThrow();
   });
 });

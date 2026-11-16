@@ -4,11 +4,12 @@
  * door's own grant: placed with the order, and read back. Mounted with the other order doors,
  * under the session protection, each starting with the real-human check.
  *
- * Two apps: one whose order doors serve the Charter pair (`CHARTER_LEGAL_TEXTS`), which no
- * deployment selects, and one on the October pair, the one every deployment serves. The database
- * is real (in memory) and the chain is never called: every member of the chain port throws. Every
- * amount is a made-up fixture; every name, company and filing number is an invention, and every
- * key is one of anvil's published test accounts.
+ * Three apps: one whose order doors serve the Charter pair (`CHARTER_LEGAL_TEXTS`), one on the
+ * October pair, the pair a deployment serves when it names none, and, for the draft rule, a
+ * production deployment on the Charter pair. The database is real (in memory) and the chain is
+ * never called: every member of the chain port throws. Every amount is a made-up fixture; every
+ * name, company and filing number is an invention, and every key is one of anvil's published test
+ * accounts.
  */
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";

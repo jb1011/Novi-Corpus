@@ -73,6 +73,7 @@ import {
 import {
   PRODUCTION_NEEDS_BUILT,
   adoptionRuleOfVersion,
+  assertContractFactsProvable,
   assertProductionNeedsBuilt,
   assertSetUsable,
   legalTextsOf,
@@ -153,13 +154,15 @@ async function main() {
   /**
    * The pair of legal texts this deployment serves, chosen once here by the setting
    * LEGAL_BODY_AGREEMENT_VERSION: the order doors and the formed door read its agreement, the
-   * customer company doors its declaration. A name that is not a selectable version, a pair no
-   * order can be placed on, or a pair a production deployment cannot serve yet stops the boot
-   * before the database is opened.
+   * customer company doors its declaration, and the config answer the status of both. A name that
+   * is not a selectable version, a pair no order can be placed on, a pair a production deployment
+   * cannot serve yet, or a pair whose contract facts have no legal-body factory to be proved
+   * against stops the boot before the database is opened.
    */
   const legalTexts = legalTextsOf(cfg.legalBodyAgreementVersion);
   assertSetUsable(legalTexts);
   assertProductionNeedsBuilt(legalTexts, legalBodyEnvironment(cfg), PRODUCTION_NEEDS_BUILT);
+  assertContractFactsProvable(legalTexts, cfg.legalBodyFactory);
   console.log(
     `[boot] legal texts: agreement ${legalTexts.agreement.text.version} (${legalTexts.agreement.text.status}), declaration ${legalTexts.declaration.version} (${legalTexts.declaration.status})`,
   );

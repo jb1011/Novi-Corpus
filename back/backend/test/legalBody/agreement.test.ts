@@ -123,6 +123,8 @@ test("the notice of each version", () => {
     "2026-11-draft-5": NOTICE,
   });
   expect(agreementNotice("Notice: a\n## 1. x\n")).toBe("Notice: a");
+  // A text with no first section: every line stands before it.
+  expect(agreementNotice("Notice: a\n")).toBe("Notice: a");
   // A line after the first section is not the notice.
   expect(agreementNotice("## 1. x\nNotice: late\n")).toBeNull();
   expect(agreementNotice("")).toBeNull();

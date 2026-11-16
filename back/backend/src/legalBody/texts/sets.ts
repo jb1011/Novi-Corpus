@@ -222,6 +222,15 @@ export function assertProductionNeedsBuilt(
   );
 }
 
+/** Throws when `set` states facts of the legal body's contract and the deployment names no
+ *  legal-body factory: there is nothing to prove them against, so the pair is not served. */
+export function assertContractFactsProvable(set: LegalTextSet, factory: string | undefined): void {
+  if (set.contractFacts === null || factory !== undefined) return;
+  throw new Error(
+    `Invalid config: LEGAL_BODY_AGREEMENT_VERSION ${set.agreement.text.version} needs LEGAL_BODY_FACTORY_ADDRESS: what this version says of the legal body's contract is proved against that factory at start`,
+  );
+}
+
 /** Throws unless an order can be placed on `set`: a Charter must be written with
  *  SCHEDULE_A_WORDING, and must have words of adoption. */
 export function assertSetUsable(set: LegalTextSet): void {

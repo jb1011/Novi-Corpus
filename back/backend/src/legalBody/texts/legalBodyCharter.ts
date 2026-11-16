@@ -15,8 +15,9 @@ import type { AgreementFields } from "./operatingAgreement";
  * code holds drafts 1, 2, 4 and 5. The Schedule A wording `grant.ts` writes is the one drafts 4
  * and 5 state.
  *
- * All four versions are defined and pinned here. No door serves any of them: new agreements are
- * still made under the October version.
+ * All four versions are defined and pinned here. A deployment serves draft 5 when its setting
+ * names it (`sets.ts`), and no deployment serves drafts 1, 2 or 4. With no version named, new
+ * agreements are made under the October version.
  */
 export interface CharterFields extends AgreementFields {
   scheduleA: string;

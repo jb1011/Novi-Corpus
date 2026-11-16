@@ -436,7 +436,7 @@ export function utcDay(nowMs: number): string {
 
 export const GRANT_SCHEMA = "novi.legal-body-grant/1";
 /** The id of the Schedule A wording this module writes, named after the Charter version it was
- *  first written for. A Charter version whose Schedule A reads the same is tagged with it
+ *  first written for. A Charter version an order can be placed on is tagged with it
  *  (`texts/sets.ts`). */
 export const SCHEDULE_A_WORDING = "2026-11-draft-4";
 
