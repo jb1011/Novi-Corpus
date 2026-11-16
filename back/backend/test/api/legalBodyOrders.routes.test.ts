@@ -22,6 +22,7 @@ import type { LegalBodyOrderDeps, LegalBodyOrderView } from "../../src/legalBody
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "../../src/legalBody/texts/operatingAgreement";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
+import { SqliteCharterGrantRepository } from "../../src/persistence/charterGrantRepository";
 import { SqliteCompanyCheckRepository } from "../../src/persistence/companyCheckRepository";
 import { SqliteCompanyDeclarationRepository } from "../../src/persistence/companyDeclarationRepository";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
@@ -129,6 +130,7 @@ function orderDeps(over: Partial<LegalBodyOrderDeps> = {}): LegalBodyOrderDeps {
       store,
       repo: legalBodies,
       adoptions: new SqliteLegalBodyAdoptionRepository(db),
+      grants: new SqliteCharterGrantRepository(db),
       docStore,
     },
     over,

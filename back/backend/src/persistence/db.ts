@@ -1482,6 +1482,67 @@ const AGREEMENT_ADOPTIONS_DDL = `
   END;
 `;
 
+/**
+ * THE GRANTS OF AN ORDER (see `charterGrantRepository.ts`): one row per grant version of an order,
+ * holding the grant's canonical form, its fingerprint and the id of the Schedule A wording it was
+ * written in. Written once.
+ *
+ * Its own table, outside `LEGAL_BODIES_DDL`, for the reasons the statement log is (see
+ * `STATEMENT_LOG_DDL`): the legal-body schema step never sees it, `migrate` creates it once
+ * `legal_bodies` exists, and its foreign key holds in place every order it has a row for. Named off
+ * the `legal_bod` prefix, as `agreement_adoptions` and `treasury_declarations` are, so a listing of
+ * the legal-body tables by that prefix still finds exactly them.
+ *
+ * WITHOUT ROWID: the primary key is the row's only identity, so no INSERT can name a rowid and
+ * REPLACE a stored row through it. The triggers refuse an UPDATE, a DELETE, and an INSERT that is
+ * not after the order's latest row (by number, then version); the in-order trigger refuses an
+ * INSERT over an existing key too, before any conflict resolution, so a REPLACE never reaches it,
+ * and the rows of an order are in the order they were made.
+ *
+ * No state column: whether a grant is in force follows from the order's state and from later rows,
+ * and a stored state would be a second truth. A later pull request that narrows or removes a grant
+ * adds rows, and the column that points a row at the one it changes, with `ALTER TABLE ... ADD
+ * COLUMN`.
+ *
+ * The shapes. The number and the version are whole numbers from 1. The canonical text is ASCII
+ * (its length in bytes is its length in characters), of 2 to 4096 characters. The digest is `0x`
+ * and 64 LOWER-CASE hex digits. The wording is the id of a Schedule A wording, of 1 to 40
+ * characters.
+ */
+const CHARTER_GRANTS_DDL = `
+  CREATE TABLE IF NOT EXISTS charter_grants (
+    legal_body_id TEXT NOT NULL REFERENCES legal_bodies(legal_body_id),
+    grant_number  INTEGER NOT NULL CHECK (typeof(grant_number) = 'integer' AND grant_number >= 1),
+    grant_version INTEGER NOT NULL CHECK (typeof(grant_version) = 'integer' AND grant_version >= 1),
+    canonical     TEXT NOT NULL CHECK (typeof(canonical) = 'text'
+      AND length(CAST(canonical AS BLOB)) = length(canonical) AND length(canonical) BETWEEN 2 AND 4096),
+    digest        TEXT NOT NULL CHECK (${sqlIsHash("digest")}),
+    wording       TEXT NOT NULL CHECK (typeof(wording) = 'text' AND length(wording) BETWEEN 1 AND 40),
+    created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (legal_body_id, grant_number, grant_version)
+  ) WITHOUT ROWID;
+
+  CREATE TRIGGER IF NOT EXISTS trg_charter_grants_no_update
+  BEFORE UPDATE ON charter_grants
+  BEGIN
+    SELECT RAISE(ABORT, 'charter_grants is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_charter_grants_no_delete
+  BEFORE DELETE ON charter_grants
+  BEGIN
+    SELECT RAISE(ABORT, 'charter_grants is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_charter_grants_in_order
+  BEFORE INSERT ON charter_grants FOR EACH ROW
+  WHEN EXISTS (SELECT 1 FROM charter_grants
+                WHERE legal_body_id = NEW.legal_body_id
+                  AND (grant_number > NEW.grant_number
+                    OR (grant_number = NEW.grant_number AND grant_version >= NEW.grant_version)))
+  BEGIN
+    SELECT RAISE(ABORT, 'charter_grants is append-only: a row comes after the order''s latest, in order');
+  END;
+`;
+
 /** The smallest time in unix MILLISECONDS the funnel's tables take: past the largest value the
  *  seconds columns take. */
 const MIN_MILLIS = 100_000_000_000;
@@ -2434,6 +2495,8 @@ export function migrate(db: Database.Database): void {
   db.exec(STATEMENT_LOG_DDL);
   // The agreement adoptions reference `legal_bodies` too, and stand outside that step alike.
   db.exec(AGREEMENT_ADOPTIONS_DDL);
+  // The grants of an order reference `legal_bodies` as well, and stand outside that step alike.
+  db.exec(CHARTER_GRANTS_DDL);
   // The funnel's tables: the statement reads reference `legal_bodies` as well. The sign-ins are
   // recorded from the moment their table is created, and that moment is kept with it; the
   // accounts the database already knows are filled in with it (`backfillTenantFirstSeen`).

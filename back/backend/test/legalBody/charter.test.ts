@@ -3,8 +3,9 @@ import { getAddress } from "viem";
 import { expect, test } from "vitest";
 import {
   type CharterFields,
-  LEGAL_BODY_CHARTER,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
 } from "../../src/legalBody/texts/legalBodyCharter";
 import {
   type AgreementFields,
@@ -30,24 +31,34 @@ const FIELDS: AgreementFields = {
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
-const CHARTER_SHA256 = "acf6cb2415cba17874d3c7505b7289d66dfd9148e6d584783035fad912a2a0b8";
-const CHARTER_DRAFT_1_SHA256 = "f869917a35368abee55855d15291059efd1fea95c6edee110524c6face3c6d2c";
-const CHARTERS = [LEGAL_BODY_CHARTER_2026_11_DRAFT_1, LEGAL_BODY_CHARTER];
+const CHARTERS = [
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
+];
 const WITH = { ...FIELDS, scheduleA: "No grant is in force." };
 
-test("the Charter is a draft version of the agreement text, and is not the served one", () => {
-  expect(LEGAL_BODY_CHARTER.id).toBe("legal-body-operating-agreement");
-  expect(LEGAL_BODY_CHARTER.version).toBe("2026-11-draft-2");
-  expect(LEGAL_BODY_CHARTER.status).toBe("draft");
-  expect(sha256(LEGAL_BODY_CHARTER.template)).toBe(CHARTER_SHA256);
-  expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.at(-1)).toBe(LEGAL_BODY_CHARTER);
-  // Draft 1 stays listed just before it, unchanged.
-  expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.at(-2)).toBe(LEGAL_BODY_CHARTER_2026_11_DRAFT_1);
-  expect(LEGAL_BODY_CHARTER_2026_11_DRAFT_1.id).toBe("legal-body-operating-agreement");
-  expect(LEGAL_BODY_CHARTER_2026_11_DRAFT_1.version).toBe("2026-11-draft-1");
-  expect(LEGAL_BODY_CHARTER_2026_11_DRAFT_1.status).toBe("draft");
-  expect(sha256(LEGAL_BODY_CHARTER_2026_11_DRAFT_1.template)).toBe(CHARTER_DRAFT_1_SHA256);
+const PINS = {
+  "2026-11-draft-1": "f869917a35368abee55855d15291059efd1fea95c6edee110524c6face3c6d2c",
+  "2026-11-draft-2": "acf6cb2415cba17874d3c7505b7289d66dfd9148e6d584783035fad912a2a0b8",
+  "2026-11-draft-4": "2bc1eb1c387ef9ac7e2d9ad3bae6365ab7c01fce6d30afd29c562f8382ef9ca6",
+} as const;
+
+test("each version of the Charter is a draft of the agreement text under its own name, and none is the served one", () => {
+  expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.slice(-3)).toEqual(CHARTERS);
+  for (const text of CHARTERS) {
+    expect(text.id).toBe("legal-body-operating-agreement");
+    expect(text.status).toBe("draft");
+    expect(sha256(text.template)).toBe(PINS[text.version as keyof typeof PINS]);
+  }
+  expect(CHARTERS.map((t) => t.version)).toEqual(Object.keys(PINS));
   expect(LEGAL_BODY_OPERATING_AGREEMENT.version).toBe("2026-10-draft-1");
+});
+
+test("draft 4 opens with its notice, on the sixth line", () => {
+  expect(LEGAL_BODY_CHARTER_2026_11_DRAFT_4.template.split("\n")[5]).toBe(
+    "Notice: this document is a fixed form. It is not a substitute for the advice of an attorney. Novi Corpus is not a law firm and does not give legal advice (section 12).",
+  );
 });
 
 test("in each version, its placeholders are the five of the agreement and scheduleA, and nothing else", () => {
@@ -73,7 +84,7 @@ test("in each version, its placeholders are the five of the agreement and schedu
 
 test("draft 2 of the Charter differs from draft 1 in two lines", () => {
   const before = LEGAL_BODY_CHARTER_2026_11_DRAFT_1.template.split("\n");
-  const after = LEGAL_BODY_CHARTER.template.split("\n");
+  const after = LEGAL_BODY_CHARTER_2026_11_DRAFT_2.template.split("\n");
   expect(after.length).toBe(before.length);
   const changed = before.flatMap((line, i) => (line === after[i] ? [] : [[line, after[i]]]));
   // The third paragraph of section 4, then 5.1: in each pair, both lines keep the opening words.
@@ -86,18 +97,18 @@ test("draft 2 of the Charter differs from draft 1 in two lines", () => {
 });
 
 test("Schedule A is rendered in its place, and a value is never read as a placeholder", () => {
-  const doc = LEGAL_BODY_CHARTER.render(WITH);
+  const doc = LEGAL_BODY_CHARTER_2026_11_DRAFT_4.render(WITH);
   expect(doc).toContain(
     "## Schedule A. Grants in force\n\nNo grant is in force.\n\n## Schedule B.",
   );
   expect(doc).toContain('# Legal Body Charter of "Example Holdings LLC"');
   expect(doc).not.toMatch(/\{[A-Za-z]/);
-  const smuggled = LEGAL_BODY_CHARTER.render({ ...WITH, scheduleA: "{guardian}" });
+  const smuggled = LEGAL_BODY_CHARTER_2026_11_DRAFT_4.render({ ...WITH, scheduleA: "{guardian}" });
   expect(smuggled).toContain("## Schedule A. Grants in force\n\n{guardian}\n");
 });
 
 test("a Charter without its Schedule A is refused, never rendered", () => {
-  expect(() => LEGAL_BODY_CHARTER.render(FIELDS as CharterFields)).toThrow(
+  expect(() => LEGAL_BODY_CHARTER_2026_11_DRAFT_4.render(FIELDS as CharterFields)).toThrow(
     'legal text "legal-body-operating-agreement": placeholder {scheduleA} has no string field',
   );
 });

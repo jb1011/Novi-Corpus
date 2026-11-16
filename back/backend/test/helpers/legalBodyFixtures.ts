@@ -21,6 +21,8 @@ import {
   toOrderView,
 } from "../../src/legalBody/orders";
 import { CUSTOMER_PROVIDER } from "../../src/legalBody/provider";
+import { servedLegalTexts } from "../../src/legalBody/texts/sets";
+import { SqliteCharterGrantRepository } from "../../src/persistence/charterGrantRepository";
 import {
   type CompanyCheckRepository,
   type CompanyCheckResult,
@@ -77,6 +79,7 @@ export interface LegalBodyStores {
   store: SqliteWorldStore;
   repo: SqliteLegalBodyRepository;
   adoptions: SqliteLegalBodyAdoptionRepository;
+  grants: SqliteCharterGrantRepository;
   docStore: MemoryDocumentStore;
 }
 
@@ -92,6 +95,7 @@ export function openLegalBodyStores(
     store: new SqliteWorldStore(db),
     repo: new SqliteLegalBodyRepository(db),
     adoptions: new SqliteLegalBodyAdoptionRepository(db),
+    grants: new SqliteCharterGrantRepository(db),
     docStore,
   };
 }
@@ -116,6 +120,7 @@ export function legalBodyOrderDeps(
   return {
     repo: s.repo,
     adoptions: s.adoptions,
+    grants: s.grants,
     companies: s.companies,
     declarations: s.declarations,
     checks: s.checks,
@@ -126,6 +131,8 @@ export function legalBodyOrderDeps(
     docStore: s.docStore,
     deployment: { chainId: CHAIN_ID, factory: FACTORY },
     identityRegistry: REGISTRY,
+    // Read when the deps are built, so a test that replaces a served text is read at that moment.
+    texts: servedLegalTexts(),
     environment: "sandbox",
     amendmentDelaySeconds: 172_800,
     maxOpenPerTenant: 3,

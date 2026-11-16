@@ -69,7 +69,9 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../../src/legalBody/sweeper";
+import { servedLegalTexts } from "../../src/legalBody/texts/sets";
 import { createLegalBodyResolver } from "../../src/payments/legalBody";
+import { SqliteCharterGrantRepository } from "../../src/persistence/charterGrantRepository";
 import { SqliteCompanyCheckRepository } from "../../src/persistence/companyCheckRepository";
 import { SqliteCompanyDeclarationRepository } from "../../src/persistence/companyDeclarationRepository";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
@@ -295,6 +297,7 @@ function deploy(opts: DeployOptions = {}): Deployment {
   const orderDeps: LegalBodyOrderDeps = {
     repo: legalBodies,
     adoptions: new SqliteLegalBodyAdoptionRepository(db),
+    grants: new SqliteCharterGrantRepository(db),
     companies,
     declarations,
     checks,
@@ -306,6 +309,7 @@ function deploy(opts: DeployOptions = {}): Deployment {
     docStore,
     deployment,
     identityRegistry: stack.registry,
+    texts: servedLegalTexts(),
     // The agreement's wording is a draft, which only a sandbox serves.
     environment: "sandbox",
     ...LEGAL_BODY_FLOW_DEFAULTS,

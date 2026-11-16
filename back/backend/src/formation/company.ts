@@ -38,8 +38,8 @@ import {
   warnIfNearLimit,
 } from "../formation";
 import { type IdentityDeps, assertIdentityVerified, namesOfRecordAtDoor } from "../identity/state";
+import { assertDraftsServable } from "../legalBody/draftTextRefusal";
 import { refusal } from "../legalBody/sentences";
-import { LegalTextNotApprovedError, assertTextsServable } from "../legalBody/texts/index";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
 import { opsLog } from "../observability/opsLog";
 import type { TransferAuthorizationDomain } from "../payments/transferAuthorization";
@@ -267,12 +267,7 @@ export function createCompany(
     const verification = assertRealHuman(deps.world, tenantId, door);
     assertHumanCompanyCap(deps.world, verification);
     assertIdentityVerified(deps.identity, deps.world, tenantId, door);
-    try {
-      assertTextsServable(door, [LEGAL_BODY_OPERATING_AGREEMENT]);
-    } catch (err) {
-      if (err instanceof LegalTextNotApprovedError) throw refusal("legal_text_not_approved", 503);
-      throw err;
-    }
+    assertDraftsServable(door, [LEGAL_BODY_OPERATING_AGREEMENT]);
     // PR 2b replaces this line with assertInvited.
     if (door === "production" && deps.invites?.required !== true)
       throw refusal("formed_door_not_offered", 403);

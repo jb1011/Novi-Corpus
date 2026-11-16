@@ -27,6 +27,8 @@ const SRC = join(import.meta.dirname, "..", "..", "src");
  *  check, the doors' route file and the MCP server, whose tools answer the same codes. */
 const ANSWERING_MODULES = [
   "legalBody/orders.ts",
+  "legalBody/orderGrant.ts",
+  "legalBody/grantDoors.ts",
   "legalBody/adoption.ts",
   "legalBody/linkDoor.ts",
   "legalBody/create.ts",
@@ -92,6 +94,10 @@ const NAMED_CODES = [
   "treasury_invalid",
   "treasury_wallet_mismatch",
   "legal_body_revoked",
+  "grant_not_valid",
+  "grant_not_taken",
+  "grant_ends_too_soon",
+  "grant_unreadable",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";

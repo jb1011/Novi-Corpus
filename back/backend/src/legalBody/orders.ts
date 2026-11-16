@@ -6,6 +6,7 @@ import { companyFiled } from "../formation/status";
 import { type IdentityDeps, assertIdentityVerified } from "../identity/state";
 import { opsLog } from "../observability/opsLog";
 import { withKeyedLock } from "../payments/keyedMutex";
+import type { CharterGrantRepository } from "../persistence/charterGrantRepository";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
 import type { CompanyDeclarationRepository } from "../persistence/companyDeclarationRepository";
 import type { CompanyRepository } from "../persistence/companyRepository";
@@ -21,13 +22,16 @@ import type {
   LegalBodyRecord,
   LegalBodyRepository,
 } from "../persistence/legalBodyRepository";
-import { buildAgreement, storeAgreement } from "./agreement";
+import { type BuiltAgreement, buildAgreement, storeAgreement } from "./agreement";
 import { filedCompanyNames, publicCompanyNames } from "./attestation";
 import { filedNamesPrintable, isStandInFilingNumber } from "./companyFields";
+import { assertDraftsServable } from "./draftTextRefusal";
+import type { Grant } from "./grant";
+import { grantOfNewOrder } from "./orderGrant";
 import { CUSTOMER_PROVIDER, companySourceOf } from "./provider";
 import { refusal } from "./sentences";
-import { LegalTextNotApprovedError, assertTextsServable } from "./texts/index";
-import { LEGAL_BODY_OPERATING_AGREEMENT } from "./texts/operatingAgreement";
+import type { AgreementFields } from "./texts/operatingAgreement";
+import type { LegalTextSet } from "./texts/sets";
 
 /**
  * LEGAL-BODY ORDERS: what a guardian orders, and the rules every door of the flow shares.
@@ -52,6 +56,8 @@ export interface LegalBodyOrderDeps {
   repo: LegalBodyRepository & LegalBodyReasonReads;
   /** The guardians' adoptions of their orders' agreements: the link doors require one. */
   adoptions: LegalBodyAdoptionRepository;
+  /** The grants of orders placed on the Charter, written in the same transaction as the order. */
+  grants: CharterGrantRepository;
   companies: CompanyRepository;
   declarations: CompanyDeclarationRepository;
   checks: CompanyCheckRepository;
@@ -69,6 +75,8 @@ export interface LegalBodyOrderDeps {
   deployment: Deployment;
   /** The ERC-8004 identity registry the agreement names. */
   identityRegistry: Address;
+  /** The pair of texts this deployment serves: every door reads this one, never a constant. */
+  texts: LegalTextSet;
   environment: "sandbox" | "production";
   /** Seconds: the amendment delay of every new order. */
   amendmentDelaySeconds: number;
@@ -325,8 +333,12 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *  1b. on production, a verified guardian identity record (`assertIdentityVerified`), the record
  *     the declared door holds the guardian to: World ID proves one real person; the identity
  *     check says who. A sandbox reads nothing here;
- *  2. the agreement's wording can be served (a production deployment refuses a draft);
+ *  2. the agreement's wording, the one of the pair this deployment serves (`deps.texts`), can be
+ *     served (a production deployment refuses a draft);
  *  3. the company is the tenant's (one 404 for unknown and not-yours) and eligible;
+ *  3b. the grant, read only now, so only for a caller who could order: an agreement that takes no
+ *     grant refuses a `grant` key whatever its value (`grant_not_taken`); the Charter requires one
+ *     the form's rules and the product's offer take (`grantOfNewOrder`), number 1, version 1;
  *  4. the agreement is built, before anything is written. It names the company by the names
  *     `companyNamesForOrder` reads, and nothing else: a customer's company by the declared name
  *     and filing number its passed check stands behind; a formed company by the filed name and
@@ -334,19 +346,20 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *     print (`filedNamesPrintable`) is refused, never cleaned. A production company whose filing
  *     number is in the sandbox stand-in space (`isStandInFilingNumber`) is refused, whatever its
  *     provider and whoever wrote the number. Its manifest states the company's source: `customer`
- *     or `novi` (`companySourceOf`);
+ *     or `novi` (`companySourceOf`). A Charter is built with the grant as its Schedule A;
  *  5. one transaction: the names are read again and must be the ones the agreement prints (an
  *     operator's `company:filed-name --replace` committed after step 4 is answered
  *     `company_not_eligible`, never a draft printing the superseded name), the two caps are
- *     counted, the draft is created, the agreement is stored and frozen, and the tenant's
- *     `ordered` note is written.
- * A throw anywhere in step 5 rolls the row back. The files are written inside it, so a failure
- * after they were written leaves at most two orphan files, named by an id no row holds.
+ *     counted, the draft is created, the agreement is stored and frozen, the grant of a Charter is
+ *     written (`deps.grants`), and the tenant's `ordered` note is written.
+ * A throw anywhere in step 5 rolls the row, its frozen agreement and its grant back together. The
+ * files are written inside it, so a failure after they were written leaves at most two orphan
+ * files, named by an id no row holds.
  */
 export function createOrder(
   deps: LegalBodyOrderDeps,
   tenantId: Address,
-  input: { companyId: string },
+  input: { companyId: string; grant?: unknown },
 ): LegalBodyOrderView {
   const nowMs = (deps.now ?? Date.now)();
 
@@ -357,18 +370,21 @@ export function createOrder(
   assertIdentityVerified(deps.identity, deps.world, tenantId, deps.environment);
 
   // 2.
-  try {
-    assertTextsServable(deps.environment, [LEGAL_BODY_OPERATING_AGREEMENT]);
-  } catch (err) {
-    if (err instanceof LegalTextNotApprovedError) throw refusal("legal_text_not_approved", 503);
-    throw err;
-  }
+  assertDraftsServable(deps.environment, [deps.texts.agreement.text]);
 
   // 3.
   const companyId = typeof input?.companyId === "string" ? input.companyId : undefined;
   const owned = companyId === undefined ? undefined : deps.companies.findOwned(tenantId, companyId);
   if (companyId === undefined || owned === undefined) throw refusal("not_found", 404);
   if (!companyEligible(deps, companyId)) throw refusal("company_not_eligible", 409);
+
+  // 3b. Any value under the key counts as given, `null` included: an agreement that takes no grant
+  //     says so rather than ignore it. On the Charter an absent grant is a problem of its own.
+  const agreement = deps.texts.agreement;
+  const given = input?.grant !== undefined;
+  if (agreement.kind === "plain" && given) throw refusal("grant_not_taken", 400);
+  const grant: Grant | null =
+    agreement.kind === "charter" ? grantOfNewOrder(input?.grant, nowMs) : null;
 
   // 4. A declaration erased, or paired with another company's check, names nothing. A filed
   //    name or number the agreement cannot print is for an operator to set; a declared company's
@@ -383,20 +399,25 @@ export function createOrder(
   //    agreement prints its declared number too. Read on the company's own pin, as every pin rule.
   if (owned.environment === "production" && isStandInFilingNumber(names.filingNumber))
     throw refusal("filing_number_reserved", 409);
-  const built = buildAgreement(
-    {
-      companyName: names.legalName,
-      filingNumber: names.filingNumber,
-      jurisdiction: "WY",
-      guardian: tenantId,
-      amendmentDelaySeconds: deps.amendmentDelaySeconds,
-      chainId: deps.deployment.chainId,
-      factory: deps.deployment.factory,
-      identityRegistry: deps.identityRegistry,
-    },
-    LEGAL_BODY_OPERATING_AGREEMENT,
-    { source: companySourceOf(owned.provider) },
-  );
+  //    The agreement is the one of the pair this deployment serves. A Charter is rendered with
+  //    its Schedule A, the order's grant.
+  const fields: AgreementFields = {
+    companyName: names.legalName,
+    filingNumber: names.filingNumber,
+    jurisdiction: "WY",
+    guardian: tenantId,
+    amendmentDelaySeconds: deps.amendmentDelaySeconds,
+    chainId: deps.deployment.chainId,
+    factory: deps.deployment.factory,
+    identityRegistry: deps.identityRegistry,
+  };
+  const source = { source: companySourceOf(owned.provider) };
+  let built: BuiltAgreement;
+  if (agreement.kind === "plain") built = buildAgreement(fields, agreement.text, source);
+  else {
+    if (grant === null) throw new Error("legal body orders: an order on the Charter has no grant");
+    built = buildAgreement({ ...fields, scheduleA: grant.scheduleA }, agreement.text, source);
+  }
 
   // 5. The names and the caps are read inside the transaction that writes, which holds the write
   //    lock from its first statement: another writer cannot change the names, or add an order,
@@ -428,6 +449,7 @@ export function createOrder(
     storeAgreement(deps.docStore, id, built);
     if (!deps.repo.freezeAgreement(id, { hash: built.manifestHash, version: built.version }))
       throw new Error(`legal body ${id}: the new draft did not take its agreement`);
+    if (grant !== null) deps.grants.insert(id, grant);
     deps.repo.recordEvent(id, "note", "tenant", null, { act: "ordered" });
     const frozen = deps.repo.findById(id);
     if (frozen === undefined) throw new Error(`legal body ${id} vanished inside its own order`);
