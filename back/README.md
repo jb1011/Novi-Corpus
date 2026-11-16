@@ -44,7 +44,7 @@ the guardian can veto them; dissolution has its own waiting window before funds 
 body is finalized.
 
 **`AgentTreasury`**: one per agent, immutable. It holds USDC and lets the agent's operator key
-spend only within a rolling cap and, when it is on, an allowlist of approved recipients. It stops
+spend only within a per-period cap and, when it is on, an allowlist of approved recipients. It stops
 spending as soon as the `LegalManager` leaves Active. The guardian can pause it, veto a policy
 change, rotate the operator key, edit the allowlist and withdraw everything to safety; policy
 changes are timelocked.
