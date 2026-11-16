@@ -14,9 +14,9 @@
  * (trust-and-access PR 2b), so on production the door stays hidden for now.
  *
  * Both legal texts are drafts today, so a production deployment that offers the door can only be
- * shown with them approved: the two text modules are replaced here by copies whose status each test
- * sets. The database is real (in memory); every address is a placeholder and every name an
- * invention.
+ * shown with them approved: the order doors are given a copy of the October pair whose statuses
+ * each test sets (`legalTextsWithStatus`), the pair `/config` reads. The database is real (in
+ * memory); every address is a placeholder and every name an invention.
  */
 import type Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -27,7 +27,7 @@ import { loadConfig } from "../../src/config/env";
 import { companyNameOptions } from "../../src/formation/intake";
 import { parsePiiKey } from "../../src/formation/pii";
 import type { IdentityDeps } from "../../src/identity/state";
-import type { LegalTextStatus } from "../../src/legalBody/texts/index";
+import type { LegalTextSet } from "../../src/legalBody/texts/sets";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import type { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -45,36 +45,12 @@ import { paymentCfg } from "../helpers/formationPayment";
 import {
   type LegalBodyStores,
   legalBodyOrderDeps,
+  legalTextsWithStatus,
   openLegalBodyStores,
 } from "../helpers/legalBodyFixtures";
 
-/** The status each of the two texts reads as in a test: approved unless the test says otherwise. */
-const texts = vi.hoisted(() => ({
-  agreement: "approved" as LegalTextStatus,
-  statement: "approved" as LegalTextStatus,
-}));
-
-vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
-  return {
-    ...actual,
-    get LEGAL_BODY_OPERATING_AGREEMENT() {
-      return { ...actual.LEGAL_BODY_OPERATING_AGREEMENT, status: texts.agreement };
-    },
-  };
-});
-
-vi.mock("../../src/legalBody/texts/statementOfAuthority", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/statementOfAuthority")>();
-  return {
-    ...actual,
-    get STATEMENT_OF_AUTHORITY() {
-      return { ...actual.STATEMENT_OF_AUTHORITY, status: texts.statement };
-    },
-  };
-});
+/** The pair a test's order doors serve unless it says otherwise: both texts approved. */
+const APPROVED = legalTextsWithStatus({ agreement: "approved", declaration: "approved" });
 
 const JWT_SECRET = "test-jwt-secret-that-is-long-enough-to-be-plausible";
 const TENANT = "0x00000000000000000000000000000000000000a1";
@@ -90,8 +66,6 @@ beforeEach(() => {
   db = openDatabase(":memory:");
   migrate(db);
   s = openLegalBodyStores(db);
-  texts.agreement = "approved";
-  texts.statement = "approved";
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -164,6 +138,8 @@ interface Deployment {
   formation?: NonNullable<ApiDeps["formation"]>;
   identity?: IdentityDeps;
   invites?: ApiDeps["invites"];
+  /** The pair the order doors serve, which `/config` reads. Absent: both texts approved. */
+  texts?: LegalTextSet;
 }
 
 /** Every gate of a production deployment met: the starting point each production test takes one
@@ -188,7 +164,10 @@ function makeApp(d: Deployment) {
     documents: new SqliteDocumentIndexRepository(db),
     docStore: new DeletableMemoryDocumentStore(),
     customerFacts: { declarations: s.declarations, checks: s.checks },
-    legalBodyOrders: legalBodyOrderDeps(s, { environment: d.environment }),
+    legalBodyOrders: legalBodyOrderDeps(s, {
+      environment: d.environment,
+      texts: d.texts ?? APPROVED,
+    }),
     formation: d.formation,
     identity: d.identity,
     invites: d.invites,
@@ -288,13 +267,12 @@ describe("formedDoor on a sandbox deployment", () => {
   });
 
   test("a sandbox serves draft texts, takes no identity record nor invite, and reads no count", async () => {
-    texts.agreement = "draft";
-    texts.statement = "draft";
+    const texts = legalTextsWithStatus({ agreement: "draft", declaration: "draft" });
     const world = worldFor(new SqliteWorldStore(db));
     const formation = formationDeps({ pin: "sandbox", maxTotal: 1, world });
     formedLegalBody(s.companies);
     const count = vi.spyOn(s.companies, "countChargeableFormedLegalBodies");
-    expect(await formedDoorOf({ environment: "sandbox", formation })).toBe("offered");
+    expect(await formedDoorOf({ environment: "sandbox", formation, texts })).toBe("offered");
     expect(count).not.toHaveBeenCalled();
   });
 
@@ -318,11 +296,10 @@ describe("formedDoor on a production deployment", () => {
   });
 
   test("a draft agreement or a draft statement of authority: hidden", async () => {
-    texts.agreement = "draft";
-    expect(await formedDoorOf(productionWithEveryGate())).toBe("hidden");
-    texts.agreement = "approved";
-    texts.statement = "draft";
-    expect(await formedDoorOf(productionWithEveryGate())).toBe("hidden");
+    const draftAgreement = legalTextsWithStatus({ agreement: "draft", declaration: "approved" });
+    expect(await formedDoorOf(productionWithEveryGate({ texts: draftAgreement }))).toBe("hidden");
+    const draftStatement = legalTextsWithStatus({ agreement: "approved", declaration: "draft" });
+    expect(await formedDoorOf(productionWithEveryGate({ texts: draftStatement }))).toBe("hidden");
   });
 
   test("at the cap, with every other gate met: cap_reached", async () => {
@@ -334,8 +311,8 @@ describe("formedDoor on a production deployment", () => {
   test("at the cap with another gate failing too: hidden, never cap_reached", async () => {
     formedLegalBody(s.companies);
     formedLegalBody(s.companies);
-    texts.statement = "draft";
-    expect(await formedDoorOf(productionWithEveryGate())).toBe("hidden");
+    const texts = legalTextsWithStatus({ agreement: "approved", declaration: "draft" });
+    expect(await formedDoorOf(productionWithEveryGate({ texts }))).toBe("hidden");
   });
 
   test("without invite codes wired (trust-and-access PR 2b not built), every other gate met: hidden", async () => {
@@ -416,7 +393,7 @@ describe("formedDoor on a production deployment", () => {
     const d = productionWithEveryGate();
     expect(await legalBodiesOf(d)).toEqual(
       legalBodyConfigOf({
-        legalBodyOrders: legalBodyOrderDeps(s, { environment: "production" }),
+        legalBodyOrders: legalBodyOrderDeps(s, { environment: "production", texts: APPROVED }),
         formation: d.formation,
         identity: d.identity,
         invites: d.invites,

@@ -1,7 +1,10 @@
 import { type Address, type Hex, getAddress, hashTypedData, recoverAddress } from "viem";
 import { assertRealHuman } from "../api/routes/worldId";
 import { withKeyedLock } from "../payments/keyedMutex";
-import type { NewAgreementAdoption } from "../persistence/legalBodyAdoptionRepository";
+import type {
+  AgreementAdoption,
+  NewAgreementAdoption,
+} from "../persistence/legalBodyAdoptionRepository";
 import { ECDSA_SIGNATURE } from "../persistence/legalBodyInput";
 import type { LegalBodyRecord } from "../persistence/legalBodyRepository";
 import type { Grant } from "./grant";
@@ -16,6 +19,7 @@ import {
 } from "./orders";
 import { refusal } from "./sentences";
 import { EIP712_DOMAIN_FIELDS } from "./statement";
+import { adoptionStatementOfVersion } from "./texts/sets";
 
 /**
  * THE ADOPTION OF AN ORDER'S OPERATING AGREEMENT: what a guardian signs to adopt, for its company,
@@ -33,6 +37,13 @@ import { EIP712_DOMAIN_FIELDS } from "./statement";
  * time the message was issued. The signature is checked by local ECDSA recovery, with no node, so a
  * stored adoption can be checked again from its row alone.
  *
+ * The typed data has two forms, under the one domain. A text whose version has words of adoption
+ * (`adoptionStatementOfVersion`) is adopted by `LegalBodyCharterAdoption`: the words, then the six
+ * fields. Any other text is adopted by `OperatingAgreementAdoption`: the six fields alone. The form
+ * follows the text the order was frozen with, never the client. The adoption's row holds the words
+ * that were signed (null for the six fields alone), so `storedAdoptionChecks` rebuilds the message
+ * from the row and never looks the words up by version.
+ *
  * There is no tool for it: the adoption is the guardian's own signature, by the wallet signed in
  * to the web app, and an agent's key signs as the identity's owner, never as the guardian.
  */
@@ -40,6 +51,7 @@ import { EIP712_DOMAIN_FIELDS } from "./statement";
 export const ADOPTION_DOMAIN_NAME = "Novi Corpus Operating Agreement Adoption";
 export const ADOPTION_DOMAIN_VERSION = "1";
 export const ADOPTION_PRIMARY_TYPE = "OperatingAgreementAdoption";
+export const CHARTER_ADOPTION_PRIMARY_TYPE = "LegalBodyCharterAdoption";
 /** An adoption issued further ahead of the server's clock than this is stale: room for a client's
  *  clock that runs a little fast, and no more. Its greatest age is the deployment's setting
  *  (`adoptionMaxAgeSeconds`). */
@@ -53,6 +65,12 @@ export const ADOPTION_FIELDS = [
   { name: "textVersion", type: "string" },
   { name: "guardian", type: "address" },
   { name: "issuedAt", type: "uint256" },
+] as const;
+
+/** The fields of the `LegalBodyCharterAdoption` type string, in its order: the words, then the six. */
+export const CHARTER_ADOPTION_FIELDS = [
+  { name: "statement", type: "string" },
+  ...ADOPTION_FIELDS,
 ] as const;
 
 /** The wording an order's agreement was frozen with, by id and version, as its stored manifest
@@ -73,22 +91,51 @@ export interface AdoptionMessage {
   guardian: Address;
   /** Unix seconds, by the server's clock. */
   issuedAt: bigint;
+  /** The words of adoption of the text the order was frozen with, or null: a text adopted by the
+   *  six fields alone. */
+  statement: string | null;
 }
 
 /**
- * The JSON-safe form served to a wallet. `issuedAt` is a canonical decimal string and `chainId` a
- * number, so `JSON.stringify` works on it. `EIP712Domain` is declared, as the statement's wire
- * form declares it: a wallet that signs this object as it arrives signs `adoptionDigest`.
+ * The JSON-safe form served to a wallet, in one of its two forms: the six fields alone, or the
+ * words then the six. `issuedAt` is a canonical decimal string and `chainId` a number, so
+ * `JSON.stringify` works on it. `EIP712Domain` is declared, as the statement's wire form declares
+ * it: a wallet that signs this object as it arrives signs `adoptionDigest`.
  */
-export interface AdoptionTypedDataWire {
-  domain: { name: string; version: string; chainId: number; verifyingContract: Address };
-  types: {
-    EIP712Domain: readonly { name: string; type: string }[];
-    OperatingAgreementAdoption: readonly { name: string; type: string }[];
-  };
-  primaryType: "OperatingAgreementAdoption";
-  message: Omit<AdoptionMessage, "issuedAt"> & { issuedAt: string };
-}
+export type AdoptionTypedDataWire =
+  | {
+      domain: { name: string; version: string; chainId: number; verifyingContract: Address };
+      primaryType: "OperatingAgreementAdoption";
+      types: {
+        EIP712Domain: readonly { name: string; type: string }[];
+        OperatingAgreementAdoption: readonly { name: string; type: string }[];
+      };
+      message: {
+        orderId: string;
+        manifestHash: Hex;
+        textId: string;
+        textVersion: string;
+        guardian: Address;
+        issuedAt: string;
+      };
+    }
+  | {
+      domain: { name: string; version: string; chainId: number; verifyingContract: Address };
+      primaryType: "LegalBodyCharterAdoption";
+      types: {
+        EIP712Domain: readonly { name: string; type: string }[];
+        LegalBodyCharterAdoption: readonly { name: string; type: string }[];
+      };
+      message: {
+        statement: string;
+        orderId: string;
+        manifestHash: Hex;
+        textId: string;
+        textVersion: string;
+        guardian: Address;
+        issuedAt: string;
+      };
+    };
 
 /** The adoption message door's answer: the typed data, and the time it was issued, as the decimal
  *  string the adoption door takes back. */
@@ -117,7 +164,8 @@ export function adoptionDomain(
 /**
  * The adoption of `order`'s agreement, issued at `issuedAt`: the order's id, its frozen manifest
  * hash and its guardian from the row, the text id and version from the agreement it was frozen
- * with. An order with no frozen agreement has nothing to adopt, and throws: a caller checks first.
+ * with, and the words of adoption of that version, if it has any: they alone choose the form. An
+ * order with no frozen agreement has nothing to adopt, and throws: a caller checks first.
  */
 export function buildAdoptionMessage(
   order: LegalBodyRecord,
@@ -133,38 +181,89 @@ export function buildAdoptionMessage(
     textVersion: frozen.textVersion,
     guardian: getAddress(order.guardian),
     issuedAt,
+    statement: adoptionStatementOfVersion(frozen.textVersion),
   };
 }
 
+/** The wire form of `m`: with no words, the six fields alone, exactly the six keys in the message;
+ *  with words, the message's keys in the order of `CHARTER_ADOPTION_FIELDS`. */
 export function adoptionTypedDataWire(
   chainId: number,
   factory: Address,
   m: AdoptionMessage,
 ): AdoptionTypedDataWire {
+  const six = {
+    orderId: m.orderId,
+    manifestHash: m.manifestHash,
+    textId: m.textId,
+    textVersion: m.textVersion,
+    guardian: m.guardian,
+    issuedAt: m.issuedAt.toString(),
+  };
+  if (m.statement === null)
+    return {
+      domain: adoptionDomain(chainId, factory),
+      types: { EIP712Domain: EIP712_DOMAIN_FIELDS, OperatingAgreementAdoption: ADOPTION_FIELDS },
+      primaryType: ADOPTION_PRIMARY_TYPE,
+      message: six,
+    };
   return {
     domain: adoptionDomain(chainId, factory),
-    types: { EIP712Domain: EIP712_DOMAIN_FIELDS, OperatingAgreementAdoption: ADOPTION_FIELDS },
-    primaryType: ADOPTION_PRIMARY_TYPE,
-    message: {
-      orderId: m.orderId,
-      manifestHash: m.manifestHash,
-      textId: m.textId,
-      textVersion: m.textVersion,
-      guardian: m.guardian,
-      issuedAt: m.issuedAt.toString(),
+    types: {
+      EIP712Domain: EIP712_DOMAIN_FIELDS,
+      LegalBodyCharterAdoption: CHARTER_ADOPTION_FIELDS,
     },
+    primaryType: CHARTER_ADOPTION_PRIMARY_TYPE,
+    message: { statement: m.statement, ...six },
   };
 }
 
-/** The digest a signature over the adoption covers. viem derives the domain type from the domain
- *  itself, so the types here leave `EIP712Domain` out; the wire form hashes to the same value. */
+/** The digest a signature over the adoption covers, in the form `m` states: the six fields alone
+ *  when it has no words. viem derives the domain type from the domain itself, so the types here
+ *  leave `EIP712Domain` out; the wire form hashes to the same value. */
 export function adoptionDigest(chainId: number, factory: Address, m: AdoptionMessage): Hex {
+  const { statement, ...six } = m;
+  if (statement === null)
+    return hashTypedData({
+      domain: adoptionDomain(chainId, factory),
+      types: { OperatingAgreementAdoption: ADOPTION_FIELDS },
+      primaryType: ADOPTION_PRIMARY_TYPE,
+      message: six,
+    });
   return hashTypedData({
     domain: adoptionDomain(chainId, factory),
-    types: { OperatingAgreementAdoption: ADOPTION_FIELDS },
-    primaryType: ADOPTION_PRIMARY_TYPE,
-    message: m,
+    types: { LegalBodyCharterAdoption: CHARTER_ADOPTION_FIELDS },
+    primaryType: CHARTER_ADOPTION_PRIMARY_TYPE,
+    message: { statement, ...six },
   });
+}
+
+/** Whether a stored adoption still checks, from its row and the deployment it was made under: the
+ *  digest of the message the row states is the row's, and the row's signature recovers to its
+ *  guardian. Reads nothing else. Never throws. */
+export async function storedAdoptionChecks(
+  row: AgreementAdoption,
+  deployment: { chainId: number; factory: Address },
+): Promise<boolean> {
+  try {
+    // The words are the row's own, never looked up by the version it names.
+    const message: AdoptionMessage = {
+      orderId: row.legalBodyId,
+      manifestHash: row.manifestHash,
+      textId: row.textId,
+      textVersion: row.textVersion,
+      guardian: row.guardian,
+      issuedAt: BigInt(row.issuedAt),
+      statement: row.statement,
+    };
+    const digest = adoptionDigest(deployment.chainId, deployment.factory, message);
+    if (digest.toLowerCase() !== row.digest.toLowerCase()) return false;
+    const signer = await recoverAddress({ hash: digest, signature: row.signature });
+    return signer.toLowerCase() === row.guardian.toLowerCase();
+  } catch {
+    // A row whose values make no message, or a signature that recovers nothing.
+    return false;
+  }
 }
 
 /** A uint256 in canonical decimal: digits only, no leading zero but "0" itself, 78 at most. */
@@ -375,6 +474,7 @@ export async function adoptAgreement(
     signature: input.signature as Hex,
     digest,
     adoptedAt: nowSec,
+    statement: message.statement,
   };
   return withKeyedLock(orderLockKey(row.legalBodyId), async () =>
     deps.transaction((): AdoptionResult => {

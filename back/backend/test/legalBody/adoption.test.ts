@@ -7,7 +7,7 @@
  * The database is real (in memory). Every name, company and filing number is an invention, and
  * every key is one of anvil's published test accounts.
  */
-import type Database from "better-sqlite3";
+import Database from "better-sqlite3";
 import { type Address, type Hex, getAddress, hashTypedData } from "viem";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { ApiError } from "../../src/errors";
@@ -17,20 +17,28 @@ import {
   ADOPTION_FIELDS,
   ADOPTION_PRIMARY_TYPE,
   type AdoptionMessage,
+  CHARTER_ADOPTION_FIELDS,
   adoptAgreement,
   adoptionDigest,
   adoptionDomain,
   adoptionMessage,
   adoptionTypedDataWire,
   buildAdoptionMessage,
+  storedAdoptionChecks,
   verifyAdoption,
 } from "../../src/legalBody/adoption";
 import { readVerifiedAgreement } from "../../src/legalBody/agreement";
-import { createOrder } from "../../src/legalBody/orders";
+import { type LegalBodyOrderDeps, createOrder } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { STATEMENT_DOMAIN_NAME } from "../../src/legalBody/statement";
+import { CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "../../src/legalBody/texts/operatingAgreement";
-import { migrate, openDatabase } from "../../src/persistence/db";
+import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
+import { addAdoptionStatementColumn, migrate, openDatabase } from "../../src/persistence/db";
+import {
+  type AgreementAdoption,
+  SqliteLegalBodyAdoptionRepository,
+} from "../../src/persistence/legalBodyAdoptionRepository";
 import { LegalBodyInputError } from "../../src/persistence/legalBodyInput";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import {
@@ -41,6 +49,7 @@ import {
   type Signer,
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
+import { A } from "../helpers/grantFixtures";
 import {
   H,
   type LegalBodyStores,
@@ -177,6 +186,7 @@ describe("the typed data", () => {
       textVersion: LEGAL_BODY_OPERATING_AGREEMENT.version,
       guardian: getAddress(guardian.address),
       issuedAt: BigInt(NOW),
+      statement: null,
     });
   });
 
@@ -185,6 +195,7 @@ describe("the typed data", () => {
     const m = buildAdoptionMessage(row, frozenOf(row), BigInt(NOW));
     const wire = adoptionTypedDataWire(CHAIN_ID, FACTORY, m);
     expect(wire.primaryType).toBe(ADOPTION_PRIMARY_TYPE);
+    if (wire.primaryType !== ADOPTION_PRIMARY_TYPE) throw new Error("not the six-field form");
     expect(wire.types.OperatingAgreementAdoption).toEqual(ADOPTION_FIELDS);
     expect(wire.types.EIP712Domain.map((f) => f.name)).toEqual([
       "name",
@@ -433,6 +444,7 @@ describe("the stored adoption is written once", () => {
       signature: PLACEHOLDER_ADOPTION_SIGNATURE,
       digest: `0x${"d".repeat(64)}` as Hex,
       adoptedAt: NOW,
+      statement: null,
     };
     for (const bad of [
       { signature: "0x01" as Hex },
@@ -446,6 +458,14 @@ describe("the stored adoption is written once", () => {
       expect(() => s.adoptions.insert({ ...valid, ...bad }), JSON.stringify(bad)).toThrow(
         LegalBodyInputError,
       );
+    // The words are null, or 1 to 2,000 characters of text.
+    for (const statement of ["", "x".repeat(2001)]) {
+      const insert = () => s.adoptions.insert({ ...valid, statement });
+      expect(insert, `${statement.length} characters`).toThrow(LegalBodyInputError);
+      expect(insert, `${statement.length} characters`).toThrow(
+        "statement must be null or 1 to 2000 characters of text",
+      );
+    }
     // An order that does not exist holds no adoption.
     expect(() => s.adoptions.insert({ ...valid, legalBodyId: "lb_missing" })).toThrow();
     // A signature in upper case is stored in the one spelling.
@@ -456,8 +476,386 @@ describe("the stored adoption is written once", () => {
     expect(s.adoptions.find(row.legalBodyId)?.signature).toBe(PLACEHOLDER_ADOPTION_SIGNATURE);
     expect(() =>
       db
-        .prepare("INSERT INTO agreement_adoptions VALUES (?, ?, 't', 'v', ?, 1, '0x01', ?, 1, 'x')")
+        .prepare(
+          "INSERT INTO agreement_adoptions VALUES (?, ?, 't', 'v', ?, 1, '0x01', ?, 1, 'x', NULL)",
+        )
         .run(draft().legalBodyId, H("a"), guardian.address, H("b")),
     ).toThrow(/CHECK/);
+  });
+});
+
+describe("the adoption in words", () => {
+  /** The words of adoption of Charter draft 5, and the same words with their last character
+   *  changed. */
+  const SENTENCE = CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1;
+  const OTHER_WORDS = `${SENTENCE.slice(0, -1)}!`;
+  /** The six keys of the adoption, in the order of its type string. */
+  const SIX_KEYS = ["orderId", "manifestHash", "textId", "textVersion", "guardian", "issuedAt"];
+
+  /**
+   * The golden adoption in words: one whole wire typed data, its digest and the signature of
+   * `ANVIL_ACCOUNT_2`, copied from the golden file. Every value is made up: the order id and the
+   * time are invented, the chain id and the factory are this suite's fixtures.
+   */
+  const GOLDEN = {
+    typedData: {
+      domain: {
+        name: "Novi Corpus Operating Agreement Adoption",
+        version: "1",
+        chainId: 31337,
+        verifyingContract: "0x00000000000000000000000000000000000fAc70",
+      },
+      types: {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" },
+        ],
+        LegalBodyCharterAdoption: [
+          { name: "statement", type: "string" },
+          { name: "orderId", type: "string" },
+          { name: "manifestHash", type: "bytes32" },
+          { name: "textId", type: "string" },
+          { name: "textVersion", type: "string" },
+          { name: "guardian", type: "address" },
+          { name: "issuedAt", type: "uint256" },
+        ],
+      },
+      primaryType: "LegalBodyCharterAdoption",
+      message: {
+        statement:
+          "I control the wallet this message names as guardian, and I am the only member of the Company named in the Legal Body Charter that the manifest hash in this message commits to. For the Company, I adopt that Charter, with the grants set out in its Schedule A, as a supplement to the Company's operating agreement. I intend this signature as a signature, made by electronic means, and as the Company's written and signed adoption of that Charter. I confirm each point of its section 13.",
+        orderId: "lb_00000000-0000-4000-8000-000000000001",
+        manifestHash: "0xb744fe1df70acc897080d737cf655b329c52cf33e105bd9c96b3066a951b6f11",
+        textId: "legal-body-operating-agreement",
+        textVersion: "2026-11-draft-5",
+        guardian: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+        issuedAt: "1800000000",
+      },
+    },
+    digest: "0x47b917f5f622fc8bdebb9314275eba21d7f3c87d149cc9e43ea30662c74a75d4",
+    signature:
+      "0xfa469fa20726128ce30e05da78cc359a76521c67d5ecd9a21ae1a58c578f48bb1a18bf67fc002d295fcf7708e4b780465fd8c91175eb2dd1761490b7074979111b",
+  } as const;
+
+  /** The order deps of a sandbox deployment that serves the Charter pair. */
+  const charterDeps = (over: Partial<LegalBodyOrderDeps> = {}) =>
+    legalBodyOrderDeps(s, { texts: CHARTER_LEGAL_TEXTS, ...over });
+
+  /** A draft of the guardian on the Charter pair, with fixture `A`, for a company declared under
+   *  the pair's declaration. */
+  function charterDraft(): LegalBodyRecord {
+    const companyId = customerCompany(s, guardian.address, {
+      filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
+      wordingVersion: "2026-11-draft-2",
+    });
+    return rowOf(
+      createOrder(charterDeps(), guardian.address, { companyId, grant: structuredClone(A) }).id,
+    );
+  }
+
+  /** The order's adoption through both doors, the served typed data signed as it arrives: the
+   *  stored row. */
+  async function adoptedThroughTheDoors(
+    row: LegalBodyRecord,
+    deps: LegalBodyOrderDeps,
+  ): Promise<AgreementAdoption> {
+    const served = adoptionMessage(deps, guardian.address, row.legalBodyId);
+    const signature = (await guardian.signTypedData(asReceived(served.typedData))) as Hex;
+    const answer = await adoptAgreement(deps, guardian.address, row.legalBodyId, {
+      issuedAt: served.issuedAt,
+      signature,
+    });
+    expect(answer).toEqual({ adoptedAt: expect.any(Number) });
+    const stored = s.adoptions.find(row.legalBodyId);
+    if (stored === undefined) throw new Error(`order ${row.legalBodyId}: no adoption stored`);
+    expect(stored.adoptedAt).toBe(answer.adoptedAt);
+    return stored;
+  }
+
+  test("the golden: the wire form, its digest and the guardian's signature", async () => {
+    const message: AdoptionMessage = {
+      orderId: "lb_00000000-0000-4000-8000-000000000001",
+      manifestHash: "0xb744fe1df70acc897080d737cf655b329c52cf33e105bd9c96b3066a951b6f11",
+      textId: "legal-body-operating-agreement",
+      textVersion: "2026-11-draft-5",
+      guardian: "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC",
+      issuedAt: 1_800_000_000n,
+      statement: GOLDEN.typedData.message.statement,
+    };
+    expect(message.statement).toBe(SENTENCE);
+    const wire = adoptionTypedDataWire(CHAIN_ID, FACTORY, message);
+    expect(wire).toEqual(GOLDEN.typedData);
+    expect(adoptionDigest(CHAIN_ID, FACTORY, message)).toBe(GOLDEN.digest);
+    expect(await ANVIL_ACCOUNT_2.signTypedData(asReceived(wire))).toBe(GOLDEN.signature);
+
+    // The same six values without the words: another digest, and a message of the six keys alone.
+    const sixFields: AdoptionMessage = { ...message, statement: null };
+    expect(adoptionDigest(CHAIN_ID, FACTORY, sixFields)).toBe(
+      "0x8a1f80ac176074b2a236be87822965db5815399f91e9d536109e03cd07eadff1",
+    );
+    expect(Object.keys(adoptionTypedDataWire(CHAIN_ID, FACTORY, sixFields).message)).toEqual(
+      SIX_KEYS,
+    );
+  });
+
+  test("the form follows the text the order was frozen with", () => {
+    const row = charterDraft();
+    expect(buildAdoptionMessage(row, frozenOf(row), 1n).statement).toBe(SENTENCE);
+    const { typedData } = adoptionMessage(charterDeps(), guardian.address, row.legalBodyId);
+    expect(typedData.primaryType).toBe("LegalBodyCharterAdoption");
+    if (typedData.primaryType !== "LegalBodyCharterAdoption") throw new Error("not in words");
+    expect(typedData.types.LegalBodyCharterAdoption).toEqual(CHARTER_ADOPTION_FIELDS);
+    expect(Object.keys(typedData.message)).toEqual([
+      "statement",
+      "orderId",
+      "manifestHash",
+      "textId",
+      "textVersion",
+      "guardian",
+      "issuedAt",
+    ]);
+
+    // On the October pair: no words, and the typed data of the six fields, key for key.
+    const october = draft();
+    expect(buildAdoptionMessage(october, frozenOf(october), 1n).statement).toBeNull();
+    const served = adoptionMessage(legalBodyOrderDeps(s), guardian.address, october.legalBodyId);
+    expect(served.typedData).toStrictEqual({
+      domain: {
+        name: ADOPTION_DOMAIN_NAME,
+        version: ADOPTION_DOMAIN_VERSION,
+        chainId: CHAIN_ID,
+        verifyingContract: FACTORY,
+      },
+      types: {
+        EIP712Domain: [
+          { name: "name", type: "string" },
+          { name: "version", type: "string" },
+          { name: "chainId", type: "uint256" },
+          { name: "verifyingContract", type: "address" },
+        ],
+        OperatingAgreementAdoption: [...ADOPTION_FIELDS],
+      },
+      primaryType: "OperatingAgreementAdoption",
+      message: {
+        orderId: october.legalBodyId,
+        manifestHash: october.oaManifestHash,
+        textId: LEGAL_BODY_OPERATING_AGREEMENT.id,
+        textVersion: LEGAL_BODY_OPERATING_AGREEMENT.version,
+        guardian: getAddress(guardian.address),
+        issuedAt: served.issuedAt,
+      },
+    });
+    expect(Object.keys(served.typedData)).toEqual(["domain", "types", "primaryType", "message"]);
+    expect(Object.keys(served.typedData.types)).toEqual([
+      "EIP712Domain",
+      "OperatingAgreementAdoption",
+    ]);
+    expect(Object.keys(served.typedData.message)).toEqual(SIX_KEYS);
+  });
+
+  test("a round trip in words", async () => {
+    const row = charterDraft();
+    const stored = await adoptedThroughTheDoors(row, charterDeps());
+    expect(stored.statement).toBe(SENTENCE);
+    expect(stored.digest).toBe(
+      adoptionDigest(
+        CHAIN_ID,
+        FACTORY,
+        buildAdoptionMessage(row, frozenOf(row), BigInt(stored.issuedAt)),
+      ),
+    );
+  });
+
+  /** A signature the doors must refuse: the order, the deps of its deployment, and the typed data
+   *  its guardian signed instead of the served one. */
+  type OtherForm = (issuedAt: bigint) => {
+    row: LegalBodyRecord;
+    deps: LegalBodyOrderDeps;
+    typedData: object;
+  };
+  const otherForms: [string, OtherForm][] = [
+    [
+      "the six-field form of the same values, on the Charter",
+      (issuedAt) => {
+        const row = charterDraft();
+        const m = { ...buildAdoptionMessage(row, frozenOf(row), issuedAt), statement: null };
+        return { row, deps: charterDeps(), typedData: adoptionTypedDataWire(CHAIN_ID, FACTORY, m) };
+      },
+    ],
+    [
+      "the form with words, one character of the sentence changed, on the Charter",
+      (issuedAt) => {
+        const row = charterDraft();
+        const m = { ...buildAdoptionMessage(row, frozenOf(row), issuedAt), statement: OTHER_WORDS };
+        return { row, deps: charterDeps(), typedData: adoptionTypedDataWire(CHAIN_ID, FACTORY, m) };
+      },
+    ],
+    [
+      "the form with words under the primary type name OperatingAgreementAdoption, on the Charter",
+      (issuedAt) => {
+        const row = charterDraft();
+        const { domain, types, message } = adoptionTypedDataWire(
+          CHAIN_ID,
+          FACTORY,
+          buildAdoptionMessage(row, frozenOf(row), issuedAt),
+        );
+        const typedData = {
+          domain,
+          types: {
+            EIP712Domain: types.EIP712Domain,
+            OperatingAgreementAdoption: CHARTER_ADOPTION_FIELDS,
+          },
+          primaryType: "OperatingAgreementAdoption",
+          message,
+        };
+        return { row, deps: charterDeps(), typedData };
+      },
+    ],
+    [
+      "the form with words, on the October pair",
+      (issuedAt) => {
+        const row = draft();
+        const m = { ...buildAdoptionMessage(row, frozenOf(row), issuedAt), statement: SENTENCE };
+        return {
+          row,
+          deps: legalBodyOrderDeps(s),
+          typedData: adoptionTypedDataWire(CHAIN_ID, FACTORY, m),
+        };
+      },
+    ],
+  ];
+  test.each(otherForms)(
+    "an adoption signed in another form or in other words is not valid: %s",
+    async (_name, make) => {
+      const issuedAt = BigInt(Math.floor(Date.now() / 1000));
+      const { row, deps, typedData } = make(issuedAt);
+      const signature = (await guardian.signTypedData(asReceived(typedData))) as Hex;
+      await refused(
+        () =>
+          adoptAgreement(deps, guardian.address, row.legalBodyId, {
+            issuedAt: String(issuedAt),
+            signature,
+          }),
+        "adoption_not_valid",
+      );
+      expect(s.adoptions.find(row.legalBodyId)).toBeUndefined();
+      expect(
+        s.repo.listEvents(row.legalBodyId).filter((e) => e.kind === "agreement_adopted"),
+      ).toEqual([]);
+    },
+  );
+
+  test("a stored adoption is checked again from its row alone", async () => {
+    const inWords = await adoptedThroughTheDoors(charterDraft(), charterDeps());
+    const october = await adoptedThroughTheDoors(draft(), legalBodyOrderDeps(s));
+    expect(inWords.statement).toBe(SENTENCE);
+    expect(october.statement).toBeNull();
+    const deployment = { chainId: CHAIN_ID, factory: FACTORY };
+    expect(await storedAdoptionChecks(inWords, deployment)).toBe(true);
+    expect(await storedAdoptionChecks(october, deployment)).toBe(true);
+
+    for (const changed of [
+      { ...inWords, statement: OTHER_WORDS },
+      { ...inWords, statement: null },
+      { ...october, statement: SENTENCE },
+    ])
+      expect(await storedAdoptionChecks(changed, deployment), changed.legalBodyId).toBe(false);
+    for (const row of [inWords, october]) {
+      expect(await storedAdoptionChecks(row, { chainId: CHAIN_ID, factory: OTHER_FACTORY })).toBe(
+        false,
+      );
+      expect(
+        await storedAdoptionChecks(
+          { ...row, signature: PLACEHOLDER_ADOPTION_SIGNATURE },
+          deployment,
+        ),
+      ).toBe(false);
+    }
+    // A row rewritten whole, its words and its digest together: the digest agrees with the row, and
+    // the signature, made over the words that were signed, no longer recovers to the guardian.
+    const rewritten = adoptionDigest(CHAIN_ID, FACTORY, {
+      orderId: inWords.legalBodyId,
+      manifestHash: inWords.manifestHash,
+      textId: inWords.textId,
+      textVersion: inWords.textVersion,
+      guardian: inWords.guardian,
+      issuedAt: BigInt(inWords.issuedAt),
+      statement: OTHER_WORDS,
+    });
+    expect(
+      await storedAdoptionChecks(
+        { ...inWords, statement: OTHER_WORDS, digest: rewritten },
+        deployment,
+      ),
+    ).toBe(false);
+  });
+
+  test("a database made before the words gains the column once, and its rows read back with none", () => {
+    const old = new Database(":memory:");
+    try {
+      // The table as it was before the words: its ten columns, without the foreign key.
+      old.exec(`
+        CREATE TABLE agreement_adoptions (
+          legal_body_id TEXT PRIMARY KEY NOT NULL,
+          manifest_hash TEXT NOT NULL,
+          text_id       TEXT NOT NULL,
+          text_version  TEXT NOT NULL,
+          guardian      TEXT NOT NULL,
+          issued_at     INTEGER NOT NULL,
+          signature     TEXT NOT NULL,
+          digest        TEXT NOT NULL,
+          adopted_at    INTEGER NOT NULL,
+          created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+      const insertOld = old.prepare(
+        `INSERT INTO agreement_adoptions
+           (legal_body_id, manifest_hash, text_id, text_version, guardian, issued_at, signature,
+            digest, adopted_at)
+         VALUES (?, ?, 't', 'v', ?, ?, ?, ?, ?)`,
+      );
+      insertOld.run(
+        "lb_before",
+        H("a"),
+        guardian.address,
+        NOW,
+        PLACEHOLDER_ADOPTION_SIGNATURE,
+        H("b"),
+        NOW,
+      );
+
+      addAdoptionStatementColumn(old);
+      addAdoptionStatementColumn(old);
+
+      const columns = (
+        old.prepare("PRAGMA table_info(agreement_adoptions)").all() as { name: string }[]
+      ).map((c) => c.name);
+      expect(columns.filter((name) => name === "statement")).toEqual(["statement"]);
+      expect(new SqliteLegalBodyAdoptionRepository(old).find("lb_before")?.statement).toBeNull();
+
+      const insertWords = old.prepare(
+        `INSERT INTO agreement_adoptions
+           (legal_body_id, manifest_hash, text_id, text_version, guardian, issued_at, signature,
+            digest, adopted_at, statement)
+         VALUES (?, ?, 't', 'v', ?, ?, ?, ?, ?, ?)`,
+      );
+      const withWords = (id: string, statement: string) => () =>
+        insertWords.run(
+          id,
+          H("a"),
+          guardian.address,
+          NOW,
+          PLACEHOLDER_ADOPTION_SIGNATURE,
+          H("b"),
+          NOW,
+          statement,
+        );
+      expect(withWords("lb_empty", "")).toThrow(/CHECK/);
+      expect(withWords("lb_long", "x".repeat(2001))).toThrow(/CHECK/);
+    } finally {
+      old.close();
+    }
   });
 });

@@ -21,7 +21,8 @@ import {
   toOrderView,
 } from "../../src/legalBody/orders";
 import { CUSTOMER_PROVIDER } from "../../src/legalBody/provider";
-import { servedLegalTexts } from "../../src/legalBody/texts/sets";
+import type { LegalTextStatus } from "../../src/legalBody/texts/index";
+import { type LegalTextSet, octoberLegalTexts } from "../../src/legalBody/texts/sets";
 import { SqliteCharterGrantRepository } from "../../src/persistence/charterGrantRepository";
 import {
   type CompanyCheckRepository,
@@ -131,8 +132,8 @@ export function legalBodyOrderDeps(
     docStore: s.docStore,
     deployment: { chainId: CHAIN_ID, factory: FACTORY },
     identityRegistry: REGISTRY,
-    // Read when the deps are built, so a test that replaces a served text is read at that moment.
-    texts: servedLegalTexts(),
+    // The October pair; a test that needs a status gives a copy (`legalTextsWithStatus`).
+    texts: octoberLegalTexts(),
     environment: "sandbox",
     amendmentDelaySeconds: 172_800,
     maxOpenPerTenant: 3,
@@ -147,6 +148,24 @@ export function legalBodyOrderDeps(
     sleep: async () => {},
     ...over,
   };
+}
+
+/** The October pair with the statuses given: a copy, so no module is replaced. */
+export function legalTextsWithStatus(over: {
+  agreement?: LegalTextStatus;
+  declaration?: LegalTextStatus;
+}): LegalTextSet {
+  const { agreement, declaration, contractFacts, productionNeeds } = octoberLegalTexts();
+  if (agreement.kind !== "plain") throw new Error("the October agreement is a plain text");
+  return Object.freeze({
+    agreement: Object.freeze({
+      kind: "plain",
+      text: Object.freeze({ ...agreement.text, status: over.agreement ?? agreement.text.status }),
+    }),
+    declaration: Object.freeze({ ...declaration, status: over.declaration ?? declaration.status }),
+    contractFacts,
+    productionNeeds,
+  });
 }
 
 /** The order's view as a door answers it for the row as stored now, its facts read from the
@@ -201,6 +220,7 @@ export function adoptFor(
       signature: PLACEHOLDER_ADOPTION_SIGNATURE,
       digest: adoptionDigest(row.chainId, row.factory, message),
       adoptedAt: nowSec,
+      statement: message.statement,
     },
   );
 }
@@ -252,7 +272,8 @@ export function appendCheck(
 /**
  * A company of `owner`, with the checks given (one pass unless told otherwise). A customer company
  * carries its declaration, written straight to its table: the statement and its signature are
- * placeholders, since only the company's name and filing number are read by the order doors.
+ * placeholders, since the order doors read only the company's name, its filing number and the
+ * version of the wording it was declared under (the October statement's unless told otherwise).
  */
 export function customerCompany(
   s: {
@@ -268,6 +289,7 @@ export function customerCompany(
     provider?: string;
     status?: "draft" | "ready";
     humanNullifier?: string;
+    wordingVersion?: string;
   } = {},
 ): string {
   const provider = opts.provider ?? CUSTOMER_PROVIDER;
@@ -299,7 +321,7 @@ export function customerCompany(
       companyName,
       jurisdiction: "WY",
       filingNumber,
-      wordingVersion: "2026-10-draft-1",
+      wordingVersion: opts.wordingVersion ?? "2026-10-draft-1",
       chainId: CHAIN_ID,
       factory: FACTORY,
       issuedAt: Math.floor(Date.now() / 1000),

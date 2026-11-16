@@ -12,8 +12,9 @@
  * A re-quote brings an expired draft back into the count, so on production it is refused at the
  * cap with the create's own code and sentence, at the REST door and the MCP tool alike.
  *
- * The operating agreement module is replaced by an approved copy. Every name, address and
- * nullifier is an invention, the keys constant test keys.
+ * The create door is given a copy of the October pair with its agreement approved
+ * (`legalTextsWithStatus`). Every name, address and nullifier is an invention, the keys constant
+ * test keys.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -27,7 +28,6 @@ import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { signSession } from "../../src/auth/session";
 import type { CreateCompanyDeps } from "../../src/formation/company";
 import { DEFAULT_INDUSTRY, companyNameOptions } from "../../src/formation/intake";
-import type { LegalTextStatus } from "../../src/legalBody/texts/index";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -45,20 +45,8 @@ import {
   worldFor,
 } from "../helpers/customerCompanyFixtures";
 import { fakeChain, paymentCfg } from "../helpers/formationPayment";
+import { legalTextsWithStatus } from "../helpers/legalBodyFixtures";
 import { startMcpTestClient } from "../mcp/helpers";
-
-const texts = vi.hoisted(() => ({ agreement: "approved" as LegalTextStatus }));
-
-vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
-  return {
-    ...actual,
-    get LEGAL_BODY_OPERATING_AGREEMENT() {
-      return { ...actual.LEGAL_BODY_OPERATING_AGREEMENT, status: texts.agreement };
-    },
-  };
-});
 
 const JWT_SECRET = "test-jwt-secret-that-is-long-enough-to-be-plausible";
 const TENANT = getAddress("0x00000000000000000000000000000000000000c1");
@@ -94,7 +82,6 @@ beforeEach(() => {
   requests = new SqliteFormationRepository(db);
   payments = new SqliteFormationPaymentRepository(db);
   apiKeys = new SqliteApiKeyStore(db);
-  texts.agreement = "approved";
   vi.spyOn(console, "log").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
@@ -126,6 +113,7 @@ function app(maxTotal: number) {
     requests,
     pin,
     legalBodyEnvironment: "production",
+    legalTexts: legalTextsWithStatus({ agreement: "approved" }),
     sandboxSyntheticPii: false,
     maxPerTenant: 10,
     dailyCeiling: 100,

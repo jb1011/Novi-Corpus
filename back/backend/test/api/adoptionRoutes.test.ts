@@ -19,7 +19,9 @@ import { ADOPTION_DOMAIN_NAME, ADOPTION_PRIMARY_TYPE } from "../../src/legalBody
 import { agreementDocNames, buildAgreement, storeAgreement } from "../../src/legalBody/agreement";
 import { type LegalBodyOrderDeps, createOrder } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import { CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
 import { LEGAL_BODY_OPERATING_AGREEMENT } from "../../src/legalBody/texts/operatingAgreement";
+import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
@@ -36,6 +38,7 @@ import {
   recordHuman,
 } from "../helpers/customerCompanyFixtures";
 import { seedCompany } from "../helpers/formationFakes";
+import { A } from "../helpers/grantFixtures";
 import {
   DAY_MS,
   JWT_SECRET,
@@ -669,5 +672,32 @@ describe("a company Novi formed, through the adoption doors", () => {
     }
     expect(snapshot()).toEqual(before);
     expect(s.adoptions.find(pending)).toBeUndefined();
+  });
+});
+
+describe("the adoption in words", () => {
+  test("an order on the Charter is served the typed data that states the words of adoption, and the guardian's signature of it is stored", async () => {
+    const app = makeApp(orderDeps({ texts: CHARTER_LEGAL_TEXTS }));
+    const companyId = customerCompany(s, guardian.address, {
+      filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
+      wordingVersion: "2026-11-draft-2",
+    });
+    const placed = await answerOf(
+      await call(app, "POST", "/legal-body-orders", await sessionOf(guardian), {
+        companyId,
+        grant: A,
+      }),
+    );
+    expect(placed.status).toBe(201);
+    const id = placed.body.id as string;
+
+    const { issuedAt, signature, typedData } = await servedAndSigned(app, id);
+    expect(typedData.primaryType).toBe("LegalBodyCharterAdoption");
+    expect(typedData.message.statement).toBe(CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1);
+
+    const res = await adopt(app, id, { issuedAt, signature });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ adoptedAt: Math.floor(nowMs / 1000) });
+    expect(s.adoptions.find(id)?.statement).toBe(CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1);
   });
 });

@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { getAddress } from "viem";
 import { expect, test } from "vitest";
+import { CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
 import {
   type CharterFields,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_5,
 } from "../../src/legalBody/texts/legalBodyCharter";
 import {
   type AgreementFields,
@@ -35,6 +37,7 @@ const CHARTERS = [
   LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_5,
 ];
 const WITH = { ...FIELDS, scheduleA: "No grant is in force." };
 
@@ -42,10 +45,11 @@ const PINS = {
   "2026-11-draft-1": "f869917a35368abee55855d15291059efd1fea95c6edee110524c6face3c6d2c",
   "2026-11-draft-2": "acf6cb2415cba17874d3c7505b7289d66dfd9148e6d584783035fad912a2a0b8",
   "2026-11-draft-4": "2bc1eb1c387ef9ac7e2d9ad3bae6365ab7c01fce6d30afd29c562f8382ef9ca6",
+  "2026-11-draft-5": "763f52ac1447c7f9f796140586840233d6ef104316360e86545fd3e339e68cfb",
 } as const;
 
 test("each version of the Charter is a draft of the agreement text under its own name, and none is the served one", () => {
-  expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.slice(-3)).toEqual(CHARTERS);
+  expect(LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS.slice(-4)).toEqual(CHARTERS);
   for (const text of CHARTERS) {
     expect(text.id).toBe("legal-body-operating-agreement");
     expect(text.status).toBe("draft");
@@ -55,8 +59,11 @@ test("each version of the Charter is a draft of the agreement text under its own
   expect(LEGAL_BODY_OPERATING_AGREEMENT.version).toBe("2026-10-draft-1");
 });
 
-test("draft 4 opens with its notice, on the sixth line", () => {
-  expect(LEGAL_BODY_CHARTER_2026_11_DRAFT_4.template.split("\n")[5]).toBe(
+test.each([
+  ["2026-11-draft-4", LEGAL_BODY_CHARTER_2026_11_DRAFT_4],
+  ["2026-11-draft-5", LEGAL_BODY_CHARTER_2026_11_DRAFT_5],
+] as const)("a version that states a notice states it on its sixth line: %s", (_version, text) => {
+  expect(text.template.split("\n")[5]).toBe(
     "Notice: this document is a fixed form. It is not a substitute for the advice of an attorney. Novi Corpus is not a law firm and does not give legal advice (section 12).",
   );
 });
@@ -97,18 +104,32 @@ test("draft 2 of the Charter differs from draft 1 in two lines", () => {
 });
 
 test("Schedule A is rendered in its place, and a value is never read as a placeholder", () => {
-  const doc = LEGAL_BODY_CHARTER_2026_11_DRAFT_4.render(WITH);
+  const doc = LEGAL_BODY_CHARTER_2026_11_DRAFT_5.render(WITH);
   expect(doc).toContain(
     "## Schedule A. Grants in force\n\nNo grant is in force.\n\n## Schedule B.",
   );
   expect(doc).toContain('# Legal Body Charter of "Example Holdings LLC"');
   expect(doc).not.toMatch(/\{[A-Za-z]/);
-  const smuggled = LEGAL_BODY_CHARTER_2026_11_DRAFT_4.render({ ...WITH, scheduleA: "{guardian}" });
+  const smuggled = LEGAL_BODY_CHARTER_2026_11_DRAFT_5.render({ ...WITH, scheduleA: "{guardian}" });
   expect(smuggled).toContain("## Schedule A. Grants in force\n\n{guardian}\n");
 });
 
 test("a Charter without its Schedule A is refused, never rendered", () => {
-  expect(() => LEGAL_BODY_CHARTER_2026_11_DRAFT_4.render(FIELDS as CharterFields)).toThrow(
+  expect(() => LEGAL_BODY_CHARTER_2026_11_DRAFT_5.render(FIELDS as CharterFields)).toThrow(
     'legal text "legal-body-operating-agreement": placeholder {scheduleA} has no string field',
   );
+});
+
+test("the sentence of adoption is one line of plain text, with no field", () => {
+  const s = CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1;
+  expect(sha256(s)).toBe("2784f8deea2e2722532d7478b5d032a9740a76868b1a3d7f40fcfafeceb6dc23");
+  expect(s).toHaveLength(483);
+  expect(s).toMatch(/^[\x20-\x7e]+$/);
+  expect(s).not.toMatch(/[{}]/);
+  expect(
+    s.startsWith(
+      "I control the wallet this message names as guardian, and I am the only member of the Company",
+    ),
+  ).toBe(true);
+  expect(s.endsWith("I confirm each point of its section 13.")).toBe(true);
 });

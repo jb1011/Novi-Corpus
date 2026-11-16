@@ -4,11 +4,12 @@
  * door's own grant: placed with the order, and read back. Mounted with the other order doors,
  * under the session protection, each starting with the real-human check.
  *
- * Two apps: one whose order doors serve the Charter pair (`CHARTER_LEGAL_TEXTS`), which no
- * deployment selects, and one on the October pair, the one every deployment serves. The database
- * is real (in memory) and the chain is never called: every member of the chain port throws. Every
- * amount is a made-up fixture; every name, company and filing number is an invention, and every
- * key is one of anvil's published test accounts.
+ * Three apps: one whose order doors serve the Charter pair (`CHARTER_LEGAL_TEXTS`), one on the
+ * October pair, the pair a deployment serves when it names none, and, for the draft rule, a
+ * production deployment on the Charter pair. The database is real (in memory) and the chain is
+ * never called: every member of the chain port throws. Every amount is a made-up fixture; every
+ * name, company and filing number is an invention, and every key is one of anvil's published test
+ * accounts.
  */
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
@@ -16,10 +17,12 @@ import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import { agreementDocNames } from "../../src/legalBody/agreement";
 import type { GrantChoices } from "../../src/legalBody/grant";
 import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
-import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
+import { CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
+import { CHARTER_LEGAL_TEXTS, type LegalTextSet } from "../../src/legalBody/texts/sets";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
@@ -66,6 +69,9 @@ const agreementPath = (id: string) => `${ORDERS}/${id}/agreement`;
 const DIGEST_A = "0xb88cefedad48bffc885596dc29fb3c8f935774498147ed74e48395e110eb4dc1";
 /** sha256 of the Schedule A of fixture `A` as grant 1, version 1. */
 const SCHEDULE_A_SHA256 = "738f0a878a3e630e697d9b670bab395e80dbfa241fcdb22eed9338c21d509685";
+/** The notice Charter draft 5 states before its first section, written out here on its own. */
+const NOTICE =
+  "Notice: this document is a fixed form. It is not a substitute for the advice of an attorney. Novi Corpus is not a law firm and does not give legal advice (section 12).";
 
 const sha256 = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
@@ -145,15 +151,18 @@ function makeApp(over: Partial<LegalBodyOrderDeps> = {}) {
 }
 type App = ReturnType<typeof makeApp>;
 
-/** The app whose order doors serve Charter draft 4 with declaration draft 2. */
+/** The app whose order doors serve Charter draft 5 with declaration draft 2. */
 const charterApp = (over: Partial<LegalBodyOrderDeps> = {}) =>
   makeApp({ texts: CHARTER_LEGAL_TEXTS, ...over });
 /** The app whose order doors serve the October pair. */
 const octoberApp = (over: Partial<LegalBodyOrderDeps> = {}) => makeApp(over);
 
 /** A checked company of `who`, with a filing number no other company of the test holds. */
-const company = (who: Signer) =>
-  customerCompany(s, who.address, { filingNumber: `TEST-${String(++filings).padStart(4, "0")}` });
+const company = (who: Signer, opts: Parameters<typeof customerCompany>[2] = {}) =>
+  customerCompany(s, who.address, {
+    filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
+    ...opts,
+  });
 
 /** The rows a table holds, for every order. */
 const rowsOf = (table: "legal_bodies" | "charter_grants") =>
@@ -185,7 +194,7 @@ describe("the form of a grant", () => {
     expect(charter.status).toBe(200);
     expect(charter.body).toEqual({
       takesGrant: true,
-      text: { id: "legal-body-operating-agreement", version: "2026-11-draft-4", status: "draft" },
+      text: { id: "legal-body-operating-agreement", version: "2026-11-draft-5", status: "draft" },
       schema: "novi.legal-body-grant/1",
       amountMax: 1000000000,
       heavyActModes: {
@@ -194,6 +203,7 @@ describe("the form of a grant", () => {
         guarantee: ["not_allowed", "guardian_signature", "alone"],
         transferProperty: ["not_allowed", "guardian_signature"],
       },
+      notice: NOTICE,
     });
 
     const october = await answerOf(await call(octoberApp(), "GET", FORM, token));
@@ -279,7 +289,10 @@ describe("an order's grant", () => {
     const app = charterApp();
     const token = await sessionOf(guardian);
     const placed = await answerOf(
-      await call(app, "POST", ORDERS, token, { companyId: company(guardian), grant: A }),
+      await call(app, "POST", ORDERS, token, {
+        companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
+        grant: A,
+      }),
     );
     expect(placed.status).toBe(201);
     const id = placed.body.id as string;
@@ -294,8 +307,11 @@ describe("an order's grant", () => {
 
     const agreement = await answerOf(await call(app, "GET", agreementPath(id), token));
     expect(agreement.status).toBe(200);
-    expect(agreement.body.textVersion).toBe("2026-11-draft-4");
+    expect(agreement.body.textVersion).toBe("2026-11-draft-5");
     expect(agreement.body.termsDoc).toContain(read.body.grant.scheduleA);
+    // The notice its stored terms state, and the words its adoption is signed with.
+    expect(agreement.body.notice).toBe(NOTICE);
+    expect(agreement.body.adoptionStatement).toBe(CHARTER_ADOPTION_STATEMENT_2026_11_DRAFT_1);
 
     // The order's view is the one an October order has: no new key.
     const october = await answerOf(
@@ -309,7 +325,7 @@ describe("an order's grant", () => {
     const token = await sessionOf(guardian);
     const res = await answerOf(
       await call(charterApp(), "POST", ORDERS, token, {
-        companyId: company(guardian),
+        companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
         grant: { ...A, endsOn: "1999-01-01" },
       }),
     );
@@ -342,7 +358,7 @@ describe("an order's grant", () => {
   test("another tenant's order has no grant to show", async () => {
     const app = charterApp();
     const id = await ordered(app, await sessionOf(guardian), {
-      companyId: company(guardian),
+      companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
       grant: A,
     });
     const theirs = await sessionOf(stranger);
@@ -353,6 +369,67 @@ describe("an order's grant", () => {
     // An unknown id gets the very same answer.
     const unknown = await answerOf(await call(app, "GET", grantPath("lb_unknown"), theirs));
     expect(unknown).toMatchObject({ status: res.status, body: res.body });
+  });
+
+  test("an order with no frozen agreement has no grant to show", async () => {
+    // Written through the repository: no door would make it, and its agreement is never frozen.
+    const own = s.repo.create({
+      tenantId: guardian.address,
+      companyId: company(guardian),
+      chainId: CHAIN_ID,
+      factory: FACTORY,
+      amendmentDelay: 172_800,
+    });
+    expect(own.oaManifestHash).toBeNull();
+
+    const res = await answerOf(
+      await call(charterApp(), "GET", grantPath(own.legalBodyId), await sessionOf(guardian)),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ grant: null });
+  });
+
+  test("an order whose stored agreement does not read back shows no grant", async () => {
+    const app = charterApp();
+    const token = await sessionOf(guardian);
+    const id = await ordered(app, token, {
+      companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
+      grant: A,
+    });
+    s.docStore.put(agreementDocNames(id).terms, "Terms that were never frozen.\n");
+
+    const res = await answerOf(await call(app, "GET", grantPath(id), token));
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(refused("agreement_unreadable"));
+  });
+});
+
+// ── A draft text ────────────────────────────────────────────────────────────────────────────
+
+describe("a draft text", () => {
+  test("a draft Charter is not served by the form or the preview of a production deployment", async () => {
+    const token = await sessionOf(guardian);
+    const production = charterApp({ environment: "production" });
+
+    const form = await answerOf(await call(production, "GET", FORM, token));
+    expect(form.status).toBe(503);
+    expect(form.body).toEqual(refused("legal_text_not_approved"));
+    const preview = await answerOf(await call(production, "POST", PREVIEW, token, { grant: A }));
+    expect(preview.status).toBe(503);
+    expect(preview.body).toEqual(refused("legal_text_not_approved"));
+
+    // The same deployment, the agreement's text copied as approved.
+    const charter = CHARTER_LEGAL_TEXTS.agreement;
+    if (charter.kind !== "charter") throw new Error("the Charter pair holds no Charter");
+    const approved: LegalTextSet = {
+      ...CHARTER_LEGAL_TEXTS,
+      agreement: { ...charter, text: { ...charter.text, status: "approved" } },
+    };
+    const served = await answerOf(
+      await call(charterApp({ environment: "production", texts: approved }), "GET", FORM, token),
+    );
+    expect(served.status).toBe(200);
+    expect(served.body.text.status).toBe("approved");
   });
 });
 
@@ -439,7 +516,10 @@ describe("who may use the grant doors", () => {
     });
     const token = await sessionOf(guardian);
     // Placed on an app with room in every throttle, then read on the one with none.
-    const id = await ordered(charterApp(), token, { companyId: company(guardian), grant: A });
+    const id = await ordered(charterApp(), token, {
+      companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
+      grant: A,
+    });
 
     for (const door of doors(id)) {
       const res = await answerOf(

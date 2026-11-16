@@ -41,17 +41,17 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   rate_limited: "Too many requests: wait a few seconds and try again.",
   payload_too_large: "The request body is too large: a legal-body door reads at most 8 KiB.",
   agreement_unreadable:
-    "This order's stored agreement no longer reads back as the agreement it was frozen with, so it is not served.",
+    "This order's stored agreement no longer reads back as the agreement it was frozen with, so it is neither served nor acted on.",
   internal_error: "Something went wrong on our side: try again in a moment.",
   order_expired:
     "This order can no longer be linked: a draft can be linked for 24 hours after it was placed. Place a new order.",
   order_revoked: "This order was revoked by the operator, and can no longer be linked.",
   agreement_outdated:
-    "This order's agreement was written on a version of the operating agreement this deployment no longer serves: place a new order.",
+    "This order's agreement was written on a version of the agreement text this deployment no longer serves: place a new order.",
   // Both link doors and both link tools, until the guardian has signed the adoption: the guardian
   // signs it in the web app, never through a tool.
   agreement_not_adopted:
-    "The operating agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
+    "This order's agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
   adoption_stale:
     "This adoption message was issued too long ago, or ahead of the server's clock: ask for a new adoption message and sign that.",
   adoption_not_valid:
@@ -142,15 +142,23 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
     "The grant is not valid: each field named in the details breaks the rule given beside it, and no order was placed.",
   // `POST /legal-body-orders` with a `grant` key, whatever its value, and the grant preview,
   // whatever grant its body holds, on a deployment whose agreement takes none.
-  grant_not_taken: "This deployment's agreement takes no grant: leave out grant.",
-  // The adoption and link doors, for an order whose grant's last day has begun by the moment its
-  // legal body could be created: now at the adoption, the link's deadline at the link.
+  grant_not_taken: "This deployment's agreement takes no grant: an order is placed without one.",
+  // The two adoption doors, for an order whose grant's last day has begun by now, the moment of the
+  // adoption.
   grant_ends_too_soon:
     "The grant in this order's agreement ends too soon for a legal body to be created under it: place a new order with a later end, or with none.",
+  // Both link doors and both link tools, for a link whose deadline is from the first second of the
+  // grant's last day on.
+  link_outlasts_grant:
+    "This link's deadline falls on or after the first second of the grant's last day: ask for a link with an earlier deadline, or place a new order with a later end, or with none.",
   // The doors that read an order's stored grant, when it no longer reads back as the grant its
   // frozen agreement states.
   grant_unreadable:
-    "This order's stored grant no longer reads back as the grant its agreement was frozen with, so it is not served.",
+    "This order's stored grant no longer reads back as the grant its agreement was frozen with, so it is neither served nor acted on.",
+  // `POST /legal-body-orders`, for a company the guardian declared under another version of the
+  // wording than the declaration of the pair this deployment serves.
+  declaration_outdated:
+    "This company was declared under another wording than the one this deployment serves, and a declaration is never rewritten: declare the company as a new one, then place the order on it.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */

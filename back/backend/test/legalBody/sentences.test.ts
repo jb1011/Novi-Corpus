@@ -97,7 +97,9 @@ const NAMED_CODES = [
   "grant_not_valid",
   "grant_not_taken",
   "grant_ends_too_soon",
+  "link_outlasts_grant",
   "grant_unreadable",
+  "declaration_outdated",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";

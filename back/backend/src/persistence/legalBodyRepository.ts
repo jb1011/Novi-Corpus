@@ -374,6 +374,8 @@ export interface LegalBodyRepository {
    * open orders stops counting a body once it is linked.
    */
   hasOpenForCompany(companyId: string, nowMs: number): boolean;
+  /** As `hasOpenForCompany`, counting only the rows of one deployment: its chain and its factory. */
+  hasOpenForCompanyOn(d: Deployment, companyId: string, nowMs: number): boolean;
   hasLinkedForCompany(companyId: string): boolean;
   /**
    * The tenant's open orders at `nowMs`: a draft under 24 hours old, a `reserved` row, and a
@@ -899,6 +901,14 @@ export class SqliteLegalBodyRepository
         `SELECT EXISTS (
            SELECT 1 FROM legal_bodies
             WHERE company_id = @company_id
+              AND (binding_state IN ('reserved','deployed','linked')
+                   OR (binding_state = 'draft' AND created_at >= @draft_cutoff))) AS found`,
+      ),
+      hasOpenForCompanyOn: db.prepare(
+        `SELECT EXISTS (
+           SELECT 1 FROM legal_bodies
+            WHERE company_id = @company_id
+              AND chain_id = @chain_id AND factory = @factory
               AND (binding_state IN ('reserved','deployed','linked')
                    OR (binding_state = 'draft' AND created_at >= @draft_cutoff))) AS found`,
       ),
@@ -1435,6 +1445,17 @@ export class SqliteLegalBodyRepository
     const r = this.stmts.hasOpenForCompany.get({ company_id: companyId, draft_cutoff }) as {
       found: number;
     };
+    return r.found === 1;
+  }
+
+  hasOpenForCompanyOn(d: Deployment, companyId: string, nowMs: number): boolean {
+    const deployment = requireDeployment(d);
+    const draft_cutoff = draftCutoff(requireMillis("nowMs", nowMs));
+    const r = this.stmts.hasOpenForCompanyOn.get({
+      ...deployment,
+      company_id: companyId,
+      draft_cutoff,
+    }) as { found: number };
     return r.found === 1;
   }
 

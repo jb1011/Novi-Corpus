@@ -60,7 +60,7 @@ export const STATEMENT_OF_AUTHORITY_VERSIONS: readonly LegalText<StatementFields
 );
 
 /**
- * The version new declarations are made under. It stays the October draft until the grant step
- * exists: the declaration of authority speaks of a Legal Body Charter, which no door serves yet.
+ * The October statement: the declaration of the pair a deployment serves when its setting names
+ * no version (`sets.ts`). New declarations are made under the declaration of the pair served.
  */
 export const STATEMENT_OF_AUTHORITY: LegalText<StatementFields> = STATEMENT_2026_10_DRAFT_1;

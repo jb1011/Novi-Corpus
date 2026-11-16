@@ -5,6 +5,7 @@ import {
   LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
   LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
+  LEGAL_BODY_CHARTER_2026_11_DRAFT_5,
 } from "./legalBodyCharter";
 
 /**
@@ -79,11 +80,12 @@ export const LEGAL_BODY_OPERATING_AGREEMENT_VERSIONS: readonly LegalText<Charter
     LEGAL_BODY_CHARTER_2026_11_DRAFT_1,
     LEGAL_BODY_CHARTER_2026_11_DRAFT_2,
     LEGAL_BODY_CHARTER_2026_11_DRAFT_4,
+    LEGAL_BODY_CHARTER_2026_11_DRAFT_5,
   ]);
 
 /**
- * The version new agreements are made under. It stays the October draft until the grant step
- * exists: the Charter cannot be rendered without its Schedule A.
+ * The October agreement: the agreement of the pair a deployment serves when its setting names no
+ * version (`sets.ts`). New agreements are made under the agreement of the pair served.
  */
 export const LEGAL_BODY_OPERATING_AGREEMENT: LegalText<AgreementFields> =
   OPERATING_AGREEMENT_2026_10_DRAFT_1;

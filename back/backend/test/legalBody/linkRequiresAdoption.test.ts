@@ -6,7 +6,8 @@
  * after every other check of rule 1, `agreement_outdated` included.
  *
  * The agreement's wording is held approved in this file, so that a production deployment serves
- * it and its link door reaches the adoption check; the wording's status is the only change.
+ * it and its link door reaches the adoption check: the doors are given a copy of the October pair
+ * with its agreement approved (`legalTextsWithStatus`). The wording's status is the only change.
  *
  * The database is real (in memory); the chain is a fake whose answers each test steers. Every
  * name, company and filing number is an invention, and every key is one of anvil's published test
@@ -52,6 +53,7 @@ import {
   customerCompany,
   fakeLinkChainMembers,
   legalBodyOrderDeps,
+  legalTextsWithStatus,
   linkFor,
   openLegalBodyStores,
   sessionOf,
@@ -59,17 +61,8 @@ import {
 } from "../helpers/legalBodyFixtures";
 import { startMcpTestClient } from "../mcp/helpers";
 
-vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
-  return {
-    ...actual,
-    LEGAL_BODY_OPERATING_AGREEMENT: {
-      ...actual.LEGAL_BODY_OPERATING_AGREEMENT,
-      status: "approved",
-    },
-  };
-});
+/** The pair the doors serve: the October one, its agreement approved. */
+const APPROVED = legalTextsWithStatus({ agreement: "approved" });
 
 /** anvil's published account #2: a test key, never a real wallet. A verified human. */
 const guardian = ANVIL_ACCOUNT_2;
@@ -95,7 +88,7 @@ afterEach(() => {
 });
 
 function deps(over: Partial<LegalBodyOrderDeps> = {}): LegalBodyOrderDeps {
-  return legalBodyOrderDeps(s, { chain: asChainPort(chain), ...over });
+  return legalBodyOrderDeps(s, { chain: asChainPort(chain), texts: APPROVED, ...over });
 }
 
 function rowOf(id: string): LegalBodyRecord {
@@ -211,7 +204,7 @@ describe("the link functions refuse an order whose agreement was not adopted", (
 
   test("the sentence tells an agent the guardian adopts the agreement in the web app first", () => {
     expect(LEGAL_BODY_SENTENCES[CODE]).toBe(
-      "The operating agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
+      "This order's agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
     );
   });
 });
@@ -230,6 +223,7 @@ describe("the adoption must name the order's own agreement", () => {
       signature: PLACEHOLDER_ADOPTION_SIGNATURE,
       digest: H("d"),
       adoptedAt: Math.floor(Date.now() / 1000),
+      statement: null,
     });
     expect(H("e")).not.toBe(row.oaManifestHash);
     const before = snapshot();
@@ -262,7 +256,7 @@ describe("agreement_not_adopted comes after every other check of rule 1", () => 
         factory: FACTORY,
         identityRegistry: REGISTRY,
       },
-      { ...LEGAL_BODY_OPERATING_AGREEMENT, version: "2026-09-draft-0" },
+      { ...LEGAL_BODY_OPERATING_AGREEMENT, status: "approved", version: "2026-09-draft-0" },
       { source: "customer" },
     );
     storeAgreement(s.docStore, created.legalBodyId, built);
@@ -312,7 +306,11 @@ function appOver(
       checks: stores.checks,
       hasLinkedLegalBody: (companyId) => stores.repo.hasLinkedForCompany(companyId),
     },
-    legalBodyOrders: legalBodyOrderDeps(stores, { chain: asChainPort(chain), ...over }),
+    legalBodyOrders: legalBodyOrderDeps(stores, {
+      chain: asChainPort(chain),
+      texts: APPROVED,
+      ...over,
+    }),
     apiKeys: new SqliteApiKeyStore(database),
     passkeys: new SqlitePasskeyStore(database),
     jobs: new SqliteJobRepository(database),
@@ -396,7 +394,7 @@ describe("the doors and the tools answer the same code and sentence", () => {
       for (const name of ["get_link_message", "submit_link"]) {
         const description = tools.find((t) => t.name === name)?.description ?? "";
         expect(description, name).toContain(
-          "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
+          "Before the link, the order's guardian adopts its agreement in the web app: until then this answers agreement_not_adopted.",
         );
       }
     } finally {

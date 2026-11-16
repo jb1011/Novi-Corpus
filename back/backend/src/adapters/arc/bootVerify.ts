@@ -7,11 +7,14 @@ import {
   ContractFunctionZeroDataError,
   type Hex,
   type PublicClient,
+  concatHex,
   getAbiItem,
+  getContractAddress,
   isAddressEqual,
   pad,
   toFunctionSelector,
   zeroAddress,
+  zeroHash,
 } from "viem";
 import {
   agentTreasuryAbi,
@@ -21,6 +24,7 @@ import {
   legalManagerFactoryAbi,
   noviControllerAbi,
 } from "../../abis/generated";
+import type { LegalBodyContractFacts } from "../../legalBody/texts/sets";
 
 /**
  * Boot-time verification that the CHAIN agrees with the env (NoviController design §5/§7).
@@ -431,6 +435,142 @@ export async function assertLegalBodyFactoryWiring(
     throw new Error(
       `boot: executor ${p.executor} (the address of PLATFORM_PRIVATE_KEY) is missing ${missing.map((s) => `${s.name} (${s.selector})`).join(", ")} on CONTROLLER_ADDRESS ${p.controller} — grant it from the controller admin`,
     );
+}
+
+/** The creation code of a minimal proxy (EIP-1167), before and after the address of the code it
+ *  runs. */
+const MINIMAL_PROXY_CREATION_HEAD: Hex = "0x3d602d80600a3d3981f3363d3d373d3d3d363d73";
+const MINIMAL_PROXY_CREATION_TAIL: Hex = "0x5af43d82803e903d91602b57fd5bf3";
+
+/** The bounds of the amendment delay a factory takes, in seconds, as the version states them. */
+const STATED_MIN_AMENDMENT_DELAY = 172_800n;
+const STATED_MAX_AMENDMENT_DELAY = 2_592_000n;
+
+/** What `MAX_AMENDMENT_DELAY()` answers on legal-body code under which the wallet that started a
+ *  dissolution can cancel it. */
+const CANCELLABLE_DISSOLUTION_CODE_MAX_AMENDMENT_DELAY = 31_536_000n;
+
+/**
+ * Proves on chain what a pair's agreement says of the legal body's contract; else throws.
+ * Each fact is read from the contracts' own answers. So the proof tells a factory of another kind
+ * from this one, and it does not test a contract written to answer falsely: which contract stands
+ * at LEGAL_BODY_FACTORY_ADDRESS is the operator's to know.
+ *
+ * Run at start, after the factory's wiring, for a pair whose agreement states such facts. Each
+ * refusal names the version, the factory and the fact that does not hold. A read the contract
+ * refused, at any of the reads (no code at the address, or no such function), is a refusal with
+ * that read's message. Only a read the node could not answer is a fault: `unreadable`, a
+ * verification outage.
+ *
+ * Each named set of facts has its own proof, and a name with none does not compile.
+ * `fixed_copy_cancellable_dissolution`, in four reads and one local computation, in this order:
+ * 1. `implementation()` on the factory: the address of the code its legal bodies run.
+ * 2. `predictLegalBody` on the factory, with a salt of 32 zero bytes, against the address computed
+ *    here: the CREATE2 address of a minimal proxy (EIP-1167) to that code, created by the factory
+ *    with that salt. Equal, the factory says it creates each legal body as a fixed copy: its
+ *    bytecode holds the code's address, and no call can point it at other code.
+ * 3. `MIN_AMENDMENT_DELAY()` and `MAX_AMENDMENT_DELAY()` on the factory: the bounds of the
+ *    amendment delay a legal body is created with are the ones the version states.
+ * 4. `MAX_AMENDMENT_DELAY()` on the code: a constant the contract gained in the same change as the
+ *    rule that lets the wallet that started a dissolution cancel it. Code that does not answer it,
+ *    or answers another value, is refused as code without that rule.
+ */
+export async function assertLegalBodyContractFacts(
+  publicClient: PublicClient,
+  p: { factory: Address; facts: LegalBodyContractFacts; agreementVersion: string },
+): Promise<void> {
+  if (p.facts !== "fixed_copy_cancellable_dissolution") {
+    const unknown: never = p.facts;
+    throw new Error(`boot: no proof is written for the contract facts ${String(unknown)}`);
+  }
+  const notServable = (fact: string, cause?: unknown) =>
+    new Error(
+      `boot: LEGAL_BODY_AGREEMENT_VERSION ${p.agreementVersion} cannot be served: ${fact}`,
+      cause === undefined ? undefined : { cause },
+    );
+  const what = `the legal-body contract facts of agreement ${p.agreementVersion} (factory ${p.factory})`;
+
+  // 1. The code the factory's legal bodies run.
+  let code: Address;
+  try {
+    code = (await publicClient.readContract({
+      address: p.factory,
+      abi: legalBodyFactoryAbi,
+      functionName: "implementation",
+    })) as Address;
+  } catch (err) {
+    if (!contractRefusal(err)) throw unreadable(what, err);
+    throw notServable(
+      `LEGAL_BODY_FACTORY_ADDRESS ${p.factory} does not answer implementation(), the code its legal bodies run`,
+      err,
+    );
+  }
+
+  // 2. Each legal body is a fixed copy of that code.
+  const notFixedCopies = `LEGAL_BODY_FACTORY_ADDRESS ${p.factory} does not create each legal body as a fixed copy of the code at ${code}, and this version is written for legal bodies whose code is never replaced`;
+  let predicted: Address;
+  try {
+    predicted = (await publicClient.readContract({
+      address: p.factory,
+      abi: legalBodyFactoryAbi,
+      functionName: "predictLegalBody",
+      args: [zeroHash],
+    })) as Address;
+  } catch (err) {
+    if (!contractRefusal(err)) throw unreadable(what, err);
+    throw notServable(notFixedCopies, err);
+  }
+  const fixedCopy = getContractAddress({
+    opcode: "CREATE2",
+    from: p.factory,
+    salt: zeroHash,
+    bytecode: concatHex([MINIMAL_PROXY_CREATION_HEAD, code, MINIMAL_PROXY_CREATION_TAIL]),
+  });
+  if (!isAddressEqual(predicted, fixedCopy)) throw notServable(notFixedCopies);
+
+  // 3. The bounds of the amendment delay the factory takes.
+  let minDelay: bigint;
+  let maxDelay: bigint;
+  try {
+    [minDelay, maxDelay] = await Promise.all([
+      publicClient.readContract({
+        address: p.factory,
+        abi: legalBodyFactoryAbi,
+        functionName: "MIN_AMENDMENT_DELAY",
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: p.factory,
+        abi: legalBodyFactoryAbi,
+        functionName: "MAX_AMENDMENT_DELAY",
+      }) as Promise<bigint>,
+    ]);
+  } catch (err) {
+    if (!contractRefusal(err)) throw unreadable(what, err);
+    throw notServable(
+      `LEGAL_BODY_FACTORY_ADDRESS ${p.factory} does not answer the bounds of its amendment delay, and this version states ${STATED_MIN_AMENDMENT_DELAY} to ${STATED_MAX_AMENDMENT_DELAY}`,
+      err,
+    );
+  }
+  if (minDelay !== STATED_MIN_AMENDMENT_DELAY || maxDelay !== STATED_MAX_AMENDMENT_DELAY)
+    throw notServable(
+      `LEGAL_BODY_FACTORY_ADDRESS ${p.factory} takes an amendment delay from ${minDelay} to ${maxDelay} seconds, and this version states ${STATED_MIN_AMENDMENT_DELAY} to ${STATED_MAX_AMENDMENT_DELAY}`,
+    );
+
+  // 4. The code lets the wallet that started a dissolution cancel it.
+  const notCancellable = `the legal bodies of LEGAL_BODY_FACTORY_ADDRESS ${p.factory} run code under which the wallet that started a dissolution cannot cancel it, and this version says the Guardian Wallet can`;
+  let codeMaxDelay: bigint;
+  try {
+    codeMaxDelay = (await publicClient.readContract({
+      address: code,
+      abi: legalManagerAbi,
+      functionName: "MAX_AMENDMENT_DELAY",
+    })) as bigint;
+  } catch (err) {
+    if (!contractRefusal(err)) throw unreadable(what, err);
+    throw notServable(notCancellable, err);
+  }
+  if (codeMaxDelay !== CANCELLABLE_DISSOLUTION_CODE_MAX_AMENDMENT_DELAY)
+    throw notServable(notCancellable);
 }
 
 /**

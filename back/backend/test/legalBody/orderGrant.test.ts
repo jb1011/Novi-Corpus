@@ -2,7 +2,8 @@
  * An order on the Charter takes the guardian's grant: the grant is held to the form's rules and to
  * what the product offers, written into the Charter's Schedule A, and kept beside the order, all in
  * the order's one transaction. Where the agreement takes no grant, a grant is refused, and an order
- * without one is placed as before.
+ * without one is placed as before. On either pair, a company the guardian declared is ordered only
+ * when it was declared under the pair's declaration.
  *
  * The database is real (in memory). Every amount and date here is a made-up fixture; every name,
  * company and filing number is an invention, and every key is one of anvil's published test
@@ -12,7 +13,9 @@ import type Database from "better-sqlite3";
 import type { Address } from "viem";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { ApiError } from "../../src/errors";
+import { companyNameOptions } from "../../src/formation/intake";
 import { readVerifiedAgreement } from "../../src/legalBody/agreement";
+import { CUSTOMER_COMPANY_PLACEHOLDER } from "../../src/legalBody/customerCompany";
 import { buildGrant } from "../../src/legalBody/grant";
 import { GRANT_HEAVY_MODES_OFFERED, grantOfferProblems } from "../../src/legalBody/orderGrant";
 import {
@@ -20,14 +23,18 @@ import {
   type LegalBodyOrderView,
   createOrder,
 } from "../../src/legalBody/orders";
+import { CUSTOMER_PROVIDER } from "../../src/legalBody/provider";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import type { FieldProblem } from "../../src/legalBody/textRules";
 import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
 import { migrate, openDatabase } from "../../src/persistence/db";
+import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
 import { ANVIL_ACCOUNT_2, recordHuman } from "../helpers/customerCompanyFixtures";
+import { seedCompany } from "../helpers/formationFakes";
 import { A, B } from "../helpers/grantFixtures";
 import {
   type LegalBodyStores,
+  appendCheck,
   customerCompany,
   legalBodyOrderDeps,
   openLegalBodyStores,
@@ -99,6 +106,8 @@ const notValid = (details: FieldProblem[]) => ({
 
 /** The grant rows the database holds, for every order. */
 const grantRows = () => db.prepare("SELECT COUNT(*) AS n FROM charter_grants").get();
+/** The order rows the database holds, for every tenant. */
+const orderRows = () => db.prepare("SELECT COUNT(*) AS n FROM legal_bodies").get();
 
 /** The order's stored agreement, re-verified. */
 function storedTermsOf(view: LegalBodyOrderView) {
@@ -111,14 +120,14 @@ function storedTermsOf(view: LegalBodyOrderView) {
 describe("an order on the Charter", () => {
   test("an order on the Charter freezes a Charter that states its grant, and keeps the grant", () => {
     const view = createOrder(charterDeps(), guardian, {
-      companyId: company(),
+      companyId: company({ wordingVersion: "2026-11-draft-2" }),
       grant: structuredClone(A),
     });
     expect(view.state).toBe("draft");
     expect(view.agreement).not.toBeNull();
 
     const stored = storedTermsOf(view);
-    expect(stored.terms.textVersion).toBe("2026-11-draft-4");
+    expect(stored.terms.textVersion).toBe("2026-11-draft-5");
     expect(stored.termsDoc).toContain(
       `## Schedule A. Grants in force\n\n${grantA.scheduleA}\n\n## Schedule B.`,
     );
@@ -140,7 +149,11 @@ describe("an order on the Charter", () => {
   });
 
   test("an order on the Charter with no grant is refused, and nothing is written", () => {
-    const err = refusedWith(() => createOrder(charterDeps(), guardian, { companyId: company() }));
+    const err = refusedWith(() =>
+      createOrder(charterDeps(), guardian, {
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
+      }),
+    );
     expect(answerOf(err)).toEqual(notValid([{ field: "grant", problem: "must be an object" }]));
     expect(s.repo.listByTenant(guardian)).toEqual([]);
     expect(grantRows()).toEqual({ n: 0 });
@@ -151,7 +164,10 @@ describe("an order on the Charter", () => {
     // On a fixed day, so the end day of fixture B stays after today.
     const deps = charterDeps({ now: () => NOON_14_NOVEMBER });
     const err = refusedWith(() =>
-      createOrder(deps, guardian, { companyId: company(), grant: structuredClone(none) }),
+      createOrder(deps, guardian, {
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
+        grant: structuredClone(none),
+      }),
     );
     expect(answerOf(err)).toEqual(
       notValid([{ field: "grant", problem: "must allow at least one act" }]),
@@ -165,7 +181,10 @@ describe("an order on the Charter", () => {
       const choices = structuredClone(A);
       choices.heavyActs[act] = { mode: "alone", perAct: 100 };
       const err = refusedWith(() =>
-        createOrder(charterDeps(), guardian, { companyId: company(), grant: choices }),
+        createOrder(charterDeps(), guardian, {
+          companyId: company({ wordingVersion: "2026-11-draft-2" }),
+          grant: choices,
+        }),
       );
       expect(answerOf(err)).toEqual(
         notValid([
@@ -180,7 +199,10 @@ describe("an order on the Charter", () => {
     (act) => {
       const choices = structuredClone(A);
       choices.heavyActs[act] = { mode: "alone", perAct: 100 };
-      const view = createOrder(charterDeps(), guardian, { companyId: company(), grant: choices });
+      const view = createOrder(charterDeps(), guardian, {
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
+        grant: choices,
+      });
       expect(view.state).toBe("draft");
       expect(s.grants.list(view.id)).toHaveLength(1);
     },
@@ -193,7 +215,10 @@ describe("an order on the Charter", () => {
       heavyActs: { ...structuredClone(A.heavyActs), employ: { mode: "alone", perAct: 100 } },
     };
     const err = refusedWith(() =>
-      createOrder(charterDeps(), guardian, { companyId: company(), grant: raw }),
+      createOrder(charterDeps(), guardian, {
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
+        grant: raw,
+      }),
     );
     expect(answerOf(err)).toEqual(
       notValid([
@@ -210,7 +235,10 @@ describe("an order on the Charter", () => {
     choices.heavyActs.transferProperty = { mode: "alone", perAct: 100 };
     choices.heavyActs.employ = { mode: "alone", perAct: 100 };
     const err = refusedWith(() =>
-      createOrder(charterDeps(), guardian, { companyId: company(), grant: choices }),
+      createOrder(charterDeps(), guardian, {
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
+        grant: choices,
+      }),
     );
     expect(answerOf(err)).toEqual(
       notValid([
@@ -227,7 +255,7 @@ describe("an order on the Charter", () => {
     const deps = charterDeps({ now: () => NOON_14_NOVEMBER });
     const err = refusedWith(() =>
       createOrder(deps, guardian, {
-        companyId: company(),
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
         grant: { ...structuredClone(A), endsOn: "2026-11-14" },
       }),
     );
@@ -236,7 +264,7 @@ describe("an order on the Charter", () => {
     );
 
     const view = createOrder(deps, guardian, {
-      companyId: company(),
+      companyId: company({ wordingVersion: "2026-11-draft-2" }),
       grant: { ...structuredClone(A), endsOn: "2026-11-15" },
     });
     expect(view.state).toBe("draft");
@@ -247,7 +275,10 @@ describe("an order on the Charter", () => {
     const raw: Record<string, unknown> = structuredClone(A);
     for (let i = 0; i < 50; i++) raw[`unknown${i}`] = i;
     const err = refusedWith(() =>
-      createOrder(charterDeps(), guardian, { companyId: company(), grant: raw }),
+      createOrder(charterDeps(), guardian, {
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
+        grant: raw,
+      }),
     );
     expect(err.code).toBe("grant_not_valid");
     expect(err.details).toHaveLength(21);
@@ -292,7 +323,7 @@ describe("when the grant is read", () => {
   test("a refusal inside the transaction leaves no grant", () => {
     const err = refusedWith(() =>
       createOrder(charterDeps({ maxOpenPerTenant: 0 }), guardian, {
-        companyId: company(),
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
         grant: structuredClone(A),
       }),
     );
@@ -314,10 +345,136 @@ describe("when the grant is read", () => {
       },
     });
     expect(() =>
-      createOrder(deps, guardian, { companyId: company(), grant: structuredClone(A) }),
+      createOrder(deps, guardian, {
+        companyId: company({ wordingVersion: "2026-11-draft-2" }),
+        grant: structuredClone(A),
+      }),
     ).toThrow(failing);
     expect(s.repo.listByTenant(guardian)).toEqual([]);
     expect(grantRows()).toEqual({ n: 0 });
+  });
+});
+
+describe("the declaration of a declared company", () => {
+  /** The refusal of a company declared under another wording than the pair's declaration. */
+  const outdated = {
+    code: "declaration_outdated",
+    status: 409,
+    message: LEGAL_BODY_SENTENCES.declaration_outdated,
+    details: undefined,
+  };
+
+  test("a company declared under the pair's declaration is ordered on the Charter", () => {
+    const view = createOrder(charterDeps(), guardian, {
+      companyId: company({ wordingVersion: "2026-11-draft-2" }),
+      grant: structuredClone(A),
+    });
+    expect(view.state).toBe("draft");
+    expect(storedTermsOf(view).terms.textVersion).toBe("2026-11-draft-5");
+    expect(s.grants.list(view.id)).toHaveLength(1);
+  });
+
+  test("a company declared under another wording is refused, and nothing is written", () => {
+    const err = refusedWith(() =>
+      createOrder(charterDeps(), guardian, { companyId: company(), grant: structuredClone(A) }),
+    );
+    expect(answerOf(err)).toEqual(outdated);
+    expect(orderRows()).toEqual({ n: 0 });
+    expect(grantRows()).toEqual({ n: 0 });
+    expect(s.docStore.files.size).toBe(0);
+  });
+
+  test("the declaration is read before the grant", () => {
+    const err = refusedWith(() =>
+      createOrder(charterDeps(), guardian, { companyId: company(), grant: "x" }),
+    );
+    expect(answerOf(err)).toEqual(outdated);
+
+    // The same grant, for a company declared under the pair's declaration, is the grant's refusal.
+    const declared = company({ wordingVersion: "2026-11-draft-2" });
+    expect(
+      refusedWith(() => createOrder(charterDeps(), guardian, { companyId: declared, grant: "x" })),
+    ).toMatchObject({ code: "grant_not_valid", status: 400 });
+  });
+
+  test("eligibility is read before the declaration", () => {
+    const err = refusedWith(() =>
+      createOrder(charterDeps(), guardian, {
+        companyId: company({ checks: ["failed"] }),
+        grant: structuredClone(A),
+      }),
+    );
+    expect(err).toMatchObject({ code: "company_not_eligible", status: 409 });
+  });
+
+  test("a customer's company with no declaration is not eligible, on either pair", () => {
+    const companyId = s.companies.create({
+      tenantId: guardian,
+      status: "ready",
+      provider: CUSTOMER_PROVIDER,
+      environment: "sandbox",
+      synthetic: true,
+      nameOptions: [{ name: "Example Holdings LLC", entityTypeEnding: "", position: 1 }],
+      businessPurpose: CUSTOMER_COMPANY_PLACEHOLDER,
+      industryLabel: CUSTOMER_COMPANY_PLACEHOLDER,
+      intakeSynthesized: false,
+      purposeKind: "legal_body",
+    });
+    appendCheck(s.checks, companyId, "passed");
+    expect(s.declarations.find(companyId)).toBeUndefined();
+
+    const onOctober = refusedWith(() =>
+      createOrder(legalBodyOrderDeps(s), guardian, { companyId }),
+    );
+    const onCharter = refusedWith(() =>
+      createOrder(charterDeps(), guardian, { companyId, grant: structuredClone(A) }),
+    );
+    for (const err of [onOctober, onCharter])
+      expect(err).toMatchObject({ code: "company_not_eligible", status: 409 });
+    expect(orderRows()).toEqual({ n: 0 });
+  });
+
+  test("the rule is the same on the October pair", () => {
+    const deps = legalBodyOrderDeps(s);
+    const err = refusedWith(() =>
+      createOrder(deps, guardian, { companyId: company({ wordingVersion: "2026-11-draft-2" }) }),
+    );
+    expect(answerOf(err)).toEqual(outdated);
+    expect(orderRows()).toEqual({ n: 0 });
+
+    const view = createOrder(deps, guardian, { companyId: company() });
+    expect(view.state).toBe("draft");
+    expect(storedTermsOf(view).terms.textVersion).toBe("2026-10-draft-1");
+  });
+
+  test("a company filed through formation has no declaration to compare", () => {
+    // Formed for the guardian, its formation steps opened, the provider's step confirmed and the
+    // filing confirmed with the facts the processor writes then.
+    const requests = new SqliteFormationRepository(db);
+    const companyId = seedCompany(s.companies, {
+      companyId: "formed-1",
+      tenantId: guardian,
+      purposeKind: "legal_body",
+      nameOptions: companyNameOptions("Lantern Works LLC"),
+      businessPurpose: "Software services.",
+    });
+    expect(requests.claimAllSteps(companyId)).toBe(true);
+    expect(
+      requests.transition(companyId, "create_provider", "pending", "confirmed", {
+        providerRef: `ref-${companyId}`,
+      }),
+    ).toBe(true);
+    expect(requests.transition(companyId, "await_filing", "pending", "confirmed")).toBe(true);
+    s.companies.recordFilingFacts(companyId, {
+      filedAt: 1_793_664_000,
+      filingNumber: "2026-000451207",
+      legalNameFiled: "Lantern Works LLC",
+    });
+    expect(s.declarations.find(companyId)).toBeUndefined();
+
+    const view = createOrder(legalBodyOrderDeps(s), guardian, { companyId });
+    expect(view.state).toBe("draft");
+    expect(view.companyName).toBe("Lantern Works LLC");
   });
 });
 

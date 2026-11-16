@@ -13,7 +13,7 @@
 import type Database from "better-sqlite3";
 import { privateKeyToAccount } from "viem/accounts";
 import { createSiweMessage } from "viem/siwe";
-import { afterEach, beforeEach, expect, test, vi } from "vitest";
+import { afterEach, beforeEach, expect, test } from "vitest";
 import { buildApiApp } from "../../src/api/app";
 import { ApiError } from "../../src/api/errors";
 import type { WorldIdDeps } from "../../src/api/routes/worldId";
@@ -23,7 +23,7 @@ import { PURPOSE_MAX_LENGTH } from "../../src/formation/intake";
 import type { IdentityDeps } from "../../src/identity/state";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
-import type { LegalTextStatus } from "../../src/legalBody/texts/index";
+import { type LegalTextSet, octoberLegalTexts } from "../../src/legalBody/texts/sets";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
@@ -42,25 +42,7 @@ import {
   worldFor,
 } from "../helpers/customerCompanyFixtures";
 import { TEST_FUND_CAPS } from "../helpers/fundCaps";
-
-/**
- * The operating agreement is a draft today, and production refuses a draft before the formed
- * door's last gate: a test that reaches that gate reads it as `texts.agreement` says. Unset, the
- * real text.
- */
-const texts = vi.hoisted(() => ({ agreement: undefined as LegalTextStatus | undefined }));
-
-vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
-  return {
-    ...actual,
-    get LEGAL_BODY_OPERATING_AGREEMENT() {
-      const text = actual.LEGAL_BODY_OPERATING_AGREEMENT;
-      return texts.agreement === undefined ? text : { ...text, status: texts.agreement };
-    },
-  };
-});
+import { legalTextsWithStatus } from "../helpers/legalBodyFixtures";
 
 const account = privateKeyToAccount(
   "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
@@ -118,7 +100,6 @@ beforeEach(() => {
   parties = new SqliteFormationPartyRepository(db);
 });
 afterEach(() => {
-  texts.agreement = undefined;
   db.close();
 });
 
@@ -139,6 +120,8 @@ function makeApp(
     world?: WorldIdDeps;
     /** The guardian identity record, which the formed door reads on production. */
     identity?: IdentityDeps;
+    /** The pair of texts the formed door's draft gate reads. */
+    legalTexts?: LegalTextSet;
   },
   custody: { circle?: boolean } = {},
 ) {
@@ -157,6 +140,7 @@ function makeApp(
     dailyCeiling: 10,
     world: formation?.world,
     identity: formation?.identity,
+    legalTexts: formation?.legalTexts,
   };
   const runner = new OnboardingRunner({
     repo,
@@ -614,7 +598,7 @@ test("POST /companies mints a company through the ONE domain function, and lists
 });
 
 test("POST /companies with `for: legal_body` mints a legal-body company; without it, one for agents", async () => {
-  const app = makeApp({ required: true, world: realHuman() });
+  const app = makeApp({ required: true, world: realHuman(), legalTexts: octoberLegalTexts() });
   const token = await login(app);
   const companies = new SqliteCompanyRepository(db);
   const create = async (extra: Record<string, unknown>) => {
@@ -650,8 +634,7 @@ test("POST /companies with `for: legal_body` mints a legal-body company; without
 
 test("PRODUCTION: POST /companies with `for: legal_body` is refused, 403 formed_door_not_offered, and nothing is written", async () => {
   // Every earlier gate of the formed door met, so the refusal is its last: a real human, the
-  // guardian identity record, and the operating agreement read as approved.
-  texts.agreement = "approved";
+  // guardian identity record, and the agreement of the door's pair read as approved.
   const identityRepo = new SqliteIdentityRepository(db);
   recordIdentity(identityRepo, account.address, {
     at: Date.now() - 24 * 60 * 60 * 1000,
@@ -663,6 +646,7 @@ test("PRODUCTION: POST /companies with `for: legal_body` is refused, 403 formed_
     environment: "production",
     world: realHuman(),
     identity: identityOver(identityRepo, Date.now),
+    legalTexts: legalTextsWithStatus({ agreement: "approved" }),
   });
   const token = await login(app);
   const companies = new SqliteCompanyRepository(db);

@@ -4,7 +4,7 @@ import type { Hex } from "viem";
 import { ZodError } from "zod";
 import type { AuthVars } from "../../auth/middleware";
 import { adoptAgreement, adoptionMessage } from "../../legalBody/adoption";
-import { readVerifiedAgreement } from "../../legalBody/agreement";
+import { agreementNotice, readVerifiedAgreement } from "../../legalBody/agreement";
 import { type BindingView, checkBinding, readBinding } from "../../legalBody/binding";
 import { type GasSeedDeps, requestGasSeed } from "../../legalBody/gasSeed";
 import { grantForm, orderGrant, previewGrant } from "../../legalBody/grantDoors";
@@ -23,6 +23,7 @@ import {
 import { resolveOrder } from "../../legalBody/resolver";
 import { refusal, refusedLinkSentence } from "../../legalBody/sentences";
 import type { LegalTextStatus } from "../../legalBody/texts/index";
+import { adoptionStatementOfVersion } from "../../legalBody/texts/sets";
 import {
   type LegalBodyTreasuryDeps,
   type TreasuryInput,
@@ -106,8 +107,9 @@ import { assertRealHuman } from "./worldId";
 /** The largest body a JSON door reads, in bytes. An order is a few dozen. */
 export const LEGAL_BODY_DOOR_MAX_BODY_BYTES = 8 * 1024;
 
-/** The agreement door's answer: the stored terms and manifest, the hash the link signs, and the
- *  id, version and status of the terms' wording. */
+/** The agreement door's answer: the stored terms and manifest, the hash the link signs, the id,
+ *  version and status of the terms' wording, and the notice they state and the words of their
+ *  adoption. */
 export interface LegalBodyAgreementAnswer {
   termsDoc: string;
   manifest: string;
@@ -115,6 +117,10 @@ export interface LegalBodyAgreementAnswer {
   textId: string;
   textVersion: string;
   textStatus: LegalTextStatus;
+  /** The notice the stored terms state before their first section, word for word, or null. */
+  notice: string | null;
+  /** The words the adoption of this agreement is signed with, or null: adopted by its fields alone. */
+  adoptionStatement: string | null;
 }
 
 /** The most keys one of the doors' bucket maps holds before it forgets the least recently used. */
@@ -263,6 +269,10 @@ export function mountLegalBodyOrderRoutes(
         textId: verified.terms.textId,
         textVersion: verified.terms.textVersion,
         textStatus: verified.terms.textStatus,
+        // Read from the stored terms and their version, so both belong to the text the order was
+        // frozen with, whatever this deployment serves now.
+        notice: agreementNotice(verified.termsDoc),
+        adoptionStatement: adoptionStatementOfVersion(verified.terms.textVersion),
       };
       return c.json(answer);
     }),

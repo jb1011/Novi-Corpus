@@ -69,7 +69,7 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../../src/legalBody/sweeper";
-import { servedLegalTexts } from "../../src/legalBody/texts/sets";
+import { octoberLegalTexts } from "../../src/legalBody/texts/sets";
 import { createLegalBodyResolver } from "../../src/payments/legalBody";
 import { SqliteCharterGrantRepository } from "../../src/persistence/charterGrantRepository";
 import { SqliteCompanyCheckRepository } from "../../src/persistence/companyCheckRepository";
@@ -309,7 +309,7 @@ function deploy(opts: DeployOptions = {}): Deployment {
     docStore,
     deployment,
     identityRegistry: stack.registry,
-    texts: servedLegalTexts(),
+    texts: octoberLegalTexts(),
     // The agreement's wording is a draft, which only a sandbox serves.
     environment: "sandbox",
     ...LEGAL_BODY_FLOW_DEFAULTS,

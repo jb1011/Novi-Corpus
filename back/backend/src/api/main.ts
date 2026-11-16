@@ -9,6 +9,7 @@ import {
   LEGAL_BODY_GRANTED_SELECTORS,
   assertControllerWiring,
   assertLegacyFactoryOwner,
+  assertLegalBodyContractFacts,
   assertLegalBodyFactoryWiring,
   assertNoFullProductGrants,
 } from "../adapters/arc/bootVerify";
@@ -69,7 +70,14 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../legalBody/sweeper";
-import { assertSetUsable, servedLegalTexts } from "../legalBody/texts/sets";
+import {
+  PRODUCTION_NEEDS_BUILT,
+  adoptionRuleOfVersion,
+  assertContractFactsProvable,
+  assertProductionNeedsBuilt,
+  assertSetUsable,
+  legalTextsOf,
+} from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { opsLog } from "../observability/opsLog";
 import { AGENT_BOOK_CAIP2, createAgentBookReader } from "../payments/agentBookReader";
@@ -143,6 +151,21 @@ import { installShutdownHandlers, shouldInstallSignalHandlers } from "./shutdown
 
 async function main() {
   const cfg = loadConfig();
+  /**
+   * The pair of legal texts this deployment serves, chosen once here by the setting
+   * LEGAL_BODY_AGREEMENT_VERSION: the order doors and the formed door read its agreement, the
+   * customer company doors its declaration, and the config answer the status of both. A name that
+   * is not a selectable version, a pair no order can be placed on, a pair a production deployment
+   * cannot serve yet, or a pair whose contract facts have no legal-body factory to be proved
+   * against stops the boot before the database is opened.
+   */
+  const legalTexts = legalTextsOf(cfg.legalBodyAgreementVersion);
+  assertSetUsable(legalTexts);
+  assertProductionNeedsBuilt(legalTexts, legalBodyEnvironment(cfg), PRODUCTION_NEEDS_BUILT);
+  assertContractFactsProvable(legalTexts, cfg.legalBodyFactory);
+  console.log(
+    `[boot] legal texts: agreement ${legalTexts.agreement.text.version} (${legalTexts.agreement.text.status}), declaration ${legalTexts.declaration.version} (${legalTexts.declaration.status})`,
+  );
   // A full-product factory, a legal-body factory, or both. With only the legal-body factory this is
   // a Minimal-only deployment: the full product is off and the adapter refuses to create entities.
   if (!cfg.factoryAddress && !cfg.legalBodyFactory)
@@ -260,6 +283,16 @@ async function main() {
     console.log(
       `[boot] legal-body factory wiring verified on-chain: owner, registry, typed-data domain on chain ${cfg.chainId}, ${LEGAL_BODY_GRANTED_SELECTORS.length} pinned executor grants`,
     );
+    if (legalTexts.contractFacts !== null) {
+      await assertLegalBodyContractFacts(publicClient, {
+        factory: cfg.legalBodyFactory,
+        facts: legalTexts.contractFacts,
+        agreementVersion: legalTexts.agreement.text.version,
+      });
+      console.log(
+        `[boot] legal-body contract facts verified on-chain for agreement ${legalTexts.agreement.text.version}: fixed copies of one code, amendment delay bounds, a dissolution its starter can cancel`,
+      );
+    }
   }
 
   const arc = new ArcAdapter({
@@ -619,6 +652,8 @@ async function main() {
         // (`formedDoorEnvironment`). No `invites` until PR 2b: a production formed door refuses.
         identity,
         legalBodyEnvironment: legalBodyEnvironment(cfg),
+        // The formed door's draft gate reads the agreement of the pair the order doors serve.
+        legalTexts,
         // With payment on, `createCompany` lands the company `draft` and writes its quote in the
         // same transaction. Absent = the beta shape, where every company lands `ready`.
         payment: formationPayment,
@@ -664,13 +699,6 @@ async function main() {
           multicall3: MULTICALL3_BY_CHAIN[cfg.chainId],
         })
       : undefined;
-  /**
-   * The pair of legal texts this deployment serves, chosen once here: the order doors read its
-   * agreement and the customer company doors its declaration. A pair no order can be placed on
-   * stops the boot.
-   */
-  const legalTexts = servedLegalTexts();
-  assertSetUsable(legalTexts);
   const legalBodyOrders =
     legalBodies && cfg.legalBodyFactory && legalBodyChain
       ? {
@@ -748,6 +776,13 @@ async function main() {
     ? { repo: new SqliteLegalBodyTreasuryRepository(db), registry: arc }
     : undefined;
 
+  // Whether a company stands behind an open legal body created on this chain by `factory`, and by
+  // no other: read for a sandbox company's abandon only. A missing store keeps every company, as
+  // `hasOpenLegalBody` below does.
+  const hasOpenLegalBodyOn = (factory: Address) => (companyId: string) =>
+    legalBodies === undefined ||
+    legalBodies.hasOpenForCompanyOn({ chainId: cfg.chainId, factory }, companyId, Date.now());
+
   /**
    * The CUSTOMER COMPANY doors' dependencies (declare an existing Wyoming LLC, abandon it, upload
    * its evidence), built ONCE and only where `customerDoorsEnabled`: the legal-body factory is set
@@ -776,6 +811,9 @@ async function main() {
           // one and write the declarant's name from it; a sandbox never reads it.
           identity,
           text: legalTexts.declaration,
+          // What the adoption of the agreement served asks of the company, said with the statement
+          // to sign: null where its adoption asks nothing in words.
+          adoptionRule: adoptionRuleOfVersion(legalTexts.agreement.text.version),
           maxOpenPerTenant: cfg.formation?.byoMaxOpenPerTenant ?? DEFAULT_BYO_MAX_OPEN_PER_TENANT,
           // The switch of the payment config built above: charging, a new company lands `draft`.
           paymentRequired: formationPayment.required,
@@ -784,6 +822,8 @@ async function main() {
           // would read as standing behind one, which only keeps it from being abandoned.
           hasOpenLegalBody: (companyId: string) =>
             legalBodies === undefined || legalBodies.hasOpenForCompany(companyId, Date.now()),
+          // The same, counting only the open legal bodies the factory above created.
+          hasOpenLegalBodyHere: hasOpenLegalBodyOn(cfg.legalBodyFactory),
           transaction: <T>(fn: () => T) => repo.transaction(fn),
           // The evidence uploads, through the index and the file store the document routes read.
           documents: formationDocuments,

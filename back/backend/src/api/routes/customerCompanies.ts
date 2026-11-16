@@ -64,6 +64,8 @@ export interface StatementMessageAnswer {
   typedData: StatementTypedDataWire;
   wordingVersion: string;
   textStatus: LegalTextStatus;
+  /** What the adoption of the agreement this deployment serves asks of the company, or null. */
+  adoptionRule: string | null;
 }
 
 const EVIDENCE_KINDS: readonly EvidenceKind[] = ["existence", "control"];
@@ -214,6 +216,8 @@ export function mountCustomerCompanyRoutes(
       typedData: statementTypedDataWire(cc.chainId, cc.factory, message),
       wordingVersion: message.wordingVersion,
       textStatus: cc.text.status,
+      // Said beside the statement, never part of it: what is signed is the typed data above.
+      adoptionRule: cc.adoptionRule ?? null,
     };
     return c.json(answer);
   });

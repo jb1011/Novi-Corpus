@@ -1425,6 +1425,11 @@ const STATEMENT_LOG_DDL = `
   END;
 `;
 
+/** The column of an adoption's words: the table's DDL and the step that adds it to a table made
+ *  before it (`addAdoptionStatementColumn`) both use this one definition. */
+const AGREEMENT_ADOPTION_STATEMENT_COLUMN =
+  "statement TEXT CHECK (statement IS NULL OR (typeof(statement) = 'text' AND length(statement) BETWEEN 1 AND 2000))";
+
 /**
  * THE ADOPTIONS OF AN ORDER'S OPERATING AGREEMENT (see `legalBodyAdoptionRepository.ts`): one row
  * per order, written when its guardian signs the adoption of the agreement frozen for it, and
@@ -1444,7 +1449,8 @@ const STATEMENT_LOG_DDL = `
  *
  * The shapes are those of the legal-body tables: hashes `0x` and 64 LOWER-CASE hex digits, the
  * guardian an address, the times unix SECONDS, and the signature 65 bytes of lower-case hex (r, s
- * and v: the only form the adoption accepts).
+ * and v: the only form the adoption accepts). `statement` holds the words, when the adoption was
+ * signed in the form that carries them, and is null otherwise.
  */
 const AGREEMENT_ADOPTIONS_DDL = `
   CREATE TABLE IF NOT EXISTS agreement_adoptions (
@@ -1460,6 +1466,7 @@ const AGREEMENT_ADOPTIONS_DDL = `
     digest        TEXT NOT NULL CHECK (${sqlIsHash("digest")}),
     adopted_at    INTEGER NOT NULL CHECK (${sqlIsSeconds("adopted_at")}),
     created_at    TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ${AGREEMENT_ADOPTION_STATEMENT_COLUMN},
     CHECK (rowid > 0)
   );
 
@@ -1481,6 +1488,26 @@ const AGREEMENT_ADOPTIONS_DDL = `
     SELECT RAISE(ABORT, 'agreement_adoptions rows are written once');
   END;
 `;
+
+/**
+ * Adds the column of an adoption's words to an `agreement_adoptions` made before it, once. As the
+ * funnel's tables are made in `migrate`: a look first, which takes no write lock, so a start that
+ * finds the column in place never waits for another process's write; and when it is missing, an
+ * IMMEDIATE transaction that looks again under the write lock. Two processes may migrate on the
+ * same first start: the second waits for the first's commit, then finds the column and adds
+ * nothing. The rows already stored read back with no words.
+ */
+export function addAdoptionStatementColumn(db: Database.Database): void {
+  const hasStatement = () =>
+    (db.prepare("PRAGMA table_info(agreement_adoptions)").all() as { name: string }[]).some(
+      (c) => c.name === "statement",
+    );
+  if (hasStatement()) return;
+  db.transaction(() => {
+    if (hasStatement()) return;
+    db.exec(`ALTER TABLE agreement_adoptions ADD COLUMN ${AGREEMENT_ADOPTION_STATEMENT_COLUMN}`);
+  }).immediate();
+}
 
 /**
  * THE GRANTS OF AN ORDER (see `charterGrantRepository.ts`): one row per grant version of an order,
@@ -2495,6 +2522,7 @@ export function migrate(db: Database.Database): void {
   db.exec(STATEMENT_LOG_DDL);
   // The agreement adoptions reference `legal_bodies` too, and stand outside that step alike.
   db.exec(AGREEMENT_ADOPTIONS_DDL);
+  addAdoptionStatementColumn(db);
   // The grants of an order reference `legal_bodies` as well, and stand outside that step alike.
   db.exec(CHARTER_GRANTS_DDL);
   // The funnel's tables: the statement reads reference `legal_bodies` as well. The sign-ins are

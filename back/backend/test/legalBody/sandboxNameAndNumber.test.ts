@@ -416,6 +416,53 @@ describe("on a sandbox, a test number is declared once", () => {
     expect(s.checks.passedElsewhere(filingKeyOf(SANDBOX_TYPED.filingNumber), "")).toBe(next);
   });
 
+  test("a sandbox company whose open legal bodies another factory created is abandoned, and its number is declared again", async () => {
+    const holder = await declare(sandbox(), owner, SANDBOX_TYPED);
+    expect(() =>
+      abandonCustomerCompany(
+        sandbox({ hasOpenLegalBody: () => true, hasOpenLegalBodyHere: () => false }),
+        owner.address,
+        holder,
+      ),
+    ).not.toThrow();
+    expect(s.companies.find(holder)?.status).toBe("abandoned");
+
+    const { fields } = prepareCustomerStatement(sandbox(), second.address, SANDBOX_TYPED);
+    expect(fields.filingNumber).toBe(SANDBOX_TYPED.filingNumber);
+    await declare(sandbox(), second, SANDBOX_TYPED);
+  });
+
+  test("a sandbox company with an open legal body of this deployment's factory is kept", async () => {
+    const holder = await declare(sandbox(), owner, SANDBOX_TYPED);
+    // These doors do not charge: the company landed ready.
+    expect(s.companies.find(holder)?.status).toBe("ready");
+    const err = refusalOf(() =>
+      abandonCustomerCompany(
+        sandbox({ hasOpenLegalBody: () => true, hasOpenLegalBodyHere: () => true }),
+        owner.address,
+        holder,
+      ),
+    );
+    expect(shapeOf(err)).toEqual({
+      code: "conflict",
+      status: 409,
+      message: "this company stands behind an open legal body",
+    });
+    expect(s.companies.find(holder)?.status).toBe("ready");
+  });
+
+  test("without the second lookup, any open legal body keeps a sandbox company", async () => {
+    const holder = await declare(sandbox(), owner, SANDBOX_TYPED);
+    const err = refusalOf(() =>
+      abandonCustomerCompany(sandbox({ hasOpenLegalBody: () => true }), owner.address, holder),
+    );
+    expect(shapeOf(err)).toEqual({
+      code: "conflict",
+      status: 409,
+      message: "this company stands behind an open legal body",
+    });
+  });
+
   test("a holder whose latest check failed holds nothing: the number is served and declared again", async () => {
     const holder = await declare(sandbox(), owner, SANDBOX_TYPED);
     // After its automatic pass, an operator's failure: the latest check is the failed one.

@@ -22,7 +22,11 @@ import {
   linkMessage,
   submitLink,
 } from "../../src/legalBody/linkDoor";
-import { assertGrantOutlasts, readOrderGrant } from "../../src/legalBody/orderGrant";
+import {
+  assertGrantOutlasts,
+  assertLinkWithinGrant,
+  readOrderGrant,
+} from "../../src/legalBody/orderGrant";
 import { type LegalBodyOrderDeps, createOrder } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
@@ -116,13 +120,17 @@ function rowOf(id: string): LegalBodyRecord {
 }
 
 /** A checked company of the guardian, with a filing number no other company of the test holds. */
-const company = () =>
-  customerCompany(s, tenant, { filingNumber: `TEST-${String(++filings).padStart(4, "0")}` });
+const company = (opts: Parameters<typeof customerCompany>[2] = {}) =>
+  customerCompany(s, tenant, {
+    filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
+    ...opts,
+  });
 
 /** An order on the Charter with fixture `A` and that end, placed by the real clock. */
 function order(endsOn: string | null): LegalBodyRecord {
   const grant: GrantChoices = { ...structuredClone(A), endsOn };
-  return rowOf(createOrder(deps(), tenant, { companyId: company(), grant }).id);
+  const companyId = company({ wordingVersion: "2026-11-draft-2" });
+  return rowOf(createOrder(deps(), tenant, { companyId, grant }).id);
 }
 
 /** An order on the October pair, which takes no grant. */
@@ -183,7 +191,7 @@ describe("the adoption doors", () => {
     const row = order(tomorrow);
 
     const served = adoptionMessage(at(tomorrowStartsMs - 1000), tenant, row.legalBodyId);
-    expect(served.typedData.primaryType).toBe("OperatingAgreementAdoption");
+    expect(served.typedData.primaryType).toBe("LegalBodyCharterAdoption");
     expect(served.typedData.message.orderId).toBe(row.legalBodyId);
     expect(served.issuedAt).toBe(String(tomorrowStartsMs / 1000 - 1));
 
@@ -246,7 +254,7 @@ describe("the link doors", () => {
     const ended = adopted(tomorrow);
     await refusedAsync(
       () => linkMessage(deps(), tenant, ended.legalBodyId, { agentId: "42" }),
-      "grant_ends_too_soon",
+      "link_outlasts_grant",
       409,
     );
 
@@ -263,9 +271,18 @@ describe("the link doors", () => {
     for (const ttlSeconds of [57_600, 85_800])
       await refusedAsync(
         () => linkMessage(deps(), tenant, row.legalBodyId, { agentId: "42", ttlSeconds }),
-        "grant_ends_too_soon",
+        "link_outlasts_grant",
         409,
       );
+
+    // The remedy the sentence names: after the refusal, the same order serves an earlier
+    // deadline, and it is still a draft.
+    const earlier = await linkMessage(deps(), tenant, row.legalBodyId, {
+      agentId: "42",
+      ttlSeconds: 57_599,
+    });
+    expect(earlier.deadline).toBe(Number(dayAfterStarts) - 1);
+    expect(rowOf(row.legalBodyId).bindingState).toBe("draft");
   });
 
   test("a signed link whose deadline reaches the grant's last day is refused before the chain is read, and the draft is kept", async () => {
@@ -282,7 +299,7 @@ describe("the link doors", () => {
           late,
           afterReserve,
         ),
-      "grant_ends_too_soon",
+      "link_outlasts_grant",
       409,
     );
     expect(identityBucket).not.toHaveBeenCalled();
@@ -371,5 +388,10 @@ describe("the stored grant", () => {
       await refusedAsync(() => assertGrantOutlasts(ending, atSec), "grant_ends_too_soon", 409);
     for (const grant of [open, null])
       expect(() => assertGrantOutlasts(grant, 2n ** 256n - 1n)).not.toThrow();
+    expect(() => assertLinkWithinGrant(ending, dayAfterStarts - 1n)).not.toThrow();
+    for (const deadline of [dayAfterStarts, 2n ** 256n - 1n])
+      await refusedAsync(() => assertLinkWithinGrant(ending, deadline), "link_outlasts_grant", 409);
+    for (const grant of [open, null])
+      expect(() => assertLinkWithinGrant(grant, 2n ** 256n - 1n)).not.toThrow();
   });
 });

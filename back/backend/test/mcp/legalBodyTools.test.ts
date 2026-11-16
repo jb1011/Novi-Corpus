@@ -712,6 +712,9 @@ describe("what an answer may carry", () => {
     const description = byName.get("get_link_message")?.description ?? "";
     expect(description).toMatch(/ethers/);
     expect(description).toContain("types.EIP712Domain");
+    expect(description).toContain(
+      "answers link_outlasts_grant: ask again with a smaller ttlSeconds, or, when the shortest lifetime is still too long, have the guardian place a new order in the web app.",
+    );
     const inputs = (name: string) =>
       Object.keys(byName.get(name)?.inputSchema.properties ?? {}).sort();
     expect(inputs("get_link_message")).toEqual(["agentId", "orderId", "ttlSeconds"]);

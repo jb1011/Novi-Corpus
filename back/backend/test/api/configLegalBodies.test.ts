@@ -357,7 +357,12 @@ describe("each named answer carries exactly the keys of its type", () => {
     );
     expect(res.status).toBe(200);
     expect(Object.keys(res.body).sort()).toEqual(
-      keysOf<StatementMessageAnswer>({ typedData: true, wordingVersion: true, textStatus: true }),
+      keysOf<StatementMessageAnswer>({
+        typedData: true,
+        wordingVersion: true,
+        textStatus: true,
+        adoptionRule: true,
+      }),
     );
   });
 
@@ -382,6 +387,8 @@ describe("each named answer carries exactly the keys of its type", () => {
         textId: true,
         textVersion: true,
         textStatus: true,
+        notice: true,
+        adoptionStatement: true,
       }),
     );
   });

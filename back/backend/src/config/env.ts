@@ -632,6 +632,10 @@ const EnvSchema = z.object({
       })
       .default(LEGAL_BODY_FLOW_DEFAULTS.adoptionMaxAgeSeconds),
   ),
+  /** The pair of legal texts this deployment serves, named by its agreement's version. Unset or
+   *  blank, the October pair. Read here as given; resolved at start, where any other name refuses
+   *  boot. */
+  LEGAL_BODY_AGREEMENT_VERSION: z.preprocess(blankAsUnset, z.string().trim().optional()),
   /** Milliseconds between two ticks of the legal-body sweeper, which settles reserved orders and
    *  checks bindings: a positive whole number a timer can hold. */
   LEGAL_BODY_SWEEP_INTERVAL_MS: z.preprocess(
@@ -901,6 +905,8 @@ export interface Config {
    *  wei where it is used. Optional in the TYPE only, like `legalBodyFlow`: loadConfig always sets
    *  it, and a reader falls back to "0". */
   legalBodyGasSeedUsdc?: string;
+  /** LEGAL_BODY_AGREEMENT_VERSION, trimmed; absent when unset or blank. */
+  legalBodyAgreementVersion?: string;
   /**
    * The funnel (`funnel:export`, design 6.14). `excludeTenants`: the accounts it never counts,
    * checksummed (FUNNEL_EXCLUDE_TENANTS). `salt`: the salt of a statement read's caller hash, 64
@@ -1443,6 +1449,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     },
     legalBodySweepIntervalMs: e.LEGAL_BODY_SWEEP_INTERVAL_MS,
     legalBodyGasSeedUsdc: e.LEGAL_BODY_GAS_SEED_USDC,
+    legalBodyAgreementVersion: e.LEGAL_BODY_AGREEMENT_VERSION,
     funnel: {
       excludeTenants: parseFunnelTenants(e.FUNNEL_EXCLUDE_TENANTS),
       salt: parseFunnelSalt(e.FUNNEL_SALT),

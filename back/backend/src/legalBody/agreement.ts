@@ -96,6 +96,16 @@ export function buildAgreement<F extends AgreementFields>(
   };
 }
 
+/** The notice an agreement states before its first section: its first line that starts with
+ *  "Notice: ", among the lines before the first that starts with "## 1. "; null when there is none. */
+export function agreementNotice(termsDoc: string): string | null {
+  for (const line of termsDoc.split("\n")) {
+    if (line.startsWith("## 1. ")) return null;
+    if (line.startsWith("Notice: ")) return line;
+  }
+  return null;
+}
+
 /** The two file names of an order's agreement, version 1. */
 export function agreementDocNames(legalBodyId: string): { terms: string; manifest: string } {
   return {

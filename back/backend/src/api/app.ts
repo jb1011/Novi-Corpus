@@ -15,8 +15,7 @@ import { DEFAULT_LINK_TTL_SECONDS, MAX_SERVED_LINK_TTL_SECONDS } from "../legalB
 import { MIN_SERVED_LINK_TTL_SECONDS } from "../legalBody/linkDoor";
 import type { LegalBodyOrderDeps } from "../legalBody/orders";
 import type { LegalBodyStatementDeps } from "../legalBody/statements";
-import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
-import { STATEMENT_OF_AUTHORITY } from "../legalBody/texts/statementOfAuthority";
+import type { LegalTextSet } from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { mountMcpRoute } from "../mcp/transport";
 import type { CompanyCheckRepository } from "../persistence/companyCheckRepository";
@@ -452,15 +451,20 @@ type FormedDoorDeps = Pick<ApiDeps, "formation" | "identity" | "invites">;
  * and World ID are both configured: the door's first gate is a real human (`assertRealHuman`), so
  * on a box without World every create answers 503. It reads the World deps the create door is
  * given (`formation.companyDeps.world`), so the two cannot disagree. Under production it is offered
- * only when every gate holds: doola pinned to production, a deployment that charges, both legal
- * texts approved, the guardian identity record wired, invite codes required, and the formed
- * legal-body companies below the total cap (World is a boot invariant of production formation).
+ * only when every gate holds: doola pinned to production, a deployment that charges, both texts
+ * of the pair the order doors serve (`texts`) approved, the guardian identity record wired, invite
+ * codes required, and the formed legal-body companies below the total cap (World is a boot
+ * invariant of production formation).
  * It reads `cap_reached` when the cap is the only gate that fails, and `hidden` otherwise. The
  * cap is `formedCapReached` over the create door's own deps (`companyDeps.companies` and
  * `companyDeps.maxTotal`, FORMATION_MAX_TOTAL), the rule and the figure `createCompany` refuses
  * by, read last and only under production: a sandbox is never capped.
  */
-function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production"): FormedDoor {
+function formedDoorOf(
+  deps: FormedDoorDeps,
+  environment: "sandbox" | "production",
+  texts: LegalTextSet,
+): FormedDoor {
   const formation = deps.formation;
   const door = formedDoorEnvironment(formation?.pin.environment ?? environment, environment);
   if (door === "sandbox") return formation?.companyDeps.world ? "offered" : "hidden";
@@ -468,8 +472,8 @@ function formedDoorOf(deps: FormedDoorDeps, environment: "sandbox" | "production
     formation !== undefined &&
     formation.pin.environment === "production" &&
     formation.payment?.required === true &&
-    LEGAL_BODY_OPERATING_AGREEMENT.status === "approved" &&
-    STATEMENT_OF_AUTHORITY.status === "approved" &&
+    texts.agreement.text.status === "approved" &&
+    texts.declaration.status === "approved" &&
     deps.identity !== undefined &&
     deps.invites?.required === true;
   if (!gated) return "hidden";
@@ -498,7 +502,7 @@ export function legalBodyConfigOf(
     gasSeedOffered: (deps.legalBodyGasSeed?.amountWei ?? 0n) > 0n,
     paymentRequired: deps.customerCompanies?.paymentRequired ?? false,
     identityRequired: orders.environment === "production",
-    formedDoor: formedDoorOf(deps, orders.environment),
+    formedDoor: formedDoorOf(deps, orders.environment, orders.texts),
     filingWorkingDays: deps.formation?.filingWorkingDays ?? DEFAULT_FORMATION_FILING_WORKING_DAYS,
     linkTtl: {
       min: Number(MIN_SERVED_LINK_TTL_SECONDS),

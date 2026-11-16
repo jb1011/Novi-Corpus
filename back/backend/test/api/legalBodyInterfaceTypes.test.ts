@@ -23,6 +23,7 @@ import { describe, expect, test } from "vitest";
 import type { LegalBodyConfig } from "../../src/api/app";
 import type { StatementMessageAnswer } from "../../src/api/routes/customerCompanies";
 import type { LegalBodyAgreementAnswer } from "../../src/api/routes/legalBodyOrders";
+import { ADOPTION_FIELDS } from "../../src/legalBody/adoption";
 import type { VerificationState } from "../../src/legalBody/attestation";
 import type { BindingView } from "../../src/legalBody/binding";
 import type { FilingStatus } from "../../src/legalBody/filings";
@@ -176,6 +177,7 @@ const STATEMENT_MESSAGE_ANSWER_KEYS: Record<keyof StatementMessageAnswer, true> 
   typedData: true,
   wordingVersion: true,
   textStatus: true,
+  adoptionRule: true,
 };
 
 const LEGAL_BODY_AGREEMENT_KEYS: Record<keyof LegalBodyAgreementAnswer, true> = {
@@ -185,6 +187,8 @@ const LEGAL_BODY_AGREEMENT_KEYS: Record<keyof LegalBodyAgreementAnswer, true> = 
   textId: true,
   textVersion: true,
   textStatus: true,
+  notice: true,
+  adoptionStatement: true,
 };
 
 const LINK_MESSAGE_RESULT_KEYS: Record<keyof LinkMessageResult, true> = {
@@ -281,5 +285,12 @@ test("the interface's link fields are this backend's, by name and type, in order
   // The order is the contract's type string: a field moved changes the digest a wallet signs.
   expect(interfaceFields("LINK_FIELDS")).toEqual(
     LINK_FIELDS.map(({ name, type }) => ({ name, type })),
+  );
+});
+
+test("the interface's adoption fields are this backend's, by name and type, in order", () => {
+  // The six fields of the adoption a text without words is adopted with.
+  expect(interfaceFields("ADOPTION_FIELDS")).toEqual(
+    ADOPTION_FIELDS.map(({ name, type }) => ({ name, type })),
   );
 });

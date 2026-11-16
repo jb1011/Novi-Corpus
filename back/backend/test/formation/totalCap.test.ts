@@ -11,9 +11,10 @@
  * refused with nothing written. `/config.legalBodies.formedDoor` reads the same rule
  * (`formedCapReached`), so the door and what the deployment advertises cannot disagree.
  *
- * The database is real (in memory). The two legal-text modules are replaced by copies whose
- * status is approved, so a production deployment can be shown offering the door. Every name,
- * address and nullifier is an invention, the PII key a constant test key.
+ * The database is real (in memory). The create door and the order doors are given a copy of the
+ * October pair with both texts approved (`legalTextsWithStatus`), so a production deployment can
+ * be shown offering the door. Every name, address and nullifier is an invention, the PII key a
+ * constant test key.
  */
 import type DatabaseType from "better-sqlite3";
 import { getAddress } from "viem";
@@ -30,7 +31,6 @@ import { formedCapReached } from "../../src/formation/formedDoor";
 import { DEFAULT_INDUSTRY, companyNameOptions } from "../../src/formation/intake";
 import type { IdentityDeps } from "../../src/identity/state";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
-import type { LegalTextStatus } from "../../src/legalBody/texts/index";
 import type { SqliteCompanyRepository } from "../../src/persistence/companyRepository";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
@@ -51,36 +51,12 @@ import { fakeChain, paymentCfg } from "../helpers/formationPayment";
 import {
   type LegalBodyStores,
   legalBodyOrderDeps,
+  legalTextsWithStatus,
   openLegalBodyStores,
 } from "../helpers/legalBodyFixtures";
 
-/** The status each of the two texts reads as: approved, so production can offer the door. */
-const texts = vi.hoisted(() => ({
-  agreement: "approved" as LegalTextStatus,
-  statement: "approved" as LegalTextStatus,
-}));
-
-vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
-  return {
-    ...actual,
-    get LEGAL_BODY_OPERATING_AGREEMENT() {
-      return { ...actual.LEGAL_BODY_OPERATING_AGREEMENT, status: texts.agreement };
-    },
-  };
-});
-
-vi.mock("../../src/legalBody/texts/statementOfAuthority", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/statementOfAuthority")>();
-  return {
-    ...actual,
-    get STATEMENT_OF_AUTHORITY() {
-      return { ...actual.STATEMENT_OF_AUTHORITY, status: texts.statement };
-    },
-  };
-});
+/** The pair both doors serve, each of its two texts approved, so production can offer the door. */
+const APPROVED = legalTextsWithStatus({ agreement: "approved", declaration: "approved" });
 
 const NOW = Date.parse("2026-11-10T12:00:00Z");
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -115,8 +91,6 @@ beforeEach(() => {
   payments = new SqliteFormationPaymentRepository(db);
   identityRepo = new SqliteIdentityRepository(db);
   identity = identityOver(identityRepo, () => NOW);
-  texts.agreement = "approved";
-  texts.statement = "approved";
   printed = [];
   for (const method of ["log", "info", "warn", "error"] as const)
     vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
@@ -129,7 +103,7 @@ afterEach(() => {
 });
 
 /** A sandbox deployment: doola's sandbox, the testnet network, World wired, no identity record,
- *  no payment. */
+ *  no payment, and the approved pair. */
 function sandboxDeps(over: Partial<CreateCompanyDeps> = {}): CreateCompanyDeps {
   return {
     companies,
@@ -137,6 +111,7 @@ function sandboxDeps(over: Partial<CreateCompanyDeps> = {}): CreateCompanyDeps {
     requests,
     pin: { provider: "doola", environment: "sandbox" },
     legalBodyEnvironment: "sandbox",
+    legalTexts: APPROVED,
     sandboxSyntheticPii: false,
     maxPerTenant: 10,
     dailyCeiling: 100,
@@ -367,6 +342,7 @@ function formedDoorServed(
   const config = legalBodyConfigOf({
     legalBodyOrders: legalBodyOrderDeps(s, {
       environment: companyDeps.legalBodyEnvironment ?? environment,
+      texts: APPROVED,
     }),
     formation,
     identity: extra.identity,

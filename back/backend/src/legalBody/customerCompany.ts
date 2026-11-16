@@ -94,12 +94,18 @@ export interface CustomerCompanyDeps {
   /** The wording new declarations are made under: the composition passes the declaration of the
    *  pair it serves. Every step reads this one, never a constant. */
   text: LegalText<StatementFields>;
+  /** What the adoption of the agreement this deployment serves asks of the company, served with
+   *  the statement to sign. Absent or null: nothing. */
+  adoptionRule?: string | null;
   maxOpenPerTenant: number;
   /** True: a new company lands `draft`, owing its payment. False: it lands `ready`. */
   paymentRequired: boolean;
   /** Whether the company stands behind a legal body that is still open. Until that lookup is
    *  wired, the composition passes `() => false`. */
   hasOpenLegalBody: (companyId: string) => boolean;
+  /** Whether the company stands behind an open legal body that this deployment's factory created.
+   *  Read by the abandon door, for a sandbox company only. Absent, every open legal body counts. */
+  hasOpenLegalBodyHere?: (companyId: string) => boolean;
   transaction: <T>(fn: () => T) => T;
   now?: () => number;
 }
@@ -528,10 +534,12 @@ function conflict(message: string): ApiError {
 /**
  * The tenant abandons its own customer company, while nobody has checked it, no payment is live or
  * settled and no legal body stands open on it. A sandbox's automatic check is evidence of nothing,
- * so it does not keep a company; any check after it does. Whether a check is the automatic one is
- * read on the company's own environment, never the deployment's. In one transaction, the status
- * moves to `abandoned` by compare-and-set from the one it has, and the declarant's personal data
- * is erased; if either fails, neither happens.
+ * so it does not keep a company; any check after it does. For a sandbox company, only the open
+ * legal bodies this deployment's chain and factory created keep it: one that another factory
+ * created is never checked again here. Both rules are read on the company's own environment,
+ * never the deployment's.
+ * In one transaction, the status moves to `abandoned` by compare-and-set from the one it has, and
+ * the declarant's personal data is erased; if either fails, neither happens.
  *
  * An unknown company and another tenant's get one answer, 404: telling them apart would make this
  * an existence oracle over company ids. Every other refusal is a 409 `conflict`.
@@ -554,8 +562,11 @@ export function abandonCustomerCompany(
       throw conflict("the operator has checked this company's declaration, so it is kept");
     if (deps.companies.hasLiveOrSettledPayment(companyId))
       throw conflict("this company has a payment, so it is kept");
-    if (deps.hasOpenLegalBody(companyId))
-      throw conflict("this company stands behind an open legal body");
+    const open =
+      company.environment === "sandbox" && deps.hasOpenLegalBodyHere !== undefined
+        ? deps.hasOpenLegalBodyHere(companyId)
+        : deps.hasOpenLegalBody(companyId);
+    if (open) throw conflict("this company stands behind an open legal body");
     if (!deps.companies.setStatus(companyId, company.status, "abandoned"))
       throw conflict("this company changed while it was being abandoned");
     // Thrown, so the status change rolls back with it: an abandoned company must not keep a

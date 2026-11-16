@@ -25,6 +25,7 @@ import { signSession } from "../../src/auth/session";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import type { CustomerCompanyDeps } from "../../src/legalBody/customerCompany";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import { CHARTER_ADOPTION_RULE_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
 import type { LegalText } from "../../src/legalBody/texts/index";
 import {
   STATEMENT_OF_AUTHORITY,
@@ -359,9 +360,16 @@ describe("asking for the statement, signing it and creating the company", () => 
     const asked = await post(app, STATEMENT_MESSAGE, token, TYPED);
     expect(asked.status).toBe(200);
     const served = await asked.json();
-    expect(Object.keys(served).sort()).toEqual(["textStatus", "typedData", "wordingVersion"]);
+    expect(Object.keys(served).sort()).toEqual([
+      "adoptionRule",
+      "textStatus",
+      "typedData",
+      "wordingVersion",
+    ]);
     expect(served.wordingVersion).toBe(APPROVED.version);
     expect(served.textStatus).toBe("approved");
+    // The dependencies hold no rule of adoption.
+    expect(served.adoptionRule).toBeNull();
     // Exactly what the wallet is asked to sign, written out here on its own.
     const fields: StatementFields = {
       ...TYPED,
@@ -431,6 +439,29 @@ describe("asking for the statement, signing it and creating the company", () => 
       provider: "customer",
       status: "draft",
     });
+  });
+
+  test("the statement to sign comes with the rule of the adoption", async () => {
+    const token = await sessionOf(owner);
+    const servedBy = async (customerCompanies: CustomerCompanyDeps) => {
+      const asked = await post(makeApp(customerCompanies), STATEMENT_MESSAGE, token, TYPED);
+      expect(asked.status).toBe(200);
+      return asked.json();
+    };
+
+    const withRule = await servedBy(doors({ adoptionRule: CHARTER_ADOPTION_RULE_2026_11_DRAFT_1 }));
+    expect(withRule.adoptionRule).toBe(CHARTER_ADOPTION_RULE_2026_11_DRAFT_1);
+    const withNull = await servedBy(doors({ adoptionRule: null }));
+    expect(withNull.adoptionRule).toBeNull();
+    const without = await servedBy(doors());
+    expect(without.adoptionRule).toBeNull();
+
+    // The rule is not part of what is signed: the typed data is the same in the three cases.
+    expect(withRule.typedData).toEqual(without.typedData);
+    expect(withNull.typedData).toEqual(without.typedData);
+    expect(JSON.stringify(withRule.typedData)).not.toContain(CHARTER_ADOPTION_RULE_2026_11_DRAFT_1);
+    // Asking writes nothing.
+    expect(countRows("companies")).toBe(0);
   });
 
   test("on a sandbox: the draft wording is served, the declarant is the sandbox fixture, and the company is created", async () => {
