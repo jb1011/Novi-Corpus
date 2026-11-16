@@ -21,7 +21,8 @@ import {
   toOrderView,
 } from "../../src/legalBody/orders";
 import { CUSTOMER_PROVIDER } from "../../src/legalBody/provider";
-import { servedLegalTexts } from "../../src/legalBody/texts/sets";
+import type { LegalTextStatus } from "../../src/legalBody/texts/index";
+import { type LegalTextSet, octoberLegalTexts } from "../../src/legalBody/texts/sets";
 import { SqliteCharterGrantRepository } from "../../src/persistence/charterGrantRepository";
 import {
   type CompanyCheckRepository,
@@ -131,8 +132,8 @@ export function legalBodyOrderDeps(
     docStore: s.docStore,
     deployment: { chainId: CHAIN_ID, factory: FACTORY },
     identityRegistry: REGISTRY,
-    // Read when the deps are built, so a test that replaces a served text is read at that moment.
-    texts: servedLegalTexts(),
+    // The October pair; a test that needs a status gives a copy (`legalTextsWithStatus`).
+    texts: octoberLegalTexts(),
     environment: "sandbox",
     amendmentDelaySeconds: 172_800,
     maxOpenPerTenant: 3,
@@ -147,6 +148,22 @@ export function legalBodyOrderDeps(
     sleep: async () => {},
     ...over,
   };
+}
+
+/** The October pair with the statuses given: a copy, so no module is replaced. */
+export function legalTextsWithStatus(over: {
+  agreement?: LegalTextStatus;
+  declaration?: LegalTextStatus;
+}): LegalTextSet {
+  const { agreement, declaration } = octoberLegalTexts();
+  if (agreement.kind !== "plain") throw new Error("the October agreement is a plain text");
+  return Object.freeze({
+    agreement: Object.freeze({
+      kind: "plain",
+      text: Object.freeze({ ...agreement.text, status: over.agreement ?? agreement.text.status }),
+    }),
+    declaration: Object.freeze({ ...declaration, status: over.declaration ?? declaration.status }),
+  });
 }
 
 /** The order's view as a door answers it for the row as stored now, its facts read from the

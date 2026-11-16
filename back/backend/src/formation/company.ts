@@ -40,7 +40,7 @@ import {
 import { type IdentityDeps, assertIdentityVerified, namesOfRecordAtDoor } from "../identity/state";
 import { assertDraftsServable } from "../legalBody/draftTextRefusal";
 import { refusal } from "../legalBody/sentences";
-import { LEGAL_BODY_OPERATING_AGREEMENT } from "../legalBody/texts/operatingAgreement";
+import type { LegalTextSet } from "../legalBody/texts/sets";
 import { opsLog } from "../observability/opsLog";
 import type { TransferAuthorizationDomain } from "../payments/transferAuthorization";
 import type { CompanyRepository, CompanyStatus } from "../persistence/companyRepository";
@@ -142,6 +142,9 @@ export interface CreateCompanyDeps {
   identity?: import("../identity/state").IdentityDeps;
   /** `legalBodyEnvironment(cfg)`: the network's environment. Absent reads as the pin's. */
   legalBodyEnvironment?: "sandbox" | "production";
+  /** The pair of texts this deployment serves: the formed door's draft gate reads its agreement.
+   *  A company for agents never reads it. Without it the formed door throws: a wiring fault. */
+  legalTexts?: LegalTextSet;
   /**
    * PLACEHOLDER, the shape of `ApiDeps.invites`: PR 2b replaces it with its InviteDeps and
    * `assertInvited`. The composition root passes nothing until then, so a production formed door
@@ -257,7 +260,8 @@ export function createCompany(
   //        environments, and a box with no World block answers 503 rather than filing.
   //     b. The per-human company cap, counted as the agent door counts it.
   //     c. The guardian identity record (production only: a sandbox returns at once).
-  //     d. The operating agreement approved (production only: a sandbox serves a draft).
+  //     d. The agreement of the pair this deployment serves (`deps.legalTexts`) approved
+  //        (production only: a sandbox serves a draft).
   //     e. The invite gate, last, so every gate above runs and is tested in its final order.
   //    A company for agents keeps step 1, the agent door's own gate, unchanged. The formed door's
   //    total cap is step 4b, after the per-tenant quota.
@@ -267,7 +271,11 @@ export function createCompany(
     const verification = assertRealHuman(deps.world, tenantId, door);
     assertHumanCompanyCap(deps.world, verification);
     assertIdentityVerified(deps.identity, deps.world, tenantId, door);
-    assertDraftsServable(door, [LEGAL_BODY_OPERATING_AGREEMENT]);
+    if (deps.legalTexts === undefined)
+      throw new Error(
+        "formation: the formed door needs the pair of legal texts this deployment serves",
+      );
+    assertDraftsServable(door, [deps.legalTexts.agreement.text]);
     // PR 2b replaces this line with assertInvited.
     if (door === "production" && deps.invites?.required !== true)
       throw refusal("formed_door_not_offered", 403);

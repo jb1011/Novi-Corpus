@@ -16,7 +16,7 @@ import {
   adoptionStatementOfVersion,
   agreementTextOfVersion,
   assertSetUsable,
-  servedLegalTexts,
+  octoberLegalTexts,
 } from "../../src/legalBody/texts/sets";
 import { STATEMENT_OF_AUTHORITY } from "../../src/legalBody/texts/statementOfAuthority";
 
@@ -52,7 +52,7 @@ test("every version of the agreement is tagged, in the list's own order", () => 
 });
 
 test("the served pair is the October one, and the Charter is paired with declaration draft 2 by name", () => {
-  const served = servedLegalTexts();
+  const served = octoberLegalTexts();
   expect(served.agreement).toEqual({ kind: "plain", text: LEGAL_BODY_OPERATING_AGREEMENT });
   expect(served.declaration).toBe(STATEMENT_OF_AUTHORITY);
   expect(CHARTER_LEGAL_TEXTS.agreement.text.version).toBe("2026-11-draft-5");
@@ -104,13 +104,10 @@ test("nothing in src selects the Charter pair, and the doors read the pair they 
     files.filter((f) => new RegExp(`\\b${name}\\b`).test(readFileSync(join(SRC, f), "utf8")));
   expect(naming("CHARTER_LEGAL_TEXTS")).toEqual(["legalBody/texts/sets.ts"]);
   expect(naming("LEGAL_BODY_OPERATING_AGREEMENT").sort()).toEqual([
-    "api/app.ts",
-    "formation/company.ts",
     "legalBody/texts/operatingAgreement.ts",
     "legalBody/texts/sets.ts",
   ]);
   expect(naming("STATEMENT_OF_AUTHORITY").sort()).toEqual([
-    "api/app.ts",
     "legalBody/texts/sets.ts",
     "legalBody/texts/statementOfAuthority.ts",
   ]);

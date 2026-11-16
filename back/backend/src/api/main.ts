@@ -69,7 +69,7 @@ import {
   LEGAL_BODY_SWEEP_MAX_PER_TICK,
   LegalBodySweeper,
 } from "../legalBody/sweeper";
-import { assertSetUsable, servedLegalTexts } from "../legalBody/texts/sets";
+import { assertSetUsable, octoberLegalTexts } from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
 import { opsLog } from "../observability/opsLog";
 import { AGENT_BOOK_CAIP2, createAgentBookReader } from "../payments/agentBookReader";
@@ -598,6 +598,14 @@ async function main() {
       );
   }
 
+  /**
+   * The pair of legal texts this deployment serves, chosen once here: the order doors and the
+   * formed door read its agreement, the customer company doors its declaration. A pair no order
+   * can be placed on stops the boot.
+   */
+  const legalTexts = octoberLegalTexts();
+  assertSetUsable(legalTexts);
+
   const companyDeps = formationDeployment
     ? {
         companies,
@@ -619,6 +627,8 @@ async function main() {
         // (`formedDoorEnvironment`). No `invites` until PR 2b: a production formed door refuses.
         identity,
         legalBodyEnvironment: legalBodyEnvironment(cfg),
+        // The formed door's draft gate reads the agreement of the pair the order doors serve.
+        legalTexts,
         // With payment on, `createCompany` lands the company `draft` and writes its quote in the
         // same transaction. Absent = the beta shape, where every company lands `ready`.
         payment: formationPayment,
@@ -664,13 +674,6 @@ async function main() {
           multicall3: MULTICALL3_BY_CHAIN[cfg.chainId],
         })
       : undefined;
-  /**
-   * The pair of legal texts this deployment serves, chosen once here: the order doors read its
-   * agreement and the customer company doors its declaration. A pair no order can be placed on
-   * stops the boot.
-   */
-  const legalTexts = servedLegalTexts();
-  assertSetUsable(legalTexts);
   const legalBodyOrders =
     legalBodies && cfg.legalBodyFactory && legalBodyChain
       ? {

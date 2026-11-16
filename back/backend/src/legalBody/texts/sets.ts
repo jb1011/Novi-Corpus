@@ -121,11 +121,8 @@ export interface LegalTextSet {
   readonly declaration: LegalText<StatementFields>;
 }
 
-/**
- * The pair every deployment serves: the October agreement and the October statement. Read when it
- * is called, so a test that replaces either export is read at that moment.
- */
-export function servedLegalTexts(): LegalTextSet {
+/** The October agreement and the October statement: the pair a deployment serves when it names none. */
+export function octoberLegalTexts(): LegalTextSet {
   return Object.freeze({
     agreement: Object.freeze({ kind: "plain", text: LEGAL_BODY_OPERATING_AGREEMENT }),
     declaration: STATEMENT_OF_AUTHORITY,

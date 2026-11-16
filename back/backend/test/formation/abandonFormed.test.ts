@@ -25,6 +25,7 @@ import {
 } from "../../src/formation/company";
 import { DEFAULT_INDUSTRY, companyNameOptions } from "../../src/formation/intake";
 import type { FormationPaymentConfig } from "../../src/formation/payment";
+import { octoberLegalTexts } from "../../src/legalBody/texts/sets";
 import {
   type CompanyPurposeKind,
   type CompanyStatus,
@@ -503,7 +504,8 @@ describe("the person's lifetime slot after an abandon", () => {
 
   const counted = (): number => store.countCompaniesForNullifier(NULLIFIER, ACTION);
 
-  /** The formed door of a sandbox deployment, with World wired and a cap of one company. */
+  /** The formed door of a sandbox deployment, with World wired, a cap of one company and the
+   *  October pair of texts. */
   function formedDoor(): CreateCompanyDeps {
     return {
       companies,
@@ -511,6 +513,7 @@ describe("the person's lifetime slot after an abandon", () => {
       requests,
       pin: { provider: "doola", environment: "sandbox" },
       legalBodyEnvironment: "sandbox",
+      legalTexts: octoberLegalTexts(),
       sandboxSyntheticPii: false,
       maxPerTenant: 10,
       dailyCeiling: 100,

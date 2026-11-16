@@ -13,9 +13,9 @@
  * A name option typed with its entity ending is refused at the formed door, at the create and at
  * the re-open alike, rather than filed with the ending twice; the agent door keeps stripping one.
  *
- * The database is real (in memory). The operating agreement module is replaced by a copy whose
- * status each test sets. Every name, address and nullifier is an invention, the PII key a constant
- * test key.
+ * The database is real (in memory). The door is given a copy of the October pair whose
+ * agreement's status each test sets (`legalTextsWithStatus`). Every name, address and nullifier is
+ * an invention, the PII key a constant test key.
  */
 import type DatabaseType from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
@@ -54,21 +54,7 @@ import {
   worldFor,
 } from "../helpers/customerCompanyFixtures";
 import { paymentCfg } from "../helpers/formationPayment";
-
-/** The status the operating agreement reads as in a test: approved unless the test says
- *  otherwise. */
-const texts = vi.hoisted(() => ({ agreement: "approved" as LegalTextStatus }));
-
-vi.mock("../../src/legalBody/texts/operatingAgreement", async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import("../../src/legalBody/texts/operatingAgreement")>();
-  return {
-    ...actual,
-    get LEGAL_BODY_OPERATING_AGREEMENT() {
-      return { ...actual.LEGAL_BODY_OPERATING_AGREEMENT, status: texts.agreement };
-    },
-  };
-});
+import { legalTextsWithStatus } from "../helpers/legalBodyFixtures";
 
 const TENANT = "0x000000000000000000000000000000000000000A" as const;
 const NULLIFIER = "1001";
@@ -88,6 +74,9 @@ let payments: SqliteFormationPaymentRepository;
 let store: SqliteWorldStore;
 let identityRepo: SqliteIdentityRepository;
 let identity: IdentityDeps;
+/** The status the agreement of the door's pair reads as in a test: approved unless the test says
+ *  otherwise. */
+let agreement: LegalTextStatus;
 /** Every console line written in the test. */
 let printed: string[];
 
@@ -101,7 +90,7 @@ beforeEach(() => {
   store = new SqliteWorldStore(db);
   identityRepo = new SqliteIdentityRepository(db);
   identity = identityOver(identityRepo, () => NOW);
-  texts.agreement = "approved";
+  agreement = "approved";
   printed = [];
   for (const method of ["log", "info", "warn", "error"] as const)
     vi.spyOn(console, method).mockImplementation((...args: unknown[]) => {
@@ -113,7 +102,8 @@ afterEach(() => {
   db.close();
 });
 
-/** A sandbox deployment: doola's sandbox, the testnet network, no identity record, no payment. */
+/** A sandbox deployment: doola's sandbox, the testnet network, no identity record, no payment.
+ *  The pair of texts is the October one, its agreement read as `agreement` says. */
 function sandboxDeps(over: Partial<CreateCompanyDeps> = {}): CreateCompanyDeps {
   return {
     companies,
@@ -121,6 +111,7 @@ function sandboxDeps(over: Partial<CreateCompanyDeps> = {}): CreateCompanyDeps {
     requests,
     pin: { provider: "doola", environment: "sandbox" },
     legalBodyEnvironment: "sandbox",
+    legalTexts: legalTextsWithStatus({ agreement }),
     sandboxSyntheticPii: false,
     maxPerTenant: 10,
     dailyCeiling: 100,
@@ -245,7 +236,7 @@ describe("formedDoorEnvironment", () => {
   test("either one production runs the production gates at createCompany", () => {
     // A real human with an identity record, and the agreement a draft, as it is today: a sandbox
     // serves the draft, production refuses it.
-    texts.agreement = "draft";
+    agreement = "draft";
     everyGateMet();
     const world = worldFor(store);
     const environments: ["sandbox" | "production", "sandbox" | "production"][] = [
@@ -279,7 +270,7 @@ describe("formedDoorEnvironment", () => {
   });
 
   test("the network's environment, when absent, reads as the pin's", () => {
-    texts.agreement = "draft";
+    agreement = "draft";
     everyGateMet();
     const partyId = newParty();
     const err = thrown(() =>
@@ -300,7 +291,7 @@ describe("formedDoorEnvironment", () => {
 describe("the formed door on production, gate by gate", () => {
   test("1. no World row: guardian_not_verified", () => {
     // Every later gate would refuse too: no identity record, a draft agreement, no invite.
-    texts.agreement = "draft";
+    agreement = "draft";
     const partyId = newParty();
     const err = thrown(() => createCompany(prodDeps(), TENANT, intake(partyId)));
     expect(err).toMatchObject({ code: "guardian_not_verified", status: 403 });
@@ -308,7 +299,7 @@ describe("the formed door on production, gate by gate", () => {
   });
 
   test("2. a waiver row: waiver_not_accepted", () => {
-    texts.agreement = "draft";
+    agreement = "draft";
     human("waiver");
     const partyId = newParty();
     const err = thrown(() => createCompany(prodDeps(), TENANT, intake(partyId)));
@@ -317,7 +308,7 @@ describe("the formed door on production, gate by gate", () => {
   });
 
   test("3. the per-human cap: guardian_company_cap, whatever the enforcement switch says", () => {
-    texts.agreement = "draft";
+    agreement = "draft";
     human();
     ownedCompany();
     const world: WorldIdDeps = worldFor(store, { maxCompaniesPerHuman: 1 });
@@ -339,7 +330,7 @@ describe("the formed door on production, gate by gate", () => {
   });
 
   test("4. no identity record: guardian_identity_not_verified", () => {
-    texts.agreement = "draft";
+    agreement = "draft";
     human();
     const partyId = newParty();
     const err = thrown(() => createCompany(prodDeps(), TENANT, intake(partyId)));
@@ -348,7 +339,7 @@ describe("the formed door on production, gate by gate", () => {
   });
 
   test("5. the operating agreement a draft: legal_text_not_approved, 503", () => {
-    texts.agreement = "draft";
+    agreement = "draft";
     everyGateMet();
     const partyId = newParty();
     const err = thrown(() => createCompany(prodDeps(), TENANT, intake(partyId)));
@@ -424,7 +415,7 @@ describe("the formed door on a sandbox", () => {
   });
 
   test("a real World row creates, with a draft agreement and no identity record", () => {
-    texts.agreement = "draft";
+    agreement = "draft";
     human();
     const world = worldFor(store, { environment: "staging" });
     const partyId = newParty();
@@ -448,6 +439,26 @@ describe("the formed door on a sandbox", () => {
     const err = thrown(() => createCompany(sandboxDeps({ world }), TENANT, intake(partyId)));
     expect(err).toMatchObject({ code: "guardian_company_cap", status: 403 });
     expect(parties.findOwned(TENANT, partyId)!.companyId).toBeNull();
+  });
+});
+
+// ── the pair of texts ────────────────────────────────────────────────────────────────────────
+
+describe("the pair of texts the formed door reads", () => {
+  test("the formed door with no pair of texts is a wiring fault", () => {
+    everyGateMet();
+    for (const deps of [
+      sandboxDeps({ world: worldFor(store), legalTexts: undefined }),
+      prodDeps({ invites: { required: true }, legalTexts: undefined }),
+    ]) {
+      const partyId = newParty();
+      expect(() => createCompany(deps, TENANT, intake(partyId))).toThrow(
+        new Error(
+          "formation: the formed door needs the pair of legal texts this deployment serves",
+        ),
+      );
+      nothingWritten(partyId);
+    }
   });
 });
 
