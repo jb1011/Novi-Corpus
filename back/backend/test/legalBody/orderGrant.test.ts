@@ -118,7 +118,7 @@ describe("an order on the Charter", () => {
     expect(view.agreement).not.toBeNull();
 
     const stored = storedTermsOf(view);
-    expect(stored.terms.textVersion).toBe("2026-11-draft-4");
+    expect(stored.terms.textVersion).toBe("2026-11-draft-5");
     expect(stored.termsDoc).toContain(
       `## Schedule A. Grants in force\n\n${grantA.scheduleA}\n\n## Schedule B.`,
     );

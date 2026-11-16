@@ -47,6 +47,7 @@ const TEMPLATE_SHA256_BY_VERSION: Readonly<Record<string, string>> = {
   "2026-11-draft-1": "f869917a35368abee55855d15291059efd1fea95c6edee110524c6face3c6d2c",
   "2026-11-draft-2": "acf6cb2415cba17874d3c7505b7289d66dfd9148e6d584783035fad912a2a0b8",
   "2026-11-draft-4": "2bc1eb1c387ef9ac7e2d9ad3bae6365ab7c01fce6d30afd29c562f8382ef9ca6",
+  "2026-11-draft-5": "763f52ac1447c7f9f796140586840233d6ef104316360e86545fd3e339e68cfb",
 };
 
 const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");

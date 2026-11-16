@@ -145,7 +145,7 @@ function makeApp(over: Partial<LegalBodyOrderDeps> = {}) {
 }
 type App = ReturnType<typeof makeApp>;
 
-/** The app whose order doors serve Charter draft 4 with declaration draft 2. */
+/** The app whose order doors serve Charter draft 5 with declaration draft 2. */
 const charterApp = (over: Partial<LegalBodyOrderDeps> = {}) =>
   makeApp({ texts: CHARTER_LEGAL_TEXTS, ...over });
 /** The app whose order doors serve the October pair. */
@@ -185,7 +185,7 @@ describe("the form of a grant", () => {
     expect(charter.status).toBe(200);
     expect(charter.body).toEqual({
       takesGrant: true,
-      text: { id: "legal-body-operating-agreement", version: "2026-11-draft-4", status: "draft" },
+      text: { id: "legal-body-operating-agreement", version: "2026-11-draft-5", status: "draft" },
       schema: "novi.legal-body-grant/1",
       amountMax: 1000000000,
       heavyActModes: {
@@ -294,7 +294,7 @@ describe("an order's grant", () => {
 
     const agreement = await answerOf(await call(app, "GET", agreementPath(id), token));
     expect(agreement.status).toBe(200);
-    expect(agreement.body.textVersion).toBe("2026-11-draft-4");
+    expect(agreement.body.textVersion).toBe("2026-11-draft-5");
     expect(agreement.body.termsDoc).toContain(read.body.grant.scheduleA);
 
     // The order's view is the one an October order has: no new key.

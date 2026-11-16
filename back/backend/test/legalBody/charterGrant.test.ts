@@ -6,7 +6,7 @@ import {
   storeAgreement,
 } from "../../src/legalBody/agreement";
 import { buildGrant } from "../../src/legalBody/grant";
-import { LEGAL_BODY_CHARTER_2026_11_DRAFT_4 } from "../../src/legalBody/texts/legalBodyCharter";
+import { LEGAL_BODY_CHARTER_2026_11_DRAFT_5 } from "../../src/legalBody/texts/legalBodyCharter";
 import type { AgreementFields } from "../../src/legalBody/texts/operatingAgreement";
 import { computeOaHash } from "../../src/oa/generator";
 import { MemoryDocumentStore } from "../helpers/formationFakes";
@@ -30,17 +30,17 @@ const FIELDS: AgreementFields = {
 
 const grant = buildGrant(A, { number: 1, version: 1 });
 const built = (scheduleA: string) =>
-  buildAgreement({ ...FIELDS, scheduleA }, LEGAL_BODY_CHARTER_2026_11_DRAFT_4, {
+  buildAgreement({ ...FIELDS, scheduleA }, LEGAL_BODY_CHARTER_2026_11_DRAFT_5, {
     source: "customer",
   });
 
 test("the manifest hash the guardian adopts commits to the grant", () => {
   const a = built(grant.scheduleA);
-  expect(a.manifestHash).toBe("0x62f09c16ecf045d5c6452f4ec51df1b05cf6eb65817b75b6d6afa0e9475f6584");
+  expect(a.manifestHash).toBe("0xb744fe1df70acc897080d737cf655b329c52cf33e105bd9c96b3066a951b6f11");
   expect(a.termsDoc).toContain(`Grant 1, version 1. Digest ${grant.digest}.`);
   expect(JSON.parse(a.manifest).terms).toMatchObject({
     textId: "legal-body-operating-agreement",
-    textVersion: "2026-11-draft-4",
+    textVersion: "2026-11-draft-5",
     textStatus: "draft",
     hash: computeOaHash(a.termsDoc),
   });
@@ -50,7 +50,7 @@ test("one dollar more in one limit is another agreement", () => {
   const changed = structuredClone(A);
   (changed.acts.pay as { perAct: number }).perAct = 201;
   const b = built(buildGrant(changed, { number: 1, version: 1 }).scheduleA);
-  expect(b.manifestHash).toBe("0x71e3796895c66a04ae25a641e352533cae9a8bb6b8dae2851f99a1fa34940404");
+  expect(b.manifestHash).toBe("0xafb2d11d2072a71ecd1bc9aa4dbd59f3a652140c443f815422aecce99eca6f4b");
 });
 
 test("the stored Charter reads back as the agreement it was frozen with", () => {
@@ -63,5 +63,5 @@ test("the stored Charter reads back as the agreement it was frozen with", () => 
     a.manifestHash,
   );
   expect(read?.termsDoc).toBe(a.termsDoc);
-  expect(read?.terms.textVersion).toBe("2026-11-draft-4");
+  expect(read?.terms.textVersion).toBe("2026-11-draft-5");
 });
