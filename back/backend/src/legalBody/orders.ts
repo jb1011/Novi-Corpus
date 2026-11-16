@@ -336,6 +336,10 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *  2. the agreement's wording, the one of the pair this deployment serves (`deps.texts`), can be
  *     served (a production deployment refuses a draft);
  *  3. the company is the tenant's (one 404 for unknown and not-yours) and eligible;
+ *  3a. a customer's own company was declared under the declaration of the pair this deployment
+ *     serves: its declaration's wording version is the version of `deps.texts.declaration`, else
+ *     `declaration_outdated`. A company filed through formation has no declaration, and none is
+ *     read for it;
  *  3b. the grant, read only now, so only for a caller who could order: an agreement that takes no
  *     grant refuses a `grant` key whatever its value (`grant_not_taken`); the Charter requires one
  *     the form's rules and the product's offer take (`grantOfNewOrder`), number 1, version 1;
@@ -377,6 +381,15 @@ export function createOrder(
   const owned = companyId === undefined ? undefined : deps.companies.findOwned(tenantId, companyId);
   if (companyId === undefined || owned === undefined) throw refusal("not_found", 404);
   if (!companyEligible(deps, companyId)) throw refusal("company_not_eligible", 409);
+
+  // 3a. Read on the company's own provider, as step 4 reads it: only a customer's own company has
+  //     a declaration. One made under another wording version than the pair's declaration is
+  //     refused, and so is none at all.
+  if (
+    owned.provider === CUSTOMER_PROVIDER &&
+    deps.declarations.find(companyId)?.wordingVersion !== deps.texts.declaration.version
+  )
+    throw refusal("declaration_outdated", 409);
 
   // 3b. Any value under the key counts as given, `null` included: an agreement that takes no grant
   //     says so rather than ignore it. On the Charter an absent grant is a problem of its own.

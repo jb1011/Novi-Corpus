@@ -153,8 +153,11 @@ const charterApp = (over: Partial<LegalBodyOrderDeps> = {}) =>
 const octoberApp = (over: Partial<LegalBodyOrderDeps> = {}) => makeApp(over);
 
 /** A checked company of `who`, with a filing number no other company of the test holds. */
-const company = (who: Signer) =>
-  customerCompany(s, who.address, { filingNumber: `TEST-${String(++filings).padStart(4, "0")}` });
+const company = (who: Signer, opts: Parameters<typeof customerCompany>[2] = {}) =>
+  customerCompany(s, who.address, {
+    filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
+    ...opts,
+  });
 
 /** The rows a table holds, for every order. */
 const rowsOf = (table: "legal_bodies" | "charter_grants") =>
@@ -280,7 +283,10 @@ describe("an order's grant", () => {
     const app = charterApp();
     const token = await sessionOf(guardian);
     const placed = await answerOf(
-      await call(app, "POST", ORDERS, token, { companyId: company(guardian), grant: A }),
+      await call(app, "POST", ORDERS, token, {
+        companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
+        grant: A,
+      }),
     );
     expect(placed.status).toBe(201);
     const id = placed.body.id as string;
@@ -310,7 +316,7 @@ describe("an order's grant", () => {
     const token = await sessionOf(guardian);
     const res = await answerOf(
       await call(charterApp(), "POST", ORDERS, token, {
-        companyId: company(guardian),
+        companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
         grant: { ...A, endsOn: "1999-01-01" },
       }),
     );
@@ -343,7 +349,7 @@ describe("an order's grant", () => {
   test("another tenant's order has no grant to show", async () => {
     const app = charterApp();
     const id = await ordered(app, await sessionOf(guardian), {
-      companyId: company(guardian),
+      companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
       grant: A,
     });
     const theirs = await sessionOf(stranger);
@@ -377,7 +383,10 @@ describe("an order's grant", () => {
   test("an order whose stored agreement does not read back shows no grant", async () => {
     const app = charterApp();
     const token = await sessionOf(guardian);
-    const id = await ordered(app, token, { companyId: company(guardian), grant: A });
+    const id = await ordered(app, token, {
+      companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
+      grant: A,
+    });
     s.docStore.put(agreementDocNames(id).terms, "Terms that were never frozen.\n");
 
     const res = await answerOf(await call(app, "GET", grantPath(id), token));
@@ -498,7 +507,10 @@ describe("who may use the grant doors", () => {
     });
     const token = await sessionOf(guardian);
     // Placed on an app with room in every throttle, then read on the one with none.
-    const id = await ordered(charterApp(), token, { companyId: company(guardian), grant: A });
+    const id = await ordered(charterApp(), token, {
+      companyId: company(guardian, { wordingVersion: "2026-11-draft-2" }),
+      grant: A,
+    });
 
     for (const door of doors(id)) {
       const res = await answerOf(

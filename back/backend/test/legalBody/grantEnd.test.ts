@@ -116,13 +116,17 @@ function rowOf(id: string): LegalBodyRecord {
 }
 
 /** A checked company of the guardian, with a filing number no other company of the test holds. */
-const company = () =>
-  customerCompany(s, tenant, { filingNumber: `TEST-${String(++filings).padStart(4, "0")}` });
+const company = (opts: Parameters<typeof customerCompany>[2] = {}) =>
+  customerCompany(s, tenant, {
+    filingNumber: `TEST-${String(++filings).padStart(4, "0")}`,
+    ...opts,
+  });
 
 /** An order on the Charter with fixture `A` and that end, placed by the real clock. */
 function order(endsOn: string | null): LegalBodyRecord {
   const grant: GrantChoices = { ...structuredClone(A), endsOn };
-  return rowOf(createOrder(deps(), tenant, { companyId: company(), grant }).id);
+  const companyId = company({ wordingVersion: "2026-11-draft-2" });
+  return rowOf(createOrder(deps(), tenant, { companyId, grant }).id);
 }
 
 /** An order on the October pair, which takes no grant. */

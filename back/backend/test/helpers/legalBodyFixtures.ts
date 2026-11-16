@@ -269,7 +269,8 @@ export function appendCheck(
 /**
  * A company of `owner`, with the checks given (one pass unless told otherwise). A customer company
  * carries its declaration, written straight to its table: the statement and its signature are
- * placeholders, since only the company's name and filing number are read by the order doors.
+ * placeholders, since the order doors read only the company's name, its filing number and the
+ * version of the wording it was declared under (the October statement's unless told otherwise).
  */
 export function customerCompany(
   s: {
@@ -285,6 +286,7 @@ export function customerCompany(
     provider?: string;
     status?: "draft" | "ready";
     humanNullifier?: string;
+    wordingVersion?: string;
   } = {},
 ): string {
   const provider = opts.provider ?? CUSTOMER_PROVIDER;
@@ -316,7 +318,7 @@ export function customerCompany(
       companyName,
       jurisdiction: "WY",
       filingNumber,
-      wordingVersion: "2026-10-draft-1",
+      wordingVersion: opts.wordingVersion ?? "2026-10-draft-1",
       chainId: CHAIN_ID,
       factory: FACTORY,
       issuedAt: Math.floor(Date.now() / 1000),

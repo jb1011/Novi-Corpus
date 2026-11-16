@@ -155,6 +155,10 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // frozen agreement states.
   grant_unreadable:
     "This order's stored grant no longer reads back as the grant its agreement was frozen with, so it is neither served nor acted on.",
+  // `POST /legal-body-orders`, for a company the guardian declared under another version of the
+  // wording than the declaration of the pair this deployment serves.
+  declaration_outdated:
+    "This company was declared under another wording than the one this deployment serves, and a declaration is never rewritten: declare the company as a new one, then place the order on it.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */
