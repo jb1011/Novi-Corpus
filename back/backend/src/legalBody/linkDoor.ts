@@ -28,7 +28,7 @@ import {
   linkFromWire,
   linkTypedDataWire,
 } from "./link";
-import { assertGrantOutlasts, readOrderGrant } from "./orderGrant";
+import { assertLinkWithinGrant, readOrderGrant } from "./orderGrant";
 import {
   type LegalBodyOrderDeps,
   type LegalBodyOrderView,
@@ -203,7 +203,7 @@ function servable(environment: LegalBodyOrderDeps["environment"], text: LegalTex
  *  3. the head, then the identity's owner at that head: none is a 422 `identity_not_found`;
  *  4. the link: this agent, the tenant as guardian, the order's delay and agreement, and a
  *     deadline counted from the CHAIN's time; a deadline from the first second of the grant's last
- *     day on is a 409 `grant_ends_too_soon` (`assertGrantOutlasts`).
+ *     day on is a 409 `link_outlasts_grant` (`assertLinkWithinGrant`).
  * Writes nothing.
  */
 export async function linkMessage(
@@ -244,7 +244,7 @@ export async function linkMessage(
     operatingAgreementHash: agreementHash,
     deadline: linkDeadline(head.timestamp, ttl),
   };
-  assertGrantOutlasts(grant, link.deadline);
+  assertLinkWithinGrant(grant, link.deadline);
   return {
     typedData: linkTypedDataWire({
       chainId: deps.deployment.chainId,
@@ -289,8 +289,8 @@ class ReserveRefused extends Error {
  *     submit changes nothing); a draft goes on with the rest of rule 1; anything else is a 409;
  *  3. the message is the served shape (400 `malformed_link`), the signature whole bytes of hex,
  *     at most `MAX_LINK_SIGNATURE_BYTES` (400 `malformed_signature`; an empty `0x` is read); a
- *     deadline from the first second of the grant's last day on is a 409 `grant_ends_too_soon`
- *     (`assertGrantOutlasts`), before the identity's bucket is touched or the chain is read;
+ *     deadline from the first second of the grant's last day on is a 409 `link_outlasts_grant`
+ *     (`assertLinkWithinGrant`), before the identity's bucket is touched or the chain is read;
  *  4. one token from the identity's bucket, keyed `chainId:agentId:tenantId` so that a stranger
  *     cannot empty the bucket the owner's tenant needs;
  *  5. the create caps, per tenant (429) and for the deployment (503), counted over 24 hours,
@@ -343,7 +343,7 @@ export async function submitLink(
       !WHOLE_BYTES_HEX.test(signature)
     )
       throw refusal("malformed_signature", 400);
-    assertGrantOutlasts(grant, link.deadline);
+    assertLinkWithinGrant(grant, link.deadline);
 
     // 4.
     const identityKey = `${deps.deployment.chainId}:${link.agentId}:${getAddress(tenantId)}`;

@@ -1,6 +1,7 @@
 import type { Address, Hex } from "viem";
 import { assertRealHuman } from "../api/routes/worldId";
 import { readVerifiedAgreement } from "./agreement";
+import { assertDraftsServable } from "./draftTextRefusal";
 import {
   GRANT_AMOUNT_MAX,
   GRANT_SCHEMA,
@@ -23,7 +24,9 @@ import type { LegalTextStatus } from "./texts/index";
  * Each starts with the real-human check (a verified credential, never a waiver). None writes
  * anything, and none takes a token, as the agreement's read and the adoption message take none.
  * None proposes a value: the form serves the rules a grant is held to, and the values are the
- * guardian's.
+ * guardian's. On an agreement that takes a grant, the form and the preview refuse a draft text on
+ * a production deployment as the order does (`assertDraftsServable`), next after the real-human
+ * check.
  */
 
 /** A grant as a door shows it. */
@@ -63,11 +66,13 @@ export type GrantFormView =
     };
 
 /** The rules of the form on the agreement this deployment serves (`deps.texts`): none where that
- *  agreement takes no grant. */
+ *  agreement takes no grant. Where it takes one, a draft text on a production deployment is the
+ *  refusal `legal_text_not_approved` (503). */
 export function grantForm(deps: LegalBodyOrderDeps, tenantId: Address): GrantFormView {
   assertRealHuman(deps.world, tenantId, deps.environment);
   const agreement = deps.texts.agreement;
   if (agreement.kind === "plain") return { takesGrant: false };
+  assertDraftsServable(deps.environment, [agreement.text]);
   const { id, version, status } = agreement.text;
   return {
     takesGrant: true,
@@ -82,7 +87,8 @@ export function grantForm(deps: LegalBodyOrderDeps, tenantId: Address): GrantFor
  * The grant an order placed now with `input.grant` would be placed with: the same checks as the
  * order's (`grantOfNewOrder`), the same refusal, and the grant numbered as the order would number
  * it. Where the agreement this deployment serves takes no grant, the refusal `grant_not_taken`
- * (400), whatever the input.
+ * (400), whatever the input; where it takes one, a draft text on a production deployment is the
+ * refusal `legal_text_not_approved` (503), whatever the input.
  */
 export function previewGrant(
   deps: LegalBodyOrderDeps,
@@ -90,7 +96,9 @@ export function previewGrant(
   input: { grant?: unknown },
 ): { grant: GrantView } {
   assertRealHuman(deps.world, tenantId, deps.environment);
-  if (deps.texts.agreement.kind === "plain") throw refusal("grant_not_taken", 400);
+  const agreement = deps.texts.agreement;
+  if (agreement.kind === "plain") throw refusal("grant_not_taken", 400);
+  assertDraftsServable(deps.environment, [agreement.text]);
   const nowMs = (deps.now ?? Date.now)();
   return { grant: toGrantView(grantOfNewOrder(input?.grant, nowMs)) };
 }

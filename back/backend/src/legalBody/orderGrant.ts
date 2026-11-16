@@ -30,8 +30,9 @@ import { agreementTextOfVersion } from "./texts/sets";
  *
  * Once the order is placed, every door that acts on its draft reads the grant back from its row
  * and checks it against the frozen Charter (`readOrderGrant`), and the doors where a legal body
- * could be created under it check its end again (`assertGrantOutlasts`): a legal body is created
- * before the last day of its grant begins.
+ * could be created under it check its end again: the adoption doors at now
+ * (`assertGrantOutlasts`), the link doors at the link's deadline (`assertLinkWithinGrant`). A
+ * legal body is created before the last day of its grant begins.
  *
  * This module takes from `orders.ts` nothing but types, so the two never import each other at run
  * time: `orders.ts` calls `grantOfNewOrder`.
@@ -119,10 +120,23 @@ export function readOrderGrant(
   return grant;
 }
 
-/** Passes when `grant` is null, has no end, or `atSec` (unix seconds) is before its last day begins;
- *  else the refusal `grant_ends_too_soon` (409). Compared as a bigint, so a deadline of any size a
- *  link can carry is compared, never converted to a date. */
-export function assertGrantOutlasts(grant: Grant | null, atSec: bigint): void {
+/** Whether `atSec` (unix seconds) is from the first second of the last day of `grant` on: never
+ *  for no grant, or a grant with no end. Compared as a bigint, so a deadline of any size a link
+ *  can carry is compared, never converted to a date. The one spelling of the rule for both checks
+ *  below. */
+function reachesLastDay(grant: Grant | null, atSec: bigint): boolean {
   const starts = grant === null ? null : grantLastDayStartsAt(grant.value.choices);
-  if (starts !== null && atSec >= BigInt(starts)) throw refusal("grant_ends_too_soon", 409);
+  return starts !== null && atSec >= BigInt(starts);
+}
+
+/** Passes when `grant` is null, has no end, or `atSec` (unix seconds) is before its last day begins;
+ *  else the refusal `grant_ends_too_soon` (409). The two adoption doors' check, at now. */
+export function assertGrantOutlasts(grant: Grant | null, atSec: bigint): void {
+  if (reachesLastDay(grant, atSec)) throw refusal("grant_ends_too_soon", 409);
+}
+
+/** Passes when `grant` is null, has no end, or `deadlineSec` is before its last day begins; else the
+ *  refusal `link_outlasts_grant` (409). The link doors' twin of `assertGrantOutlasts`. */
+export function assertLinkWithinGrant(grant: Grant | null, deadlineSec: bigint): void {
+  if (reachesLastDay(grant, deadlineSec)) throw refusal("link_outlasts_grant", 409);
 }

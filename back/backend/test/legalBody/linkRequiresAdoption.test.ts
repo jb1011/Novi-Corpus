@@ -211,7 +211,7 @@ describe("the link functions refuse an order whose agreement was not adopted", (
 
   test("the sentence tells an agent the guardian adopts the agreement in the web app first", () => {
     expect(LEGAL_BODY_SENTENCES[CODE]).toBe(
-      "The operating agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
+      "This order's agreement has not been adopted yet: the guardian reads it and signs the adoption in the web app first.",
     );
   });
 });
@@ -396,7 +396,7 @@ describe("the doors and the tools answer the same code and sentence", () => {
       for (const name of ["get_link_message", "submit_link"]) {
         const description = tools.find((t) => t.name === name)?.description ?? "";
         expect(description, name).toContain(
-          "Before the link, the order's guardian adopts its operating agreement in the web app: until then this answers agreement_not_adopted.",
+          "Before the link, the order's guardian adopts its agreement in the web app: until then this answers agreement_not_adopted.",
         );
       }
     } finally {

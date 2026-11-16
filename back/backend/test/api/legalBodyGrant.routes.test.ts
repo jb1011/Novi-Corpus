@@ -16,10 +16,11 @@ import { privateKeyToAccount } from "viem/accounts";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import { agreementDocNames } from "../../src/legalBody/agreement";
 import type { GrantChoices } from "../../src/legalBody/grant";
 import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
-import { CHARTER_LEGAL_TEXTS } from "../../src/legalBody/texts/sets";
+import { CHARTER_LEGAL_TEXTS, type LegalTextSet } from "../../src/legalBody/texts/sets";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
@@ -353,6 +354,64 @@ describe("an order's grant", () => {
     // An unknown id gets the very same answer.
     const unknown = await answerOf(await call(app, "GET", grantPath("lb_unknown"), theirs));
     expect(unknown).toMatchObject({ status: res.status, body: res.body });
+  });
+
+  test("an order with no frozen agreement has no grant to show", async () => {
+    // Written through the repository: no door would make it, and its agreement is never frozen.
+    const own = s.repo.create({
+      tenantId: guardian.address,
+      companyId: company(guardian),
+      chainId: CHAIN_ID,
+      factory: FACTORY,
+      amendmentDelay: 172_800,
+    });
+    expect(own.oaManifestHash).toBeNull();
+
+    const res = await answerOf(
+      await call(charterApp(), "GET", grantPath(own.legalBodyId), await sessionOf(guardian)),
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ grant: null });
+  });
+
+  test("an order whose stored agreement does not read back shows no grant", async () => {
+    const app = charterApp();
+    const token = await sessionOf(guardian);
+    const id = await ordered(app, token, { companyId: company(guardian), grant: A });
+    s.docStore.put(agreementDocNames(id).terms, "Terms that were never frozen.\n");
+
+    const res = await answerOf(await call(app, "GET", grantPath(id), token));
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual(refused("agreement_unreadable"));
+  });
+});
+
+// ── A draft text ────────────────────────────────────────────────────────────────────────────
+
+describe("a draft text", () => {
+  test("a draft Charter is not served by the form or the preview of a production deployment", async () => {
+    const token = await sessionOf(guardian);
+    const production = charterApp({ environment: "production" });
+
+    const form = await answerOf(await call(production, "GET", FORM, token));
+    expect(form.status).toBe(503);
+    expect(form.body).toEqual(refused("legal_text_not_approved"));
+    const preview = await answerOf(await call(production, "POST", PREVIEW, token, { grant: A }));
+    expect(preview.status).toBe(503);
+    expect(preview.body).toEqual(refused("legal_text_not_approved"));
+
+    // The same deployment, the agreement's text copied as approved.
+    const charter = CHARTER_LEGAL_TEXTS.agreement;
+    if (charter.kind !== "charter") throw new Error("the Charter pair holds no Charter");
+    const approved: LegalTextSet = {
+      ...CHARTER_LEGAL_TEXTS,
+      agreement: { ...charter, text: { ...charter.text, status: "approved" } },
+    };
+    const served = await answerOf(
+      await call(charterApp({ environment: "production", texts: approved }), "GET", FORM, token),
+    );
+    expect(served.status).toBe(200);
+    expect(served.body.text.status).toBe("approved");
   });
 });
 

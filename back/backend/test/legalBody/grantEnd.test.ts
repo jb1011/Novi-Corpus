@@ -246,7 +246,7 @@ describe("the link doors", () => {
     const ended = adopted(tomorrow);
     await refusedAsync(
       () => linkMessage(deps(), tenant, ended.legalBodyId, { agentId: "42" }),
-      "grant_ends_too_soon",
+      "link_outlasts_grant",
       409,
     );
 
@@ -263,9 +263,18 @@ describe("the link doors", () => {
     for (const ttlSeconds of [57_600, 85_800])
       await refusedAsync(
         () => linkMessage(deps(), tenant, row.legalBodyId, { agentId: "42", ttlSeconds }),
-        "grant_ends_too_soon",
+        "link_outlasts_grant",
         409,
       );
+
+    // The remedy the sentence names: after the refusal, the same order serves an earlier
+    // deadline, and it is still a draft.
+    const earlier = await linkMessage(deps(), tenant, row.legalBodyId, {
+      agentId: "42",
+      ttlSeconds: 57_599,
+    });
+    expect(earlier.deadline).toBe(Number(dayAfterStarts) - 1);
+    expect(rowOf(row.legalBodyId).bindingState).toBe("draft");
   });
 
   test("a signed link whose deadline reaches the grant's last day is refused before the chain is read, and the draft is kept", async () => {
@@ -282,7 +291,7 @@ describe("the link doors", () => {
           late,
           afterReserve,
         ),
-      "grant_ends_too_soon",
+      "link_outlasts_grant",
       409,
     );
     expect(identityBucket).not.toHaveBeenCalled();
