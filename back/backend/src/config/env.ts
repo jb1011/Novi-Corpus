@@ -572,7 +572,8 @@ const EnvSchema = z.object({
     z.coerce.number().int().positive().optional(),
   ),
   /** How many customer companies one tenant may hold open (not abandoned) at once: a positive
-   *  whole number. Unset or blank, DEFAULT_BYO_MAX_OPEN_PER_TENANT (3). */
+   *  whole number. Unset or blank, DEFAULT_BYO_MAX_OPEN_PER_TENANT (3). A sandbox company declared
+   *  under another version of the declaration than the one served takes no place. */
   BYO_MAX_OPEN_PER_TENANT: z.preprocess(
     blankAsUnset,
     z.coerce.number().int().positive().default(DEFAULT_BYO_MAX_OPEN_PER_TENANT),
