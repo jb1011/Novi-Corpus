@@ -51,7 +51,10 @@ import type { StatementFields } from "./texts/statementOfAuthority";
  *     instead of being refused by the check its first request wrote, and with this same
  *     statement's company left out, so a retry signed again goes on to the transaction's lookup;
  *  5. the human's company cap, when one is set;
- *  6. the tenant's caps: open customer companies, and declarations in the last 24 hours;
+ *  6. the tenant's caps: open customer companies, and declarations in the last 24 hours. A
+ *     sandbox company declared under another version of the wording than the one served
+ *     (`deps.text`) takes no place under the first: the order door refuses it
+ *     (`declaration_outdated`), so its tenant may declare a new one;
  *  7. the signature, checked by local recovery over the sentence the server renders itself.
  * Then ONE transaction writes the company and its declaration, and on a sandbox deployment the
  * automatic check (`./sandboxCheck`): nobody is on duty there, so the declaration writes its own
@@ -376,8 +379,10 @@ function assertCaps(
         `this human already controls ${used} companies (max ${humanCap})`,
       );
   }
-  // 6. The tenant's open customer companies, then its declarations in the last 24 hours.
-  const open = deps.companies.countCustomerOpenByTenant(tenantId);
+  // 6. The tenant's open customer companies, then its declarations in the last 24 hours. The
+  //    first count leaves out a sandbox company declared under another version of the wording
+  //    than the one served; the second counts every declaration.
+  const open = deps.companies.countCustomerOpenByTenant(tenantId, deps.text.version);
   if (open >= deps.maxOpenPerTenant)
     throw new ApiError(
       "customer_company_cap",

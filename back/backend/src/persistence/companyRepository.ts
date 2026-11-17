@@ -156,10 +156,16 @@ export interface CompanyRepository {
    */
   countChargeableFormedLegalBodies(): number;
   /**
-   * A tenant's customer companies that are still open: provider `customer`, status `draft` or
-   * `ready`. The cap on a tenant's open declarations reads it, so an abandoned one has left it.
+   * A tenant's customer companies that take a place under its cap on open declarations: provider
+   * `customer`, status `draft` or `ready`, so an abandoned one has left it. One more is left out:
+   * a company whose environment is `sandbox` and whose declaration was made under another version
+   * of the wording than `servedWording`, the version of the declaration the deployment serves. The
+   * order door refuses such a company for as long as that declaration is served
+   * (`declaration_outdated`), so it holds no place. Nothing is written: served again, its wording
+   * makes it count again. A company of any other environment counts whatever its declaration says,
+   * and so does a company with no declaration.
    */
-  countCustomerOpenByTenant(tenantId: string): number;
+  countCustomerOpenByTenant(tenantId: string, servedWording: string): number;
   /**
    * Customer companies that are stale, oldest first, at most `limit`: every condition of the rule
    * but the open legal body, which the caller asks about itself. A company is stale when
@@ -305,6 +311,9 @@ export class SqliteCompanyRepository implements CompanyRepository {
    *  database this build has not migrated lacks the column, and `formation:abandon` constructs
    *  this repository without migrating. */
   private purposeStmts?: { insert: Database.Statement; countFormed: Database.Statement };
+  /** The cap's count, prepared on first use for the same reason: it reads
+   *  `company_declarations`. */
+  private customerOpenStmt?: Database.Statement;
 
   constructor(private readonly db: Database.Database) {
     this.stmts = {
@@ -315,9 +324,9 @@ export class SqliteCompanyRepository implements CompanyRepository {
       ),
       // The quota reader. The EXISTS is the derived-paying predicate, written out once here and
       // once in `livePaymentCount`, both against the same partial index. A customer's own company
-      // is left out of both arms: it has its own cap below.
+      // is left out of both arms: it has its own cap, counted by `countCustomerOpenByTenant`.
       //
-      // 'customer' is the provider value of a customer's own company, here and in the cap below
+      // 'customer' is the provider value of a customer's own company, here and in that count
       // (CUSTOMER_PROVIDER in legalBody/provider.ts).
       countChargeable: db.prepare(
         `SELECT COUNT(*) AS n FROM companies c
@@ -327,10 +336,6 @@ export class SqliteCompanyRepository implements CompanyRepository {
                  OR EXISTS (SELECT 1 FROM formation_payments p
                              WHERE p.company_id = c.company_id
                                AND p.status IN ('quoted','settling')))`,
-      ),
-      countCustomerOpen: db.prepare(
-        `SELECT COUNT(*) AS n FROM companies
-          WHERE tenant_id = ? AND provider = 'customer' AND status IN ('draft','ready')`,
       ),
       livePayments: db.prepare(
         `SELECT COUNT(*) AS n FROM formation_payments
@@ -467,8 +472,24 @@ export class SqliteCompanyRepository implements CompanyRepository {
     return (this.purpose().countFormed.get() as { n: number }).n;
   }
 
-  countCustomerOpenByTenant(tenantId: string): number {
-    return (this.stmts.countCustomerOpen.get(tenantId) as { n: number }).n;
+  countCustomerOpenByTenant(tenantId: string, servedWording: string): number {
+    // 'customer' here too is CUSTOMER_PROVIDER. The test on the wording version is the order
+    // door's (`createOrder`, step 3a), applied to a sandbox company only, on its own environment.
+    this.customerOpenStmt ??= this.db.prepare(
+      `SELECT COUNT(*) AS n FROM companies c
+        WHERE c.tenant_id = @tenant_id
+          AND c.provider = 'customer'
+          AND c.status IN ('draft','ready')
+          AND NOT (c.environment = 'sandbox'
+                   AND EXISTS (SELECT 1 FROM company_declarations d
+                                WHERE d.company_id = c.company_id
+                                  AND d.wording_version <> @served_wording))`,
+    );
+    return (
+      this.customerOpenStmt.get({ tenant_id: tenantId, served_wording: servedWording }) as {
+        n: number;
+      }
+    ).n;
   }
 
   private stale(): { list: Database.Statement; one: Database.Statement } {
