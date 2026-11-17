@@ -180,37 +180,42 @@ describe("pathFacts", () => {
   test("testnet: a sandbox legal-body config, its filing estimate and the wizard's step count", () => {
     const testnet: PublicConfig = {
       ...base,
-      formationPaymentRequired: false,
       formationFeeUsdc: 399,
-      legalBodies: lb({ filingWorkingDays: 5 }),
+      legalBodies: lb({ filingWorkingDays: 5, paymentRequired: false }),
     };
     expect(pathFacts(testnet)).toEqual({
       environment: "sandbox",
       filingWorkingDays: 5,
-      formationPaymentRequired: false,
+      paymentRequired: false,
       formationFeeUsdc: 399,
       stepCount: ONBOARDING_STEP_COUNT,
     });
   });
-  test("production charges only on an explicit true, with the fee the server serves", () => {
+  test("a payment is owed only on the legal-body flag, with the fee the server serves", () => {
     const paid: PublicConfig = {
       ...base,
-      formationPaymentRequired: true,
       formationFeeUsdc: 399,
-      legalBodies: lb({ environment: "production", filingWorkingDays: 7 }),
+      legalBodies: lb({ environment: "production", filingWorkingDays: 7, paymentRequired: true }),
     };
     expect(pathFacts(paid)).toMatchObject({
       environment: "production",
       filingWorkingDays: 7,
-      formationPaymentRequired: true,
+      paymentRequired: true,
       formationFeeUsdc: 399,
     });
+  });
+  test("the wizard's payment flag is not the legal-body flow's", () => {
+    expect(pathFacts({ ...base, formationPaymentRequired: true, legalBodies: lb({}) }).paymentRequired).toBe(false);
+    expect(
+      pathFacts({ ...base, formationPaymentRequired: false, legalBodies: lb({ paymentRequired: true }) })
+        .paymentRequired,
+    ).toBe(true);
   });
   test("nothing said is the smaller truth: production, no estimate, no payment, no fee", () => {
     const smaller = {
       environment: "production",
       filingWorkingDays: null,
-      formationPaymentRequired: false,
+      paymentRequired: false,
       formationFeeUsdc: null,
       stepCount: ONBOARDING_STEP_COUNT,
     };

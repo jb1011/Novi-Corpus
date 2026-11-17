@@ -12,6 +12,7 @@ import { LEGAL_BODY_PHASES } from "@/lib/legalBody/phases";
 import type { LegalBodyMemory } from "@/lib/legalBody/storage";
 import {
   chooserRows,
+  companyScreen,
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
@@ -20,7 +21,6 @@ import {
   memoryAfterThread,
   mergeLegalBodyMemory,
   newCompanyHandover,
-  newCompanyScreen,
   patchEndsIntent,
   threadDoor,
   threadRefsOf,
@@ -265,53 +265,101 @@ describe("threadDoor", () => {
   });
 });
 
-describe("newCompanyScreen: the choice of paths, in place, in front of a new company", () => {
+describe("companyScreen: the choice of paths in front of a new company, and a door that is closed", () => {
   const three = pathCards({
     fullProductAvailable: true,
     legalBodies: { available: true, declarations: true, formedDoor: "offered" } as never,
   });
+  /** A new company on a deployment that takes declarations, with the fields a case changes. */
+  const screen = (over: Partial<Parameters<typeof companyScreen>[0]>) =>
+    companyScreen({
+      companyId: null,
+      company: null,
+      companyStep: "form",
+      door: null,
+      cards: three,
+      declarations: true,
+      ...over,
+    });
 
   test("nothing chosen and more than one way in: the choice, in place", () => {
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: three })).toBe("choice");
+    expect(screen({})).toBe("choice");
   });
 
   test("a chosen door goes to its step; a door that closed since goes back to the choice", () => {
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "form", cards: three })).toBe("step");
+    expect(screen({ door: "form" })).toBe("step");
     const fullUp = pathCards({
       legalBodies: { available: true, declarations: true, formedDoor: "cap_reached" } as never,
     });
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "form", cards: fullUp })).toBe("choice");
+    expect(screen({ door: "form", cards: fullUp })).toBe("choice");
   });
 
   test("the declared door alone needs no choice, and a deployment that takes no declaration says so", () => {
     const only = pathCards({
       legalBodies: { available: true, declarations: true, formedDoor: "hidden" } as never,
     });
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: only })).toBe("step");
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "declare", cards: [] })).toBe("closed");
+    expect(screen({ cards: only })).toBe("step");
+    expect(screen({ door: "declare", cards: [], declarations: false })).toBe("closed");
   });
 
   test("an existing company is never asked again", () => {
-    expect(newCompanyScreen({ companyId: "co_1", companyStep: "form", door: null, cards: three })).toBe("step");
+    expect(screen({ companyId: "co_1" })).toBe("step");
   });
 
   test("a company step past the form is the step, whatever the cards", () => {
-    expect(newCompanyScreen({ companyId: null, companyStep: "loading", door: null, cards: three })).toBe("step");
-    expect(newCompanyScreen({ companyId: null, companyStep: undefined, door: null, cards: [] })).toBe("step");
+    expect(screen({ companyStep: "loading" })).toBe("step");
+    expect(screen({ companyStep: undefined, cards: [] })).toBe("step");
   });
 
   test("the declare door goes to its step while declarations are taken", () => {
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "declare", cards: three })).toBe("step");
+    expect(screen({ door: "declare" })).toBe("step");
   });
 
   test("the full product alone is still a choice: it is never opened from here unasked", () => {
     const fullOnly = pathCards({ fullProductAvailable: true, legalBodies: { available: false } });
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: fullOnly })).toBe("choice");
+    expect(screen({ cards: fullOnly, declarations: false })).toBe("choice");
   });
 
   test("no way in at all is the closed sentence, never an empty choice", () => {
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: [] })).toBe("closed");
-    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "form", cards: [] })).toBe("closed");
+    expect(screen({ cards: [], declarations: false })).toBe("closed");
+    expect(screen({ door: "form", cards: [], declarations: false })).toBe("closed");
+  });
+
+  describe("where the deployment takes no declarations", () => {
+    const formOnly = pathCards({
+      legalBodies: { available: true, declarations: false, formedDoor: "offered" } as never,
+    });
+
+    test("a declared company of the account back on its form is closed", () => {
+      const declared = company("co_d", { provider: "customer", state: "abandoned" });
+      expect(
+        screen({ companyId: "co_d", company: declared, door: "form", cards: formOnly, declarations: false }),
+      ).toBe("closed");
+    });
+
+    test("a formed company of the account back on its form is its step: it never needed the declared door", () => {
+      const formed = company("co_f", { provider: "doola", purpose: "legal_body", state: "abandoned" });
+      expect(
+        screen({ companyId: "co_f", company: formed, door: null, cards: formOnly, declarations: false }),
+      ).toBe("step");
+    });
+
+    test("a new company on the form door is its step", () => {
+      expect(screen({ door: "form", cards: formOnly, declarations: false })).toBe("step");
+    });
+
+    test("an existing company on a step other than its form is that step", () => {
+      const declared = company("co_d", { provider: "customer" });
+      for (const companyStep of ["loading", "evidence", "waiting", "failed", "revoked"] as const)
+        expect(
+          screen({ companyId: "co_d", company: declared, companyStep, cards: formOnly, declarations: false }),
+        ).toBe("step");
+    });
+
+    test("a declared company back on its form where declarations are taken is its step", () => {
+      const declared = company("co_d", { provider: "customer", state: "abandoned" });
+      expect(screen({ companyId: "co_d", company: declared })).toBe("step");
+    });
   });
 });
 

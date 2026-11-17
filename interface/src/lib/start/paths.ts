@@ -109,7 +109,9 @@ export function fullProductHref(
 export type PathFacts = {
   environment: "sandbox" | "production";
   filingWorkingDays: number | null;
-  formationPaymentRequired: boolean;
+  /** Whether a new legal-body company owes a payment: the flag the legal-body flow itself reads
+   *  (its payment phase, its money sentence), never the wizard's. */
+  paymentRequired: boolean;
   formationFeeUsdc: number | null;
   /** The wizard's steps, for the full-product card. */
   stepCount: number;
@@ -121,7 +123,7 @@ export function pathFacts(config: PublicConfig | null | undefined): PathFacts {
   return {
     environment: available?.environment === "sandbox" ? "sandbox" : "production",
     filingWorkingDays: available?.filingWorkingDays ?? null,
-    formationPaymentRequired: config?.formationPaymentRequired === true,
+    paymentRequired: available?.paymentRequired === true,
     formationFeeUsdc: config?.formationFeeUsdc ?? null,
     stepCount: ONBOARDING_STEP_COUNT,
   };

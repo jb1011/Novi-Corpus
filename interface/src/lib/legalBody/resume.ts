@@ -108,24 +108,37 @@ export function threadDoor(company: CompanyView | null, memoryDoor: DoorChoice |
 
 /**
  * What the company phase shows for a thread: the choice of paths, in place; the sentence that
- * this deployment takes no new company; or the company step.
+ * this deployment does not take the company; or the company step.
  *
- * A company that exists, or a company step past its form, is the step: nobody is asked again. In
- * front of a new company the door the memory holds decides while the deployment still offers it:
- * a chosen form door whose card is no longer offered goes back to the choice; a chosen declare
- * door with no declare card is closed. With no door chosen, the choice whenever there is a form
- * or full-product card; the declare card alone needs no choice. No card at all is closed, never
- * an empty choice.
+ * A company that exists, or a company step past its form, is never asked again: it is the step,
+ * except a declared company back on its form (abandoned) where the deployment takes no
+ * declarations, which is closed. The door is the thread's (`threadDoor`), so a formed company is
+ * never closed by declarations being off: it never needed the declared door.
+ *
+ * In front of a new company the door the memory holds decides while the deployment still offers
+ * it: a chosen form door whose card is no longer offered goes back to the choice; a chosen declare
+ * door with no declare card is closed. With no door chosen, the choice whenever there is a form or
+ * full-product card; the declare card alone needs no choice. No card at all is closed, never an
+ * empty choice.
  */
-export type NewCompanyScreen = "choice" | "closed" | "step";
+export type CompanyScreen = "choice" | "closed" | "step";
 
-export function newCompanyScreen(p: {
+export function companyScreen(p: {
   companyId: string | null;
+  /** The thread's company as read, null while it is new (or not read yet). */
+  company: CompanyView | null;
   companyStep: CompanyStep | undefined;
+  /** The door the memory holds. */
   door: DoorChoice | null;
   cards: readonly PathCard[];
-}): NewCompanyScreen {
-  if (p.companyId !== null || p.companyStep !== "form") return "step";
+  /** The legal-body config's `declarations === true`. */
+  declarations: boolean;
+}): CompanyScreen {
+  if (p.companyId !== null || p.companyStep !== "form") {
+    const declaredForm =
+      p.companyStep === "form" && threadDoor(p.company, p.door) === "declare";
+    return declaredForm && !p.declarations ? "closed" : "step";
+  }
   const card = (id: PathCard["id"]) => p.cards.find((c) => c.id === id);
   if (p.door === "form") {
     if (card("form")?.state === "offered") return "step";

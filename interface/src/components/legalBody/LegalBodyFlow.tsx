@@ -46,7 +46,6 @@ import {
 import {
   anySignInRequired,
   bannerLines,
-  declarationsClosed,
   identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
@@ -71,6 +70,7 @@ import {
 } from "@/lib/legalBody/phases";
 import {
   chooserRows,
+  companyScreen,
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
@@ -78,7 +78,6 @@ import {
   jumpMemoryPatch,
   memoryAfterThread,
   mergeLegalBodyMemory,
-  newCompanyScreen,
   patchEndsIntent,
   threadDoor,
   threadRefsOf,
@@ -575,13 +574,16 @@ function LegalBodySession({
         return <FilingStep key={kit.companyId ?? "filing"} kit={kit} />;
       case "company": {
         // In front of a new company with no door chosen, the choice of paths, in place: a door
-        // picked here is remembered, the full product opens the wizard.
+        // picked here is remembered, the full product opens the wizard. `companyScreen` decides,
+        // closed doors included; this renders its answer.
         const cards = pathCards(publicConfig);
-        const opening = newCompanyScreen({
+        const opening = companyScreen({
           companyId: kit.companyId,
+          company,
           companyStep: derivation.companyStep,
           door: memory?.door ?? null,
           cards,
+          declarations: config.declarations === true,
         });
         if (opening === "choice")
           return (
@@ -600,10 +602,7 @@ function LegalBodySession({
               }}
             />
           );
-        // A new company this deployment does not take; and, as before, a company of the account
-        // back on its form where declarations are off.
-        return opening === "closed" ||
-          (kit.companyId !== null && declarationsClosed(config, derivation)) ? (
+        return opening === "closed" ? (
           <StepPlaceholder kit={kit} sentence={LEGAL_BODY_COPY.company.declarationsOff} />
         ) : (
           // One form per thread: a new declaration never inherits another thread's typing.

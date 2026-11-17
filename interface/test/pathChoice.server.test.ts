@@ -25,7 +25,7 @@ const THREE: PathCard[] = [
 const SANDBOX: PathFacts = {
   environment: "sandbox",
   filingWorkingDays: 5,
-  formationPaymentRequired: false,
+  paymentRequired: false,
   formationFeeUsdc: 399,
   stepCount: 8,
 };
@@ -33,12 +33,10 @@ const SANDBOX: PathFacts = {
 const PRODUCTION_PAID: PathFacts = {
   environment: "production",
   filingWorkingDays: 5,
-  formationPaymentRequired: true,
+  paymentRequired: true,
   formationFeeUsdc: 399,
   stepCount: 8,
 };
-
-const outputs: string[] = [];
 
 function render(p: {
   cards?: readonly PathCard[];
@@ -57,7 +55,6 @@ function render(p: {
       onContinue: () => {},
     }),
   );
-  outputs.push(html);
   // The apostrophes a person reads ("My agent's company"), as they read them; tags unchanged.
   return html.replace(/&#x27;/g, "'");
 }
@@ -111,7 +108,13 @@ describe("the choice on testnet", () => {
     }
     expect(radio(html, "declare")).toMatch(CHECKED);
     expect(radio(html, "form")).not.toMatch(CHECKED);
-    expect(occurrences(html, 'name="path"')).toBe(3);
+    // One group: the three radios share one name, and nothing else on the screen carries it.
+    const names = (["form", "declare", "full"] as const).map(
+      (id) => radio(html, id)?.match(/\sname="([^"]+)"/)?.[1] ?? null,
+    );
+    expect(names[0]).toBeTruthy();
+    expect(new Set(names).size).toBe(1);
+    expect(occurrences(html, `name="${names[0]}"`)).toBe(3);
   });
 
   test("what every path needs is said once, under the cards", () => {
@@ -169,7 +172,7 @@ describe("the choice on production", () => {
 
   test("a deployment that says nothing about payment or time shows no price and no time", () => {
     const html = render({
-      facts: { ...PRODUCTION_PAID, formationPaymentRequired: false, filingWorkingDays: null },
+      facts: { ...PRODUCTION_PAID, paymentRequired: false, filingWorkingDays: null },
     });
     expect(html).not.toContain("USDC, paid before filing");
     expect(html).not.toContain("No payment on testnet");
@@ -182,10 +185,21 @@ describe("the choice on production", () => {
     expect(html).not.toContain("{fee}");
   });
 
-  test("a charge on testnet is a price, never no payment", () => {
-    const html = render({ facts: { ...SANDBOX, formationPaymentRequired: true } });
+  test("a charge on testnet is a price on the form card, and neither card says no payment", () => {
+    const html = render({ facts: { ...SANDBOX, paymentRequired: true } });
     expect(html).toContain("399 USDC, paid before filing");
-    expect(occurrences(html, "No payment on testnet")).toBe(1); // the declare card's only
+    expect(html).not.toContain("No payment on testnet");
+    expect(html).toContain(S.declare.needsSandbox);
+  });
+
+  test("a charge on testnet with no fee to name: no price line, and still no payment line", () => {
+    const html = render({ facts: { ...SANDBOX, paymentRequired: true, formationFeeUsdc: null } });
+    expect(html).not.toContain("USDC, paid before filing");
+    expect(html).not.toContain("No payment on testnet");
+  });
+
+  test("testnet that charges nothing says so once on each legal-body card", () => {
+    expect(occurrences(render({}), "No payment on testnet")).toBe(2);
   });
 });
 
@@ -226,11 +240,22 @@ describe("the way back", () => {
 
 describe("every render", () => {
   test("carries no em dash and no unfilled placeholder", () => {
-    render({});
-    render({ facts: PRODUCTION_PAID });
-    expect(outputs.length).toBeGreaterThan(5);
-    for (const html of outputs) {
-      expect(html).not.toContain("—");
+    const fullUp: PathCard[] = [
+      { id: "form", state: "full_up" },
+      { id: "declare", state: "offered" },
+      { id: "full", state: "offered" },
+    ];
+    const renders = [
+      render({}),
+      render({ initial: "form", busy: true }),
+      render({ cards: fullUp, initial: "declare" }),
+      render({ facts: PRODUCTION_PAID }),
+      render({ facts: { ...PRODUCTION_PAID, paymentRequired: false, filingWorkingDays: null } }),
+      render({ facts: { ...SANDBOX, paymentRequired: true } }),
+      render({ back: { href: "/agents", label: START_COPY.backToAgents } }),
+    ];
+    for (const html of renders) {
+      expect(html).not.toContain("\u2014");
       expect(html).not.toMatch(/\{(days|fee|count)\}/);
     }
   });
