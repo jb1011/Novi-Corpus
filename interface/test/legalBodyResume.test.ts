@@ -11,6 +11,7 @@ import { selectLegalBodyThread, type LegalBodyThread } from "@/lib/legalBody/flo
 import { LEGAL_BODY_PHASES } from "@/lib/legalBody/phases";
 import type { LegalBodyMemory } from "@/lib/legalBody/storage";
 import {
+  arrivalAction,
   arrivalMemory,
   chooserRows,
   companyScreen,
@@ -324,6 +325,32 @@ describe("arrivalMemory: an order or a company named in the address", () => {
     const byCompany = arrivalMemory(TENANT, null, { order: null, company: "co_2" })!;
     expect(selectLegalBodyThread({ companies, orders, stored: byCompany, nowMs: NOW }))
       .toEqual({ kind: "company", companyId: "co_2" });
+  });
+});
+
+describe("arrivalAction: when the address's arrival is taken", () => {
+  const arrival = memory({ orderId: "ord_2" });
+  const NOTHING = { write: null, replace: false };
+
+  test("nothing before the gates are passed: the address waits for the session really used", () => {
+    for (const gate of ["signin", "human"] as const)
+      expect(arrivalAction({ gate, named: true, arrival, done: false })).toEqual(NOTHING);
+  });
+
+  test("past the gates, an address that names a handle is written, then cleaned", () => {
+    expect(arrivalAction({ gate: "flow", named: true, arrival, done: false })).toEqual({ write: arrival, replace: true });
+  });
+
+  test("past the gates, an address that names nothing usable is cleaned, and nothing is written", () => {
+    expect(arrivalAction({ gate: "flow", named: true, arrival: null, done: false })).toEqual({ write: null, replace: true });
+  });
+
+  test("once taken, never again on this mount", () => {
+    expect(arrivalAction({ gate: "flow", named: true, arrival, done: true })).toEqual(NOTHING);
+  });
+
+  test("an address that names no order and no company: nothing", () => {
+    expect(arrivalAction({ gate: "flow", named: false, arrival: null, done: false })).toEqual(NOTHING);
   });
 });
 

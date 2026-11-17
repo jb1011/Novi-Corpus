@@ -8,6 +8,7 @@ import {
   type LegalBodyThread,
   type LegalBodyThreadRef,
 } from "@/lib/legalBody/flow";
+import type { LegalBodyGate } from "@/lib/legalBody/gates";
 import type { LegalBodyRailPhase } from "@/lib/legalBody/phases";
 import {
   isHandle,
@@ -119,6 +120,27 @@ export function arrivalMemory(
   if (params.company !== null && isHandle(params.company))
     return mergeLegalBodyMemory(tenant, stored, { ...fresh, companyId: params.company, orderId: null });
   return null;
+}
+
+/**
+ * What the flow does with an address that names an order or a company: write the memory it hands
+ * the flow (`arrivalMemory`, when it has one), then clean the address; or nothing yet.
+ *
+ * Nothing before the gates are passed: a session that is not the one really used (a stale wallet's,
+ * cleared a moment later when the wallet reconnects as another) never takes the link, and the
+ * address keeps it for the session that is. Nothing when the address names neither, and nothing
+ * once taken on this mount.
+ */
+export function arrivalAction(p: {
+  gate: LegalBodyGate;
+  /** The address carries `order` or `company`, whatever their values. */
+  named: boolean;
+  arrival: LegalBodyMemory | null;
+  /** Already taken on this mount. */
+  done: boolean;
+}): { write: LegalBodyMemory | null; replace: boolean } {
+  if (p.gate !== "flow" || !p.named || p.done) return { write: null, replace: false };
+  return { write: p.arrival, replace: true };
 }
 
 /**

@@ -1,6 +1,13 @@
 "use client";
 
-import { Suspense, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useBytecode } from "wagmi";
@@ -69,6 +76,7 @@ import {
   type LegalBodyRailPhase,
 } from "@/lib/legalBody/phases";
 import {
+  arrivalAction,
   arrivalMemory,
   chooserRows,
   companyScreen,
@@ -125,9 +133,9 @@ import { ThreadChooser } from "./ThreadChooser";
  *
  * Nothing here writes to the server on its own: every write is a click's. The effects are three:
  * an address that names an order or a company (`?order=`, `?company=`, the agents page's links)
- * is taken once, the memory it hands the flow (`arrivalMemory`) written to the store, and the
- * address cleaned; the memory's write once a thread is on screen; and the scroll to the top when
- * the screen changes.
+ * is taken once the gates are passed (`arrivalAction`), the memory it hands the flow
+ * (`arrivalMemory`) written to the store, and the address cleaned; the memory's write once a
+ * thread is on screen; and the scroll to the top when the screen changes.
  *
  * Three facts live in this visit's memory only, never in the store: that a draft's agreement was
  * read (so the draft moves on to the identity step, and a reload shows the agreement again); a
@@ -265,29 +273,23 @@ function LegalBodySession({
   const [view, setView] = useState<GateView>(engaged ? "signin" : null);
   // The token a step's request was refused under: that session is over, whatever it still says.
   const [refusedToken, setRefusedToken] = useState<string | null>(null);
-  // An order or a company named in the address, taken once, as the session opens: the memory it
-  // hands the flow, or null when the address names nothing that is a handle.
+  // An order or a company named in the address, read as this session mounts: the memory it hands
+  // the flow, or null when the address names nothing that is a handle. The store and the address
+  // are left alone until the gates are passed (`arrivalAction`).
   const [fromAddress] = useState<LegalBodyMemory | null>(() =>
     arrivalMemory(tenant, readLegalBodyMemory(tenant), {
       order: searchParams.get("order"),
       company: searchParams.get("company"),
     }),
   );
+  const named = searchParams.has("order") || searchParams.has("company");
+  // Whether this mount took the address: it is taken at most once.
+  const arrivalTaken = useRef(false);
   // This visit's snapshot of the memory. The store is written once a thread is on screen; the
   // snapshot changes only on a click, so a closed order stays on screen for this visit.
   const [memory, setMemory] = useState<LegalBodyMemory | null>(
     () => fromAddress ?? readLegalBodyMemory(tenant),
   );
-  // The address is cleaned once it is taken, so a reload or a later click never applies it again.
-  // The arrival is written to the store first: the thread's own write compares with the snapshot,
-  // which already holds it, so without this the store would keep the old thread for a reload. A
-  // parameter that names nothing writes nothing, and is cleaned all the same.
-  const named = searchParams.has("order") || searchParams.has("company");
-  useEffect(() => {
-    if (!named) return;
-    if (fromAddress) writeLegalBodyMemory(fromAddress);
-    router.replace("/legal-body");
-  }, [named, fromAddress, router]);
   // A "start another" click, until what it starts exists: the memory's, so a reload keeps it.
   const intent = memory?.startAnother ?? null;
   const [mountedAt] = useState(() => Date.now());
@@ -374,6 +376,25 @@ function LegalBodySession({
     view,
     identityBlocks: identityBlocksGate(me?.identity),
   });
+
+  // The address's arrival, once the gates are passed, so the session really used takes it (a
+  // stale wallet's session, cleared a moment later, never does): the arrival is written to the
+  // store, then the address is cleaned so a reload or a later click never applies it again. The
+  // write is needed because the thread's own write below compares with the snapshot, which
+  // already holds the arrival; declared before it, so a thread on screen in the same render has the
+  // last word. A parameter that names nothing writes nothing, and is cleaned all the same.
+  useEffect(() => {
+    const action = arrivalAction({
+      gate,
+      named,
+      arrival: fromAddress,
+      done: arrivalTaken.current,
+    });
+    if (action.write === null && !action.replace) return;
+    arrivalTaken.current = true;
+    if (action.write) writeLegalBodyMemory(action.write);
+    if (action.replace) router.replace("/legal-body");
+  }, [gate, named, fromAddress, router]);
 
   // The intent stays in the store while it is live; once what it started exists, the thread on
   // screen is the store's and the intent leaves it.
