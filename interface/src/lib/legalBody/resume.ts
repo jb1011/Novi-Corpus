@@ -8,7 +8,12 @@ import {
   type LegalBodyThreadRef,
 } from "@/lib/legalBody/flow";
 import type { LegalBodyRailPhase } from "@/lib/legalBody/phases";
-import type { LegalBodyMemory, OwnerChoice } from "@/lib/legalBody/storage";
+import type {
+  DoorChoice,
+  LegalBodyMemory,
+  OwnerChoice,
+  StoredIntent,
+} from "@/lib/legalBody/storage";
 
 /**
  * Resuming the flow from the server's state, the local memory as a hint.
@@ -30,6 +35,7 @@ const EMPTY: Memo = {
   identityChoice: null,
   signer: null,
   suggestedAgentId: null,
+  startAnother: null,
 };
 
 /** The company and order a screen reads for a thread; null for a chooser, which has none yet. */
@@ -66,8 +72,36 @@ export function mergeLegalBodyMemory(
     identityChoice: b.identityChoice,
     signer: b.signer,
     suggestedAgentId: b.suggestedAgentId,
+    startAnother: b.startAnother,
   };
   return { ...kept, ...patch, tenant };
+}
+
+/**
+ * The memory that hands a new company over to the flow: the door it goes through, and an
+ * `another-company` intent that knows the companies there are, so the flow shows a new company
+ * until one appears that was not among them.
+ */
+export function newCompanyHandover(
+  tenant: Address,
+  stored: LegalBodyMemory | null,
+  door: DoorChoice,
+  companies: readonly { companyId: string }[],
+): LegalBodyMemory {
+  return mergeLegalBodyMemory(tenant, stored, {
+    door,
+    startAnother: { kind: "another-company", known: companies.map((c) => c.companyId) },
+  });
+}
+
+/**
+ * Which company door a thread is on. A company decides: a formed one is on the form door, any
+ * other on the declare door, whatever was chosen for another thread. With no company yet, the
+ * door the memory holds, and the declare door when it holds none.
+ */
+export function threadDoor(company: CompanyView | null, memoryDoor: DoorChoice | null): DoorChoice {
+  if (company !== null) return isFormedCompany(company) ? "form" : "declare";
+  return memoryDoor ?? "declare";
 }
 
 /**
@@ -75,12 +109,15 @@ export function mergeLegalBodyMemory(
  * chooser, which changes nothing until a pick).
  *
  * The draft choices belong to one order: another order starts with none. A closed order is shown
- * once: its id is dropped after it renders, so the next visit does not show it again.
+ * once: its id is dropped after it renders, so the next visit does not show it again. The intent
+ * is the caller's: the stored one while it is live, null once it is spent (`intentSpent`), so a
+ * spent intent leaves the store once the thread it led to is on screen.
  */
 export function memoryAfterThread(p: {
   tenant: Address;
   stored: LegalBodyMemory | null;
   thread: LegalBodyThread;
+  intent: LegalBodyIntent | null;
 }): LegalBodyMemory | null {
   const refs = threadRefsOf(p.thread);
   if (refs === null) return null;
@@ -97,6 +134,7 @@ export function memoryAfterThread(p: {
     identityChoice: base.identityChoice,
     signer: base.signer,
     suggestedAgentId: base.suggestedAgentId,
+    startAnother: p.intent,
   };
   const unchanged =
     sameAddress(base.tenant, next.tenant) &&
@@ -107,8 +145,18 @@ export function memoryAfterThread(p: {
     base.door === next.door &&
     base.identityChoice === next.identityChoice &&
     base.signer === next.signer &&
-    base.suggestedAgentId === next.suggestedAgentId;
+    base.suggestedAgentId === next.suggestedAgentId &&
+    sameIntent(base.startAnother, next.startAnother);
   return unchanged ? null : next;
+}
+
+/** Two intents with the same values: a stored one read back is another object. */
+function sameIntent(a: LegalBodyIntent | null, b: LegalBodyIntent | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "another-agent" && b.kind === "another-agent" && a.companyId !== b.companyId)
+    return false;
+  return a.known.length === b.known.length && a.known.every((id, i) => id === b.known[i]);
 }
 
 /**
@@ -125,14 +173,29 @@ export function draftChoices(
 }
 
 /**
- * A click that starts something new, held in memory only until what it starts exists:
+ * A click that starts something new, held in the memory (`startAnother`, so a reload keeps it)
+ * until what it starts exists:
  *  - `another-agent`: a new order on this company (the done page's first button, a closed order's
  *    way out); `known` is the orders there were at the click;
  *  - `another-company`: a new declaration; `known` is the companies there were at the click.
  */
-export type LegalBodyIntent =
-  | { kind: "another-agent"; companyId: string; known: readonly string[] }
-  | { kind: "another-company"; known: readonly string[] };
+export type LegalBodyIntent = StoredIntent;
+
+/**
+ * Whether what the intent started exists, so it no longer holds the thread:
+ *  - `another-company`: a company exists that was not there at the click;
+ *  - `another-agent`: its company is gone, or an order of it exists that was not there at the
+ *    click.
+ */
+export function intentSpent(
+  intent: LegalBodyIntent,
+  p: { companies: CompanyView[]; orders: LegalBodyOrderView[] },
+): boolean {
+  if (intent.kind === "another-company")
+    return p.companies.some((c) => !intent.known.includes(c.companyId));
+  if (!p.companies.some((c) => c.companyId === intent.companyId)) return true;
+  return p.orders.some((o) => o.companyId === intent.companyId && !intent.known.includes(o.id));
+}
 
 /**
  * The thread with the intent over it. The intent ends by itself once what it started exists, so
@@ -154,16 +217,17 @@ export function threadWithIntent(
   },
 ): LegalBodyThread {
   if (intent === null) return thread;
-  if (intent.kind === "another-company") {
-    const appeared = p.companies.some((c) => !intent.known.includes(c.companyId));
-    return appeared ? thread : { kind: "new-company" };
-  }
+  if (!intentSpent(intent, p))
+    return intent.kind === "another-company"
+      ? { kind: "new-company" }
+      : { kind: "company", companyId: intent.companyId };
+  if (intent.kind === "another-company") return thread;
   if (!p.companies.some((c) => c.companyId === intent.companyId)) return thread;
-  const fresh = p.orders
+  // Spent with its company there: an order of it appeared after the click.
+  const newest = p.orders
     .filter((o) => o.companyId === intent.companyId && !intent.known.includes(o.id))
-    .sort((a, b) => timeOf(b) - timeOf(a));
-  if (fresh.length === 0) return { kind: "company", companyId: intent.companyId };
-  const newest = fresh[0];
+    .sort((a, b) => timeOf(b) - timeOf(a))[0];
+  if (newest === undefined) return thread;
   const liveHere =
     newest.chainId === p.where.chainId &&
     sameAddress(newest.factory, p.where.factory) &&

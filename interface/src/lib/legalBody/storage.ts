@@ -6,7 +6,8 @@ import type { Address } from "@/lib/api/types";
  * The flow handles a company name, a filing number, a declarant's name and title, a statement,
  * the typed data behind it and a signature. None of that is written to a browser store. What
  * survives a reload is which wallet the memory belongs to, the backend's handles for the company
- * and the order, and the two draft-only choices; everything else is read back from the server.
+ * and the order, the two draft-only choices, the entrance's answers, and a "start another" click
+ * with the handles there were when it was made; everything else is read back from the server.
  *
  * Persistence is an ALLOWLIST, and each value is checked against its shape on the way in and on
  * the way out: a field nobody thought about is not persisted, and a typed value put under an
@@ -28,11 +29,25 @@ export const PERSISTED_LEGAL_BODY_KEYS = [
   "identityChoice",
   "signer",
   "suggestedAgentId",
+  "startAnother",
 ] as const satisfies readonly (keyof LegalBodyMemory)[];
 
 export type OwnerChoice = "this-wallet" | "elsewhere";
 export type DoorChoice = "declare" | "form";
 export type IdentityChoice = "has-one" | "not-yet";
+
+/**
+ * A "start another" click, kept until what it starts exists: handles only.
+ *  - `another-agent`: a new order on this company; `known` is the orders there were at the click;
+ *  - `another-company`: a new company; `known` is the companies there were at the click.
+ */
+export type StoredIntent =
+  | { kind: "another-agent"; companyId: string; known: readonly string[] }
+  | { kind: "another-company"; known: readonly string[] };
+
+/** The most handles an intent's `known` may carry into the store. A longer one is not stored; this
+ *  visit's snapshot still holds it. */
+export const MAX_STORED_INTENT_KNOWN = 500;
 
 export type LegalBodyMemory = {
   /** The signed-in wallet the memory belongs to. */
@@ -51,6 +66,8 @@ export type LegalBodyMemory = {
   signer: OwnerChoice | null;
   /** An identity number the entrance offered. The identity step confirms it. */
   suggestedAgentId: string | null;
+  /** A "start another" click, until what it starts exists. */
+  startAnother: StoredIntent | null;
 };
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
@@ -87,6 +104,31 @@ function own(state: Record<string, unknown>, key: string): unknown {
   return Object.prototype.hasOwnProperty.call(state, key) ? state[key] : undefined;
 }
 
+/** A list of at most `MAX_STORED_INTENT_KNOWN` handles, copied; null for anything else. */
+function knownOf(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length > MAX_STORED_INTENT_KNOWN) return null;
+  const known: string[] = [];
+  for (const id of value) {
+    const handle = matching(id, HANDLE);
+    if (handle === null) return null;
+    known.push(handle);
+  }
+  return known;
+}
+
+/** The intent rebuilt from its allowed names only, or null when any of them fails its shape. */
+function intentOf(value: unknown): StoredIntent | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const intent = value as Record<string, unknown>;
+  const known = knownOf(own(intent, "known"));
+  if (known === null) return null;
+  const kind = own(intent, "kind");
+  if (kind === "another-company") return { kind, known };
+  if (kind !== "another-agent") return null;
+  const companyId = matching(own(intent, "companyId"), HANDLE);
+  return companyId === null ? null : { kind, companyId, known };
+}
+
 /**
  * Picks the allowlist from any object, validates each value's shape, nulls what fails.
  *
@@ -108,6 +150,7 @@ export function buildLegalBodyMemory(
     identityChoice: identityChoiceOf(own(state, "identityChoice")),
     signer: ownerChoiceOf(own(state, "signer")),
     suggestedAgentId: matching(own(state, "suggestedAgentId"), AGENT_ID),
+    startAnother: intentOf(own(state, "startAnother")),
   };
 }
 

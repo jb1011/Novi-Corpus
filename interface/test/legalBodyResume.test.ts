@@ -14,16 +14,20 @@ import {
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
+  intentSpent,
   jumpMemoryPatch,
   memoryAfterThread,
   mergeLegalBodyMemory,
+  newCompanyHandover,
   patchEndsIntent,
+  threadDoor,
   threadRefsOf,
   threadWithIntent,
 } from "@/lib/legalBody/resume";
 
 /** Anvil's first published test account, and the public testnet factory. */
 const TENANT = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address;
+const OTHER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as Address;
 const FACTORY = "0x069f4ADEabcBEd3ffFe2cB6Aaf9e7a66E8731456" as Address;
 const OTHER_FACTORY = "0x00000000000000000000000000000000000fac70" as Address;
 const CHAIN = 5042002;
@@ -43,6 +47,7 @@ const memory = (over: Partial<LegalBodyMemory> = {}): LegalBodyMemory => ({
   identityChoice: null,
   signer: null,
   suggestedAgentId: null,
+  startAnother: null,
   ...over,
 });
 
@@ -104,7 +109,7 @@ describe("threadRefsOf", () => {
 
 describe("memoryAfterThread", () => {
   const after = (stored: LegalBodyMemory | null, thread: LegalBodyThread) =>
-    memoryAfterThread({ tenant: TENANT, stored, thread });
+    memoryAfterThread({ tenant: TENANT, stored, thread, intent: null });
 
   test("an order thread is remembered with its company", () => {
     expect(after(null, { kind: "order", companyId: "c1", orderId: "o1" })).toEqual(
@@ -153,6 +158,30 @@ describe("memoryAfterThread", () => {
   });
 });
 
+describe("memoryAfterThread: the start-another intent", () => {
+  test("the stored thread keeps a live intent and drops a spent one", () => {
+    const stored = memory({ companyId: null, orderId: null, startAnother: { kind: "another-company", known: [] } });
+    expect(memoryAfterThread({ tenant: TENANT, stored, thread: { kind: "new-company" }, intent: stored.startAnother })).toBeNull();
+    expect(memoryAfterThread({ tenant: TENANT, stored, thread: { kind: "new-company" }, intent: null })?.startAnother).toBeNull();
+  });
+
+  test("an intent that differs from the stored one is a change, and is written", () => {
+    const intent = { kind: "another-agent" as const, companyId: "c1", known: ["o1"] };
+    const stored = memory({ companyId: "c1" });
+    expect(memoryAfterThread({ tenant: TENANT, stored, thread: { kind: "company", companyId: "c1" }, intent })).toEqual(
+      memory({ companyId: "c1", startAnother: intent }),
+    );
+    // The same intent read back from the store is another object with the same values: no change.
+    const reread = memory({ companyId: "c1", startAnother: { ...intent, known: [...intent.known] } });
+    expect(memoryAfterThread({ tenant: TENANT, stored: reread, thread: { kind: "company", companyId: "c1" }, intent })).toBeNull();
+    // An intent known with other ids is another intent.
+    const older = memory({ companyId: "c1", startAnother: { ...intent, known: [] } });
+    expect(
+      memoryAfterThread({ tenant: TENANT, stored: older, thread: { kind: "company", companyId: "c1" }, intent })?.startAnother,
+    ).toEqual(intent);
+  });
+});
+
 describe("draftChoices", () => {
   const stored = memory({ companyId: "c1", orderId: "o1", ownerChoice: "this-wallet", agentId: "42" });
 
@@ -191,6 +220,67 @@ describe("mergeLegalBodyMemory", () => {
   test("the base's tenant never wins over the session's", () => {
     const other = memory({ tenant: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as Address, companyId: "c1" });
     expect(mergeLegalBodyMemory(TENANT, other, {}).tenant).toBe(TENANT);
+  });
+
+  test("the start-another intent is carried, and a patch replaces it", () => {
+    const intent = { kind: "another-company" as const, known: ["c1"] };
+    expect(mergeLegalBodyMemory(TENANT, memory({ startAnother: intent }), { agentId: "42" }).startAnother).toEqual(intent);
+    expect(mergeLegalBodyMemory(TENANT, memory({ startAnother: intent }), { startAnother: null }).startAnother).toBeNull();
+  });
+});
+
+describe("newCompanyHandover", () => {
+  test("a handover for another account starts from nothing of the first", () => {
+    const m = newCompanyHandover(OTHER, null, "form", [{ companyId: "co_9" }]);
+    expect(m).toMatchObject({ tenant: OTHER, door: "form", companyId: null, orderId: null,
+      startAnother: { kind: "another-company", known: ["co_9"] } });
+  });
+
+  test("over this account's memory: the door and the companies there are, the rest kept", () => {
+    const stored = memory({ companyId: "co_1", signer: "elsewhere", startAnother: { kind: "another-agent", companyId: "co_1", known: [] } });
+    expect(newCompanyHandover(TENANT, stored, "declare", [{ companyId: "co_1" }, { companyId: "co_2" }])).toEqual(
+      memory({
+        companyId: "co_1",
+        signer: "elsewhere",
+        door: "declare",
+        startAnother: { kind: "another-company", known: ["co_1", "co_2"] },
+      }),
+    );
+  });
+});
+
+describe("threadDoor", () => {
+  test("a company decides its own door, whatever was chosen elsewhere", () => {
+    expect(threadDoor(company("co_d", { provider: "customer" }), "form")).toBe("declare");
+    expect(threadDoor(company("co_f", { provider: "doola", purpose: "legal_body" }), "declare")).toBe("form");
+    expect(threadDoor(null, "form")).toBe("form");
+    expect(threadDoor(null, null)).toBe("declare");
+  });
+
+  test("a company of the agent wizard is not a formed legal body: the declare door", () => {
+    expect(threadDoor(company("co_a", { provider: "doola", purpose: "agent" }), "form")).toBe("declare");
+  });
+});
+
+describe("intentSpent", () => {
+  test("an intent is spent once what it started exists", () => {
+    const intent = { kind: "another-company", known: ["co_1"] } as const;
+    expect(intentSpent(intent, { companies: [company("co_1")], orders: [] })).toBe(false);
+    expect(intentSpent(intent, { companies: [company("co_1"), company("co_2")], orders: [] })).toBe(true);
+  });
+
+  test("another agent: spent once its company is gone", () => {
+    const intent = { kind: "another-agent", companyId: "co_1", known: ["o1"] } as const;
+    expect(intentSpent(intent, { companies: [company("co_1")], orders: [order("o1", "co_1")] })).toBe(false);
+    expect(intentSpent(intent, { companies: [company("co_2")], orders: [order("o1", "co_1")] })).toBe(true);
+  });
+
+  test("another agent: spent once an order of its company exists that was not there at the click", () => {
+    const intent = { kind: "another-agent", companyId: "co_1", known: ["o1"] } as const;
+    const companies = [company("co_1"), company("co_2")];
+    // An order of another company is not the one the click started.
+    expect(intentSpent(intent, { companies, orders: [order("o1", "co_1"), order("o2", "co_2")] })).toBe(false);
+    expect(intentSpent(intent, { companies, orders: [order("o1", "co_1"), order("o3", "co_1")] })).toBe(true);
   });
 });
 

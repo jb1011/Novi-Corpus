@@ -39,7 +39,6 @@ import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import { entranceOffer } from "@/lib/legalBody/entrance";
 import {
   deriveLegalBodyPhase,
-  isFormedCompany,
   selectLegalBodyThread,
   type LegalBodyDerivation,
   type LegalBodyThreadRef,
@@ -75,19 +74,21 @@ import {
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
+  intentSpent,
   jumpMemoryPatch,
   memoryAfterThread,
   mergeLegalBodyMemory,
   patchEndsIntent,
+  threadDoor,
   threadRefsOf,
   threadWithIntent,
   type IdentitySuggestionEvent,
-  type LegalBodyIntent,
 } from "@/lib/legalBody/resume";
 import {
   readLegalBodyMemory,
   writeLegalBodyMemory,
   type LegalBodyMemory,
+  type StoredIntent,
 } from "@/lib/legalBody/storage";
 import { worldIdGateState, worldIdMeStatus } from "@/lib/legalBody/worldIdGate";
 import { AgreementStep } from "./AgreementStep";
@@ -125,7 +126,9 @@ import { ThreadChooser } from "./ThreadChooser";
  * read (so the draft moves on to the identity step, and a reload shows the agreement again); a
  * door's sentence carried back to the step it sends the person to; and the identity already
  * chosen on this visit, which the identity step offers first when the person comes back to it
- * (`identitySuggestionAfter`), so going back never invites a second registration.
+ * (`identitySuggestionAfter`), so going back never invites a second registration. A "start
+ * another" click is not one of them: it is the memory's `startAnother`, so a reload keeps it, and
+ * it leaves the store once what it started exists (`intentSpent`).
  */
 
 type AvailableConfig = Extract<LegalBodyConfig, { available: true }>;
@@ -254,7 +257,8 @@ function LegalBodySession({
   // This visit's snapshot of the memory. The store is written once a thread is on screen; the
   // snapshot changes only on a click, so a closed order stays on screen for this visit.
   const [memory, setMemory] = useState<LegalBodyMemory | null>(() => readLegalBodyMemory(tenant));
-  const [intent, setIntent] = useState<LegalBodyIntent | null>(null);
+  // A "start another" click, until what it starts exists: the memory's, so a reload keeps it.
+  const intent = memory?.startAnother ?? null;
   const [mountedAt] = useState(() => Date.now());
   // The draft whose agreement was read on this visit: in memory only, so a reload shows it again.
   const [agreementReadFor, setAgreementReadFor] = useState<string | null>(null);
@@ -340,7 +344,17 @@ function LegalBodySession({
     identityBlocks: identityBlocksGate(me?.identity),
   });
 
-  const toStore = gate === "flow" && thread ? memoryAfterThread({ tenant, stored: memory, thread }) : null;
+  // The intent stays in the store while it is live; once what it started exists, the thread on
+  // screen is the store's and the intent leaves it.
+  const toStore =
+    gate === "flow" && thread
+      ? memoryAfterThread({
+          tenant,
+          stored: memory,
+          thread,
+          intent: intent && !intentSpent(intent, { companies, orders }) ? intent : null,
+        })
+      : null;
   useStoredThread(toStore);
 
   const screen =
@@ -353,13 +367,14 @@ function LegalBodySession({
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, [screen]);
 
-  /** A click's change to the memory: written to the store and to this visit's snapshot. */
+  /** A click's change to the memory: written to the store and to this visit's snapshot. A click
+   *  that names the thread ends any intent. */
   function remember(patch: MemoryPatch) {
-    const next = mergeLegalBodyMemory(tenant, toStore ?? memory, patch);
+    const ended: MemoryPatch = patchEndsIntent(patch) ? { startAnother: null } : {};
+    const next = mergeLegalBodyMemory(tenant, toStore ?? memory, { ...patch, ...ended });
     writeLegalBodyMemory(next);
     setMemory(next);
     setCarried(null);
-    if (patchEndsIntent(patch)) setIntent(null);
   }
 
   /** A change to the identity the identity step offers again. Nothing is stored. */
@@ -390,8 +405,7 @@ function LegalBodySession({
     return true;
   }
 
-  const door: "declare" | "form" =
-    (company && isFormedCompany(company)) || memory?.door === "form" ? "form" : "declare";
+  const door = threadDoor(company, memory?.door ?? null);
   const phases = visibleLegalBodyPhases(config, door);
   const current = railCurrentOf(gate, derivation);
 
@@ -412,26 +426,30 @@ function LegalBodySession({
   }
 
   function startAnother(kind: "new_order" | "new_company") {
-    if (kind === "new_order" && refs?.companyId)
-      setIntent({
-        kind: "another-agent",
-        companyId: refs.companyId,
-        known: orders.map((o) => o.id),
-      });
     if (kind === "new_company") {
-      setIntent({ kind: "another-company", known: companies.map((c) => c.companyId) });
       noteIdentity({ kind: "start_another" });
       remember({
         door: null,
         identityChoice: null,
         signer: null,
         suggestedAgentId: null,
+        startAnother: { kind: "another-company", known: companies.map((c) => c.companyId) },
       });
       return;
     }
     noteIdentity({ kind: "start_another" });
     // A closed order shown here is done with: this visit forgets it too.
-    remember({});
+    remember(
+      refs?.companyId
+        ? {
+            startAnother: {
+              kind: "another-agent",
+              companyId: refs.companyId,
+              known: orders.map((o) => o.id),
+            },
+          }
+        : {},
+    );
   }
 
   /** A link door's refusal sent the person elsewhere: go there, with the door's sentence. */
@@ -664,6 +682,8 @@ function useStoredThread(next: LegalBodyMemory | null) {
   const identityChoice = next?.identityChoice ?? null;
   const signer = next?.signer ?? null;
   const suggestedAgentId = next?.suggestedAgentId ?? null;
+  // The intent by its value: a re-render that rebuilds the same intent writes nothing.
+  const startAnother = next?.startAnother ? JSON.stringify(next.startAnother) : null;
   useEffect(() => {
     if (tenant === null) return;
     writeLegalBodyMemory({
@@ -676,6 +696,7 @@ function useStoredThread(next: LegalBodyMemory | null) {
       identityChoice,
       signer,
       suggestedAgentId,
+      startAnother: startAnother === null ? null : (JSON.parse(startAnother) as StoredIntent),
     });
   }, [
     tenant,
@@ -687,6 +708,7 @@ function useStoredThread(next: LegalBodyMemory | null) {
     identityChoice,
     signer,
     suggestedAgentId,
+    startAnother,
   ]);
 }
 
