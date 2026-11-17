@@ -7,10 +7,11 @@
 import { describe, expect, test } from "vitest";
 import type { Address, CompanyView, LegalBodyOrderView } from "@/lib/api/types";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
-import type { LegalBodyThread } from "@/lib/legalBody/flow";
+import { selectLegalBodyThread, type LegalBodyThread } from "@/lib/legalBody/flow";
 import { LEGAL_BODY_PHASES } from "@/lib/legalBody/phases";
 import type { LegalBodyMemory } from "@/lib/legalBody/storage";
 import {
+  arrivalMemory,
   chooserRows,
   companyScreen,
   draftChoices,
@@ -249,6 +250,80 @@ describe("newCompanyHandover", () => {
         startAnother: { kind: "another-company", known: ["co_1", "co_2"] },
       }),
     );
+  });
+});
+
+describe("arrivalMemory: an order or a company named in the address", () => {
+  test("an order named in the address becomes the remembered order, and ends any intent", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", agentId: "7",
+      startAnother: { kind: "another-company", known: [] } });
+    expect(arrivalMemory(TENANT, stored, { order: "ord_2", company: null }))
+      .toMatchObject({ tenant: TENANT, orderId: "ord_2", companyId: null, agentId: null, ownerChoice: null, startAnother: null });
+  });
+
+  test("a company named in the address becomes the remembered company, with no order and no draft choice", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "this-wallet", agentId: "7",
+      startAnother: { kind: "another-agent", companyId: "co_1", known: ["ord_1"] } });
+    expect(arrivalMemory(TENANT, stored, { order: null, company: "co_2" }))
+      .toMatchObject({ tenant: TENANT, companyId: "co_2", orderId: null, agentId: null, ownerChoice: null, startAnother: null });
+  });
+
+  test("an order wins over a company", () => {
+    expect(arrivalMemory(TENANT, null, { order: "ord_2", company: "co_2" }))
+      .toMatchObject({ orderId: "ord_2", companyId: null });
+  });
+
+  test("an order that is not a handle does not count: the company named with it does", () => {
+    expect(arrivalMemory(TENANT, null, { order: "<script>", company: "co_2" }))
+      .toMatchObject({ orderId: null, companyId: "co_2" });
+  });
+
+  test("the draft choices are cleared even for the order already remembered", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7" });
+    expect(arrivalMemory(TENANT, stored, { order: "ord_1", company: null }))
+      .toMatchObject({ orderId: "ord_1", companyId: null, ownerChoice: null, agentId: null });
+  });
+
+  test("the rest of the memory is kept; with no memory, one for this tenant", () => {
+    const stored = memory({ door: "form", identityChoice: "has-one", signer: "elsewhere", suggestedAgentId: "42" });
+    expect(arrivalMemory(TENANT, stored, { order: "ord_2", company: null })).toEqual(
+      memory({ orderId: "ord_2", door: "form", identityChoice: "has-one", signer: "elsewhere", suggestedAgentId: "42" }),
+    );
+    expect(arrivalMemory(OTHER, null, { order: null, company: "co_2" })).toEqual(
+      memory({ tenant: OTHER, companyId: "co_2" }),
+    );
+  });
+
+  test("anything that is not a handle is ignored", () => {
+    for (const bad of ["<script>", "a b", "", "x".repeat(81), "../etc"])
+      expect(arrivalMemory(TENANT, null, { order: bad, company: bad })).toBeNull();
+    expect(arrivalMemory(TENANT, null, { order: null, company: null })).toBeNull();
+  });
+
+  test("another account's order is not opened", () => {
+    const m = arrivalMemory(TENANT, null, { order: "ord_theirs", company: null })!;
+    expect(selectLegalBodyThread({ companies: [], orders: [], stored: m, nowMs: 0 })).toEqual({ kind: "new-company" });
+  });
+
+  test("another account's order or company is not opened over the account's own thread", () => {
+    const companies = [company("co_1")];
+    const orders = [order("ord_1", "co_1")];
+    for (const params of [{ order: "ord_theirs", company: null }, { order: null, company: "co_theirs" }]) {
+      const m = arrivalMemory(TENANT, memory({ companyId: "co_1" }), params)!;
+      expect(selectLegalBodyThread({ companies, orders, stored: m, nowMs: NOW }))
+        .toEqual({ kind: "order", companyId: "co_1", orderId: "ord_1" });
+    }
+  });
+
+  test("the account's own order or company named in the address is the thread", () => {
+    const companies = [company("co_1"), company("co_2")];
+    const orders = [order("ord_1", "co_1")];
+    const byOrder = arrivalMemory(TENANT, null, { order: "ord_1", company: null })!;
+    expect(selectLegalBodyThread({ companies, orders, stored: byOrder, nowMs: NOW }))
+      .toEqual({ kind: "order", companyId: "co_1", orderId: "ord_1" });
+    const byCompany = arrivalMemory(TENANT, null, { order: null, company: "co_2" })!;
+    expect(selectLegalBodyThread({ companies, orders, stored: byCompany, nowMs: NOW }))
+      .toEqual({ kind: "company", companyId: "co_2" });
   });
 });
 

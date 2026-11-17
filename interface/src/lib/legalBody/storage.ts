@@ -80,6 +80,11 @@ const OWNER_CHOICES: readonly OwnerChoice[] = ["this-wallet", "elsewhere"];
 const DOORS: readonly DoorChoice[] = ["declare", "form"];
 const IDENTITY_CHOICES: readonly IdentityChoice[] = ["has-one", "not-yet"];
 
+/** Whether a value has the shape of the backend's handles, the one the store keeps them in. */
+export function isHandle(value: string): boolean {
+  return HANDLE.test(value);
+}
+
 function isAddress(value: unknown): value is Address {
   return typeof value === "string" && ADDRESS.test(value);
 }

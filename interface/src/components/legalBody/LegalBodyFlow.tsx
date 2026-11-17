@@ -2,7 +2,7 @@
 
 import { Suspense, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useBytecode } from "wagmi";
 import { AuthProvider, useAuth } from "@/components/onboarding/AuthProvider";
 import { StepNav } from "@/components/onboarding/OnboardingFlow";
@@ -69,6 +69,7 @@ import {
   type LegalBodyRailPhase,
 } from "@/lib/legalBody/phases";
 import {
+  arrivalMemory,
   chooserRows,
   companyScreen,
   draftChoices,
@@ -122,8 +123,11 @@ import { ThreadChooser } from "./ThreadChooser";
  * (`deriveLegalBodyPhase`). Every decision is a pure function in `src/lib/legalBody`; this file
  * reads, calls them, and renders their answers.
  *
- * Nothing here writes to the server on its own: every write is a click's. The only effects are the
- * memory's write once a thread is on screen, and the scroll to the top when the screen changes.
+ * Nothing here writes to the server on its own: every write is a click's. The effects are three:
+ * an address that names an order or a company (`?order=`, `?company=`, the agents page's links)
+ * is taken once, the memory it hands the flow (`arrivalMemory`) written to the store, and the
+ * address cleaned; the memory's write once a thread is on screen; and the scroll to the top when
+ * the screen changes.
  *
  * Three facts live in this visit's memory only, never in the store: that a draft's agreement was
  * read (so the draft moves on to the identity step, and a reload shows the agreement again); a
@@ -253,6 +257,7 @@ function LegalBodySession({
   const tenant = session.address;
   const token = session.token;
   const router = useRouter();
+  const searchParams = useSearchParams();
   // The whole public config: the choice of paths in front of a new company reads its cards and
   // facts from it.
   const { data: publicConfig } = usePublicConfigQuery();
@@ -260,9 +265,29 @@ function LegalBodySession({
   const [view, setView] = useState<GateView>(engaged ? "signin" : null);
   // The token a step's request was refused under: that session is over, whatever it still says.
   const [refusedToken, setRefusedToken] = useState<string | null>(null);
+  // An order or a company named in the address, taken once, as the session opens: the memory it
+  // hands the flow, or null when the address names nothing that is a handle.
+  const [fromAddress] = useState<LegalBodyMemory | null>(() =>
+    arrivalMemory(tenant, readLegalBodyMemory(tenant), {
+      order: searchParams.get("order"),
+      company: searchParams.get("company"),
+    }),
+  );
   // This visit's snapshot of the memory. The store is written once a thread is on screen; the
   // snapshot changes only on a click, so a closed order stays on screen for this visit.
-  const [memory, setMemory] = useState<LegalBodyMemory | null>(() => readLegalBodyMemory(tenant));
+  const [memory, setMemory] = useState<LegalBodyMemory | null>(
+    () => fromAddress ?? readLegalBodyMemory(tenant),
+  );
+  // The address is cleaned once it is taken, so a reload or a later click never applies it again.
+  // The arrival is written to the store first: the thread's own write compares with the snapshot,
+  // which already holds it, so without this the store would keep the old thread for a reload. A
+  // parameter that names nothing writes nothing, and is cleaned all the same.
+  const named = searchParams.has("order") || searchParams.has("company");
+  useEffect(() => {
+    if (!named) return;
+    if (fromAddress) writeLegalBodyMemory(fromAddress);
+    router.replace("/legal-body");
+  }, [named, fromAddress, router]);
   // A "start another" click, until what it starts exists: the memory's, so a reload keeps it.
   const intent = memory?.startAnother ?? null;
   const [mountedAt] = useState(() => Date.now());
@@ -685,9 +710,10 @@ function LegalBodySession({
 }
 
 /**
- * The memory's write, once a thread is on screen: the one effect besides the scroll. It writes
- * only what `memoryAfterThread` says has changed, from the values themselves, so a re-render with
- * the same thread writes nothing.
+ * The memory's write, once a thread is on screen: the one effect besides the address's arrival and
+ * the scroll. It writes only what `memoryAfterThread` says has changed, from the values themselves,
+ * so a re-render with the same thread writes nothing. It runs after the arrival's write, so a
+ * thread on screen in the same render has the last word.
  */
 function useStoredThread(next: LegalBodyMemory | null) {
   const tenant = next?.tenant ?? null;

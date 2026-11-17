@@ -9,11 +9,12 @@ import {
   type LegalBodyThreadRef,
 } from "@/lib/legalBody/flow";
 import type { LegalBodyRailPhase } from "@/lib/legalBody/phases";
-import type {
-  DoorChoice,
-  LegalBodyMemory,
-  OwnerChoice,
-  StoredIntent,
+import {
+  isHandle,
+  type DoorChoice,
+  type LegalBodyMemory,
+  type OwnerChoice,
+  type StoredIntent,
 } from "@/lib/legalBody/storage";
 import type { PathCard } from "@/lib/start/paths";
 
@@ -22,8 +23,9 @@ import type { PathCard } from "@/lib/start/paths";
  *
  * The server decides where a person is (`selectLegalBodyThread`, `deriveLegalBodyPhase`); this
  * module says what the memory holds once a thread is on screen, which of its draft choices count,
- * what a "start another" click overrides until the new order or company exists, and what a jump
- * back on the rail changes before the derivation decides again.
+ * what an address that names an order or a company hands it on arrival, what a "start another"
+ * click overrides until the new order or company exists, and what a jump back on the rail changes
+ * before the derivation decides again.
  */
 
 type Memo = Omit<LegalBodyMemory, "tenant">;
@@ -94,6 +96,29 @@ export function newCompanyHandover(
     door,
     startAnother: { kind: "another-company", known: companies.map((c) => c.companyId) },
   });
+}
+
+/**
+ * The memory an address hands the flow on arrival (`/legal-body?order=<id>` or `?company=<id>`, the
+ * links of the agents page), or null when it names nothing the flow can use.
+ *
+ * A value counts only when it has the shape of a handle; anything else is ignored. An order wins
+ * over a company. The named order (or company) becomes the remembered one, with no other, and the
+ * memory starts the thread afresh: no "start another" intent and no draft choice. Whether the id is
+ * the account's own is not decided here: `selectLegalBodyThread` ignores an order or a company
+ * that is not in the account's lists, so an address opens only what the account already has.
+ */
+export function arrivalMemory(
+  tenant: Address,
+  stored: LegalBodyMemory | null,
+  params: { order: string | null; company: string | null },
+): LegalBodyMemory | null {
+  const fresh = { ownerChoice: null, agentId: null, startAnother: null };
+  if (params.order !== null && isHandle(params.order))
+    return mergeLegalBodyMemory(tenant, stored, { ...fresh, orderId: params.order, companyId: null });
+  if (params.company !== null && isHandle(params.company))
+    return mergeLegalBodyMemory(tenant, stored, { ...fresh, companyId: params.company, orderId: null });
+  return null;
 }
 
 /**
