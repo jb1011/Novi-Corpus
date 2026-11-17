@@ -1,5 +1,7 @@
-import { CREATE_COMPANY_CTA, SEE_THE_STEPS_CTA } from "./copy";
+import Link from "next/link";
+import { GET_STARTED_CTA, HERO_RECORD, HERO_SUB, HERO_TITLE, SEE_PATHS_CTA } from "./copy";
 import { Reveal } from "./Reveal";
+import { Mark } from "./Wordmark";
 
 export function Hero() {
   return (
@@ -14,38 +16,37 @@ export function Hero() {
         <div className="flex flex-col justify-center">
           <Reveal immediate delay={180} variant="up" duration={760}>
             <h1 className="text-balance text-[44px] font-medium leading-[1.02] tracking-[-0.025em] text-ink sm:text-[60px] lg:text-[78px]">
-              <span className="relative inline-block">Create a company</span>
+              <span className="relative inline-block">{HERO_TITLE[0]}</span>
               <br />
-              for your agent.
+              {HERO_TITLE[1]}
             </h1>
           </Reveal>
 
           <Reveal immediate delay={300} variant="up">
-            <p className="mt-7 max-w-lg text-pretty text-[17px] leading-[1.5] text-muted lg:text-[18px]">
-              A legal entity, a USDC treasury, and spending rules on Arc. You
-              set the limits and stay the guardian.
+            <p className="mt-7 max-w-xl text-pretty text-[17px] leading-[1.5] text-muted lg:text-[18px]">
+              {HERO_SUB}
             </p>
           </Reveal>
 
           <Reveal immediate delay={420} variant="pop">
             <div className="mt-9 flex flex-wrap items-center gap-3">
-              <a
-                href="/onboarding"
+              <Link
+                href="/start"
                 className="group inline-flex items-center gap-2 rounded-full bg-ink px-5 py-3 text-[14px] font-medium text-paper transition-all duration-300 hover:bg-ink-hover hover:scale-[1.03] active:scale-[0.98]"
               >
-                <span>{CREATE_COMPANY_CTA}</span>
+                <span>{GET_STARTED_CTA}</span>
                 <span
                   aria-hidden
                   className="transition-transform group-hover:translate-x-0.5"
                 >
                   →
                 </span>
-              </a>
+              </Link>
               <a
-                href="#how"
+                href="#paths"
                 className="inline-flex items-center gap-2 rounded-full border hairline-strong bg-paper/60 px-5 py-3 text-[14px] text-ink transition-all duration-300 hover:bg-paper-2 hover:scale-[1.03] active:scale-[0.98]"
               >
-                {SEE_THE_STEPS_CTA}
+                {SEE_PATHS_CTA}
               </a>
             </div>
           </Reveal>
@@ -59,7 +60,7 @@ export function Hero() {
           className="flex items-center justify-center py-6 lg:justify-end lg:py-8"
         >
           <div className="w-full max-w-[400px] rotate-[2.5deg] transition-transform duration-500 hover:rotate-[1.5deg] hover:scale-[1.02] lg:max-w-[420px]">
-            <AgentDeskPreview />
+            <LegalBodyRecordPreview />
           </div>
         </Reveal>
       </div>
@@ -74,7 +75,11 @@ export function Hero() {
   );
 }
 
-function AgentDeskPreview() {
+/**
+ * A legal body's public record, as a picture: no live data, the same lines on every deployment.
+ * The treasury is the full product's and is named only on its own card.
+ */
+function LegalBodyRecordPreview() {
   return (
     <div className="overflow-hidden rounded-2xl border hairline-strong bg-paper shadow-[0_12px_40px_-12px_rgba(0,0,0,0.3)]">
       <div className="flex items-center justify-between border-b hairline bg-paper-2/80 px-4 py-2.5">
@@ -84,77 +89,75 @@ function AgentDeskPreview() {
           <span className="h-2.5 w-2.5 rounded-full bg-[#28c840]" />
         </div>
         <span className="text-[11px] tracking-wide text-muted-2">
-          Agent desk · Treasury
+          {HERO_RECORD.header}
         </span>
         <span className="w-12" aria-hidden />
       </div>
 
       <div className="space-y-3 p-5">
-        <Reveal immediate delay={640} variant="pop" duration={560}>
-          <div className="rounded-xl border hairline bg-paper-2/50 px-4 py-3">
-            <div className="text-[10px] uppercase tracking-[0.18em] text-muted-2">
-              Policy
-            </div>
-            <p className="mt-1.5 text-[13px] leading-[1.5] text-ink">
-              Spend within your caps. Pause or veto anytime.
-            </p>
-          </div>
-        </Reveal>
-
-        <div className="flex flex-col items-center py-1">
-          <div className="h-4 w-px bg-line-strong" />
-          <span className="my-1 rounded-full bg-ink px-2.5 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] text-paper">
-            Live
-          </span>
-          <div className="h-4 w-px bg-line-strong" />
-        </div>
-
-        <Reveal immediate delay={760} variant="scale" duration={620}>
+        <Reveal immediate delay={640} variant="scale" duration={620}>
           <div className="overflow-hidden rounded-xl border-2 border-accent/40 bg-accent/[0.06]">
             <div className="flex items-start gap-3 p-4">
-              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent/30 to-highlight/25 text-[14px] font-medium text-ink">
-                AG
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-accent/30 to-highlight/25">
+                <Mark />
               </div>
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2">
-                  <div>
-                    <div className="text-[15px] font-medium text-ink">
-                      Your agent
-                    </div>
-                    <div className="mt-0.5 text-[12px] text-muted">
-                      Wyoming LLC · Novi managed · World ID
-                    </div>
+                  <div className="text-[15px] font-medium text-ink">
+                    {HERO_RECORD.company}
                   </div>
-                  <span className="shrink-0 rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium text-paper">
+                  <span
+                    aria-hidden
+                    className="shrink-0 rounded-full bg-ink px-2 py-0.5 text-[10px] font-medium text-paper"
+                  >
                     ✓
                   </span>
                 </div>
                 <ul className="mt-2.5 space-y-1 text-[12px] text-muted">
-                  <li>· USDC treasury on Arc</li>
-                  <li>· Rules you define</li>
+                  <li>· {HERO_RECORD.identity}</li>
                 </ul>
               </div>
             </div>
             <div className="border-t border-accent/25 bg-accent/10 px-4 py-2 text-[11.5px] font-medium text-accent-soft">
-              Operational · guardian controls on
+              {HERO_RECORD.standing}
             </div>
           </div>
         </Reveal>
 
-        <Reveal immediate delay={880} variant="up" duration={560}>
+        <div aria-hidden className="flex flex-col items-center py-1">
+          <div className="h-6 w-px bg-line-strong" />
+          <span className="my-1 h-1.5 w-1.5 rounded-full bg-accent" />
+          <div className="h-6 w-px bg-line-strong" />
+        </div>
+
+        <Reveal immediate delay={780} variant="up" duration={560}>
           <div className="flex items-center gap-3 rounded-xl border hairline bg-paper-2/40 px-3 py-2.5">
-            <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-paper-3 text-[10px] font-medium text-muted">
-              YOU
+            <div
+              aria-hidden
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-paper-3 text-muted"
+            >
+              <PersonGlyph />
             </div>
-            <div>
-              <div className="text-[13px] font-medium text-ink">You</div>
-              <div className="text-[11.5px] text-muted-2">
-                Guardian · pause and veto
-              </div>
+            <div className="text-[13px] font-medium text-ink">
+              {HERO_RECORD.human}
             </div>
           </div>
         </Reveal>
       </div>
     </div>
+  );
+}
+
+function PersonGlyph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <circle cx="8" cy="5.5" r="2.75" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M2.75 14c.6-2.6 2.7-4.25 5.25-4.25S12.65 11.4 13.25 14"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
