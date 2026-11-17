@@ -85,6 +85,7 @@ const TREE = {
 			items: [
 				{ label: 'Terms of use', slug: 'policies/terms' },
 				{ label: 'Privacy notice', slug: 'policies/privacy' },
+				{ label: 'Privacy notice for the guardian', slug: 'policies/guardian-notice' },
 				{ label: 'Lawful requests for information', slug: 'policies/lawful-requests' },
 				{ label: 'Relying on a Novi Corpus statement', slug: 'policies/relying-party' },
 				{ label: 'Notices', slug: 'policies/notices' },
