@@ -174,22 +174,39 @@ describe("startDestination", () => {
   });
 });
 
-describe("the choice screen's words", () => {
-  /** Every string reachable from a value, depth first. */
-  const stringsOf = (value: unknown): string[] =>
-    typeof value === "string"
-      ? [value]
-      : value && typeof value === "object"
-        ? Object.values(value).flatMap(stringsOf)
-        : [];
+/** Every string reachable from a value, depth first. */
+function stringsOf(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(stringsOf);
+  if (value && typeof value === "object") return Object.values(value).flatMap(stringsOf);
+  return [];
+}
 
-  test("no sentence carries an em dash or says our agents", () => {
-    const all = stringsOf(START_COPY);
-    expect(all.length).toBeGreaterThan(20);
-    for (const s of all) {
-      expect(s).not.toContain("\u2014");
-      expect(s.toLowerCase()).not.toContain("our agents");
-    }
+const ALL_START_COPY = stringsOf(START_COPY);
+
+describe("the claims ceiling of the start", () => {
+  test("the walk reaches a real number of sentences", () => {
+    // A guard that walks nothing passes vacuously.
+    expect(ALL_START_COPY.length).toBeGreaterThan(20);
+    for (const s of ALL_START_COPY) expect(s.trim().length).toBeGreaterThan(0);
+  });
+
+  test("no sentence says free: the money sentence says there is no payment", () => {
+    for (const s of ALL_START_COPY) expect(s).not.toMatch(/\bfree\b/i);
+  });
+
+  test("no sentence carries an em dash", () => {
+    for (const s of ALL_START_COPY) expect(s).not.toContain("\u2014");
+  });
+});
+
+describe("the choice screen's words", () => {
+  test("no sentence says our agents", () => {
+    for (const s of ALL_START_COPY) expect(s.toLowerCase()).not.toContain("our agents");
+  });
+  test("testnet says there is no payment on both legal-body cards", () => {
+    expect(START_COPY.cards.form.noPayment).toBe("No payment on testnet");
+    expect(START_COPY.cards.declare.noPayment).toBe("No payment on testnet");
   });
   test("each card names its company the way it was decided", () => {
     expect(START_COPY.cards.form.body).toContain("Wyoming company");

@@ -20,7 +20,7 @@ export const START_COPY = {
       time: "About {days} working days",
       timeSandbox: "A few minutes on testnet: a test company, nothing is filed",
       price: "{fee} USDC, paid before filing",
-      free: "Free on testnet",
+      noPayment: "No payment on testnet",
       fullUp: "All places are taken.",
       fullUpLink: "Join the early-access list",
     },
@@ -29,7 +29,7 @@ export const START_COPY = {
       body: "You already have a Wyoming LLC or DAO LLC. You declare it and show you control it.",
       needsProduction: "A document that shows you control the company, checked by a Novi Corpus operator",
       needsSandbox: "On testnet the check is automatic: a test declaration",
-      free: "Free on testnet",
+      noPayment: "No payment on testnet",
     },
     full: {
       title: "The full product",
