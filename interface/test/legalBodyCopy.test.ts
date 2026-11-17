@@ -142,7 +142,6 @@ describe("the sentences carried verbatim", () => {
       "the smart-account sentence",
       "This wallet is a smart account. The declaration needs a plain wallet signature, so a smart account cannot be the guardian here.",
     ],
-    ["the entry button", "Get a legal body for an agent you already run"],
     [
       "the rail's footer",
       "Two signatures and one or two transactions from your wallet. Never an approval or a transfer.",

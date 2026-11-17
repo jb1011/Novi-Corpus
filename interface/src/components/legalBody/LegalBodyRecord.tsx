@@ -22,6 +22,29 @@ const TONE_CLASS: Record<StandingPresentation["tone"], string> = {
   neutral: "border-line-strong bg-paper-2/70 text-muted",
 };
 
+/** The standing in a few words, in its tone: on the done page beside its sentences, and on a row
+ *  of "My agents" (`sm`) on its own. */
+export function StandingPill({
+  standing,
+  size = "md",
+}: {
+  standing: Pick<StandingPresentation, "label" | "tone">;
+  size?: "sm" | "md";
+}) {
+  return (
+    <span
+      className={cx(
+        "inline-flex items-center rounded-full border",
+        size === "sm" ? "px-2 py-0.5 text-[11px]" : "px-3 py-1 text-[13px]",
+        "font-medium",
+        TONE_CLASS[standing.tone],
+      )}
+    >
+      {standing.label}
+    </span>
+  );
+}
+
 /** Amber words: the sandbox said out loud. */
 const AMBER_TEXT = "text-[#f3cd72]";
 
@@ -59,14 +82,7 @@ export function LegalBodyRecord({
       <Card className="p-6">
         <SectionTitle>{D.standingHeading}</SectionTitle>
         <div className="mt-3 flex flex-wrap items-center gap-3">
-          <span
-            className={cx(
-              "inline-flex items-center rounded-full border px-3 py-1 text-[13px] font-medium",
-              TONE_CLASS[standing.tone],
-            )}
-          >
-            {standing.label}
-          </span>
+          <StandingPill standing={standing} />
           {view.sandbox && <AmberPill size="sm">{D.sandboxPill}</AmberPill>}
         </div>
         {identityLine && (

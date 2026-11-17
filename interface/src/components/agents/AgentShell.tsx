@@ -23,7 +23,7 @@ export function AgentShell({ children }: { children: ReactNode }) {
           <nav className="flex min-w-0 flex-1 items-center justify-end gap-2 overflow-visible">
             <NavLink href="/agents">My agents</NavLink>
             <Link
-              href="/onboarding?new=1"
+              href="/start"
               className="inline-flex items-center gap-1.5 rounded-full bg-ink px-3.5 py-1.5 text-[12px] font-medium text-paper transition-colors hover:bg-ink-hover"
             >
               <PlusIcon />

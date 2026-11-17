@@ -768,8 +768,18 @@ export const LEGAL_BODY_COPY = {
       "Say it with the word sandbox: a sandbox statement is a test, and nothing in it is a filing.",
   },
 
-  entry: {
-    button: "Get a legal body for an agent you already run",
+  /** "My agents": the account's legal bodies beside its agents with a treasury. */
+  account: {
+    legalBodies: "Legal bodies",
+    treasuryAgents: "Agents with a treasury",
+    add: "Add",
+    states: { in_progress: "In progress", linked: "Linked", attention: "Needs attention" },
+    actions: { continue: "Continue", open: "Open" },
+    agent: "agent #{agentId}",
+    unreadable: "Your legal bodies could not be read.",
+    emptyTitle: "Nothing here yet",
+    emptyBody: "Give your agent a legal body.",
+    getStarted: "Get started",
   },
 
   transparency: {

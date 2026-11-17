@@ -422,6 +422,25 @@ export type ChooserRow = {
   identity: string | null;
 };
 
+/**
+ * The name a legal body goes by in a list (the chooser, "My agents"): the company name its order
+ * states, else the company's declared name, its filed name, its first name option; with none, the
+ * unnamed words of its kind. An empty name counts as none, so a row is never titled with nothing.
+ */
+export function legalBodyTitle(p: {
+  order: LegalBodyOrderView | null;
+  company: CompanyView | null;
+}): string {
+  const C = LEGAL_BODY_COPY.chooser;
+  const named =
+    p.order?.companyName ||
+    p.company?.declared?.companyName ||
+    p.company?.legalNameFiled ||
+    p.company?.nameOptions[0]?.name;
+  if (named) return named;
+  return isFormedCompany(p.company) ? C.formedUnnamed : C.unnamed;
+}
+
 /** One row per open thread: the declared name, and the state in words. */
 export function chooserRows(
   threads: LegalBodyThreadRef[],
@@ -429,11 +448,9 @@ export function chooserRows(
   orders: LegalBodyOrderView[],
 ): ChooserRow[] {
   const C = LEGAL_BODY_COPY.chooser;
-  const nameOf = (companyId: string) =>
-    companies.find((c) => c.companyId === companyId)?.declared?.companyName ?? null;
   return threads.map((ref) => {
+    const company = companies.find((c) => c.companyId === ref.companyId) ?? null;
     if (ref.kind === "company") {
-      const company = companies.find((c) => c.companyId === ref.companyId) ?? null;
       if (isFormedCompany(company)) {
         const state = company.state;
         const detail =
@@ -442,12 +459,10 @@ export function chooserRows(
             : state === "filed" || state === "complete"
               ? C.formedFiled
               : C.formedFiling;
-        const filed = company.legalNameFiled;
-        const first = company.nameOptions[0]?.name;
         return {
           key: `company:${ref.companyId}`,
           ref,
-          title: filed || first || C.formedUnnamed,
+          title: legalBodyTitle({ order: null, company }),
           detail,
           identity: null,
         };
@@ -455,12 +470,12 @@ export function chooserRows(
       return {
         key: `company:${ref.companyId}`,
         ref,
-        title: nameOf(ref.companyId) ?? C.unnamed,
+        title: legalBodyTitle({ order: null, company }),
         detail: C.companyRow,
         identity: null,
       };
     }
-    const order = orders.find((o) => o.id === ref.orderId);
+    const order = orders.find((o) => o.id === ref.orderId) ?? null;
     const state = order?.state;
     const detail =
       state === "draft" || state === "reserved" || state === "deployed" || state === "broken"
@@ -469,7 +484,7 @@ export function chooserRows(
     return {
       key: `order:${ref.orderId}`,
       ref,
-      title: order?.companyName ?? nameOf(ref.companyId) ?? C.unnamed,
+      title: legalBodyTitle({ order, company }),
       detail,
       identity: order?.agentId ? fillCopy(C.identity, { agentId: order.agentId }) : null,
     };
