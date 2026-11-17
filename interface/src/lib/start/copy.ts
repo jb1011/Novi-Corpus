@@ -6,6 +6,9 @@
  * by the screen that renders them, from the deployment's config and the wizard's step count.
  */
 export const START_COPY = {
+  page: {
+    title: "Get started: Novi Corpus",
+  },
   notOffered: {
     title: "The full product is not offered here",
     body: "This deployment gives agents a legal body. The treasury and spending rules are on testnet.",

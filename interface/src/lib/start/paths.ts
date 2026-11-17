@@ -1,5 +1,6 @@
 import { ONBOARDING_STEP_COUNT } from "@/components/landing/copy";
 import type { PublicConfig } from "@/lib/api/types";
+import type { LegalBodyGate, SignInStepState } from "@/lib/legalBody/gates";
 import { isOnboardingComplete, type PersistedOnboarding } from "@/lib/onboarding/storage";
 
 /**
@@ -154,4 +155,23 @@ export function startDestination(answer: {
   }
   if (cards.some((card) => card.id === "full")) return { kind: "full_only" };
   return { kind: "none" };
+}
+
+/**
+ * Whether the start shows its one link past the gate to the full product.
+ *
+ * Only where the full product is offered. A gate that stops a legal body does not stop the full
+ * product: under the human step always (a waiver, a refused record and a deployment without World
+ * ID are answered there, and the wizard checks World ID in its own steps), and under the sign-in
+ * step only for a smart account (the stop that is the declaration's: it needs a plain wallet
+ * signature). Never on the choice, which has the full product's own card.
+ */
+export function escapeToFullProduct(p: {
+  cards: readonly PathCard[];
+  gate: LegalBodyGate;
+  signIn: SignInStepState;
+}): boolean {
+  if (!p.cards.some((card) => card.id === "full" && card.state === "offered")) return false;
+  if (p.gate === "human") return true;
+  return p.gate === "signin" && p.signIn === "smart_account";
 }
