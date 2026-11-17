@@ -665,6 +665,8 @@ describe("flowNowMs", () => {
 
 describe("chooserRows", () => {
   const C = LEGAL_BODY_COPY.chooser;
+  /** A declared company's name option, as the backend stores the typed name. */
+  const typed = (name: string) => ({ name, entityTypeEnding: "", position: 1 });
 
   test("one row per thread, named by the declaration, with its state in words", () => {
     const companies = [company("c1"), company("c2", { declared: { companyName: "Second Test LLC", filingNumber: "TEST-0002", wordingVersion: "v1" } })];
@@ -696,15 +698,83 @@ describe("chooserRows", () => {
   });
 
   test("a draft with no identity yet, and a company whose declaration could not be read", () => {
+    // As the backend serves them: a declared company keeps the typed name as its first name option,
+    // and its declaration is null when the declaration row is missing.
     const rows = chooserRows(
       [
         { kind: "order", companyId: "c1", orderId: "o1" },
         { kind: "company", companyId: "c3" },
       ],
-      [company("c1"), company("c3", { declared: null })],
+      [
+        company("c1", { nameOptions: [typed("Example Test Holdings LLC")] }),
+        company("c3", { declared: null, nameOptions: [typed("Third Test LLC")] }),
+      ],
       [order("o1", "c1", { companyName: null })],
     );
     expect(rows[0]).toMatchObject({ title: "Example Test Holdings LLC", detail: C.orderStates.draft, identity: null });
-    expect(rows[1]).toMatchObject({ title: C.unnamed });
+    expect(rows[1]).toMatchObject({ title: "Third Test LLC" });
+  });
+
+  describe("the title, on companies and orders as the backend serves them", () => {
+    /** A company formed through doola: no declaration and no check, its name options as asked. */
+    const formed = (companyId: string, over: Partial<CompanyView> = {}) =>
+      company(companyId, {
+        provider: "doola",
+        purpose: "legal_body",
+        state: "in_progress",
+        declared: undefined,
+        verification: undefined,
+        nameOptions: [{ name: "First Choice Agent", entityTypeEnding: "LLC", position: 1 }],
+        ...over,
+      });
+
+    test("a declared company whose declaration is missing goes by the name it was declared with", () => {
+      const c = company("c1", { declared: null, nameOptions: [typed("Typed Name LLC")] });
+      // The order of such a company carries no name: the backend has no declaration to read it from.
+      const rows = chooserRows(
+        [
+          { kind: "company", companyId: "c1" },
+          { kind: "order", companyId: "c1", orderId: "o1" },
+        ],
+        [c],
+        [order("o1", "c1", { companyName: null })],
+      );
+      expect(rows.map((r) => r.title)).toEqual(["Typed Name LLC", "Typed Name LLC"]);
+    });
+
+    test("an order on a formed company while it files goes by the first name option, once filed by the filed name", () => {
+      const filing = chooserRows(
+        [{ kind: "order", companyId: "cf", orderId: "o1" }],
+        [formed("cf")],
+        [order("o1", "cf", { companyName: null })],
+      );
+      expect(filing[0].title).toBe("First Choice Agent");
+      // Filed: the backend serves the filed name as the order's company name.
+      const filed = chooserRows(
+        [{ kind: "order", companyId: "cf", orderId: "o1" }],
+        [formed("cf", { state: "filed", legalNameFiled: "First Choice Agent LLC" })],
+        [order("o1", "cf", { companyName: "First Choice Agent LLC" })],
+      );
+      expect(filed[0].title).toBe("First Choice Agent LLC");
+      // No name at all: the words for a company being formed, never those for a declared one.
+      const bare = chooserRows(
+        [{ kind: "order", companyId: "cf", orderId: "o1" }],
+        [formed("cf", { nameOptions: [] })],
+        [order("o1", "cf", { companyName: null })],
+      );
+      expect(bare[0].title).toBe(C.formedUnnamed);
+    });
+
+    test("an empty name counts as none: the next name is taken, never a blank title", () => {
+      const rows = chooserRows(
+        [
+          { kind: "order", companyId: "c1", orderId: "o1" },
+          { kind: "company", companyId: "cf" },
+        ],
+        [company("c1", { nameOptions: [typed("Example Test Holdings LLC")] }), formed("cf", { legalNameFiled: "" })],
+        [order("o1", "c1", { companyName: "" })],
+      );
+      expect(rows.map((r) => r.title)).toEqual(["Example Test Holdings LLC", "First Choice Agent"]);
+    });
   });
 });

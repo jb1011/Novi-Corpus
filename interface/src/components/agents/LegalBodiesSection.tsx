@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import { LoadingState } from "@/components/agents/RequireAuth";
-import { StandingPill } from "@/components/legalBody/LegalBodyRecord";
+import { SandboxPill, StandingPill } from "@/components/legalBody/LegalBodyRecord";
 import { Button } from "@/components/onboarding/primitives";
 import { useCompaniesQuery } from "@/lib/api/hooks";
 import {
@@ -14,7 +14,7 @@ import {
 import { legalBodiesView, type AccountRow, type LegalBodiesView } from "@/lib/legalBody/accountRows";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import { flowNowMs } from "@/lib/legalBody/resume";
-import { standingPresentation } from "@/lib/legalBody/standing";
+import { legalBodyRecordView } from "@/lib/legalBody/standing";
 
 const A = LEGAL_BODY_COPY.account;
 
@@ -123,19 +123,25 @@ function LegalBodyRow({ row }: { row: AccountRow }) {
 
 /**
  * The public standing of a linked row, read the way the done page reads it: the by-agent answer
- * as served (`data`, or nothing yet), never polled and never retried on its own. Nothing shows
- * until the read is back. Only the pill is shown, whose words and tone the deployment's
- * environment and payment flag do not change.
+ * as served (`data`, or nothing yet), never polled and never retried on its own, and shown as the
+ * record shows it: the standing pill, and the sandbox pill wherever the record says sandbox (a
+ * sandbox deployment, or a statement that says sandbox). Nothing shows until the read is back.
+ * A config not read yet counts as production: the sandbox is then said only by a statement.
  */
 function RowStanding({ agentId }: { agentId: string }) {
   const byAgent = useLegalBodyByAgentQuery(agentId, true);
   const { config } = useLegalBodyConfig();
   if (byAgent.isPending) return null;
-  const standing = standingPresentation({
+  const record = legalBodyRecordView({
     read: byAgent.data ?? null,
     orderState: "linked",
     environment: config?.available === true ? config.environment : "production",
     paymentRequired: config?.available === true && config.paymentRequired === true,
   });
-  return <StandingPill standing={standing} size="sm" />;
+  return (
+    <>
+      <StandingPill standing={record.standing} size="sm" />
+      {record.sandbox && <SandboxPill />}
+    </>
+  );
 }

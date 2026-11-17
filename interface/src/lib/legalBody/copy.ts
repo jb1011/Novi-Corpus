@@ -780,6 +780,8 @@ export const LEGAL_BODY_COPY = {
     emptyTitle: "Nothing here yet",
     emptyBody: "Give your agent a legal body.",
     getStarted: "Get started",
+    treasuryNone: "No agent with a treasury yet.",
+    treasuryUnreadable: "Your agents with a treasury could not be read.",
   },
 
   transparency: {

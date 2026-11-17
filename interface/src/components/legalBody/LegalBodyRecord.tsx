@@ -45,6 +45,11 @@ export function StandingPill({
   );
 }
 
+/** The record's sandbox marker, beside the standing wherever the record says sandbox. */
+export function SandboxPill() {
+  return <AmberPill size="sm">{D.sandboxPill}</AmberPill>;
+}
+
 /** Amber words: the sandbox said out loud. */
 const AMBER_TEXT = "text-[#f3cd72]";
 
@@ -83,7 +88,7 @@ export function LegalBodyRecord({
         <SectionTitle>{D.standingHeading}</SectionTitle>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <StandingPill standing={standing} />
-          {view.sandbox && <AmberPill size="sm">{D.sandboxPill}</AmberPill>}
+          {view.sandbox && <SandboxPill />}
         </div>
         {identityLine && (
           <p className="mt-3 text-[13px] leading-[1.6] text-muted">{identityLine}</p>

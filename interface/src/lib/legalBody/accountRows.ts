@@ -15,7 +15,7 @@ import {
   type LegalBodyConfig,
   type LegalBodyOrderView,
 } from "@/lib/api/types";
-import { isContinuable, isFinished, isLiveOrder } from "@/lib/legalBody/flow";
+import { isContinuable, isFinished, isFormedCompany, isLiveOrder } from "@/lib/legalBody/flow";
 import { legalBodyTitle } from "@/lib/legalBody/resume";
 import type { FullProductGate } from "@/lib/start/paths";
 
@@ -34,6 +34,14 @@ export type AccountRow = {
  *  limited, and a long list must not spend it. */
 export const STANDING_READS = 5;
 
+/** A company the flow continues from that needs the person: its filing failed (formed), or its
+ *  check failed (declared). */
+function companyNeedsAttention(company: CompanyView): boolean {
+  return isFormedCompany(company)
+    ? company.state === "failed"
+    : company.verification?.state === "failed";
+}
+
 /** For ordering only: a time that cannot be read sorts oldest. */
 function sortTime(ms: number): number {
   return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
@@ -46,8 +54,9 @@ function sortTime(ms: number): number {
  *    continued; a linked order is linked and opened; another finished one needs attention and is
  *    opened; every other order (an expired or revoked draft, a lapse, a supersession, a
  *    replacement, an abandonment) has no row;
- *  - a company the flow can continue from, with no live and no linked order, is in progress and
- *    continued by its company.
+ *  - a company the flow can continue from, with no live and no linked order, is continued by its
+ *    company: it needs attention when its filing (formed) or its check (declared) failed, and is
+ *    in progress otherwise.
  * Rows that are not linked come first, then the newest; the first `STANDING_READS` linked rows
  * with an identity may read their public standing.
  */
@@ -102,7 +111,7 @@ export function accountLegalBodyRows(p: {
         href: `/legal-body?company=${encodeURIComponent(company.companyId)}`,
         title: legalBodyTitle({ order: null, company }),
         agentId: null,
-        state: "in_progress",
+        state: companyNeedsAttention(company) ? "attention" : "in_progress",
         action: "continue",
         standing: false,
       },
@@ -164,15 +173,17 @@ export function legalBodiesView(p: {
   return { kind: "loading" };
 }
 
-/** The treasury section: no section, a loading line, the list's error, the cards, or the line
- *  that there is none yet. */
+/** The treasury section: no section, a loading line, the list's error with its retry, the cards,
+ *  or the line that there is none yet. */
 export type TreasuryView = "hidden" | "loading" | "unreadable" | "cards" | "none";
 
 /**
  * The page around the legal bodies:
- *  - the treasury section shows the cards whenever the person has an agent with a treasury; with
- *    none known, it shows (loading, its error, or none yet) only where the deployment says it
- *    offers the full product, and never beside the empty card;
+ *  - the treasury section shows the cards whenever the person has an agent with a treasury, and
+ *    its error with a retry whenever the list could not be read, wherever: the person may have
+ *    such agents on a deployment that no longer offers them. Otherwise it shows (loading, or none
+ *    yet) only where the deployment says it offers the full product, and never beside the empty
+ *    card;
  *  - the empty card shows when both lists are known to be empty: no legal-body row (or no
  *    section) and an entity list read as empty. A list not read, or that could not be read, never
  *    makes the page say there is nothing.
@@ -188,7 +199,7 @@ export function agentsPageView(p: {
     (p.legalBodies.kind === "rows" && p.legalBodies.rows.length === 0);
   const empty = noLegalBody && count === 0;
   if (count !== undefined && count > 0) return { treasury: "cards", empty };
+  if (count === undefined && p.entities.error) return { treasury: "unreadable", empty };
   if (p.gate !== "offered" || empty) return { treasury: "hidden", empty };
-  if (count === 0) return { treasury: "none", empty };
-  return { treasury: p.entities.error ? "unreadable" : "loading", empty };
+  return { treasury: count === 0 ? "none" : "loading", empty };
 }

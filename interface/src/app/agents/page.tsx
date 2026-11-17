@@ -6,7 +6,7 @@ import { AgentShell } from "@/components/agents/AgentShell";
 import { AgentCards } from "@/components/agents/AgentCards";
 import { LegalBodiesSection, useAccountLegalBodies } from "@/components/agents/LegalBodiesSection";
 import { LoadingState, RequireAuth } from "@/components/agents/RequireAuth";
-import { Card } from "@/components/onboarding/primitives";
+import { Button, Card } from "@/components/onboarding/primitives";
 import { agentsPageView } from "@/lib/legalBody/accountRows";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import { fullProductGate } from "@/lib/start/paths";
@@ -22,9 +22,10 @@ export default function AgentsPage() {
 }
 
 /**
- * "My agents": the account's legal bodies, then its agents with a treasury where it has some or
- * the deployment offers the full product. One "Add" opens the start, where every path begins.
- * Each list keeps its own loading and error, so one that cannot be read never hides the other.
+ * "My agents": the account's legal bodies, then its agents with a treasury where it has some, where
+ * the deployment offers the full product, or where their list could not be read (`agentsPageView`).
+ * One "Add" opens the start, where every path begins. Each list keeps its own loading and its own
+ * error with a retry, so one that cannot be read never hides the other.
  */
 function AgentsList() {
   const legalBodies = useAccountLegalBodies();
@@ -36,8 +37,6 @@ function AgentsList() {
     gate: fullProductGate(config),
   });
   const entities = entitiesQuery.data ?? [];
-  const error = entitiesQuery.error;
-  const errorMessage = error instanceof Error ? error.message : "Failed to load agents.";
 
   return (
     <AgentShell>
@@ -73,9 +72,18 @@ function AgentsList() {
           ) : page.treasury === "loading" ? (
             <LoadingState label="Loading agents…" />
           ) : page.treasury === "unreadable" ? (
-            <p className="py-6 text-[13px] text-[#ff8a84]">{errorMessage}</p>
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border hairline bg-paper/40 px-5 py-4">
+              <p className="text-[13px] text-[#ff8a84]">{A.treasuryUnreadable}</p>
+              <Button
+                variant="ghost"
+                onClick={() => void entitiesQuery.refetch()}
+                loading={entitiesQuery.isFetching}
+              >
+                {LEGAL_BODY_COPY.done.retry}
+              </Button>
+            </div>
           ) : (
-            <p className="text-[13px] text-muted">No agent with a treasury yet.</p>
+            <p className="text-[13px] text-muted">{A.treasuryNone}</p>
           )}
         </section>
       )}

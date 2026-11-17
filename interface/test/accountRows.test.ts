@@ -4,25 +4,27 @@
  * One row per legal body the account can still do something with or open: a live order (in
  * progress, or needing attention when its pointer was cleared), a linked body, another finished
  * body (needing attention), and a company the flow can continue from that has no live and no
- * linked order. Each row links into the legal-body flow by its order or its company. Rows that
+ * linked order (needing attention when its filing or its check failed). Each row links into the legal-body flow by its order or its company. Rows that
  * are not linked come first, then the newest; the public standing is read for the first five
  * linked rows only, because the public read is rate limited.
  *
  * The section reads the orders and the companies: a 403 (an account the real-human check does
  * not accept) and a deployment that says it has no legal bodies show no section; any other error
  * shows one line with a retry. The page shows the treasury section where the person has such
- * agents or the deployment says it offers the full product, and the empty card only when both
- * lists are known to be empty. Every view is built from one fixed `NOW`: nothing here reads a
+ * agents, where the deployment says it offers the full product, or wherever their list could not
+ * be read (one line with a retry), and the empty card only when both lists are known to be empty.
+ * On a sandbox deployment a row's standing carries the record's sandbox pill. Every view is built from one fixed `NOW`: nothing here reads a
  * clock.
  */
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   ApiError,
   type CompanyView,
   type EntityView,
   type LegalBodyByAgent,
+  type LegalBodyConfig,
   type LegalBodyOrderView,
 } from "@/lib/api/types";
 import type { PublicRead } from "@/lib/api/legalBodyClient";
@@ -30,6 +32,7 @@ import type { PublicRead } from "@/lib/api/legalBodyClient";
 const byAgent = vi.hoisted(() => ({
   calls: [] as { agentId: string | null | undefined; enabled: boolean }[],
   data: undefined as PublicRead<LegalBodyByAgent> | undefined,
+  config: null as LegalBodyConfig | null,
 }));
 
 vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
@@ -38,8 +41,17 @@ vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
     byAgent.calls.push({ agentId, enabled });
     return { data: byAgent.data, isPending: byAgent.data === undefined };
   },
-  useLegalBodyConfig: () => ({ status: "loading", config: null }),
+  useLegalBodyConfig: () =>
+    byAgent.config === null
+      ? { status: "loading", config: null }
+      : { status: "ready", config: byAgent.config },
 }));
+
+afterEach(() => {
+  byAgent.calls = [];
+  byAgent.data = undefined;
+  byAgent.config = null;
+});
 
 import { LegalBodiesSection } from "@/components/agents/LegalBodiesSection";
 import {
@@ -167,6 +179,8 @@ describe("the exact values", () => {
       emptyTitle: "Nothing here yet",
       emptyBody: "Give your agent a legal body.",
       getStarted: "Get started",
+      treasuryNone: "No agent with a treasury yet.",
+      treasuryUnreadable: "Your agents with a treasury could not be read.",
     });
   });
 });
@@ -271,6 +285,42 @@ describe("accountLegalBodyRows: which orders and companies make a row", () => {
         action: "continue",
         standing: false,
       },
+    ]);
+  });
+
+  test("a formed company whose filing failed needs attention, and is continued by its company", () => {
+    expect(rows([formed("co_f", { state: "failed" })], [])).toEqual([
+      expect.objectContaining({
+        key: "company:co_f",
+        href: "/legal-body?company=co_f",
+        state: "attention",
+        action: "continue",
+      }),
+    ]);
+  });
+
+  test("a declared company whose check failed needs attention, and is continued by its company", () => {
+    const failed = company("co_a", {
+      verification: { state: "failed", checkedAt: NOW_S - 60, reasonCode: null },
+    });
+    expect(rows([failed], [])).toEqual([
+      expect.objectContaining({
+        key: "company:co_a",
+        href: "/legal-body?company=co_a",
+        state: "attention",
+        action: "continue",
+      }),
+    ]);
+  });
+
+  test("a company waiting on its check, or formed and filed, is in progress", () => {
+    const waiting = company("co_w", {
+      verification: { state: "awaiting_check", checkedAt: null, reasonCode: null },
+    });
+    const filed = formed("co_f", { state: "filed", legalNameFiled: "Filed Name LLC" });
+    expect(rows([waiting, filed], []).map((r) => [r.key, r.state])).toEqual([
+      ["company:co_w", "in_progress"],
+      ["company:co_f", "in_progress"],
     ]);
   });
 
@@ -460,17 +510,34 @@ describe("agentsPageView: the treasury section and the empty card", () => {
     expect(agentsPageView({ legalBodies: some, entities: entities([]), gate: "unknown" }).treasury).toBe("hidden");
   });
 
-  test("its loading and its error show only where the full product is offered, and never hide the legal bodies", () => {
+  test("its loading shows only where the full product is offered", () => {
     expect(agentsPageView({ legalBodies: some, entities: entities(undefined), gate: "offered" }).treasury).toBe(
       "loading",
     );
+    expect(agentsPageView({ legalBodies: some, entities: entities(undefined), gate: "not_offered" }).treasury).toBe(
+      "hidden",
+    );
+    expect(agentsPageView({ legalBodies: some, entities: entities(undefined), gate: "unknown" }).treasury).toBe(
+      "hidden",
+    );
+  });
+
+  test("a list that could not be read is said wherever, and never hides the legal bodies", () => {
+    // The person may have agents with a treasury on a deployment that no longer offers them.
     const failed = entities(undefined, new Error("offline"));
-    expect(agentsPageView({ legalBodies: some, entities: failed, gate: "offered" })).toEqual({
-      treasury: "unreadable",
-      empty: false,
-    });
-    expect(agentsPageView({ legalBodies: some, entities: failed, gate: "not_offered" }).treasury).toBe("hidden");
-    expect(agentsPageView({ legalBodies: some, entities: failed, gate: "unknown" }).treasury).toBe("hidden");
+    for (const gate of ["offered", "not_offered", "unknown"] as const) {
+      for (const legalBodies of [some, none, { kind: "hidden" } as const, { kind: "unreadable" } as const]) {
+        expect(agentsPageView({ legalBodies, entities: failed, gate })).toEqual({
+          treasury: "unreadable",
+          empty: false,
+        });
+      }
+    }
+  });
+
+  test("a list already read stays on screen through a failed refresh", () => {
+    const stale = entities([entity], new Error("offline"));
+    expect(agentsPageView({ legalBodies: some, entities: stale, gate: "not_offered" }).treasury).toBe("cards");
   });
 
   test("no row and no entity: the empty card alone", () => {
@@ -502,6 +569,21 @@ describe("agentsPageView: the treasury section and the empty card", () => {
 });
 
 describe("LegalBodiesSection, as the server renders it", () => {
+  /** The amber pill's markup ending in the record's sandbox word. */
+  const SANDBOX_PILL = new RegExp(`#febc2e[^>]*>(?:<span[^>]*></span>)?${LEGAL_BODY_COPY.done.sandboxPill}</span>`);
+  const legalBodyConfig = (environment: "sandbox" | "production"): LegalBodyConfig => ({
+    available: true,
+    declarations: true,
+    statements: true,
+    environment,
+    chainId: CHAIN,
+    identityRegistry: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+    factory: FACTORY,
+    gasSeedOffered: false,
+    paymentRequired: false,
+    linkTtl: { min: 600, max: 85_800, default: 3_600 },
+  });
+
   const render = (view: LegalBodiesView) =>
     renderToString(createElement(LegalBodiesSection, { view, onRetry: () => {}, retrying: false }));
 
@@ -518,7 +600,6 @@ describe("LegalBodiesSection, as the server renders it", () => {
   });
 
   test("each row links into the flow with its title, identity, state and action", () => {
-    byAgent.calls = [];
     const html = render({
       kind: "rows",
       rows: rows(
@@ -539,18 +620,35 @@ describe("LegalBodiesSection, as the server renders it", () => {
   });
 
   test("a standing row reads the public standing for its identity, and shows it once read", () => {
-    byAgent.calls = [];
     byAgent.data = { kind: "could_not_check", reason: "rate_limited" } as PublicRead<LegalBodyByAgent>;
     const html = render({ kind: "rows", rows: rows([company("co_a")], [linked("ord_1", "co_a", "897126")]) });
     expect(byAgent.calls).toEqual([{ agentId: "897126", enabled: true }]);
     expect(html).toContain(A.states.linked);
     expect(html).toContain(A.actions.open);
     expect(html).toContain(LEGAL_BODY_COPY.done.labels.couldNotCheck);
+  });
+
+  test("on a sandbox deployment the standing carries the record's sandbox pill; on production it does not", () => {
+    byAgent.data = { kind: "could_not_check", reason: "rate_limited" } as PublicRead<LegalBodyByAgent>;
+    const linkedRows = rows([company("co_a")], [linked("ord_1", "co_a", "897126")]);
+    byAgent.config = legalBodyConfig("sandbox");
+    const sandbox = render({ kind: "rows", rows: linkedRows });
+    expect(sandbox).toMatch(SANDBOX_PILL);
+    byAgent.config = legalBodyConfig("production");
+    expect(render({ kind: "rows", rows: linkedRows })).not.toMatch(SANDBOX_PILL);
+    // Nothing read yet: no standing and no sandbox pill either.
     byAgent.data = undefined;
+    byAgent.config = legalBodyConfig("sandbox");
+    expect(render({ kind: "rows", rows: linkedRows })).not.toMatch(SANDBOX_PILL);
+  });
+
+  test("no standing row, no sandbox pill: the pill belongs to the standing", () => {
+    byAgent.config = legalBodyConfig("sandbox");
+    const html = render({ kind: "rows", rows: rows([company("co_a")], [order("ord_1", "co_a")]) });
+    expect(html).not.toMatch(SANDBOX_PILL);
   });
 
   test("a linked row past the five reads asks for nothing", () => {
-    byAgent.calls = [];
     const orders = Array.from({ length: 7 }, (_, i) => linked(`ord_${i}`, "co_a", String(100 + i), i + 1));
     const html = render({ kind: "rows", rows: rows([company("co_a")], orders) });
     expect(byAgent.calls.map((c) => c.agentId)).toEqual(["100", "101", "102", "103", "104"]);
