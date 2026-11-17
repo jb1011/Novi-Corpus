@@ -2,13 +2,14 @@
 
 import { Suspense, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useBytecode } from "wagmi";
-import { Wordmark } from "@/components/landing/Wordmark";
 import { AuthProvider, useAuth } from "@/components/onboarding/AuthProvider";
 import { StepNav } from "@/components/onboarding/OnboardingFlow";
 import { Button, Callout, Card, Spinner, StepHeader } from "@/components/onboarding/primitives";
 import { PaymentStep } from "@/components/onboarding/steps/PaymentStep";
 import { Web3Provider } from "@/components/providers/Web3Provider";
+import { PathChoice } from "@/components/start/PathChoice";
 import {
   useCompaniesQuery,
   useCompanyQuery,
@@ -36,7 +37,6 @@ import {
   type CarriedSentence,
 } from "@/lib/legalBody/agreement";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
-import { entranceOffer } from "@/lib/legalBody/entrance";
 import {
   deriveLegalBodyPhase,
   selectLegalBodyThread,
@@ -78,6 +78,7 @@ import {
   jumpMemoryPatch,
   memoryAfterThread,
   mergeLegalBodyMemory,
+  newCompanyScreen,
   patchEndsIntent,
   threadDoor,
   threadRefsOf,
@@ -91,12 +92,15 @@ import {
   type StoredIntent,
 } from "@/lib/legalBody/storage";
 import { worldIdGateState, worldIdMeStatus } from "@/lib/legalBody/worldIdGate";
+import { readPersistedOnboarding } from "@/lib/onboarding/storage";
+import { START_COPY } from "@/lib/start/copy";
+import { fullProductHref, pathCards, pathFacts, preselectedPath } from "@/lib/start/paths";
 import { AgreementStep } from "./AgreementStep";
 import { ClosedNotice } from "./ClosedNotice";
 import { CompanyStep } from "./CompanyStep";
 import { DoneStep } from "./DoneStep";
-import { EntranceStep } from "./EntranceStep";
 import { FilingStep } from "./FilingStep";
+import { Blank, FlowBackground, FlowHeader } from "./FlowFrame";
 import { HumanStep } from "./HumanStep";
 import { IdentityStep } from "./IdentityStep";
 import { LegalBodyRail } from "./LegalBodyRail";
@@ -155,7 +159,6 @@ export type LegalBodyStepKit = {
   door: "declare" | "form";
 };
 
-const F = LEGAL_BODY_COPY.frame;
 const T = LEGAL_BODY_COPY.thread;
 const NO_CODE: CodeRead = { status: "pending", data: undefined };
 const NO_COMPANIES: CompanyView[] = [];
@@ -250,6 +253,10 @@ function LegalBodySession({
 }) {
   const tenant = session.address;
   const token = session.token;
+  const router = useRouter();
+  // The whole public config: the choice of paths in front of a new company reads its cards and
+  // facts from it.
+  const { data: publicConfig } = usePublicConfigQuery();
 
   const [view, setView] = useState<GateView>(engaged ? "signin" : null);
   // The token a step's request was refused under: that session is over, whatever it still says.
@@ -567,25 +574,36 @@ function LegalBodySession({
       case "filing":
         return <FilingStep key={kit.companyId ?? "filing"} kit={kit} />;
       case "company": {
-        const offer = entranceOffer(config.formedDoor);
-        if (
-          !kit.companyId &&
-          derivation.companyStep === "form" &&
-          memory?.door == null &&
-          offer.kind === "ask"
-        ) {
+        // In front of a new company with no door chosen, the choice of paths, in place: a door
+        // picked here is remembered, the full product opens the wizard.
+        const cards = pathCards(publicConfig);
+        const opening = newCompanyScreen({
+          companyId: kit.companyId,
+          companyStep: derivation.companyStep,
+          door: memory?.door ?? null,
+          cards,
+        });
+        if (opening === "choice")
           return (
-            <EntranceStep
-              offer={offer}
-              onAnswer={(patch) => {
-                remember(patch);
-                if (patch.suggestedAgentId)
-                  noteIdentity({ kind: "registered", agentId: patch.suggestedAgentId });
+            <PathChoice
+              cards={cards}
+              initial={preselectedPath(cards, null)}
+              facts={pathFacts(publicConfig)}
+              back={
+                companies.length > 0 || orders.length > 0
+                  ? { href: "/agents", label: START_COPY.backToAgents }
+                  : undefined
+              }
+              onContinue={(path) => {
+                if (path === "full") router.push(fullProductHref(readPersistedOnboarding()));
+                else remember({ door: path });
               }}
             />
           );
-        }
-        return declarationsClosed(config, derivation) ? (
+        // A new company this deployment does not take; and, as before, a company of the account
+        // back on its form where declarations are off.
+        return opening === "closed" ||
+          (kit.companyId !== null && declarationsClosed(config, derivation)) ? (
           <StepPlaceholder kit={kit} sentence={LEGAL_BODY_COPY.company.declarationsOff} />
         ) : (
           // One form per thread: a new declaration never inherits another thread's typing.
@@ -830,38 +848,4 @@ function StepPlaceholder({
       </Card>
     </div>
   );
-}
-
-function FlowHeader() {
-  return (
-    <header className="sticky top-0 z-40">
-      <div className="absolute inset-0 -z-10 border-b hairline bg-paper/80 backdrop-blur-md" />
-      <div className="mx-auto flex h-16 max-w-[1180px] items-center justify-between px-5 lg:px-8">
-        <Wordmark />
-        <Link
-          href="/"
-          className="rounded-full px-3 py-1.5 text-[12.5px] text-muted transition-colors hover:bg-paper-2 hover:text-ink"
-        >
-          {F.exit}
-        </Link>
-      </div>
-    </header>
-  );
-}
-
-/** The wizard's background, so both flows look like one product. */
-function FlowBackground() {
-  return (
-    <>
-      <div
-        aria-hidden
-        className="pointer-events-none fixed inset-0 -z-10 hero-mesh-dark opacity-70"
-      />
-      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 bg-paper-grain opacity-60" />
-    </>
-  );
-}
-
-function Blank() {
-  return <div className="min-h-screen bg-paper" aria-hidden />;
 }

@@ -1,7 +1,8 @@
 /**
  * Resuming the legal-body flow from the server's state: what the local memory holds after a thread
  * is shown, which local choices count for which order, what a "start another" click overrides,
- * where a rail jump sends the derivation, the flow's clock, and the chooser's rows.
+ * where a rail jump sends the derivation, the flow's clock, the chooser's rows, and whether a new
+ * company opens on the choice of paths.
  */
 import { describe, expect, test } from "vitest";
 import type { Address, CompanyView, LegalBodyOrderView } from "@/lib/api/types";
@@ -19,11 +20,13 @@ import {
   memoryAfterThread,
   mergeLegalBodyMemory,
   newCompanyHandover,
+  newCompanyScreen,
   patchEndsIntent,
   threadDoor,
   threadRefsOf,
   threadWithIntent,
 } from "@/lib/legalBody/resume";
+import { pathCards } from "@/lib/start/paths";
 
 /** Anvil's first published test account, and the public testnet factory. */
 const TENANT = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address;
@@ -259,6 +262,56 @@ describe("threadDoor", () => {
 
   test("a company of the agent wizard is not a formed legal body: the declare door", () => {
     expect(threadDoor(company("co_a", { provider: "doola", purpose: "agent" }), "form")).toBe("declare");
+  });
+});
+
+describe("newCompanyScreen: the choice of paths, in place, in front of a new company", () => {
+  const three = pathCards({
+    fullProductAvailable: true,
+    legalBodies: { available: true, declarations: true, formedDoor: "offered" } as never,
+  });
+
+  test("nothing chosen and more than one way in: the choice, in place", () => {
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: three })).toBe("choice");
+  });
+
+  test("a chosen door goes to its step; a door that closed since goes back to the choice", () => {
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "form", cards: three })).toBe("step");
+    const fullUp = pathCards({
+      legalBodies: { available: true, declarations: true, formedDoor: "cap_reached" } as never,
+    });
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "form", cards: fullUp })).toBe("choice");
+  });
+
+  test("the declared door alone needs no choice, and a deployment that takes no declaration says so", () => {
+    const only = pathCards({
+      legalBodies: { available: true, declarations: true, formedDoor: "hidden" } as never,
+    });
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: only })).toBe("step");
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "declare", cards: [] })).toBe("closed");
+  });
+
+  test("an existing company is never asked again", () => {
+    expect(newCompanyScreen({ companyId: "co_1", companyStep: "form", door: null, cards: three })).toBe("step");
+  });
+
+  test("a company step past the form is the step, whatever the cards", () => {
+    expect(newCompanyScreen({ companyId: null, companyStep: "loading", door: null, cards: three })).toBe("step");
+    expect(newCompanyScreen({ companyId: null, companyStep: undefined, door: null, cards: [] })).toBe("step");
+  });
+
+  test("the declare door goes to its step while declarations are taken", () => {
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "declare", cards: three })).toBe("step");
+  });
+
+  test("the full product alone is still a choice: it is never opened from here unasked", () => {
+    const fullOnly = pathCards({ fullProductAvailable: true, legalBodies: { available: false } });
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: fullOnly })).toBe("choice");
+  });
+
+  test("no way in at all is the closed sentence, never an empty choice", () => {
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: null, cards: [] })).toBe("closed");
+    expect(newCompanyScreen({ companyId: null, companyStep: "form", door: "form", cards: [] })).toBe("closed");
   });
 });
 

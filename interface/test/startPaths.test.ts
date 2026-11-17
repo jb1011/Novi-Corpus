@@ -6,10 +6,12 @@ import {
   landingPaths,
   parsePathParam,
   pathCards,
+  pathFacts,
   preselectedPath,
   startDestination,
 } from "@/lib/start/paths";
 import { START_COPY } from "@/lib/start/copy";
+import { ONBOARDING_STEP_COUNT } from "@/components/landing/copy";
 import { buildPersistedOnboarding } from "@/lib/onboarding/storage";
 import { emptyConfig, emptySession, type Phase } from "@/components/onboarding/types";
 import type { EntityView, PublicConfig } from "@/lib/api/types";
@@ -171,6 +173,54 @@ describe("startDestination", () => {
     expect(startDestination({ status: "loading", config: all })).toEqual({ kind: "loading" });
     expect(startDestination({ status: "error", config: all })).toEqual({ kind: "error" });
     expect(startDestination({ status: "ready", config: undefined })).toEqual({ kind: "none" });
+  });
+});
+
+describe("pathFacts", () => {
+  test("testnet: a sandbox legal-body config, its filing estimate and the wizard's step count", () => {
+    const testnet: PublicConfig = {
+      ...base,
+      formationPaymentRequired: false,
+      formationFeeUsdc: 399,
+      legalBodies: lb({ filingWorkingDays: 5 }),
+    };
+    expect(pathFacts(testnet)).toEqual({
+      environment: "sandbox",
+      filingWorkingDays: 5,
+      formationPaymentRequired: false,
+      formationFeeUsdc: 399,
+      stepCount: ONBOARDING_STEP_COUNT,
+    });
+  });
+  test("production charges only on an explicit true, with the fee the server serves", () => {
+    const paid: PublicConfig = {
+      ...base,
+      formationPaymentRequired: true,
+      formationFeeUsdc: 399,
+      legalBodies: lb({ environment: "production", filingWorkingDays: 7 }),
+    };
+    expect(pathFacts(paid)).toMatchObject({
+      environment: "production",
+      filingWorkingDays: 7,
+      formationPaymentRequired: true,
+      formationFeeUsdc: 399,
+    });
+  });
+  test("nothing said is the smaller truth: production, no estimate, no payment, no fee", () => {
+    const smaller = {
+      environment: "production",
+      filingWorkingDays: null,
+      formationPaymentRequired: false,
+      formationFeeUsdc: null,
+      stepCount: ONBOARDING_STEP_COUNT,
+    };
+    expect(pathFacts(undefined)).toEqual(smaller);
+    expect(pathFacts(base)).toEqual(smaller);
+    expect(pathFacts({ ...base, legalBodies: { available: false } })).toEqual(smaller);
+    expect(pathFacts({ ...base, legalBodies: lb({ filingWorkingDays: undefined }) }).filingWorkingDays).toBeNull();
+  });
+  test("only the legal-body config says sandbox: a sandbox formation alone does not", () => {
+    expect(pathFacts({ ...base, formationEnvironment: "sandbox" }).environment).toBe("production");
   });
 });
 

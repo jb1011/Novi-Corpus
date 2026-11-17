@@ -1,7 +1,8 @@
 /**
  * Every sentence the way in to the site shows, in one place, grouped by screen.
  *
- * No em dash in any of them, and never "our agents". `{days}`, `{fee}` and `{count}` are filled
+ * No em dash in any of them, never "our agents", and never "free": the money line says there is
+ * no payment, since "free" reads as a price promise. `{days}`, `{fee}` and `{count}` are filled
  * by the screen that renders them, from the deployment's config and the wizard's step count.
  */
 export const START_COPY = {
@@ -10,6 +11,7 @@ export const START_COPY = {
     body: "This deployment gives agents a legal body. The treasury and spending rules are on testnet.",
     choose: "Choose a path",
   },
+  eyebrow: "Get started",
   title: "Choose how your agent gets its legal body",
   needs: "Every path needs this wallet, World ID, and a key for your agent's identity that can send a transaction on Arc.",
   continue: "Continue",
@@ -46,4 +48,5 @@ export const START_COPY = {
   companiesUnreadable: "Your companies could not be read.",
   retry: "Try again",
   home: "Back to the home page",
+  backToAgents: "Back to my agents",
 } as const;

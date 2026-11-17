@@ -4,6 +4,7 @@ import {
   isFormedCompany,
   isLiveOrder,
   sameAddress,
+  type CompanyStep,
   type LegalBodyThread,
   type LegalBodyThreadRef,
 } from "@/lib/legalBody/flow";
@@ -14,6 +15,7 @@ import type {
   OwnerChoice,
   StoredIntent,
 } from "@/lib/legalBody/storage";
+import type { PathCard } from "@/lib/start/paths";
 
 /**
  * Resuming the flow from the server's state, the local memory as a hint.
@@ -102,6 +104,36 @@ export function newCompanyHandover(
 export function threadDoor(company: CompanyView | null, memoryDoor: DoorChoice | null): DoorChoice {
   if (company !== null) return isFormedCompany(company) ? "form" : "declare";
   return memoryDoor ?? "declare";
+}
+
+/**
+ * What the company phase shows for a thread: the choice of paths, in place; the sentence that
+ * this deployment takes no new company; or the company step.
+ *
+ * A company that exists, or a company step past its form, is the step: nobody is asked again. In
+ * front of a new company the door the memory holds decides while the deployment still offers it:
+ * a chosen form door whose card is no longer offered goes back to the choice; a chosen declare
+ * door with no declare card is closed. With no door chosen, the choice whenever there is a form
+ * or full-product card; the declare card alone needs no choice. No card at all is closed, never
+ * an empty choice.
+ */
+export type NewCompanyScreen = "choice" | "closed" | "step";
+
+export function newCompanyScreen(p: {
+  companyId: string | null;
+  companyStep: CompanyStep | undefined;
+  door: DoorChoice | null;
+  cards: readonly PathCard[];
+}): NewCompanyScreen {
+  if (p.companyId !== null || p.companyStep !== "form") return "step";
+  const card = (id: PathCard["id"]) => p.cards.find((c) => c.id === id);
+  if (p.door === "form") {
+    if (card("form")?.state === "offered") return "step";
+    return p.cards.length > 0 ? "choice" : "closed";
+  }
+  if (p.door === "declare") return card("declare") ? "step" : "closed";
+  if (!card("form") && !card("full")) return card("declare") ? "step" : "closed";
+  return "choice";
 }
 
 /**

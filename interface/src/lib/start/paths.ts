@@ -1,3 +1,4 @@
+import { ONBOARDING_STEP_COUNT } from "@/components/landing/copy";
 import type { PublicConfig } from "@/lib/api/types";
 import { isOnboardingComplete, type PersistedOnboarding } from "@/lib/onboarding/storage";
 
@@ -98,6 +99,32 @@ export function fullProductHref(
 ): "/onboarding" | "/onboarding?new=1" {
   if (stored && stored.phase !== "welcome" && !isOnboardingComplete(stored)) return "/onboarding";
   return "/onboarding?new=1";
+}
+
+/**
+ * The facts a choice card states, each from one explicit value of `/config`. Absent, a legal-body
+ * config that is not available, and a config not there yet all read as the smaller truth:
+ * production (no testnet line), no filing estimate, no payment and no fee to name.
+ */
+export type PathFacts = {
+  environment: "sandbox" | "production";
+  filingWorkingDays: number | null;
+  formationPaymentRequired: boolean;
+  formationFeeUsdc: number | null;
+  /** The wizard's steps, for the full-product card. */
+  stepCount: number;
+};
+
+export function pathFacts(config: PublicConfig | null | undefined): PathFacts {
+  const legalBodies = config?.legalBodies;
+  const available = legalBodies?.available === true ? legalBodies : null;
+  return {
+    environment: available?.environment === "sandbox" ? "sandbox" : "production",
+    filingWorkingDays: available?.filingWorkingDays ?? null,
+    formationPaymentRequired: config?.formationPaymentRequired === true,
+    formationFeeUsdc: config?.formationFeeUsdc ?? null,
+    stepCount: ONBOARDING_STEP_COUNT,
+  };
 }
 
 /** What the start page shows once the person is through the gate. */

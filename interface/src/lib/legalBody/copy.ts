@@ -274,25 +274,6 @@ export const LEGAL_BODY_COPY = {
   /* ── The steps after the gates. Each screen's own sentences, carried here so the one walk covers
         them from the start. ─────────────────────────────────────────────────────────────────── */
 
-  entrance: {
-    title: "About your agent",
-    intro: "Three answers, kept in this browser. They choose the door. They file nothing.",
-    company: "Your company",
-    have: "We have a Wyoming LLC",
-    form: "Form one for this agent",
-    capReached: "The formed companies this deployment takes are all spoken for.",
-    identity: "Your agent's identity",
-    hasOne: "It has one",
-    notYet: "Not yet",
-    agentId: "The agent's identity number",
-    key: "Who holds its key",
-    thisWallet: "This wallet",
-    anotherKey: "Another key I control",
-    keySentence:
-      "The key must be able to send a transaction on Arc, or have a sponsor, because the pointer is a transaction.",
-    continue: "Continue",
-  },
-
   filing: {
     title: "The state is filing the company",
     waiting:

@@ -6,8 +6,9 @@ import type { Address } from "@/lib/api/types";
  * The flow handles a company name, a filing number, a declarant's name and title, a statement,
  * the typed data behind it and a signature. None of that is written to a browser store. What
  * survives a reload is which wallet the memory belongs to, the backend's handles for the company
- * and the order, the two draft-only choices, the entrance's answers, and a "start another" click
- * with the handles there were when it was made; everything else is read back from the server.
+ * and the order, the two draft-only choices, the company door, two answers no longer asked, an
+ * identity number to offer, and a "start another" click with the handles there were when it was
+ * made; everything else is read back from the server.
  *
  * Persistence is an ALLOWLIST, and each value is checked against its shape on the way in and on
  * the way out: a field nobody thought about is not persisted, and a typed value put under an
@@ -58,13 +59,13 @@ export type LegalBodyMemory = {
   ownerChoice: OwnerChoice | null;
   /** The identity picked or registered, draft only. */
   agentId: string | null;
-  /** The entrance's company door. Null until the person answers, or when the door is hidden. */
+  /** The company door, picked on the choice of paths. Null until the person picks one. */
   door: DoorChoice | null;
-  /** The entrance's answer about the agent's identity. Not the identity itself. */
+  /** An earlier answer about the agent's identity, no longer asked. Not the identity itself. */
   identityChoice: IdentityChoice | null;
-  /** The entrance's answer about who holds the key. It does not skip the agreement. */
+  /** An earlier answer about who holds the key, no longer asked. It does not skip the agreement. */
   signer: OwnerChoice | null;
-  /** An identity number the entrance offered. The identity step confirms it. */
+  /** An identity number offered to the identity step, which confirms it. */
   suggestedAgentId: string | null;
   /** A "start another" click, until what it starts exists. */
   startAnother: StoredIntent | null;
