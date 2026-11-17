@@ -6,9 +6,8 @@ import type { Address } from "@/lib/api/types";
  * The flow handles a company name, a filing number, a declarant's name and title, a statement,
  * the typed data behind it and a signature. None of that is written to a browser store. What
  * survives a reload is which wallet the memory belongs to, the backend's handles for the company
- * and the order, the two draft-only choices, the company door, two answers no longer asked, an
- * identity number to offer, and a "start another" click with the handles there were when it was
- * made; everything else is read back from the server.
+ * and the order, the two draft-only choices, the company door, and a "start another" click with the
+ * handles there were when it was made; everything else is read back from the server.
  *
  * Persistence is an ALLOWLIST, and each value is checked against its shape on the way in and on
  * the way out: a field nobody thought about is not persisted, and a typed value put under an
@@ -27,15 +26,11 @@ export const PERSISTED_LEGAL_BODY_KEYS = [
   "ownerChoice",
   "agentId",
   "door",
-  "identityChoice",
-  "signer",
-  "suggestedAgentId",
   "startAnother",
 ] as const satisfies readonly (keyof LegalBodyMemory)[];
 
 export type OwnerChoice = "this-wallet" | "elsewhere";
 export type DoorChoice = "declare" | "form";
-export type IdentityChoice = "has-one" | "not-yet";
 
 /**
  * A "start another" click, kept until what it starts exists: handles only.
@@ -61,12 +56,6 @@ export type LegalBodyMemory = {
   agentId: string | null;
   /** The company door, picked on the choice of paths. Null until the person picks one. */
   door: DoorChoice | null;
-  /** An earlier answer about the agent's identity, no longer asked. Not the identity itself. */
-  identityChoice: IdentityChoice | null;
-  /** An earlier answer about who holds the key, no longer asked. It does not skip the agreement. */
-  signer: OwnerChoice | null;
-  /** An identity number offered to the identity step, which confirms it. */
-  suggestedAgentId: string | null;
   /** A "start another" click, until what it starts exists. */
   startAnother: StoredIntent | null;
 };
@@ -78,7 +67,6 @@ const HANDLE = /^[A-Za-z0-9_-]{1,80}$/;
 const AGENT_ID = /^(?:0|[1-9][0-9]{0,77})$/;
 const OWNER_CHOICES: readonly OwnerChoice[] = ["this-wallet", "elsewhere"];
 const DOORS: readonly DoorChoice[] = ["declare", "form"];
-const IDENTITY_CHOICES: readonly IdentityChoice[] = ["has-one", "not-yet"];
 
 /** Whether a value has the shape of the backend's handles, the one the store keeps them in. */
 export function isHandle(value: string): boolean {
@@ -99,10 +87,6 @@ function ownerChoiceOf(value: unknown): OwnerChoice | null {
 
 function doorOf(value: unknown): DoorChoice | null {
   return DOORS.find((door) => door === value) ?? null;
-}
-
-function identityChoiceOf(value: unknown): IdentityChoice | null {
-  return IDENTITY_CHOICES.find((choice) => choice === value) ?? null;
 }
 
 /** An own property only: nothing inherited is picked. */
@@ -153,9 +137,6 @@ export function buildLegalBodyMemory(
     ownerChoice: ownerChoiceOf(own(state, "ownerChoice")),
     agentId: matching(own(state, "agentId"), AGENT_ID),
     door: doorOf(own(state, "door")),
-    identityChoice: identityChoiceOf(own(state, "identityChoice")),
-    signer: ownerChoiceOf(own(state, "signer")),
-    suggestedAgentId: matching(own(state, "suggestedAgentId"), AGENT_ID),
     startAnother: intentOf(own(state, "startAnother")),
   };
 }

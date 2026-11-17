@@ -49,9 +49,6 @@ const memory = (over: Partial<LegalBodyMemory> = {}): LegalBodyMemory => ({
   ownerChoice: null,
   agentId: null,
   door: null,
-  identityChoice: null,
-  signer: null,
-  suggestedAgentId: null,
   startAnother: null,
   ...over,
 });
@@ -242,11 +239,11 @@ describe("newCompanyHandover", () => {
   });
 
   test("over this account's memory: the door and the companies there are, the rest kept", () => {
-    const stored = memory({ companyId: "co_1", signer: "elsewhere", startAnother: { kind: "another-agent", companyId: "co_1", known: [] } });
+    const stored = memory({ companyId: "co_1", ownerChoice: "elsewhere", startAnother: { kind: "another-agent", companyId: "co_1", known: [] } });
     expect(newCompanyHandover(TENANT, stored, "declare", [{ companyId: "co_1" }, { companyId: "co_2" }])).toEqual(
       memory({
         companyId: "co_1",
-        signer: "elsewhere",
+        ownerChoice: "elsewhere",
         door: "declare",
         startAnother: { kind: "another-company", known: ["co_1", "co_2"] },
       }),
@@ -286,9 +283,9 @@ describe("arrivalMemory: an order or a company named in the address", () => {
   });
 
   test("the rest of the memory is kept; with no memory, one for this tenant", () => {
-    const stored = memory({ door: "form", identityChoice: "has-one", signer: "elsewhere", suggestedAgentId: "42" });
+    const stored = memory({ door: "form" });
     expect(arrivalMemory(TENANT, stored, { order: "ord_2", company: null })).toEqual(
-      memory({ orderId: "ord_2", door: "form", identityChoice: "has-one", signer: "elsewhere", suggestedAgentId: "42" }),
+      memory({ orderId: "ord_2", door: "form" }),
     );
     expect(arrivalMemory(OTHER, null, { order: null, company: "co_2" })).toEqual(
       memory({ tenant: OTHER, companyId: "co_2" }),

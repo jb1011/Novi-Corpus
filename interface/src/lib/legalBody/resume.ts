@@ -37,9 +37,6 @@ const EMPTY: Memo = {
   ownerChoice: null,
   agentId: null,
   door: null,
-  identityChoice: null,
-  signer: null,
-  suggestedAgentId: null,
   startAnother: null,
 };
 
@@ -74,9 +71,6 @@ export function mergeLegalBodyMemory(
     ownerChoice: b.ownerChoice,
     agentId: b.agentId,
     door: b.door,
-    identityChoice: b.identityChoice,
-    signer: b.signer,
-    suggestedAgentId: b.suggestedAgentId,
     startAnother: b.startAnother,
   };
   return { ...kept, ...patch, tenant };
@@ -223,9 +217,6 @@ export function memoryAfterThread(p: {
     ownerChoice: sameOrder ? base.ownerChoice : null,
     agentId: sameOrder ? base.agentId : null,
     door: base.door,
-    identityChoice: base.identityChoice,
-    signer: base.signer,
-    suggestedAgentId: base.suggestedAgentId,
     startAnother: p.intent,
   };
   const unchanged =
@@ -235,9 +226,6 @@ export function memoryAfterThread(p: {
     base.ownerChoice === next.ownerChoice &&
     base.agentId === next.agentId &&
     base.door === next.door &&
-    base.identityChoice === next.identityChoice &&
-    base.signer === next.signer &&
-    base.suggestedAgentId === next.suggestedAgentId &&
     sameIntent(base.startAnother, next.startAnother);
   return unchanged ? null : next;
 }

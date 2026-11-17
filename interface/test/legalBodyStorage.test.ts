@@ -39,9 +39,6 @@ function fullMemory(over: Partial<LegalBodyMemory> = {}): LegalBodyMemory {
     ownerChoice: "this-wallet",
     agentId: "42",
     door: "declare",
-    identityChoice: "not-yet",
-    signer: "this-wallet",
-    suggestedAgentId: "7",
     startAnother: null,
     ...over,
   };
@@ -119,9 +116,6 @@ describe("the allowlist", () => {
       "ownerChoice",
       "agentId",
       "door",
-      "identityChoice",
-      "signer",
-      "suggestedAgentId",
       "startAnother",
     ]);
     // The built memory carries exactly those names: none missing, none added.
@@ -163,9 +157,6 @@ describe("the allowlist", () => {
       ownerChoice: null,
       agentId: null,
       door: null,
-      identityChoice: null,
-      signer: null,
-      suggestedAgentId: null,
       startAnother: null,
     });
     const bytes = JSON.stringify(memory);
@@ -335,6 +326,20 @@ describe("parseLegalBodyMemory", () => {
   test("names off the allowlist in a stored blob are dropped on the way in", () => {
     const raw = JSON.stringify({ ...fullMemory(), ...TYPED_FIELDS });
     expect(parseLegalBodyMemory(raw, TENANT)).toEqual(fullMemory());
+  });
+
+  test("an older blob with the entrance's answers reads without them", () => {
+    // The "About your agent" screen wrote these three; nothing reads them any more.
+    const entrance = { identityChoice: "not-yet", signer: "this-wallet", suggestedAgentId: "7" };
+    const raw = JSON.stringify({ ...fullMemory(), ...entrance });
+
+    const memory = parseLegalBodyMemory(raw, TENANT);
+
+    expect(memory).toEqual(fullMemory());
+    for (const key of Object.keys(entrance)) expect(memory, key).not.toHaveProperty(key);
+    // ...and the memory written back from it holds none of them either.
+    const bytes = JSON.stringify(buildLegalBodyMemory(memory!));
+    for (const key of Object.keys(entrance)) expect(bytes, key).not.toContain(key);
   });
 });
 

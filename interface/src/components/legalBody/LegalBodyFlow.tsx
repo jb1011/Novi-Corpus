@@ -301,9 +301,7 @@ function LegalBodySession({
   // The drafts the link door refused on this visit: none is offered again as a draft to continue.
   const [refusedDraftIds, setRefusedDraftIds] = useState<readonly string[]>([]);
   // The identity already chosen on this visit, offered first on the identity step: in memory only.
-  const [identitySuggestion, setIdentitySuggestion] = useState<string | null>(
-    () => readLegalBodyMemory(tenant)?.suggestedAgentId ?? null,
-  );
+  const [identitySuggestion, setIdentitySuggestion] = useState<string | null>(null);
 
   // Reads only.
   const code = useBytecode({ address: tenant, chainId: arcTestnet.id });
@@ -482,9 +480,6 @@ function LegalBodySession({
       noteIdentity({ kind: "start_another" });
       remember({
         door: null,
-        identityChoice: null,
-        signer: null,
-        suggestedAgentId: null,
         startAnother: { kind: "another-company", known: companies.map((c) => c.companyId) },
       });
       return;
@@ -743,9 +738,6 @@ function useStoredThread(next: LegalBodyMemory | null) {
   const ownerChoice = next?.ownerChoice ?? null;
   const agentId = next?.agentId ?? null;
   const door = next?.door ?? null;
-  const identityChoice = next?.identityChoice ?? null;
-  const signer = next?.signer ?? null;
-  const suggestedAgentId = next?.suggestedAgentId ?? null;
   // The intent by its value: a re-render that rebuilds the same intent writes nothing.
   const startAnother = next?.startAnother ? JSON.stringify(next.startAnother) : null;
   useEffect(() => {
@@ -757,9 +749,6 @@ function useStoredThread(next: LegalBodyMemory | null) {
       ownerChoice,
       agentId,
       door,
-      identityChoice,
-      signer,
-      suggestedAgentId,
       startAnother: startAnother === null ? null : (JSON.parse(startAnother) as StoredIntent),
     });
   }, [
@@ -769,9 +758,6 @@ function useStoredThread(next: LegalBodyMemory | null) {
     ownerChoice,
     agentId,
     door,
-    identityChoice,
-    signer,
-    suggestedAgentId,
     startAnother,
   ]);
 }
