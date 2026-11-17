@@ -9,6 +9,9 @@
 # Allow the secrets-seam source module (no real secrets, just interface + env wrapper)
 !backend/src/secrets/
 
+# The local chain's keys, settings and database (backend/scripts/local-chain.sh)
+backend/.local-chain/
+
 # Dependencies / build
 node_modules/
 dist/
