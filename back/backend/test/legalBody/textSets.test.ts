@@ -26,6 +26,7 @@ import {
   assertContractFactsProvable,
   assertProductionNeedsBuilt,
   assertSetUsable,
+  declarationAccepted,
   legalTextsOf,
   octoberLegalTexts,
 } from "../../src/legalBody/texts/sets";
@@ -281,4 +282,22 @@ test("a draft text is one refusal, through one helper", () => {
       message: LEGAL_BODY_SENTENCES.legal_text_not_approved,
     }),
   );
+});
+
+test("a pair accepts a declaration made under its own declaration's version, and no other", () => {
+  const cases: [string, boolean, boolean][] = [
+    ["2026-10-draft-1", true, false],
+    ["2026-11-draft-1", false, false],
+    ["2026-11-draft-2", false, true],
+    ["2099-01-draft-1", false, false],
+    ["", false, false],
+  ];
+  for (const [wordingVersion, onOctober, onCharter] of cases) {
+    expect(declarationAccepted(octoberLegalTexts(), wordingVersion), wordingVersion).toBe(
+      onOctober,
+    );
+    expect(declarationAccepted(CHARTER_LEGAL_TEXTS, wordingVersion), wordingVersion).toBe(
+      onCharter,
+    );
+  }
 });

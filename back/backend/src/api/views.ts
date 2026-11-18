@@ -204,7 +204,16 @@ export interface CompanyView {
    * operator's check passes, which is why it is served on the tenant's own authenticated view and
    * nowhere else. Null when the declaration could not be read.
    */
-  declared?: { companyName: string; filingNumber: string; wordingVersion: string } | null;
+  declared?: {
+    companyName: string;
+    filingNumber: string;
+    wordingVersion: string;
+    /** Whether this deployment places an order on a declaration of that wording version: today,
+     *  whether it is the version of the declaration served. False, an order for the company
+     *  answers `declaration_outdated`. It says nothing of the company's check. Null when this
+     *  surface was not given the rule. */
+    wordingAccepted: boolean | null;
+  } | null;
   /**
    * The operator's latest check of the declaration: its derived state, when it was made (unix
    * SECONDS, like `filedAt`) and its reason code. The free-text reason stays with the operator.
@@ -233,6 +242,8 @@ function daoSupplementOf(row: DocumentIndexRecord | undefined): CompanyView["dao
 export interface CustomerCompanyFacts {
   declaration: CompanyDeclaration | undefined;
   latestCheck: CompanyCheck | undefined;
+  /** Whether a declaration made under this wording version takes an order on this deployment (`declarationAccepted` of the pair served). Absent, the view answers null. */
+  declarationAccepted?: (wordingVersion: string) => boolean;
 }
 
 /** Where a view reads those facts, narrowed to the two reads it makes. Wired on every deployment
@@ -240,6 +251,8 @@ export interface CustomerCompanyFacts {
 export interface CustomerFactsLookup {
   declarations: Pick<CompanyDeclarationRepository, "find">;
   checks: Pick<CompanyCheckRepository, "latest">;
+  /** The rule of the pair this deployment serves, where the surface was given it. */
+  declarationAccepted?: (wordingVersion: string) => boolean;
 }
 
 /** One company's customer facts, read for a customer's company only: a formation company costs no
@@ -252,6 +265,7 @@ function customerFactsOf(
   return {
     declaration: lookup.declarations.find(company.companyId),
     latestCheck: lookup.checks.latest(company.companyId),
+    declarationAccepted: lookup.declarationAccepted,
   };
 }
 
@@ -357,6 +371,7 @@ export function toCompanyView(
           companyName: declaration.companyName,
           filingNumber: declaration.filingNumber,
           wordingVersion: declaration.wordingVersion,
+          wordingAccepted: customer?.declarationAccepted?.(declaration.wordingVersion) ?? null,
         }
       : null,
     verification: customer
