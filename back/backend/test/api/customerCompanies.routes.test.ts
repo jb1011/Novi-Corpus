@@ -28,6 +28,12 @@ import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { CHARTER_ADOPTION_RULE_2026_11_DRAFT_1 } from "../../src/legalBody/texts/adoptionStatement";
 import type { LegalText } from "../../src/legalBody/texts/index";
 import {
+  CHARTER_LEGAL_TEXTS,
+  type LegalTextSet,
+  declarationAccepted,
+  octoberLegalTexts,
+} from "../../src/legalBody/texts/sets";
+import {
   STATEMENT_OF_AUTHORITY,
   type StatementFields,
 } from "../../src/legalBody/texts/statementOfAuthority";
@@ -187,7 +193,10 @@ function counting(base: LegalText<StatementFields>): {
  * composition root wires them; the doors only when `customerCompanies` is given, with the document
  * index and store the document routes read. The MCP surface reads the same object.
  */
-function makeApp(customerCompanies?: CustomerCompanyDeps) {
+function makeApp(
+  customerCompanies?: CustomerCompanyDeps,
+  texts: LegalTextSet = octoberLegalTexts(),
+) {
   const documents = new SqliteDocumentIndexRepository(db);
   const docStore = new DeletableMemoryDocumentStore();
   const deps: Partial<ApiDeps> = {
@@ -198,7 +207,11 @@ function makeApp(customerCompanies?: CustomerCompanyDeps) {
     companies,
     documents,
     docStore,
-    customerFacts: { declarations, checks },
+    customerFacts: {
+      declarations,
+      checks,
+      declarationAccepted: (wordingVersion: string) => declarationAccepted(texts, wordingVersion),
+    },
     customerCompanies: customerCompanies && { ...customerCompanies, documents, docStore },
     apiKeys,
     passkeys: new SqlitePasskeyStore(db),
@@ -635,6 +648,7 @@ describe("the company view", () => {
       companyName: "Example Holdings LLC",
       filingNumber: "TEST-0001",
       wordingVersion: APPROVED.version,
+      wordingAccepted: true,
     });
     expect(view.verification).toEqual({
       state: "awaiting_check",
@@ -663,6 +677,41 @@ describe("the company view", () => {
       expect(JSON.parse(textOf(overMcp))).toEqual(view);
       const listed = await client.callTool({ name: "list_companies", arguments: {} });
       expect(JSON.parse(textOf(listed))).toEqual(list);
+    } finally {
+      await close();
+    }
+  });
+
+  test("a declaration made under another wording than the one served reads wordingAccepted: false, on the detail, the list and the agent surface", async () => {
+    const token = await sessionOf(owner);
+    const companyId = await declared(makeApp(doors()), token);
+    // The same database, read by a deployment that serves the Charter pair.
+    const app = makeApp(undefined, CHARTER_LEGAL_TEXTS);
+
+    const view = await (await get(app, `/companies/${companyId}`, token)).json();
+    expect(view.declared).toEqual({
+      companyName: "Example Holdings LLC",
+      filingNumber: "TEST-0001",
+      wordingVersion: "2026-10-draft-1",
+      wordingAccepted: false,
+    });
+    // Nothing else of the company reads differently.
+    expect(view.state).toBe("draft");
+    expect(view.verification).toEqual({
+      state: "awaiting_check",
+      checkedAt: null,
+      reasonCode: null,
+    });
+    const list = await (await get(app, "/companies", token)).json();
+    expect(list.companies[0].declared).toEqual(view.declared);
+
+    const { key } = apiKeys.mint(owner.address, { capability: "read" });
+    const { client, close } = await startMcpTestClient(app, key);
+    try {
+      const overMcp = await client.callTool({ name: "get_company", arguments: { companyId } });
+      expect(JSON.parse(textOf(overMcp)).declared).toEqual(view.declared);
+      const listed = await client.callTool({ name: "list_companies", arguments: {} });
+      expect(JSON.parse(textOf(listed)).companies[0].declared).toEqual(view.declared);
     } finally {
       await close();
     }
@@ -789,9 +838,15 @@ describe("the company view", () => {
     // With them, the declaration and a check not made yet.
     expect(toCompanyView(customer, [], false, 0, facts)).toMatchObject({
       provider: "customer",
-      declared: { companyName: "Example Holdings LLC" },
+      declared: { companyName: "Example Holdings LLC", wordingAccepted: null },
       verification: { state: "awaiting_check" },
     });
+    // Given the rule, the declaration's wording version is held to it.
+    for (const accepted of [true, false])
+      expect(
+        toCompanyView(customer, [], false, 0, { ...facts, declarationAccepted: () => accepted })
+          .declared?.wordingAccepted,
+      ).toBe(accepted);
   });
 });
 
@@ -825,6 +880,7 @@ describe("abandoning through the door", () => {
       companyName: "Example Holdings LLC",
       filingNumber: "TEST-0001",
       wordingVersion: APPROVED.version,
+      wordingAccepted: true,
     });
   });
 });
