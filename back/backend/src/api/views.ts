@@ -209,9 +209,9 @@ export interface CompanyView {
     filingNumber: string;
     wordingVersion: string;
     /** Whether this deployment places an order on a declaration of that wording version: today,
-     *  whether it is the version of the declaration served. False, an order for the company
-     *  answers `declaration_outdated`. It says nothing of the company's check. Null when this
-     *  surface was not given the rule. */
+     *  whether it is the version of the declaration served. False, no order is placed on the
+     *  company: once the company is otherwise eligible, the order answers `declaration_outdated`.
+     *  It says nothing of the company's check. Null when this surface was not given the rule. */
     wordingAccepted: boolean | null;
   } | null;
   /**
@@ -242,7 +242,8 @@ function daoSupplementOf(row: DocumentIndexRecord | undefined): CompanyView["dao
 export interface CustomerCompanyFacts {
   declaration: CompanyDeclaration | undefined;
   latestCheck: CompanyCheck | undefined;
-  /** Whether a declaration made under this wording version takes an order on this deployment (`declarationAccepted` of the pair served). Absent, the view answers null. */
+  /** Whether a declaration made under this wording version takes an order on this deployment
+   *  (`declarationAccepted` of the pair served). Absent, the view answers null. */
   declarationAccepted?: (wordingVersion: string) => boolean;
 }
 
