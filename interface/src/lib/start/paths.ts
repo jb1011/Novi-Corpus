@@ -1,6 +1,8 @@
 import { ONBOARDING_STEP_COUNT } from "@/components/landing/copy";
-import type { PublicConfig } from "@/lib/api/types";
+import type { Address, PublicConfig } from "@/lib/api/types";
 import type { LegalBodyGate, SignInStepState } from "@/lib/legalBody/gates";
+import { newCompanyHandover } from "@/lib/legalBody/resume";
+import type { LegalBodyMemory } from "@/lib/legalBody/storage";
 import { isOnboardingComplete, type PersistedOnboarding } from "@/lib/onboarding/storage";
 
 /**
@@ -100,6 +102,32 @@ export function fullProductHref(
 ): "/onboarding" | "/onboarding?new=1" {
   if (stored && stored.phase !== "welcome" && !isOnboardingComplete(stored)) return "/onboarding";
   return "/onboarding?new=1";
+}
+
+/**
+ * What Continue on the start does with the path picked: the memory to write, if any, and where it
+ * goes. The full product writes nothing and opens the wizard where it was left (`fullProductHref`).
+ * A legal-body path writes the memory that hands a new company over to the flow
+ * (`newCompanyHandover`: the door, and the companies there are at the click, over this account's
+ * memory) and opens `/legal-body`; before the companies list is read there is nothing to hand
+ * over, so nothing happens (Continue waits for the list anyway). The one write the start makes.
+ */
+export function startContinue(p: {
+  path: PathId;
+  tenant: Address;
+  /** This account's memory, as stored. */
+  stored: LegalBodyMemory | null;
+  /** The account's companies, undefined while the list is not read. */
+  companies: readonly { companyId: string }[] | undefined;
+  /** The wizard's stored state. */
+  wizard: PersistedOnboarding | null;
+}): { write: LegalBodyMemory | null; href: string } | null {
+  if (p.path === "full") return { write: null, href: fullProductHref(p.wizard) };
+  if (p.companies === undefined) return null;
+  return {
+    write: newCompanyHandover(p.tenant, p.stored, p.path, p.companies),
+    href: "/legal-body",
+  };
 }
 
 /**

@@ -8,13 +8,15 @@ import {
   pathCards,
   pathFacts,
   preselectedPath,
+  startContinue,
   startDestination,
 } from "@/lib/start/paths";
+import type { LegalBodyMemory } from "@/lib/legalBody/storage";
 import { START_COPY } from "@/lib/start/copy";
 import { ONBOARDING_STEP_COUNT } from "@/components/landing/copy";
 import { buildPersistedOnboarding } from "@/lib/onboarding/storage";
 import { emptyConfig, emptySession, type Phase } from "@/components/onboarding/types";
-import type { EntityView, PublicConfig } from "@/lib/api/types";
+import type { Address, EntityView, PublicConfig } from "@/lib/api/types";
 
 describe("whether the full product is offered", () => {
   test("only an explicit answer decides", () => {
@@ -149,6 +151,72 @@ describe("fullProductHref", () => {
   test("a wizard on a later phase is resumed", () => {
     expect(fullProductHref(stored("guardian"))).toBe("/onboarding");
     expect(fullProductHref(stored("configure"))).toBe("/onboarding");
+  });
+});
+
+describe("startContinue: the one write the start makes, on Continue", () => {
+  const TENANT = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address;
+  const OTHER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as Address;
+  const wizard = (phase: Phase) =>
+    buildPersistedOnboarding({ phase, config: emptyConfig(), done: {}, session: emptySession() });
+  const memory = (over: Partial<LegalBodyMemory> = {}): LegalBodyMemory => ({
+    tenant: TENANT,
+    companyId: null,
+    orderId: null,
+    ownerChoice: null,
+    agentId: null,
+    door: null,
+    startAnother: null,
+    ...over,
+  });
+  const companies = [{ companyId: "co_1" }, { companyId: "co_2" }];
+
+  test.each(["form", "declare"] as const)(
+    "the %s path hands a new company over through the memory and opens the legal-body flow",
+    (path) => {
+      expect(startContinue({ path, tenant: TENANT, stored: null, companies, wizard: null })).toEqual({
+        write: memory({ door: path, startAnother: { kind: "another-company", known: ["co_1", "co_2"] } }),
+        href: "/legal-body",
+      });
+    },
+  );
+
+  test("over this account's memory: the door and the companies there are, the rest kept", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7" });
+    expect(startContinue({ path: "form", tenant: TENANT, stored, companies: [], wizard: null })?.write).toEqual(
+      memory({
+        companyId: "co_1",
+        orderId: "ord_1",
+        ownerChoice: "elsewhere",
+        agentId: "7",
+        door: "form",
+        startAnother: { kind: "another-company", known: [] },
+      }),
+    );
+  });
+
+  test("always for the session's account", () => {
+    const theirs = memory({ tenant: OTHER, companyId: "co_9" });
+    expect(startContinue({ path: "declare", tenant: TENANT, stored: theirs, companies, wizard: null })?.write?.tenant).toBe(
+      TENANT,
+    );
+  });
+
+  test("a legal-body path before the companies list is read does nothing: there is nothing to hand over yet", () => {
+    for (const path of ["form", "declare"] as const)
+      expect(startContinue({ path, tenant: TENANT, stored: memory(), companies: undefined, wizard: null })).toBeNull();
+  });
+
+  test("the full product writes nothing and opens the wizard where it was left, with or without the list", () => {
+    for (const list of [companies, undefined]) {
+      expect(startContinue({ path: "full", tenant: TENANT, stored: memory(), companies: list, wizard: null })).toEqual({
+        write: null,
+        href: "/onboarding?new=1",
+      });
+      expect(
+        startContinue({ path: "full", tenant: TENANT, stored: null, companies: list, wizard: wizard("guardian") }),
+      ).toEqual({ write: null, href: "/onboarding" });
+    }
   });
 });
 

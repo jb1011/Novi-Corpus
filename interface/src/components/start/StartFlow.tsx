@@ -22,7 +22,6 @@ import {
   type CodeRead,
   type GateView,
 } from "@/lib/legalBody/gates";
-import { newCompanyHandover } from "@/lib/legalBody/resume";
 import { readLegalBodyMemory, writeLegalBodyMemory } from "@/lib/legalBody/storage";
 import { worldIdGateState, worldIdMeStatus } from "@/lib/legalBody/worldIdGate";
 import { readPersistedOnboarding } from "@/lib/onboarding/storage";
@@ -33,6 +32,7 @@ import {
   parsePathParam,
   pathFacts,
   preselectedPath,
+  startContinue,
   startDestination,
   type PathCard,
   type PathId,
@@ -49,8 +49,8 @@ import { PathChoice } from "./PathChoice";
  * full product is offered, a gate that stops a legal body shows one link past it
  * (`escapeToFullProduct`).
  *
- * The choice hands over and leaves: a legal-body path writes the per-account memory
- * (`newCompanyHandover`, which knows the companies there are at the click) and opens
+ * The choice hands over and leaves (`startContinue`): a legal-body path writes the per-account
+ * memory (`newCompanyHandover`, which knows the companies there are at the click) and opens
  * `/legal-body`; the full product opens the wizard. `?path=` only picks which card opens
  * selected, among the cards there are. Nothing here writes to the server.
  */
@@ -203,17 +203,21 @@ function StartSession({
 
   const companies = companiesQuery.data?.companies;
 
-  /** Continue: a legal-body path is handed over through the memory, with the companies there are
-   *  at the click; the full product opens the wizard where it was left. */
+  /** Continue: `startContinue` decides. A legal-body path is handed over through the memory, with
+   *  the companies there are at the click; the full product opens the wizard where it was left.
+   *  Continue waits for the list (`busy`), so a null answer only guards a click the button
+   *  refuses. */
   function choose(path: PathId) {
-    if (path === "full") {
-      router.push(fullProductHref(readPersistedOnboarding()));
-      return;
-    }
-    // Continue waits for the list (`busy`), so this only guards a click the button refuses.
-    if (!companies) return;
-    writeLegalBodyMemory(newCompanyHandover(tenant, readLegalBodyMemory(tenant), path, companies));
-    router.push("/legal-body");
+    const next = startContinue({
+      path,
+      tenant,
+      stored: readLegalBodyMemory(tenant),
+      companies,
+      wizard: readPersistedOnboarding(),
+    });
+    if (next === null) return;
+    if (next.write) writeLegalBodyMemory(next.write);
+    router.push(next.href);
   }
 
   if (gate === "signin")
