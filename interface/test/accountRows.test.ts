@@ -6,7 +6,9 @@
  * body (needing attention), and a company the flow can continue from that has no live and no
  * linked order (needing attention when its filing or its check failed). Each row links into the legal-body flow by its order or its company. Rows that
  * are not linked come first, then the newest; the public standing is read for the first five
- * linked rows only, because the public read is rate limited.
+ * linked rows only, because the public read is rate limited. A live order of another deployment
+ * (another chain or factory) needs attention and is opened, never continued: the flow opens it as
+ * closed.
  *
  * The section reads the orders and the companies: a 403 (an account the real-human check does
  * not accept) and a deployment that says it has no legal bodies show no section; any other error
@@ -159,8 +161,12 @@ const linked = (id: string, companyId: string, agentId: string | null, hoursAgo 
     createdAt: iso(NOW - hoursAgo * HOUR),
   });
 
+/** This deployment: the chain and factory every order above is made under. */
+const WHERE = { chainId: CHAIN, factory: FACTORY };
+const OTHER_FACTORY = "0x00000000000000000000000000000000000fac70" as const;
+
 const rows = (companies: CompanyView[], orders: LegalBodyOrderView[]) =>
-  accountLegalBodyRows({ companies, orders, nowMs: NOW });
+  accountLegalBodyRows({ companies, orders, nowMs: NOW, where: WHERE });
 
 describe("the exact values", () => {
   test("the standing is read for five linked rows at most", () => {
@@ -357,6 +363,74 @@ describe("accountLegalBodyRows: which orders and companies make a row", () => {
     expect(r.map((x) => x.href)).toEqual(["/legal-body?company=co%20f%2F1"]);
     const o = rows([company("co_a")], [order("ord?&=", "co_a")]);
     expect(o[0].href).toBe("/legal-body?order=ord%3F%26%3D");
+  });
+});
+
+describe("accountLegalBodyRows: an order of another deployment", () => {
+  // Made under another chain or another factory, it opens in the flow as closed ("it can be read
+  // here and nothing else"), with a new order on its company as the way out: it is never
+  // "In progress" and never continued here.
+  const elsewhere = [
+    { factory: OTHER_FACTORY },
+    { chainId: CHAIN + 1 },
+  ] as const;
+
+  test.each(elsewhere)("a live order under %o needs attention and opens", (where) => {
+    const live = [
+      order("ord_d", "co_a", where),
+      order("ord_r", "co_a", { ...where, state: "reserved", agentId: "1" }),
+      order("ord_p", "co_a", { ...where, state: "deployed", agentId: "2" }),
+      { ...linked("ord_c", "co_a", "3"), ...where, state: "broken" as const, brokenReason: "not_linked" as const },
+    ];
+    for (const o of live) {
+      const r = rows([company("co_a")], [o]);
+      // Its company is reached through it, as the flow reaches it: no company row beside it.
+      expect(r).toEqual([
+        expect.objectContaining({ key: `order:${o.id}`, href: `/legal-body?order=${o.id}`, state: "attention", action: "open", standing: false }),
+      ]);
+    }
+  });
+
+  test("a linked body elsewhere is still linked and opened; an expired draft elsewhere has no row", () => {
+    const body = { ...linked("ord_l", "co_a", "42"), factory: OTHER_FACTORY };
+    expect(rows([company("co_a")], [body])[0]).toMatchObject({ state: "linked", action: "open" });
+    const expired = order("ord_x", "co_a", { factory: OTHER_FACTORY, createdAt: iso(NOW - 25 * HOUR) });
+    expect(rows([company("co_a")], [expired]).map((r) => r.key)).toEqual(["company:co_a"]);
+  });
+
+  test("the factory is compared as an address, whatever its case", () => {
+    const lower = order("ord_1", "co_a", { factory: FACTORY.toLowerCase() as typeof FACTORY });
+    expect(rows([company("co_a")], [lower])[0]).toMatchObject({ state: "in_progress", action: "continue" });
+  });
+
+  test("with the deployment not known, every order reads as this deployment's, as before", () => {
+    const foreign = order("ord_1", "co_a", { factory: OTHER_FACTORY });
+    expect(
+      accountLegalBodyRows({ companies: [company("co_a")], orders: [foreign], nowMs: NOW, where: null })[0],
+    ).toMatchObject({ state: "in_progress", action: "continue" });
+  });
+
+  test("the section reads the deployment from its legal-body config", () => {
+    // The two fields the rows read; the rest of the config plays no part here.
+    const config = { available: true, chainId: CHAIN, factory: FACTORY } as unknown as LegalBodyConfig;
+    const lists = (factory: string) => ({
+      orders: { data: { orders: [order("ord_1", "co_a", { factory: factory as typeof FACTORY })] }, error: null },
+      companies: { data: { companies: [company("co_a")] }, error: null },
+    });
+    const first = (v: LegalBodiesView) => (v.kind === "rows" ? v.rows[0] : null);
+    expect(first(legalBodiesView({ ...lists(OTHER_FACTORY), config, nowMs: NOW }))).toMatchObject({
+      state: "attention",
+      action: "open",
+    });
+    expect(first(legalBodiesView({ ...lists(FACTORY), config, nowMs: NOW }))).toMatchObject({
+      state: "in_progress",
+      action: "continue",
+    });
+    // A config not read yet: as before.
+    expect(first(legalBodiesView({ ...lists(OTHER_FACTORY), config: null, nowMs: NOW }))).toMatchObject({
+      state: "in_progress",
+      action: "continue",
+    });
   });
 });
 

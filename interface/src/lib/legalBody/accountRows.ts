@@ -10,12 +10,19 @@
  */
 import {
   ApiError,
+  type Address,
   type CompanyView,
   type EntityView,
   type LegalBodyConfig,
   type LegalBodyOrderView,
 } from "@/lib/api/types";
-import { isContinuable, isFinished, isFormedCompany, isLiveOrder } from "@/lib/legalBody/flow";
+import {
+  isContinuable,
+  isFinished,
+  isFormedCompany,
+  isLiveOrder,
+  sameAddress,
+} from "@/lib/legalBody/flow";
 import { legalBodyTitle } from "@/lib/legalBody/resume";
 import type { FullProductGate } from "@/lib/start/paths";
 
@@ -54,6 +61,10 @@ function sortTime(ms: number): number {
  *    continued; a linked order is linked and opened; another finished one needs attention and is
  *    opened; every other order (an expired or revoked draft, a lapse, a supersession, a
  *    replacement, an abandonment) has no row;
+ *  - a live order of another deployment (another chain or factory than `where`) needs attention
+ *    and is opened, never continued: the flow opens it as closed, readable here and nothing else,
+ *    with a new order on its company as the way out. With `where` null (the deployment's config
+ *    not read) every order reads as this deployment's;
  *  - a company the flow can continue from, with no live and no linked order, is continued by its
  *    company: it needs attention when its filing (formed) or its check (declared) failed, and is
  *    in progress otherwise.
@@ -64,16 +75,24 @@ export function accountLegalBodyRows(p: {
   companies: CompanyView[];
   orders: LegalBodyOrderView[];
   nowMs: number;
+  /** This deployment's chain and factory, or null while they are not known. */
+  where: { chainId: number; factory: Address } | null;
 }): AccountRow[] {
   const byId = new Map(p.companies.map((c) => [c.companyId, c]));
   const orders = p.orders.filter((o) => byId.has(o.companyId));
   const live = (o: LegalBodyOrderView) => isLiveOrder(o, p.nowMs);
+  const here = (o: LegalBodyOrderView) =>
+    p.where === null ||
+    (o.chainId === p.where.chainId && sameAddress(o.factory, p.where.factory));
   const found: { row: AccountRow; time: number }[] = [];
 
   for (const order of orders) {
     let state: AccountRow["state"];
     let action: AccountRow["action"];
-    if (live(order)) {
+    if (live(order) && !here(order)) {
+      state = "attention";
+      action = "open";
+    } else if (live(order)) {
       state = order.state === "broken" ? "attention" : "in_progress";
       action = "continue";
     } else if (order.state === "linked") {
@@ -146,7 +165,8 @@ type ListRead<T> = { data: T | undefined; error: unknown };
  * The section, from the two lists:
  *  - a deployment that says it has no legal bodies (`available: false`), and an orders list that
  *    answers 403 (an account the real-human check does not accept): no section;
- *  - both lists read: the rows, kept through a failed refresh;
+ *  - both lists read: the rows, kept through a failed refresh, an order measured against the
+ *    deployment's chain and factory once the config is read;
  *  - any other error on either list: one line with a retry;
  *  - otherwise loading.
  */
@@ -160,12 +180,14 @@ export function legalBodiesView(p: {
   if (p.config?.available === false) return { kind: "hidden" };
   if (p.orders.error instanceof ApiError && p.orders.error.status === 403) return { kind: "hidden" };
   if (p.orders.data && p.companies.data) {
+    const config = p.config?.available === true ? p.config : null;
     return {
       kind: "rows",
       rows: accountLegalBodyRows({
         companies: p.companies.data.companies,
         orders: p.orders.data.orders,
         nowMs: p.nowMs,
+        where: config && { chainId: config.chainId, factory: config.factory },
       }),
     };
   }
