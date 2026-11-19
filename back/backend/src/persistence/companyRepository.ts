@@ -159,11 +159,11 @@ export interface CompanyRepository {
    * A tenant's customer companies that take a place under its cap on open declarations: provider
    * `customer`, status `draft` or `ready`, so an abandoned one has left it. One more is left out:
    * a company whose environment is `sandbox` and whose declaration was made under another version
-   * of the wording than `servedWording`, the version of the declaration the deployment serves. The
-   * order door refuses such a company for as long as that declaration is served
-   * (`declaration_outdated`), so it holds no place. Nothing is written: served again, its wording
-   * makes it count again. A company of any other environment counts whatever its declaration says,
-   * and so does a company with no declaration.
+   * of the wording than `servedWording`, the version of the declaration the deployment serves. No
+   * order is placed on such a company for as long as that declaration is served: once the company
+   * is otherwise eligible, the order door answers `declaration_outdated`. So it holds no place.
+   * Nothing is written: served again, its wording makes it count again. A company of any other
+   * environment counts whatever its declaration says, and so does a company with no declaration.
    */
   countCustomerOpenByTenant(tenantId: string, servedWording: string): number;
   /**

@@ -692,7 +692,7 @@ describe("the company view", () => {
     expect(view.declared).toEqual({
       companyName: "Example Holdings LLC",
       filingNumber: "TEST-0001",
-      wordingVersion: "2026-10-draft-1",
+      wordingVersion: APPROVED.version,
       wordingAccepted: false,
     });
     // Nothing else of the company reads differently.
