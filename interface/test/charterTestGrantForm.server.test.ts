@@ -68,12 +68,15 @@ const textOf = (html: string): string => html.replace(/<[^>]*>/g, " ").replace(/
 describe("a form as it opens", () => {
   const html = render(emptyGrantFormState());
 
-  test("the notice comes first, as served", () => {
-    expect(textOf(html).trimStart().startsWith(NOTICE)).toBe(true);
+  test("the notice comes first, as served, under its served key", () => {
+    const text = textOf(html).trimStart();
+    expect(text.startsWith(`notice (served with the grant form) ${NOTICE}`)).toBe(true);
   });
 
-  test("a form with no notice shows none", () => {
+  test("a form with no notice writes the served null out", () => {
     const without = render(emptyGrantFormState(), { form: { ...FORM, notice: null } });
+    const text = textOf(without).trimStart();
+    expect(text.startsWith("notice (served with the grant form) null ")).toBe(true);
     expect(without).not.toContain("Notice:");
   });
 
@@ -85,9 +88,11 @@ describe("a form as it opens", () => {
 
   test("nothing is typed, and no control has a placeholder", () => {
     const texts = tags(html, "input").filter((t) => t.includes('type="text"'));
-    // Six lines with an amount per act, three of them with one per thirty days, four acts of
-    // heavyActs, and the end's date.
-    expect(texts).toHaveLength(6 + 3 + 4 + 1);
+    // Six lines with an amount per act, three of them with one per thirty days, the two acts of
+    // heavyActs whose served settings include `alone`, and the end's date.
+    expect(texts).toHaveLength(6 + 3 + 2 + 1);
+    expect(html).not.toContain('aria-label="heavyActs.employ.perAct"');
+    expect(html).not.toContain('aria-label="heavyActs.transferProperty.perAct"');
     for (const input of texts) expect(input).toContain('value=""');
     expect(html).not.toContain("placeholder");
   });

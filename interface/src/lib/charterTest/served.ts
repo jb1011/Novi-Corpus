@@ -2,17 +2,18 @@
  * Whether the Charter flow's test page is served, and where it lives.
  *
  * The page is a test harness for the legal-body flow on a deployment that serves the Legal Body
- * Charter. It is served by the development server only (`next dev`), which is the only command
- * that runs with `NODE_ENV` set to `development`: every build (`next build`), a preview included,
- * answers the site's not-found page at its path. Nothing sets it on: there is no variable to add
- * to a deployment, so none can be added by mistake.
+ * Charter. It is served by the development server only (`next dev`). A build writes `production`
+ * for `process.env.NODE_ENV`, whatever the environment says, so a deployed site, a preview
+ * included, answers its not-found page at the page's path. Only Next's debug builds write
+ * `development` (`next build --debug-prerender`, or `experimental.allowDevelopmentBuild`). No
+ * variable of the page's own turns it on.
  *
  * Under the development server it runs against a sandbox deployment only: `deploymentStop` says
  * why the page stops on any other.
  */
 import type { LegalBodyConfig } from "@/lib/api/types";
 
-/** The page's path. Nothing outside the page's own folders names it (`charterTestHidden.test.ts`). */
+/** The page's path. Nothing outside the page's own folders names it (`charterTestServed.test.ts`). */
 export const CHARTER_TEST_PATH = "/charter-test";
 
 /** True under the development server only. */

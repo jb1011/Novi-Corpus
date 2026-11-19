@@ -11,6 +11,7 @@ import {
   emptyGrantFormState,
   grantFromState,
   grantKey,
+  orderCanBePlaced,
   readGrantForm,
   readServedGrant,
   type GrantFormState,
@@ -33,7 +34,8 @@ import { Facts, Json, Line, Refusal, Section, Served } from "./parts";
  * sent. The preview shows the Schedule A text the server would write for those choices: the only
  * place where the page says what a choice means, in the server's words. An order freezes its
  * agreement for good, so on a deployment that takes a grant the order is placed only with choices
- * whose preview is on screen: any change of the form removes the preview.
+ * whose preview is on screen and reads as a grant (`orderCanBePlaced`): any change of the form
+ * removes the preview.
  *
  * On a deployment whose agreement takes no grant the form is not drawn, and the order is placed
  * without one. The order is placed by its click alone, once per click.
@@ -62,11 +64,25 @@ export function GrantSection({
   const grant = grantFromState(state);
   const key = grantKey(grant);
   const current = previewed !== null && previewed.key === key ? previewed : null;
-  const servedGrant = current === null ? null : readServedGrant(current.answer);
+  // Undefined while there is no preview of the choices now on the form.
+  const servedGrant = current === null ? undefined : readServedGrant(current.answer);
   // The preview's last refusal, with the choices it refused: shown while the form holds them.
   const [refused, setRefused] = useState<{ key: string; error: unknown } | null>(null);
   const refusal = refused !== null && refused.key === key ? refused.error : null;
-  const problems = refusal instanceof ApiError ? fieldProblems(refusal.details) : [];
+  // The order's last refusal, with the choices and the company it refused: shown while both hold.
+  const [placeRefused, setPlaceRefused] = useState<{
+    key: string;
+    companyId: string;
+    error: unknown;
+  } | null>(null);
+  const placeRefusal =
+    placeRefused !== null && placeRefused.key === key && placeRefused.companyId === companyId
+      ? placeRefused.error
+      : null;
+  // Each refusal's problems, under the lines they name.
+  const problems = [refusal, placeRefusal].flatMap((e) =>
+    e instanceof ApiError ? fieldProblems(e.details) : [],
+  );
 
   async function onPreview() {
     const sent = grant;
@@ -83,17 +99,19 @@ export function GrantSection({
   }
 
   const takesGrant = read?.kind === "form";
-  const canPlace =
-    companyId !== null && read !== null && (read.kind === "none" || (takesGrant && current !== null));
+  const canPlace = orderCanBePlaced({ companyId, read, key, previewed });
 
   async function onPlace() {
     if (!canPlace || companyId === null || placing.current) return;
     placing.current = true;
+    const sentKey = key;
+    setPlaceRefused(null);
     try {
       const order = await place.mutateAsync({ companyId, grant: takesGrant ? grant : undefined });
       onSelectOrder(order);
-    } catch {
-      // The refusal is the mutation's error, shown below as served.
+    } catch (error) {
+      // Shown below as served, with each problem beside the line it names.
+      setPlaceRefused({ key: sentKey, companyId, error });
     } finally {
       placing.current = false;
     }
@@ -134,13 +152,13 @@ export function GrantSection({
             </div>
             <Refusal error={refusal} />
             {current === null && <Line>No preview of the choices now on the form.</Line>}
-            {servedGrant === "unreadable" && current !== null && (
+            {current !== null && (servedGrant === null || servedGrant === "unreadable") && (
               <>
                 <Line>The preview&apos;s answer is not a grant this page can read.</Line>
                 <Json value={current.answer} />
               </>
             )}
-            {servedGrant !== null && servedGrant !== "unreadable" && (
+            {servedGrant !== undefined && servedGrant !== null && servedGrant !== "unreadable" && (
               <>
                 <Facts
                   rows={[
@@ -194,7 +212,7 @@ export function GrantSection({
             Place the order
           </Button>
         </div>
-        <Refusal error={place.error} />
+        <Refusal error={placeRefusal} />
 
         <h3 className="text-[13px] font-medium text-ink">Your orders (GET /legal-body-orders)</h3>
         <Refusal error={ordersQuery.error} />

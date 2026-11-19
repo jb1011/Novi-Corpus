@@ -271,6 +271,30 @@ describe("each rule, broken once, in the form with words", () => {
   test("the unbroken example passes", () => {
     expect(problemOf(servedInWords(), ctxInWords)).toBe(null);
   });
+
+  test("several rules broken: the first in the gate's order is named", () => {
+    const s = servedInWords();
+    const m = s.typedData.message;
+    m.orderId = "lb_other";
+    m.manifestHash = `0x${"00".repeat(32)}`;
+    m.textId = "another-text";
+    m.guardian = FACTORY;
+    m.issuedAt = "1800000001";
+    m.statement = "other words";
+    const steps: [string, () => void][] = [
+      ["order_id", () => { m.orderId = ORDER_ID; }],
+      ["manifest_hash", () => { m.manifestHash = MANIFEST_HASH; }],
+      ["text", () => { m.textId = "legal-body-operating-agreement"; }],
+      ["guardian", () => { m.guardian = GUARDIAN; }],
+      ["issued_at", () => { m.issuedAt = "1800000000"; }],
+      ["statement", () => { m.statement = STATEMENT; }],
+    ];
+    for (const [problem, repair] of steps) {
+      expect(problemOf(s, ctxInWords)).toBe(problem);
+      repair();
+    }
+    expect(problemOf(s, ctxInWords)).toBe(null);
+  });
 });
 
 describe("what is on screen, changed once", () => {

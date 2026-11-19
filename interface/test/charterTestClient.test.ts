@@ -1,6 +1,8 @@
 /**
  * The test page's own calls, against a stubbed `fetch`: each goes through the site's proxy with
  * the session's bearer token, and a refusal is the API's own code and sentence.
+ *
+ * The amounts here are made up.
  */
 import { afterEach, describe, expect, test, vi } from "vitest";
 

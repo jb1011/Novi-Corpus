@@ -1,8 +1,11 @@
 "use client";
 
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useConnection, useSignTypedData } from "wagmi";
 import { Button, Field, TextInput } from "@/components/onboarding/primitives";
+import { useAuthToken } from "@/lib/api/hooks";
+import { apiKeys } from "@/lib/api/keys";
 import {
   useAdoptOrderMutation,
   useLegalBodyAgreementQuery,
@@ -29,6 +32,7 @@ import type { CharterTestConfig } from "@/lib/charterTest/served";
 import { agreementProblem } from "@/lib/legalBody/agreement";
 import { sameAddress } from "@/lib/legalBody/flow";
 import { linkRequestFor } from "@/lib/legalBody/link";
+import { RESERVED_POLL_MS } from "@/lib/legalBody/polling";
 import { linkSignGate, signThroughGate } from "@/lib/legalBody/signGate";
 import { Facts, Json, Line, Refusal, Section, Served } from "./parts";
 
@@ -168,7 +172,9 @@ function Adoption({
   const [adoptedAt, setAdoptedAt] = useState<number | null>(null);
   const adopted = order.adoptedAt ?? adoptedAt;
 
-  /** Each form goes to the wallet under its own primary type. */
+  /** Each form goes to the wallet under its own primary type.
+   *  Both branches are the same call: the ternary narrows the union so wagmi infers each form's
+   *  own types. */
   const sign = (typedData: WagmiAdoptionTypedData) =>
     typedData.primaryType === CHARTER_ADOPTION_TYPE
       ? signTypedDataAsync(typedData)
@@ -176,6 +182,8 @@ function Adoption({
 
   async function onAdopt() {
     if (busy) return;
+    adoptionMessage.reset();
+    adopt.reset();
     setSaid(null);
     setAsked(null);
     if (!sameAddress(connected, tenant)) {
@@ -244,6 +252,7 @@ function Adoption({
         </>
       )}
       {said && <Line>{said}</Line>}
+      {!asked && adoptionMessage.data !== undefined && <Json value={adoptionMessage.data} />}
       <Refusal error={adoptionMessage.error} />
       <Refusal error={adopt.error} />
     </>
@@ -280,9 +289,17 @@ function Link({
   const [said, setSaid] = useState<string | null>(null);
   const [served, setServed] = useState<LinkMessageResult | null>(null);
   const [answer, setAnswer] = useState<LinkSubmitAnswer | null>(null);
+  // The served message read as untrusted: an answer of another shape is shown whole, never read.
+  const msg: unknown = served?.typedData?.message;
+  const servedMessage =
+    typeof msg === "object" && msg !== null && !Array.isArray(msg)
+      ? (msg as Record<string, unknown>)
+      : null;
 
   async function onLink() {
     if (busy) return;
+    linkMessage.reset();
+    submitLink.reset();
     setSaid(null);
     setServed(null);
     setAnswer(null);
@@ -357,15 +374,19 @@ function Link({
       {served && (
         <>
           <h3 className="text-[13px] font-medium text-ink">The link as served</h3>
-          <Facts
-            rows={[
-              ["identityOwner", served.identityOwner],
-              ["deadline", served.deadline],
-              ...Object.entries(served.typedData.message).map(
-                ([name, value]) => [`message.${name}`, value] as const,
-              ),
-            ]}
-          />
+          {servedMessage !== null ? (
+            <Facts
+              rows={[
+                ["identityOwner", served.identityOwner],
+                ["deadline", served.deadline],
+                ...Object.entries(servedMessage).map(
+                  ([name, value]) => [`message.${name}`, value] as const,
+                ),
+              ]}
+            />
+          ) : (
+            <Json value={served} />
+          )}
         </>
       )}
       {said && <Line>{said}</Line>}
@@ -403,13 +424,17 @@ function OrderState({
   order: LegalBodyOrderView | undefined;
   onReadAgain: () => void;
 }) {
-  const bindingQuery = useLegalBodyBindingQuery(orderId);
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
   return (
     <Section title="9. Order state (GET /legal-body-orders/:id, and its binding)">
       {order && <Json value={order} />}
-      <Refusal error={bindingQuery.error} />
-      {bindingQuery.data && <Json value={bindingQuery.data} />}
-      <Line>While the state is reserved, the order is read again every 5 seconds.</Line>
+      {/* A change of the order's state mounts the binding's read anew, so it is read again. */}
+      <BindingRead key={order?.state ?? "unread"} orderId={orderId} />
+      <Line>
+        While the state is reserved, the order is read again every {RESERVED_POLL_MS / 1000}{" "}
+        seconds.
+      </Line>
       {order?.state === "deployed" && (
         <Line>
           The legal body is created. Writing the pointer on the identity is the step that follows,
@@ -421,12 +446,26 @@ function OrderState({
           variant="ghost"
           onClick={() => {
             onReadAgain();
-            void bindingQuery.refetch();
+            void queryClient.refetchQueries({
+              queryKey: apiKeys.legalBodyBinding(token ?? "", orderId),
+              exact: true,
+            });
           }}
         >
           Read again
         </Button>
       </div>
     </Section>
+  );
+}
+
+/** The order's binding, whole. Mounted anew for each state of the order, so each is read. */
+function BindingRead({ orderId }: { orderId: string }) {
+  const bindingQuery = useLegalBodyBindingQuery(orderId);
+  return (
+    <>
+      <Refusal error={bindingQuery.error} />
+      {bindingQuery.data && <Json value={bindingQuery.data} />}
+    </>
   );
 }

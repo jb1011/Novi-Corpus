@@ -134,4 +134,12 @@ describe("the name of the call a failure came from", () => {
     expect(callLabel([])).toBe("call");
     expect(callLabel("api")).toBe("call");
   });
+
+  test("a long text in the first two parts is never shown", () => {
+    const long = "t".repeat(49);
+    expect(callLabel([long, "companies"])).toBe("companies");
+    expect(callLabel(["api", long])).toBe("api");
+    expect(callLabel([long, long, "third"])).toBe("call");
+    expect(callLabel(["api", "x".repeat(48)])).toBe(`api.${"x".repeat(48)}`);
+  });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { callLabel, refusalView, type RefusalView } from "@/lib/charterTest/refusal";
 import { Json, Line, Section } from "./parts";
@@ -13,23 +13,25 @@ const KEPT = 50;
 /**
  * Every failed call of the page, newest first, as served.
  *
- * Every call of the page, its own and the ones of the hooks it shares with the product (the
- * sign-in, the real-human check, the wallet), runs through the one query client. This listens to
- * that client and lists each query and each mutation that ended in an error, so a refusal is on
- * screen even where a shared hook keeps only its sentence. A call is named by the first parts of
- * its key (`callLabel`), which never hold a token.
+ * Every API call and every wallet request of the page, its own and the ones of the hooks it
+ * shares with the product, runs through the one query client. This listens to that client and
+ * lists each query and each mutation that ended in an error, so a refusal is on screen even where
+ * a shared hook keeps only its sentence. A failure that is not a call (the World ID widget's own
+ * error, a sign-in stopped before its first request) is shown beside its card only. A call is
+ * named by the first parts of its key (`callLabel`), which never hold a token.
  *
  * The one effect subscribes and unsubscribes; the list changes only when the client reports.
  */
 export function RefusalLog() {
   const queryClient = useQueryClient();
   const [entries, setEntries] = useState<Entry[]>([]);
+  // Kept across the effect's runs, so an entry's id is never given twice.
+  const nextId = useRef(0);
 
   useEffect(() => {
-    let next = 0;
     const add = (key: unknown, error: unknown) => {
       const entry: Entry = {
-        id: next++,
+        id: nextId.current++,
         at: new Date().toISOString().slice(11, 19),
         call: callLabel(key),
         view: refusalView(error),
@@ -42,7 +44,7 @@ export function RefusalLog() {
     });
     const offMutations = queryClient.getMutationCache().subscribe((event) => {
       if (event.type === "updated" && event.action.type === "error")
-        add(event.mutation.options.mutationKey, event.action.error);
+        add(event.mutation.options.mutationKey ?? ["mutation (no key)"], event.action.error);
     });
     return () => {
       offQueries();

@@ -54,6 +54,28 @@ describe("the test page is served by the development server only", () => {
     expect(page.indexOf("notFound();")).toBeLessThan(page.indexOf("<CharterTestPage"));
     expect(page).toContain("robots: { index: false, follow: false }");
   });
+
+  test("the route's first line refuses, its metadata refuses first too, and it exports nothing else", () => {
+    const page = readFileSync(join(SRC, "app", "charter-test", "page.tsx"), "utf8");
+    expect(page).toMatch(
+      /export default function CharterTestRoute\(\) \{\n  if \(!charterTestPageServed\(process\.env\.NODE_ENV\)\) notFound\(\);\n/,
+    );
+    expect(page).toMatch(
+      /export function generateMetadata\(\): Metadata \{\n  if \(!charterTestPageServed\(process\.env\.NODE_ENV\)\) notFound\(\);\n/,
+    );
+    expect(page).not.toMatch(/["']use client["']/);
+    expect(
+      [...page.matchAll(/^export\s+(?:const|async function|function|default function)\s+(\w+)/gm)].map((m) => m[1]),
+    ).toEqual(["generateMetadata", "CharterTestRoute"]);
+  });
+
+  test("the build is a plain `next build`, and no development build is allowed", () => {
+    const pkg = JSON.parse(readFileSync(join(SRC, "..", "package.json"), "utf8")) as {
+      scripts: Record<string, string>;
+    };
+    expect(pkg.scripts.build).toBe("next build");
+    expect(readFileSync(join(SRC, "..", "next.config.ts"), "utf8")).not.toContain("allowDevelopmentBuild");
+  });
 });
 
 describe("nothing leads to the test page", () => {
@@ -73,6 +95,15 @@ describe("nothing leads to the test page", () => {
       return /charter-test|charterTest/i.test(text);
     });
     expect(naming).toEqual([]);
+  });
+
+  test("nothing under interface/ outside src names its path", () => {
+    const publicFiles = filesUnder(join(SRC, "..", "public"));
+    expect(publicFiles.length).toBeGreaterThan(0);
+    const outside = [...publicFiles, "../README.md", "../next.config.ts"].filter((file) =>
+      /charter-test|charterTest/i.test(readFileSync(join(SRC, file), "utf8")),
+    );
+    expect(outside).toEqual([]);
   });
 });
 
