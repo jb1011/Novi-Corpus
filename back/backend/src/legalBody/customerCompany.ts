@@ -53,8 +53,9 @@ import type { StatementFields } from "./texts/statementOfAuthority";
  *  5. the human's company cap, when one is set;
  *  6. the tenant's caps: open customer companies, and declarations in the last 24 hours. A
  *     sandbox company declared under another version of the wording than the one served
- *     (`deps.text`) takes no place under the first: the order door refuses it
- *     (`declaration_outdated`), so its tenant may declare a new one;
+ *     (`deps.text`) takes no place under the first: no order is placed on it (once it is
+ *     otherwise eligible, the order door answers `declaration_outdated`), so its tenant may
+ *     declare a new one;
  *  7. the signature, checked by local recovery over the sentence the server renders itself.
  * Then ONE transaction writes the company and its declaration, and on a sandbox deployment the
  * automatic check (`./sandboxCheck`): nobody is on duty there, so the declaration writes its own

@@ -211,7 +211,8 @@ export interface CompanyView {
     /** Whether this deployment places an order on a declaration of that wording version: today,
      *  whether it is the version of the declaration served. False, no order is placed on the
      *  company: once the company is otherwise eligible, the order answers `declaration_outdated`.
-     *  It says nothing of the company's check. Null when this surface was not given the rule. */
+     *  It says nothing of the company's check or status: an abandoned company carries it too.
+     *  Null when this surface was not given the rule. */
     wordingAccepted: boolean | null;
   } | null;
   /**

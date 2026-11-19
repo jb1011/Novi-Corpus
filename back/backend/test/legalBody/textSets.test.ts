@@ -263,6 +263,16 @@ test("the pair is chosen once, at start, by the setting", () => {
     "legalBody/texts/adoptionStatement.ts",
     "legalBody/texts/sets.ts",
   ]);
+  // The rule a pair holds a declaration's wording to is written in one file, read by the order
+  // door and by the company views, and handed to the views by the composition root: a root that
+  // does not name it serves `wordingAccepted: null` on every view.
+  expect(naming("declarationAccepted").sort()).toEqual([
+    "api/app.ts",
+    "api/main.ts",
+    "api/views.ts",
+    "legalBody/orders.ts",
+    "legalBody/texts/sets.ts",
+  ]);
 });
 
 test("no file of src outside the texts names a version of a text", () => {
