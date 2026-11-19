@@ -168,9 +168,9 @@ export function threadDoor(company: CompanyView | null, memoryDoor: DoorChoice |
  * full-product card; the declare card alone needs no choice. No card at all is closed, never an
  * empty choice.
  */
-export type CompanyScreen = "choice" | "closed" | "step";
+export type CompanyStepScreen = "choice" | "closed" | "step";
 
-export function companyScreen(p: {
+export function companyStepScreen(p: {
   companyId: string | null;
   /** The thread's company as read, null while it is new (or not read yet). */
   company: CompanyView | null;
@@ -180,7 +180,7 @@ export function companyScreen(p: {
   cards: readonly PathCard[];
   /** The legal-body config's `declarations === true`. */
   declarations: boolean;
-}): CompanyScreen {
+}): CompanyStepScreen {
   if (p.companyId !== null || p.companyStep !== "form") {
     const declaredForm =
       p.companyStep === "form" && threadDoor(p.company, p.door) === "declare";

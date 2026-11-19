@@ -14,7 +14,7 @@ import {
   arrivalAction,
   arrivalMemory,
   chooserRows,
-  companyScreen,
+  companyStepScreen,
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
@@ -392,14 +392,14 @@ describe("threadDoor", () => {
   });
 });
 
-describe("companyScreen: the choice of paths in front of a new company, and a door that is closed", () => {
+describe("companyStepScreen: the choice of paths in front of a new company, and a door that is closed", () => {
   const three = pathCards({
     fullProductAvailable: true,
     legalBodies: { available: true, declarations: true, formedDoor: "offered" } as never,
   });
   /** A new company on a deployment that takes declarations, with the fields a case changes. */
-  const screen = (over: Partial<Parameters<typeof companyScreen>[0]>) =>
-    companyScreen({
+  const screen = (over: Partial<Parameters<typeof companyStepScreen>[0]>) =>
+    companyStepScreen({
       companyId: null,
       company: null,
       companyStep: "form",

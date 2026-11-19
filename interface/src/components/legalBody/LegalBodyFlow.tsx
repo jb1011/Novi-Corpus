@@ -79,7 +79,7 @@ import {
   arrivalAction,
   arrivalMemory,
   chooserRows,
-  companyScreen,
+  companyStepScreen,
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
@@ -596,10 +596,10 @@ function LegalBodySession({
         return <FilingStep key={kit.companyId ?? "filing"} kit={kit} />;
       case "company": {
         // In front of a new company with no door chosen, the choice of paths, in place: a door
-        // picked here is remembered, the full product opens the wizard. `companyScreen` decides,
-        // closed doors included; this renders its answer.
+        // picked here is remembered, the full product opens the wizard. `companyStepScreen`
+        // decides, closed doors included; this renders its answer.
         const cards = pathCards(publicConfig);
-        const opening = companyScreen({
+        const opening = companyStepScreen({
           companyId: kit.companyId,
           company,
           companyStep: derivation.companyStep,
