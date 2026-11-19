@@ -20,7 +20,7 @@ import { Facts, Line, Section } from "./parts";
  * step on one page, in the flow's order, each showing what the server serves, as served.
  *
  * It reuses the product's sign-in, real-human check, API client and checks, and changes none of
- * them. What the product's own screens do not do yet on such a deployment, it does itself: the
+ * them. What the product's own screens do not do on such a deployment, it does itself: the
  * rule of the adoption shown before the declaration is signed, the grant form, the order placed
  * with its grant, the notice and the words of adoption, and the adoption signed in the form the
  * server serves.

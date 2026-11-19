@@ -199,10 +199,10 @@ const WHOLE_NUMBER = /^(?:0|[1-9][0-9]*)$/;
 /**
  * An amount as it is sent: nothing typed is no key at all; a whole number typed in its one
  * spelling, and small enough to be exact, is that number; anything else is sent as the text typed,
- * for the server to refuse. The spaces at the ends are not part of what was typed.
+ * for the server to refuse.
  */
 function amountOf(typed: string): { value: number | string } | null {
-  const text = typed.trim();
+  const text = typed;
   if (text === "") return null;
   if (WHOLE_NUMBER.test(text)) {
     const n = Number(text);
@@ -243,13 +243,38 @@ export function grantFromState(state: GrantFormState): Record<string, unknown> {
   const grant: Record<string, unknown> = { acts, heavyActs };
   if (state.counterparties !== "") grant.counterparties = state.counterparties;
   if (state.ends === "none") grant.endsOn = null;
-  if (state.ends === "date") grant.endsOn = state.endsOn.trim();
+  if (state.ends === "date") grant.endsOn = state.endsOn;
   return grant;
 }
 
 /** One spelling of a grant, to tell whether a preview was made for the choices now on the form. */
 export function grantKey(grant: Record<string, unknown>): string {
   return JSON.stringify(grant);
+}
+
+/**
+ * Whether the order can be placed. An order freezes its agreement for good, so it is open only
+ * when a company is chosen and the form was read, and either this deployment's agreement takes no
+ * grant, or a preview of exactly the choices now on the form came back and its answer reads as a
+ * grant: the Schedule A of those choices is then on screen. A preview of other choices, or one
+ * whose answer is not a grant this page can read, keeps it closed.
+ */
+export function orderCanBePlaced(input: {
+  companyId: string | null;
+  /** The served form, read, or null while it is not. */
+  read: GrantFormRead | null;
+  /** The `grantKey` of the choices now on the form. */
+  key: string;
+  /** The last preview that came back: the key of the choices it was made for, and the answer. */
+  previewed: { key: string; answer: unknown } | null;
+}): boolean {
+  const { companyId, read, key, previewed } = input;
+  if (companyId === null || read === null) return false;
+  if (read.kind === "none") return true;
+  if (read.kind !== "form") return false;
+  if (previewed === null || previewed.key !== key) return false;
+  const served = readServedGrant(previewed.answer);
+  return served !== null && served !== "unreadable";
 }
 
 // ---------------------------------------------------------------------------------------------

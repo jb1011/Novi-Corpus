@@ -55,13 +55,15 @@ export function problemsAt(problems: readonly FieldProblem[], field: string): st
 }
 
 /**
- * A short name for the call a failure came from, read from its query or mutation key: the key's
- * first two elements when they are text, joined by a dot. Every key of this site holds its
- * session token, when it holds one, from the third element on, so a name never shows a token. A
- * call with no key is `call`.
+ * A short name for the call a failure came from, read from its query or mutation key: of the key's
+ * first two elements, those that are text of at most 48 characters, joined by a dot. Every key of
+ * this site holds its session token, when it holds one, from the third element on, and a longer
+ * text is never shown, so a name never shows a token. A call with no key is `call`.
  */
 export function callLabel(key: unknown): string {
   if (!Array.isArray(key)) return "call";
-  const names = key.slice(0, 2).filter((part): part is string => typeof part === "string");
+  const names = key
+    .slice(0, 2)
+    .filter((p): p is string => typeof p === "string" && p.length <= 48);
   return names.length > 0 ? names.join(".") : "call";
 }

@@ -41,14 +41,15 @@ export function Facts({ rows }: { rows: readonly (readonly [string, unknown])[] 
 function shown(value: unknown): string {
   if (value === undefined) return "undefined";
   if (typeof value === "string") return value;
-  return JSON.stringify(value);
+  if (typeof value === "bigint") return value.toString();
+  return JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v));
 }
 
 /** A value as JSON, as it arrived. */
 export function Json({ value }: { value: unknown }) {
   return (
     <pre className="max-h-80 overflow-auto rounded-xl border hairline bg-paper-2/60 px-4 py-3 font-mono text-[11.5px] leading-[1.5] text-ink">
-      {JSON.stringify(value, null, 2)}
+      {JSON.stringify(value, (_k, v) => (typeof v === "bigint" ? v.toString() : v), 2)}
     </pre>
   );
 }
@@ -86,8 +87,9 @@ export function Served({
 }
 
 /**
- * A failed call, as served: the status and the code, the sentence, and the details whole, with
- * the `{ field, problem }` rows listed first when there are any. Renders nothing for no error.
+ * A failed call, as served: the status and the code, the sentence, then the `{ field, problem }`
+ * rows when there are any, otherwise the details whole as JSON; the list at the foot of the page
+ * shows the details whole either way. Renders nothing for no error.
  */
 export function Refusal({ error }: { error: unknown }) {
   if (error === null || error === undefined) return null;

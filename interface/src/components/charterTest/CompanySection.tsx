@@ -27,8 +27,9 @@ import { Facts, Line, Refusal, Section, Served } from "./parts";
  * field by field by the product's own gate before it is shown and again before the wallet opens,
  * and the wallet opens for a statement the gate accepted only.
  *
- * The form is not checked here: what is typed is sent, and the server's refusal is shown as
- * served. A sandbox names its own declarant, so two fields are typed.
+ * The form is not checked here: what is typed is sent, normalised as the door normalises it, and
+ * the server's refusal is shown as served. A sandbox names its own declarant, so two fields are
+ * typed.
  */
 export function CompanySection({
   config,
@@ -164,6 +165,7 @@ function Declaration({
   async function signAndCreate() {
     if (busy || shown === null) return;
     setSaid(null);
+    createCompany.reset();
     if (!sameAddress(connected, tenant)) {
       setSaid("The connected wallet is not the wallet signed in: sign in again with this wallet.");
       return;
@@ -199,6 +201,10 @@ function Declaration({
   }
 
   const message = shown?.served.typedData.message;
+  // Read as untrusted: a key not served is told from a served null, and only text or null is
+  // shown as served words.
+  const rule: unknown =
+    shown === null ? undefined : (shown.served as Record<string, unknown>).adoptionRule;
 
   return (
     <div className="flex flex-col gap-4">
@@ -243,10 +249,18 @@ function Declaration({
 
       {shown !== null && message !== undefined && (
         <>
-          <Served
-            name="adoptionRule (served beside the statement; not part of what is signed)"
-            text={shown.served.adoptionRule ?? null}
-          />
+          {typeof rule === "string" || rule === null ? (
+            <Served
+              name="adoptionRule (served beside the statement; not part of what is signed)"
+              text={rule}
+            />
+          ) : (
+            <Facts
+              rows={[
+                ["adoptionRule", Object.hasOwn(shown.served, "adoptionRule") ? rule : "not served"],
+              ]}
+            />
+          )}
           <Served name="statement (the sentence the wallet will sign)" text={message.statement} />
           <Facts
             rows={[

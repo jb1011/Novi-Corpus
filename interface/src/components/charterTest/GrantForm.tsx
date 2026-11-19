@@ -19,16 +19,19 @@ import {
   type ServedGrantForm,
 } from "@/lib/charterTest/grantForm";
 import type { FieldProblem } from "@/lib/charterTest/refusal";
+import { Served } from "./parts";
 
 /**
  * The grant form of the test page, drawn from the served form and the form's state. It holds no
  * state and sends nothing: every change goes to `onChange`, and the page decides what is sent.
  *
  * Every line is named by its key in the grant and every setting by its value in the grant, so the
- * form says nothing of its own about what a choice means. The notice comes first, as served. The
- * settings offered for the four acts of `heavyActs` are the served ones, in the served order. The
- * three rules of the schema that never vary stand beside their lines, in the words the server
- * answers when one is broken. A problem the server answered is shown under the line it names.
+ * form says nothing of its own about what a choice means. The notice comes first, as served,
+ * under its served key, and a served `null` is written out. The settings offered for the four acts
+ * of `heavyActs` are the served ones, in the served order, and an act's amount is drawn only where
+ * `alone` is among them. The three rules of the schema that never vary stand beside their lines,
+ * in the words the server answers when one is broken. A problem the server answered is shown
+ * under the line it names.
  *
  * Nothing is filled in: no control has a placeholder or a starting value of the page's, and the
  * settings that have no "not allowed" (`above`, `counterparties`, the end) start not chosen.
@@ -57,11 +60,7 @@ export function GrantForm({
 
   return (
     <div className="flex flex-col gap-6 text-[13px] text-ink">
-      {form.notice !== null && (
-        <p className="rounded-xl border hairline-strong px-4 py-3 text-[13px] leading-[1.6] text-ink">
-          {form.notice}
-        </p>
-      )}
+      <Served name="notice (served with the grant form)" text={form.notice} />
 
       <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 font-mono text-[12px] text-muted">
         <dt>schema</dt>
@@ -369,13 +368,15 @@ function HeavyLine({
             ))}
           </select>
         </Labelled>
-        <Amount
-          label="perAct"
-          field={`${field}.perAct`}
-          value={line.perAct}
-          disabled={disabled || line.mode !== "alone"}
-          onChange={(perAct) => onChange({ perAct })}
-        />
+        {modes.includes("alone") && (
+          <Amount
+            label="perAct"
+            field={`${field}.perAct`}
+            value={line.perAct}
+            disabled={disabled || line.mode !== "alone"}
+            onChange={(perAct) => onChange({ perAct })}
+          />
+        )}
       </div>
       <Problems rows={problems} />
     </Line>

@@ -16,6 +16,7 @@ import {
   emptyGrantFormState,
   grantFromState,
   grantKey,
+  orderCanBePlaced,
   readGrantForm,
   readServedGrant,
   type GrantFormState,
@@ -227,7 +228,7 @@ describe("the grant a state sends", () => {
     expect(grantFromState(s).endsOn).toBe(null);
     s.ends = "date";
     s.endsOn = "  9 March 2031 ";
-    expect(grantFromState(s).endsOn).toBe("9 March 2031");
+    expect(grantFromState(s).endsOn).toBe("  9 March 2031 ");
     s.endsOn = "";
     expect(grantFromState(s).endsOn).toBe("");
   });
@@ -269,7 +270,7 @@ describe("the grant a state sends", () => {
 
   test.each([
     ["731", 731],
-    [" 731 ", 731],
+    [" 731 ", " 731 "],
     ["0", 0],
     ["1000000001", 1_000_000_001],
     ["0731", "0731"],
@@ -325,4 +326,63 @@ describe("a grant as a door shows it", () => {
       expect(readServedGrant(answer)).toBe("unreadable");
     },
   );
+});
+
+describe("when the order can be placed", () => {
+  const form = readGrantForm(servedForm());
+  const choices = grantKey(grantFromState(filled()));
+  const readable = {
+    grant: {
+      number: 1,
+      version: 1,
+      digest: `0x${"ab".repeat(32)}`,
+      wording: "2026-11-draft-4",
+      choices: {},
+      scheduleA: "Grant number 1, version 1.",
+    },
+  };
+  const open = (over: Partial<Parameters<typeof orderCanBePlaced>[0]> = {}) =>
+    orderCanBePlaced({
+      companyId: "co_1",
+      read: form,
+      key: choices,
+      previewed: { key: choices, answer: readable },
+      ...over,
+    });
+
+  test("a readable preview of the choices now on the form opens it", () => {
+    expect(open()).toBe(true);
+  });
+
+  test("no company chosen", () => {
+    expect(open({ companyId: null })).toBe(false);
+  });
+
+  test("the form not read, or not one this page can draw", () => {
+    expect(open({ read: null })).toBe(false);
+    expect(open({ read: { kind: "unreadable", problem: "schema" } })).toBe(false);
+  });
+
+  test("no preview", () => {
+    expect(open({ previewed: null })).toBe(false);
+  });
+
+  test("a preview of other choices", () => {
+    const other = grantKey(grantFromState(emptyGrantFormState()));
+    expect(open({ previewed: { key: other, answer: readable } })).toBe(false);
+  });
+
+  test("a preview that came back with no grant", () => {
+    expect(open({ previewed: { key: choices, answer: { grant: null } } })).toBe(false);
+  });
+
+  test("a preview whose answer is not a grant this page can read", () => {
+    expect(open({ previewed: { key: choices, answer: { grant: { number: 1 } } } })).toBe(false);
+    expect(open({ previewed: { key: choices, answer: "text" } })).toBe(false);
+  });
+
+  test("a deployment whose agreement takes no grant: open with no preview", () => {
+    expect(open({ read: { kind: "none" }, previewed: null })).toBe(true);
+    expect(open({ read: { kind: "none" }, previewed: null, companyId: null })).toBe(false);
+  });
 });

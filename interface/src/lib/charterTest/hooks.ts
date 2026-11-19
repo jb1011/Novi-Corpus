@@ -11,7 +11,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuthToken } from "@/lib/api/hooks";
 import { apiKeys } from "@/lib/api/keys";
-import { ApiError } from "@/lib/api/types";
 import {
   getGrantForm,
   getOrderGrant,
@@ -30,9 +29,10 @@ export const CHARTER_TEST_KEYS = {
   adoptionMessage: () => [...apiKeys.all, "charterTest:adoptionMessage"] as const,
 };
 
-/** The token a mutation sends, or a refusal before any request: the page signs in first. */
+/** The token a mutation sends, or a failure before any request: the page signs in first. It is
+ *  not an answer of the API, so it is never shown as one. */
 function requireToken(token: string | undefined): string {
-  if (!token) throw new ApiError(401, { code: "unauthorized", message: "sign-in required" });
+  if (!token) throw new Error("No session: sign in first. Nothing was sent.");
   return token;
 }
 
