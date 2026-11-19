@@ -3,7 +3,7 @@
 /**
  * The hooks of the Charter flow's test page: thin wrappers over `./client`, built as the
  * legal-body hooks are. Keys are scoped by the session's token; a mutation without a session
- * refuses before any request leaves the browser; nothing writes on mount.
+ * fails before any request leaves the browser; nothing writes on mount.
  *
  * No query here retries: a refusal is an answer the page shows at once, as served. Each query and
  * each mutation has a key that names its door, so a failure can be named where it is listed.

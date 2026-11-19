@@ -201,7 +201,7 @@ export function GrantSection({
           ]}
         />
         {companyId === null && <Line>Select or declare a company first.</Line>}
-        {takesGrant && current === null && (
+        {takesGrant && companyId !== null && !canPlace && (
           <Line>
             Preview the choices now on the form first: the order freezes them, and an order&apos;s
             agreement never changes.
