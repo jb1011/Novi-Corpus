@@ -37,6 +37,8 @@ export const LEGAL_BODY_COPY = {
 
   frame: {
     exit: "Exit",
+    /** Beside Exit while signed in: the way back to the account's legal bodies from any step. */
+    myAgents: "My agents",
     loading: "Loading…",
   },
 
@@ -68,8 +70,8 @@ export const LEGAL_BODY_COPY = {
   },
 
   sandbox: {
-    banner:
-      "Arc testnet. The company is a test declaration, its check is automatic, and the wording is a draft; nothing here is a filing.",
+    /** Above the choice of paths and on both doors: true of a formed company and a declared one. */
+    banner: "Arc testnet. The company is a test, the wording is a draft, and nothing here is a filing.",
     noPaymentStep: "There is no payment step on this testnet deployment.",
   },
 
@@ -273,25 +275,6 @@ export const LEGAL_BODY_COPY = {
 
   /* ── The steps after the gates. Each screen's own sentences, carried here so the one walk covers
         them from the start. ─────────────────────────────────────────────────────────────────── */
-
-  entrance: {
-    title: "About your agent",
-    intro: "Three answers, kept in this browser. They choose the door. They file nothing.",
-    company: "Your company",
-    have: "We have a Wyoming LLC",
-    form: "Form one for this agent",
-    capReached: "The formed companies this deployment takes are all spoken for.",
-    identity: "Your agent's identity",
-    hasOne: "It has one",
-    notYet: "Not yet",
-    agentId: "The agent's identity number",
-    key: "Who holds its key",
-    thisWallet: "This wallet",
-    anotherKey: "Another key I control",
-    keySentence:
-      "The key must be able to send a transaction on Arc, or have a sponsor, because the pointer is a transaction.",
-    continue: "Continue",
-  },
 
   filing: {
     title: "The state is filing the company",
@@ -756,8 +739,9 @@ export const LEGAL_BODY_COPY = {
       "the statement says attestationState {attestationState} and bindingState {bindingState}",
     standingNotKnown:
       "the statement gives a standing this page does not know, so it reads as unknown here",
+    /** On both doors' done page. */
     sandboxStatement:
-      "sandbox: this statement is a test about a test declaration, and nothing in it is a filing",
+      "sandbox: this statement is a test about a test company, and nothing in it is a filing",
     retry: "Try again",
     factsHeading: "What the statement says",
     facts: {
@@ -787,8 +771,20 @@ export const LEGAL_BODY_COPY = {
       "Say it with the word sandbox: a sandbox statement is a test, and nothing in it is a filing.",
   },
 
-  entry: {
-    button: "Get a legal body for an agent you already run",
+  /** "My agents": the account's legal bodies beside its agents with a treasury. */
+  account: {
+    legalBodies: "Legal bodies",
+    treasuryAgents: "Agents with a treasury",
+    add: "Add",
+    states: { in_progress: "In progress", linked: "Linked", attention: "Needs attention" },
+    actions: { continue: "Continue", open: "Open" },
+    agent: "agent #{agentId}",
+    unreadable: "Your legal bodies could not be read.",
+    emptyTitle: "Nothing here yet",
+    emptyBody: "Give your agent a legal body.",
+    getStarted: "Get started",
+    treasuryNone: "No agent with a treasury yet.",
+    treasuryUnreadable: "Your agents with a treasury could not be read.",
   },
 
   transparency: {

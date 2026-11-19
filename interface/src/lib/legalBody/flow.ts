@@ -161,7 +161,7 @@ function isOpenCompany(company: CompanyView): boolean {
 }
 
 /** Either door's company, while it can still take the flow. */
-function isContinuable(company: CompanyView): boolean {
+export function isContinuable(company: CompanyView): boolean {
   return isOpenCompany(company) || isOpenFormedCompany(company);
 }
 
@@ -173,7 +173,7 @@ function formedReadyForOrder(company: CompanyView | null): boolean {
 }
 
 /** A body that stood behind its identity and was not replaced: its page is the done page. */
-function isFinished(order: LegalBodyOrderView): boolean {
+export function isFinished(order: LegalBodyOrderView): boolean {
   return order.state === "linked" || (order.state === "broken" && order.brokenReason !== "replaced");
 }
 

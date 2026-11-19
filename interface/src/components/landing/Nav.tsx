@@ -6,7 +6,8 @@ import {
   getAuthSessionSnapshot,
   subscribeAuthSession,
 } from "@/lib/api/config";
-import { CREATE_COMPANY_CTA } from "./copy";
+import { GET_STARTED_CTA, TESTNET_TAG } from "./copy";
+import { showsTestnetTag, useLandingConfig } from "./useLandingConfig";
 import { Wordmark } from "./Wordmark";
 
 export function Nav() {
@@ -16,12 +17,21 @@ export function Nav() {
     () => null,
   );
   const signedIn = Boolean(session?.token);
+  // Only a config that is there and says sandbox: loading, unreadable and production show none.
+  const testnet = showsTestnetTag(useLandingConfig());
 
   return (
     <header className="sticky top-0 z-50 anim-nav-drop">
       <div className="absolute inset-0 -z-10 backdrop-blur-md bg-paper/75 border-b hairline" />
       <nav className="mx-auto flex h-16 max-w-[1240px] items-center justify-between gap-2 px-3.5 sm:px-6 lg:px-10">
-        <Wordmark />
+        <div className="flex items-center gap-2.5">
+          <Wordmark />
+          {testnet && (
+            <span className="rounded-full border border-accent/35 bg-accent/[0.08] px-2 py-0.5 text-[10px] font-medium uppercase tracking-[0.14em] text-accent-soft">
+              {TESTNET_TAG}
+            </span>
+          )}
+        </div>
 
         <div className="flex items-center gap-1.5 sm:gap-2">
           {signedIn ? (
@@ -44,10 +54,10 @@ export function Nav() {
             </Link>
           )}
           <Link
-            href="/onboarding"
+            href="/start"
             className="group inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-ink px-3 py-1.5 text-[12px] font-medium text-paper transition-colors hover:bg-ink-hover sm:gap-1.5 sm:px-4 sm:py-2 sm:text-[13px]"
           >
-            {CREATE_COMPANY_CTA}
+            {GET_STARTED_CTA}
             <span
               aria-hidden
               className="transition-transform group-hover:translate-x-0.5"

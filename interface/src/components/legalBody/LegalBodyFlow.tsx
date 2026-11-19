@@ -1,14 +1,22 @@
 "use client";
 
-import { Suspense, useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
+import {
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
 import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useBytecode } from "wagmi";
-import { Wordmark } from "@/components/landing/Wordmark";
 import { AuthProvider, useAuth } from "@/components/onboarding/AuthProvider";
 import { StepNav } from "@/components/onboarding/OnboardingFlow";
 import { Button, Callout, Card, Spinner, StepHeader } from "@/components/onboarding/primitives";
 import { PaymentStep } from "@/components/onboarding/steps/PaymentStep";
 import { Web3Provider } from "@/components/providers/Web3Provider";
+import { PathChoice } from "@/components/start/PathChoice";
 import {
   useCompaniesQuery,
   useCompanyQuery,
@@ -36,10 +44,8 @@ import {
   type CarriedSentence,
 } from "@/lib/legalBody/agreement";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
-import { entranceOffer } from "@/lib/legalBody/entrance";
 import {
   deriveLegalBodyPhase,
-  isFormedCompany,
   selectLegalBodyThread,
   type LegalBodyDerivation,
   type LegalBodyThreadRef,
@@ -47,7 +53,6 @@ import {
 import {
   anySignInRequired,
   bannerLines,
-  declarationsClosed,
   identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
@@ -71,31 +76,39 @@ import {
   type LegalBodyRailPhase,
 } from "@/lib/legalBody/phases";
 import {
+  arrivalAction,
+  arrivalMemory,
   chooserRows,
+  companyStepScreen,
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
   jumpMemoryPatch,
+  liveIntent,
+  memoryAfterClick,
   memoryAfterThread,
-  mergeLegalBodyMemory,
-  patchEndsIntent,
+  startAnotherPatch,
+  threadDoor,
   threadRefsOf,
   threadWithIntent,
   type IdentitySuggestionEvent,
-  type LegalBodyIntent,
 } from "@/lib/legalBody/resume";
 import {
   readLegalBodyMemory,
   writeLegalBodyMemory,
   type LegalBodyMemory,
+  type StoredIntent,
 } from "@/lib/legalBody/storage";
 import { worldIdGateState, worldIdMeStatus } from "@/lib/legalBody/worldIdGate";
+import { readPersistedOnboarding } from "@/lib/onboarding/storage";
+import { START_COPY } from "@/lib/start/copy";
+import { fullProductHref, pathCards, pathFacts, preselectedPath } from "@/lib/start/paths";
 import { AgreementStep } from "./AgreementStep";
 import { ClosedNotice } from "./ClosedNotice";
 import { CompanyStep } from "./CompanyStep";
 import { DoneStep } from "./DoneStep";
-import { EntranceStep } from "./EntranceStep";
 import { FilingStep } from "./FilingStep";
+import { Blank, FlowBackground, FlowHeader } from "./FlowFrame";
 import { HumanStep } from "./HumanStep";
 import { IdentityStep } from "./IdentityStep";
 import { LegalBodyRail } from "./LegalBodyRail";
@@ -118,14 +131,19 @@ import { ThreadChooser } from "./ThreadChooser";
  * (`deriveLegalBodyPhase`). Every decision is a pure function in `src/lib/legalBody`; this file
  * reads, calls them, and renders their answers.
  *
- * Nothing here writes to the server on its own: every write is a click's. The only effects are the
- * memory's write once a thread is on screen, and the scroll to the top when the screen changes.
+ * Nothing here writes to the server on its own: every write is a click's. The effects are three:
+ * an address that names an order or a company (`?order=`, `?company=`, the agents page's links)
+ * is taken once the gates are passed (`arrivalAction`), the memory it hands the flow
+ * (`arrivalMemory`) written to the store, and the address cleaned; the memory's write once a
+ * thread is on screen; and the scroll to the top when the screen changes.
  *
  * Three facts live in this visit's memory only, never in the store: that a draft's agreement was
  * read (so the draft moves on to the identity step, and a reload shows the agreement again); a
  * door's sentence carried back to the step it sends the person to; and the identity already
  * chosen on this visit, which the identity step offers first when the person comes back to it
- * (`identitySuggestionAfter`), so going back never invites a second registration.
+ * (`identitySuggestionAfter`), so going back never invites a second registration. A "start
+ * another" click is not one of them: it is the memory's `startAnother`, so a reload keeps it, and
+ * it leaves the store once what it started exists (`intentSpent`).
  */
 
 type AvailableConfig = Extract<LegalBodyConfig, { available: true }>;
@@ -152,7 +170,6 @@ export type LegalBodyStepKit = {
   door: "declare" | "form";
 };
 
-const F = LEGAL_BODY_COPY.frame;
 const T = LEGAL_BODY_COPY.thread;
 const NO_CODE: CodeRead = { status: "pending", data: undefined };
 const NO_COMPANIES: CompanyView[] = [];
@@ -247,14 +264,34 @@ function LegalBodySession({
 }) {
   const tenant = session.address;
   const token = session.token;
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  // The whole public config: the choice of paths in front of a new company reads its cards and
+  // facts from it.
+  const { data: publicConfig } = usePublicConfigQuery();
 
   const [view, setView] = useState<GateView>(engaged ? "signin" : null);
   // The token a step's request was refused under: that session is over, whatever it still says.
   const [refusedToken, setRefusedToken] = useState<string | null>(null);
+  // An order or a company named in the address, read as this session mounts: the memory it hands
+  // the flow, or null when the address names nothing that is a handle. The store and the address
+  // are left alone until the gates are passed (`arrivalAction`).
+  const [fromAddress] = useState<LegalBodyMemory | null>(() =>
+    arrivalMemory(tenant, readLegalBodyMemory(tenant), {
+      order: searchParams.get("order"),
+      company: searchParams.get("company"),
+    }),
+  );
+  const named = searchParams.has("order") || searchParams.has("company");
+  // Whether this mount took the address: it is taken at most once.
+  const arrivalTaken = useRef(false);
   // This visit's snapshot of the memory. The store is written once a thread is on screen; the
   // snapshot changes only on a click, so a closed order stays on screen for this visit.
-  const [memory, setMemory] = useState<LegalBodyMemory | null>(() => readLegalBodyMemory(tenant));
-  const [intent, setIntent] = useState<LegalBodyIntent | null>(null);
+  const [memory, setMemory] = useState<LegalBodyMemory | null>(
+    () => fromAddress ?? readLegalBodyMemory(tenant),
+  );
+  // A "start another" click, until what it starts exists: the memory's, so a reload keeps it.
+  const intent = memory?.startAnother ?? null;
   const [mountedAt] = useState(() => Date.now());
   // The draft whose agreement was read on this visit: in memory only, so a reload shows it again.
   const [agreementReadFor, setAgreementReadFor] = useState<string | null>(null);
@@ -264,9 +301,7 @@ function LegalBodySession({
   // The drafts the link door refused on this visit: none is offered again as a draft to continue.
   const [refusedDraftIds, setRefusedDraftIds] = useState<readonly string[]>([]);
   // The identity already chosen on this visit, offered first on the identity step: in memory only.
-  const [identitySuggestion, setIdentitySuggestion] = useState<string | null>(
-    () => readLegalBodyMemory(tenant)?.suggestedAgentId ?? null,
-  );
+  const [identitySuggestion, setIdentitySuggestion] = useState<string | null>(null);
 
   // Reads only.
   const code = useBytecode({ address: tenant, chainId: arcTestnet.id });
@@ -340,7 +375,36 @@ function LegalBodySession({
     identityBlocks: identityBlocksGate(me?.identity),
   });
 
-  const toStore = gate === "flow" && thread ? memoryAfterThread({ tenant, stored: memory, thread }) : null;
+  // The address's arrival, once the gates are passed, so the session really used takes it (a
+  // stale wallet's session, cleared a moment later, never does): the arrival is written to the
+  // store, then the address is cleaned so a reload or a later click never applies it again. The
+  // write is needed because the thread's own write below compares with the snapshot, which
+  // already holds the arrival; declared before it, so a thread on screen in the same render has the
+  // last word. A parameter that names nothing writes nothing, and is cleaned all the same.
+  useEffect(() => {
+    const action = arrivalAction({
+      gate,
+      named,
+      arrival: fromAddress,
+      done: arrivalTaken.current,
+    });
+    if (action.write === null && !action.replace) return;
+    arrivalTaken.current = true;
+    if (action.write) writeLegalBodyMemory(action.write);
+    if (action.replace) router.replace("/legal-body");
+  }, [gate, named, fromAddress, router]);
+
+  // The intent stays in the store while it is live; once what it started exists, the thread on
+  // screen is the store's and the intent leaves it.
+  const toStore =
+    gate === "flow" && thread
+      ? memoryAfterThread({
+          tenant,
+          stored: memory,
+          thread,
+          intent: liveIntent(intent, { companies, orders }),
+        })
+      : null;
   useStoredThread(toStore);
 
   const screen =
@@ -353,13 +417,13 @@ function LegalBodySession({
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, [screen]);
 
-  /** A click's change to the memory: written to the store and to this visit's snapshot. */
+  /** A click's change to the memory: written to the store and to this visit's snapshot. A click
+   *  that names the thread ends any intent. */
   function remember(patch: MemoryPatch) {
-    const next = mergeLegalBodyMemory(tenant, toStore ?? memory, patch);
+    const next = memoryAfterClick(tenant, toStore ?? memory, patch);
     writeLegalBodyMemory(next);
     setMemory(next);
     setCarried(null);
-    if (patchEndsIntent(patch)) setIntent(null);
   }
 
   /** A change to the identity the identity step offers again. Nothing is stored. */
@@ -390,8 +454,7 @@ function LegalBodySession({
     return true;
   }
 
-  const door: "declare" | "form" =
-    (company && isFormedCompany(company)) || memory?.door === "form" ? "form" : "declare";
+  const door = threadDoor(company, memory?.door ?? null);
   const phases = visibleLegalBodyPhases(config, door);
   const current = railCurrentOf(gate, derivation);
 
@@ -412,26 +475,9 @@ function LegalBodySession({
   }
 
   function startAnother(kind: "new_order" | "new_company") {
-    if (kind === "new_order" && refs?.companyId)
-      setIntent({
-        kind: "another-agent",
-        companyId: refs.companyId,
-        known: orders.map((o) => o.id),
-      });
-    if (kind === "new_company") {
-      setIntent({ kind: "another-company", known: companies.map((c) => c.companyId) });
-      noteIdentity({ kind: "start_another" });
-      remember({
-        door: null,
-        identityChoice: null,
-        signer: null,
-        suggestedAgentId: null,
-      });
-      return;
-    }
     noteIdentity({ kind: "start_another" });
     // A closed order shown here is done with: this visit forgets it too.
-    remember({});
+    remember(startAnotherPatch(kind, { companyId: refs?.companyId ?? null, companies, orders }));
   }
 
   /** A link door's refusal sent the person elsewhere: go there, with the door's sentence. */
@@ -549,25 +595,36 @@ function LegalBodySession({
       case "filing":
         return <FilingStep key={kit.companyId ?? "filing"} kit={kit} />;
       case "company": {
-        const offer = entranceOffer(config.formedDoor);
-        if (
-          !kit.companyId &&
-          derivation.companyStep === "form" &&
-          memory?.door == null &&
-          offer.kind === "ask"
-        ) {
+        // In front of a new company with no door chosen, the choice of paths, in place: a door
+        // picked here is remembered, the full product opens the wizard. `companyStepScreen`
+        // decides, closed doors included; this renders its answer.
+        const cards = pathCards(publicConfig);
+        const opening = companyStepScreen({
+          companyId: kit.companyId,
+          company,
+          companyStep: derivation.companyStep,
+          door: memory?.door ?? null,
+          cards,
+          declarations: config.declarations === true,
+        });
+        if (opening === "choice")
           return (
-            <EntranceStep
-              offer={offer}
-              onAnswer={(patch) => {
-                remember(patch);
-                if (patch.suggestedAgentId)
-                  noteIdentity({ kind: "registered", agentId: patch.suggestedAgentId });
+            <PathChoice
+              cards={cards}
+              initial={preselectedPath(cards, null)}
+              facts={pathFacts(publicConfig)}
+              back={
+                companies.length > 0 || orders.length > 0
+                  ? { href: "/agents", label: START_COPY.backToAgents }
+                  : undefined
+              }
+              onContinue={(path) => {
+                if (path === "full") router.push(fullProductHref(readPersistedOnboarding()));
+                else remember({ door: path });
               }}
             />
           );
-        }
-        return declarationsClosed(config, derivation) ? (
+        return opening === "closed" ? (
           <StepPlaceholder kit={kit} sentence={LEGAL_BODY_COPY.company.declarationsOff} />
         ) : (
           // One form per thread: a new declaration never inherits another thread's typing.
@@ -650,9 +707,10 @@ function LegalBodySession({
 }
 
 /**
- * The memory's write, once a thread is on screen: the one effect besides the scroll. It writes
- * only what `memoryAfterThread` says has changed, from the values themselves, so a re-render with
- * the same thread writes nothing.
+ * The memory's write, once a thread is on screen: the one effect besides the address's arrival and
+ * the scroll. It writes only what `memoryAfterThread` says has changed, from the values themselves,
+ * so a re-render with the same thread writes nothing. It runs after the arrival's write, so a
+ * thread on screen in the same render has the last word.
  */
 function useStoredThread(next: LegalBodyMemory | null) {
   const tenant = next?.tenant ?? null;
@@ -661,9 +719,8 @@ function useStoredThread(next: LegalBodyMemory | null) {
   const ownerChoice = next?.ownerChoice ?? null;
   const agentId = next?.agentId ?? null;
   const door = next?.door ?? null;
-  const identityChoice = next?.identityChoice ?? null;
-  const signer = next?.signer ?? null;
-  const suggestedAgentId = next?.suggestedAgentId ?? null;
+  // The intent by its value: a re-render that rebuilds the same intent writes nothing.
+  const startAnother = next?.startAnother ? JSON.stringify(next.startAnother) : null;
   useEffect(() => {
     if (tenant === null) return;
     writeLegalBodyMemory({
@@ -673,9 +730,7 @@ function useStoredThread(next: LegalBodyMemory | null) {
       ownerChoice,
       agentId,
       door,
-      identityChoice,
-      signer,
-      suggestedAgentId,
+      startAnother: startAnother === null ? null : (JSON.parse(startAnother) as StoredIntent),
     });
   }, [
     tenant,
@@ -684,9 +739,7 @@ function useStoredThread(next: LegalBodyMemory | null) {
     ownerChoice,
     agentId,
     door,
-    identityChoice,
-    signer,
-    suggestedAgentId,
+    startAnother,
   ]);
 }
 
@@ -808,38 +861,4 @@ function StepPlaceholder({
       </Card>
     </div>
   );
-}
-
-function FlowHeader() {
-  return (
-    <header className="sticky top-0 z-40">
-      <div className="absolute inset-0 -z-10 border-b hairline bg-paper/80 backdrop-blur-md" />
-      <div className="mx-auto flex h-16 max-w-[1180px] items-center justify-between px-5 lg:px-8">
-        <Wordmark />
-        <Link
-          href="/"
-          className="rounded-full px-3 py-1.5 text-[12.5px] text-muted transition-colors hover:bg-paper-2 hover:text-ink"
-        >
-          {F.exit}
-        </Link>
-      </div>
-    </header>
-  );
-}
-
-/** The wizard's background, so both flows look like one product. */
-function FlowBackground() {
-  return (
-    <>
-      <div
-        aria-hidden
-        className="pointer-events-none fixed inset-0 -z-10 hero-mesh-dark opacity-70"
-      />
-      <div aria-hidden className="pointer-events-none fixed inset-0 -z-10 bg-paper-grain opacity-60" />
-    </>
-  );
-}
-
-function Blank() {
-  return <div className="min-h-screen bg-paper" aria-hidden />;
 }

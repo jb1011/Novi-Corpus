@@ -9,15 +9,16 @@
  * the browser: the flow renders the sign-in before any of its steps, and a hook here never opens a
  * sign-in prompt of its own.
  *
- * No hook here writes on mount. Every write is a mutation a click calls; the one decision a hook
- * makes about time, the poll interval, is `orderPollInterval`'s, a pure function with a test.
+ * No hook here writes on mount. Every write is a mutation a click calls; the two decisions a hook
+ * makes about time, the poll interval and whether the orders list is asked again after a failure,
+ * are `orderPollInterval`'s and `retryRead`'s, pure functions with tests.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { useConnection, useWriteContract } from "wagmi";
 import { arcTestnet } from "@/lib/chain";
 import { sendAllowedCall, type CallContext, type WriteRequest } from "@/lib/legalBody/chain";
-import { orderPollInterval } from "@/lib/legalBody/polling";
+import { orderPollInterval, retryRead } from "@/lib/legalBody/polling";
 import { getTransparency } from "./client";
 import { useAuthToken, usePublicConfigQuery } from "./hooks";
 import { apiKeys } from "./keys";
@@ -72,12 +73,16 @@ export function useLegalBodyConfig(): {
 
 /* ── Orders: reads ───────────────────────────────────────────────────────────────────────── */
 
+/** The tenant's orders. A refusal (a 401, the 403 of an account the real-human check does not
+ *  accept) is said at once, never retried (`retryRead`): "My agents" would otherwise wait seconds
+ *  on a spinner for an answer it already has, and the flow on its way to the sign-in step. */
 export function useLegalBodyOrdersQuery() {
   const token = useAuthToken();
   return useQuery({
     queryKey: apiKeys.legalBodyOrders(token ?? ""),
     queryFn: () => listLegalBodyOrders(token!),
     enabled: !!token,
+    retry: retryRead,
   });
 }
 

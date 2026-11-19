@@ -48,7 +48,7 @@ export function CompaniesList() {
             to the same company.
           </p>
           <Link
-            href="/onboarding?new=1"
+            href="/start"
             className="mt-6 inline-flex rounded-full bg-ink px-5 py-2.5 text-[13px] font-medium text-paper transition-colors hover:bg-ink-hover"
           >
             Create an agent
