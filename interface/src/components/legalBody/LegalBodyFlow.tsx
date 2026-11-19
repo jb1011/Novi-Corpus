@@ -83,11 +83,11 @@ import {
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
-  intentSpent,
   jumpMemoryPatch,
+  liveIntent,
+  memoryAfterClick,
   memoryAfterThread,
-  mergeLegalBodyMemory,
-  patchEndsIntent,
+  startAnotherPatch,
   threadDoor,
   threadRefsOf,
   threadWithIntent,
@@ -402,7 +402,7 @@ function LegalBodySession({
           tenant,
           stored: memory,
           thread,
-          intent: intent && !intentSpent(intent, { companies, orders }) ? intent : null,
+          intent: liveIntent(intent, { companies, orders }),
         })
       : null;
   useStoredThread(toStore);
@@ -420,8 +420,7 @@ function LegalBodySession({
   /** A click's change to the memory: written to the store and to this visit's snapshot. A click
    *  that names the thread ends any intent. */
   function remember(patch: MemoryPatch) {
-    const ended: MemoryPatch = patchEndsIntent(patch) ? { startAnother: null } : {};
-    const next = mergeLegalBodyMemory(tenant, toStore ?? memory, { ...patch, ...ended });
+    const next = memoryAfterClick(tenant, toStore ?? memory, patch);
     writeLegalBodyMemory(next);
     setMemory(next);
     setCarried(null);
@@ -476,27 +475,9 @@ function LegalBodySession({
   }
 
   function startAnother(kind: "new_order" | "new_company") {
-    if (kind === "new_company") {
-      noteIdentity({ kind: "start_another" });
-      remember({
-        door: null,
-        startAnother: { kind: "another-company", known: companies.map((c) => c.companyId) },
-      });
-      return;
-    }
     noteIdentity({ kind: "start_another" });
     // A closed order shown here is done with: this visit forgets it too.
-    remember(
-      refs?.companyId
-        ? {
-            startAnother: {
-              kind: "another-agent",
-              companyId: refs.companyId,
-              known: orders.map((o) => o.id),
-            },
-          }
-        : {},
-    );
+    remember(startAnotherPatch(kind, { companyId: refs?.companyId ?? null, companies, orders }));
   }
 
   /** A link door's refusal sent the person elsewhere: go there, with the door's sentence. */

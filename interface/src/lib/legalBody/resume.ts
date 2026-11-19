@@ -99,9 +99,12 @@ export function newCompanyHandover(
  *
  * A value counts only when it has the shape of a handle; anything else is ignored. An order wins
  * over a company. The named order (or company) becomes the remembered one, with no other, and the
- * memory starts the thread afresh: no "start another" intent and no draft choice. Whether the id is
- * the account's own is not decided here: `selectLegalBodyThread` ignores an order or a company
- * that is not in the account's lists, so an address opens only what the account already has.
+ * memory starts the thread afresh: no "start another" intent. The draft choices (the owner choice
+ * and the identity) are kept when the address names the order the memory already holds, so
+ * "Continue" on "My agents" comes back where a reload would; another order or a company starts
+ * with none. Whether the id is the account's own is not decided here: `selectLegalBodyThread`
+ * ignores an order or a company that is not in the account's lists, so an address opens only what
+ * the account already has.
  */
 export function arrivalMemory(
   tenant: Address,
@@ -109,8 +112,11 @@ export function arrivalMemory(
   params: { order: string | null; company: string | null },
 ): LegalBodyMemory | null {
   const fresh = { ownerChoice: null, agentId: null, startAnother: null };
-  if (params.order !== null && isHandle(params.order))
-    return mergeLegalBodyMemory(tenant, stored, { ...fresh, orderId: params.order, companyId: null });
+  if (params.order !== null && isHandle(params.order)) {
+    const sameOrder = stored !== null && stored.orderId === params.order;
+    const choices = sameOrder ? { startAnother: null } : fresh;
+    return mergeLegalBodyMemory(tenant, stored, { ...choices, orderId: params.order, companyId: null });
+  }
   if (params.company !== null && isHandle(params.company))
     return mergeLegalBodyMemory(tenant, stored, { ...fresh, companyId: params.company, orderId: null });
   return null;
@@ -322,6 +328,54 @@ export function patchEndsIntent(patch: Partial<Memo>): boolean {
     Object.prototype.hasOwnProperty.call(patch, "companyId") ||
     Object.prototype.hasOwnProperty.call(patch, "orderId")
   );
+}
+
+/** The intent the store keeps once a thread is on screen: the stored one while it is live, none
+ *  once what it started exists (`intentSpent`). */
+export function liveIntent(
+  intent: LegalBodyIntent | null,
+  p: { companies: CompanyView[]; orders: LegalBodyOrderView[] },
+): LegalBodyIntent | null {
+  return intent !== null && !intentSpent(intent, p) ? intent : null;
+}
+
+/**
+ * The memory after a click's change: the patch over the base, for this tenant. A click that names
+ * the thread (`patchEndsIntent`) ends any intent, and that end has the last word over the patch.
+ */
+export function memoryAfterClick(
+  tenant: Address,
+  base: LegalBodyMemory | null,
+  patch: Partial<Memo>,
+): LegalBodyMemory {
+  const ended: Partial<Memo> = patchEndsIntent(patch) ? { startAnother: null } : {};
+  return mergeLegalBodyMemory(tenant, base, { ...patch, ...ended });
+}
+
+/**
+ * What a "start another" click remembers (`startAnother`), from the lists at the click:
+ *  - `new_company`: no door chosen yet, so the choice of paths shows in place, and the companies
+ *    there are;
+ *  - `new_order`: the orders there are, for the company on screen; nothing with none on screen.
+ * Neither names the thread, so neither ends the intent it starts.
+ */
+export function startAnotherPatch(
+  kind: "new_order" | "new_company",
+  p: { companyId: string | null; companies: CompanyView[]; orders: LegalBodyOrderView[] },
+): Partial<Memo> {
+  if (kind === "new_company")
+    return {
+      door: null,
+      startAnother: { kind: "another-company", known: p.companies.map((c) => c.companyId) },
+    };
+  if (!p.companyId) return {};
+  return {
+    startAnother: {
+      kind: "another-agent",
+      companyId: p.companyId,
+      known: p.orders.map((o) => o.id),
+    },
+  };
 }
 
 function timeOf(order: LegalBodyOrderView): number {

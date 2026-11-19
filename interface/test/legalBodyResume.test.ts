@@ -20,10 +20,13 @@ import {
   identitySuggestionAfter,
   intentSpent,
   jumpMemoryPatch,
+  liveIntent,
+  memoryAfterClick,
   memoryAfterThread,
   mergeLegalBodyMemory,
   newCompanyHandover,
   patchEndsIntent,
+  startAnotherPatch,
   threadDoor,
   threadRefsOf,
   threadWithIntent,
@@ -253,7 +256,7 @@ describe("newCompanyHandover", () => {
 
 describe("arrivalMemory: an order or a company named in the address", () => {
   test("an order named in the address becomes the remembered order, and ends any intent", () => {
-    const stored = memory({ companyId: "co_1", orderId: "ord_1", agentId: "7",
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7",
       startAnother: { kind: "another-company", known: [] } });
     expect(arrivalMemory(TENANT, stored, { order: "ord_2", company: null }))
       .toMatchObject({ tenant: TENANT, orderId: "ord_2", companyId: null, agentId: null, ownerChoice: null, startAnother: null });
@@ -276,10 +279,35 @@ describe("arrivalMemory: an order or a company named in the address", () => {
       .toMatchObject({ orderId: null, companyId: "co_2" });
   });
 
-  test("the draft choices are cleared even for the order already remembered", () => {
+  test("the order already remembered keeps its draft choices: Continue comes back where the person was", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7",
+      startAnother: { kind: "another-company", known: [] } });
+    const m = arrivalMemory(TENANT, stored, { order: "ord_1", company: null });
+    expect(m).toEqual(memory({ orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7" }));
+    // The flow reads them for that order, and its write once the thread is on screen keeps them.
+    const thread = { kind: "order" as const, companyId: "co_1", orderId: "ord_1" };
+    expect(draftChoices(m, thread)).toEqual({ ownerChoice: "elsewhere", agentId: "7" });
+    expect(memoryAfterThread({ tenant: TENANT, stored: m, thread, intent: null })).toMatchObject({
+      orderId: "ord_1",
+      ownerChoice: "elsewhere",
+      agentId: "7",
+    });
+  });
+
+  test("another order still starts with no draft choice", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "this-wallet", agentId: "7" });
+    const m = arrivalMemory(TENANT, stored, { order: "ord_2", company: null });
+    expect(m).toMatchObject({ orderId: "ord_2", ownerChoice: null, agentId: null });
+    expect(draftChoices(m, { kind: "order", companyId: "co_1", orderId: "ord_2" })).toEqual({
+      ownerChoice: null,
+      agentId: null,
+    });
+  });
+
+  test("a company named in the address clears the draft choices, even the company of the order remembered", () => {
     const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7" });
-    expect(arrivalMemory(TENANT, stored, { order: "ord_1", company: null }))
-      .toMatchObject({ orderId: "ord_1", companyId: null, ownerChoice: null, agentId: null });
+    expect(arrivalMemory(TENANT, stored, { order: null, company: "co_1" }))
+      .toMatchObject({ companyId: "co_1", orderId: null, ownerChoice: null, agentId: null });
   });
 
   test("the rest of the memory is kept; with no memory, one for this tenant", () => {
@@ -564,6 +592,93 @@ describe("patchEndsIntent", () => {
     expect(patchEndsIntent({})).toBe(false);
     expect(patchEndsIntent({ ownerChoice: "this-wallet", agentId: "42" })).toBe(false);
     expect(patchEndsIntent({ agentId: null })).toBe(false);
+  });
+});
+
+describe("liveIntent: the intent the store keeps once a thread is on screen", () => {
+  test("no intent stays none", () => {
+    expect(liveIntent(null, { companies: [company("co_1")], orders: [] })).toBeNull();
+  });
+
+  test("a live intent is kept as it is", () => {
+    const intent = { kind: "another-company" as const, known: ["co_1"] };
+    expect(liveIntent(intent, { companies: [company("co_1")], orders: [] })).toBe(intent);
+    const agent = { kind: "another-agent" as const, companyId: "co_1", known: ["o1"] };
+    expect(liveIntent(agent, { companies: [company("co_1")], orders: [order("o1", "co_1")] })).toBe(agent);
+  });
+
+  test("a spent intent leaves: what it started exists", () => {
+    expect(
+      liveIntent({ kind: "another-company", known: ["co_1"] }, { companies: [company("co_1"), company("co_2")], orders: [] }),
+    ).toBeNull();
+    const agent = { kind: "another-agent" as const, companyId: "co_1", known: ["o1"] };
+    expect(liveIntent(agent, { companies: [company("co_1")], orders: [order("o1", "co_1"), order("o2", "co_1")] })).toBeNull();
+    expect(liveIntent(agent, { companies: [], orders: [] })).toBeNull();
+  });
+});
+
+describe("memoryAfterClick: a click's change to the memory", () => {
+  const intent = { kind: "another-company" as const, known: ["co_1"] };
+
+  test("a choice inside the thread is laid over the base, and the intent stays", () => {
+    const base = memory({ companyId: "co_1", orderId: "o1", startAnother: intent });
+    expect(memoryAfterClick(TENANT, base, { ownerChoice: "this-wallet", agentId: "42" })).toEqual(
+      memory({ companyId: "co_1", orderId: "o1", ownerChoice: "this-wallet", agentId: "42", startAnother: intent }),
+    );
+  });
+
+  test("a click that names the thread ends the intent", () => {
+    const base = memory({ startAnother: intent, door: "form" });
+    expect(memoryAfterClick(TENANT, base, { companyId: "co_2", orderId: null })).toEqual(
+      memory({ companyId: "co_2", door: "form" }),
+    );
+    expect(memoryAfterClick(TENANT, base, { orderId: "o2" }).startAnother).toBeNull();
+  });
+
+  test("the end of the intent has the last word over a patch that names the thread and an intent", () => {
+    expect(memoryAfterClick(TENANT, null, { companyId: "co_2", startAnother: intent }).startAnother).toBeNull();
+  });
+
+  test("a patch that starts an intent is written with it", () => {
+    expect(memoryAfterClick(TENANT, memory({ companyId: "co_1" }), { door: null, startAnother: intent })).toEqual(
+      memory({ companyId: "co_1", startAnother: intent }),
+    );
+  });
+
+  test("always for this tenant, from nothing when there is no base", () => {
+    expect(memoryAfterClick(TENANT, memory({ tenant: OTHER, companyId: "co_9" }), {}).tenant).toBe(TENANT);
+    expect(memoryAfterClick(TENANT, null, { agentId: "7" })).toEqual(memory({ agentId: "7" }));
+  });
+});
+
+describe("startAnotherPatch: what a start-another click remembers", () => {
+  const companies = [company("co_1"), company("co_2")];
+  const orders = [order("o1", "co_1"), order("o2", "co_2")];
+
+  test("a new company: no door chosen yet, and the companies there are at the click", () => {
+    expect(startAnotherPatch("new_company", { companyId: "co_1", companies, orders })).toEqual({
+      door: null,
+      startAnother: { kind: "another-company", known: ["co_1", "co_2"] },
+    });
+    expect(startAnotherPatch("new_company", { companyId: null, companies: [], orders: [] })).toEqual({
+      door: null,
+      startAnother: { kind: "another-company", known: [] },
+    });
+  });
+
+  test("a new order on this company: the orders there are at the click", () => {
+    expect(startAnotherPatch("new_order", { companyId: "co_1", companies, orders })).toEqual({
+      startAnother: { kind: "another-agent", companyId: "co_1", known: ["o1", "o2"] },
+    });
+  });
+
+  test("a new order with no company on screen remembers nothing", () => {
+    expect(startAnotherPatch("new_order", { companyId: null, companies, orders })).toEqual({});
+  });
+
+  test("neither patch names the thread, so neither ends itself", () => {
+    expect(patchEndsIntent(startAnotherPatch("new_company", { companyId: "co_1", companies, orders }))).toBe(false);
+    expect(patchEndsIntent(startAnotherPatch("new_order", { companyId: "co_1", companies, orders }))).toBe(false);
   });
 });
 
