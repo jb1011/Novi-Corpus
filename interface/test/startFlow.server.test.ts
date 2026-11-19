@@ -85,6 +85,7 @@ vi.mock("next/navigation", () => ({
 }));
 
 import { StartDestination, StartFlow } from "@/components/start/StartFlow";
+import { FlowHeader } from "@/components/legalBody/FlowFrame";
 import { metadata } from "@/app/start/page";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import type { LegalBodyGate, SignInStepState } from "@/lib/legalBody/gates";
@@ -153,7 +154,7 @@ function given(over: {
 }
 
 /** The markup, with the apostrophes a person reads ("My agent's company") as they read them. */
-function render(component: typeof StartFlow | typeof StartDestination): string {
+function render(component: typeof StartFlow | typeof StartDestination | typeof FlowHeader): string {
   const html = renderToString(
     createElement(QueryClientProvider, { client: new QueryClient() }, createElement(component)),
   );
@@ -335,7 +336,7 @@ describe("the choice", () => {
     expect(html).toContain("No payment on testnet");
   });
 
-  test("no way back to an account page from the start", () => {
+  test("the choice on the start carries no back link of its own: the header has the way to the account", () => {
     given({});
     expect(render(StartDestination)).not.toContain(START_COPY.backToAgents);
   });
@@ -356,6 +357,28 @@ describe("the choice", () => {
     expect(html).toContain(START_COPY.companiesUnreadable);
     expect(buttonWith(html, START_COPY.retry)).not.toBeNull();
     expect(html).not.toContain("boom");
+  });
+});
+
+describe("the header of /start and /legal-body", () => {
+  const F = LEGAL_BODY_COPY.frame;
+  const link = (html: string, href: string) =>
+    html.match(new RegExp(`<a[^>]*href="${href}"[^>]*>([^<]*)</a>`))?.[1] ?? null;
+
+  test("signed in: a link to My agents beside Exit, so a stored new company never hides the account's legal bodies", () => {
+    given({});
+    const html = render(FlowHeader);
+    expect(link(html, "/agents")).toBe(F.myAgents);
+    expect(link(html, "/")).toBe(F.exit);
+    expect(F.myAgents).toBe("My agents");
+  });
+
+  test("no session: Exit alone", () => {
+    given({ session: null });
+    const html = render(FlowHeader);
+    expect(html).not.toContain('href="/agents"');
+    expect(html).not.toContain(F.myAgents);
+    expect(link(html, "/")).toBe(F.exit);
   });
 });
 

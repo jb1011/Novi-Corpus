@@ -37,6 +37,8 @@ export const LEGAL_BODY_COPY = {
 
   frame: {
     exit: "Exit",
+    /** Beside Exit while signed in: the way back to the account's legal bodies from any step. */
+    myAgents: "My agents",
     loading: "Loading…",
   },
 
