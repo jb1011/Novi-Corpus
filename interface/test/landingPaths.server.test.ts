@@ -22,7 +22,8 @@ import { Hero } from "@/components/landing/Hero";
 import { Nav } from "@/components/landing/Nav";
 import { PathsSection, PathsView } from "@/components/landing/PathsSection";
 import { landingCards, showsTestnetTag, type LandingConfig } from "@/components/landing/useLandingConfig";
-import { ONBOARDING_STEP_COUNT, PATHS_HEADING, TESTNET_TAG } from "@/components/landing/copy";
+import { GET_STARTED_CTA, ONBOARDING_STEP_COUNT, PATHS_HEADING, TESTNET_TAG } from "@/components/landing/copy";
+import PersonhoodPage from "@/app/personhood/page";
 import type { PublicConfig } from "@/lib/api/types";
 import { START_COPY } from "@/lib/start/copy";
 import { landingPaths, type PathCard } from "@/lib/start/paths";
@@ -136,6 +137,11 @@ describe("the buttons", () => {
       expect(out).toContain('href="/start"');
       expect(out).toContain('href="#paths"');
     }
+  });
+  test("the personhood page leads to the start, and says so: the start is not the wizard", () => {
+    const out = html(createElement(PersonhoodPage));
+    expect(out).toMatch(new RegExp(`<a[^>]*href="/start"[^>]*>${GET_STARTED_CTA}</a>`));
+    expect(out).not.toContain("Start onboarding");
   });
   test("the hero's record card names no treasury", () => {
     expect(html(createElement(Hero)).toLowerCase()).not.toContain("treasury");
