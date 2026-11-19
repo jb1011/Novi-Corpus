@@ -70,8 +70,8 @@ export const LEGAL_BODY_COPY = {
   },
 
   sandbox: {
-    banner:
-      "Arc testnet. The company is a test declaration, its check is automatic, and the wording is a draft; nothing here is a filing.",
+    /** Above the choice of paths and on both doors: true of a formed company and a declared one. */
+    banner: "Arc testnet. The company is a test, the wording is a draft, and nothing here is a filing.",
     noPaymentStep: "There is no payment step on this testnet deployment.",
   },
 
@@ -739,8 +739,9 @@ export const LEGAL_BODY_COPY = {
       "the statement says attestationState {attestationState} and bindingState {bindingState}",
     standingNotKnown:
       "the statement gives a standing this page does not know, so it reads as unknown here",
+    /** On both doors' done page. */
     sandboxStatement:
-      "sandbox: this statement is a test about a test declaration, and nothing in it is a filing",
+      "sandbox: this statement is a test about a test company, and nothing in it is a filing",
     retry: "Try again",
     factsHeading: "What the statement says",
     facts: {
