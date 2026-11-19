@@ -26,6 +26,7 @@ import {
   assertContractFactsProvable,
   assertProductionNeedsBuilt,
   assertSetUsable,
+  declarationAccepted,
   legalTextsOf,
   octoberLegalTexts,
 } from "../../src/legalBody/texts/sets";
@@ -262,6 +263,16 @@ test("the pair is chosen once, at start, by the setting", () => {
     "legalBody/texts/adoptionStatement.ts",
     "legalBody/texts/sets.ts",
   ]);
+  // The rule a pair holds a declaration's wording to is written in one file, read by the order
+  // door and by the company views, and handed to the views by the composition root: a root that
+  // does not name it serves `wordingAccepted: null` on every view.
+  expect(naming("declarationAccepted").sort()).toEqual([
+    "api/app.ts",
+    "api/main.ts",
+    "api/views.ts",
+    "legalBody/orders.ts",
+    "legalBody/texts/sets.ts",
+  ]);
 });
 
 test("no file of src outside the texts names a version of a text", () => {
@@ -281,4 +292,22 @@ test("a draft text is one refusal, through one helper", () => {
       message: LEGAL_BODY_SENTENCES.legal_text_not_approved,
     }),
   );
+});
+
+test("a pair accepts a declaration made under its own declaration's version, and no other", () => {
+  const cases: [string, boolean, boolean][] = [
+    ["2026-10-draft-1", true, false],
+    ["2026-11-draft-1", false, false],
+    ["2026-11-draft-2", false, true],
+    ["2099-01-draft-1", false, false],
+    ["", false, false],
+  ];
+  for (const [wordingVersion, onOctober, onCharter] of cases) {
+    expect(declarationAccepted(octoberLegalTexts(), wordingVersion), wordingVersion).toBe(
+      onOctober,
+    );
+    expect(declarationAccepted(CHARTER_LEGAL_TEXTS, wordingVersion), wordingVersion).toBe(
+      onCharter,
+    );
+  }
 });

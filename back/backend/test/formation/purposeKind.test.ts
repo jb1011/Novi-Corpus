@@ -221,6 +221,24 @@ test("the repository is constructed, and reads and moves a company, on a databas
   }
 });
 
+test("the repository is constructed, and reads a company, on a database that has no table of declarations", () => {
+  // The count behind the tenant's cap on open declared companies reads `company_declarations`, so
+  // its statement is prepared on first use: constructing the repository must not need the table.
+  const db = previousBuildDatabase();
+  try {
+    db.exec("DROP TABLE company_declarations");
+    const companies = new SqliteCompanyRepository(db);
+    insertLegacy(db, "co_older", "doola");
+    expect(companies.find("co_older")).toMatchObject({ companyId: "co_older", status: "ready" });
+    // The count is the one read that needs the table.
+    expect(() => companies.countCustomerOpenByTenant(TENANT, "2026-10-draft-1")).toThrow(
+      "no such table: company_declarations",
+    );
+  } finally {
+    db.close();
+  }
+});
+
 describe("countChargeableFormedLegalBodies", () => {
   let db: Database.Database;
   let companies: SqliteCompanyRepository;

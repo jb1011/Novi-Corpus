@@ -87,6 +87,9 @@ export interface ApiDeps extends EntityViewDeps {
     declarations: CompanyDeclarationRepository;
     checks: CompanyCheckRepository;
     hasLinkedLegalBody?: (companyId: string) => boolean;
+    /** Whether a declaration made under this wording version takes an order on this deployment:
+     *  `declarationAccepted` of the pair served. The company views read it. */
+    declarationAccepted?: (wordingVersion: string) => boolean;
   };
   /**
    * The customer company DOORS (declare, abandon, upload evidence). Present only where
