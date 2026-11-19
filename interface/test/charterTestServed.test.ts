@@ -1,9 +1,10 @@
 /**
  * Where the Charter flow's test page is served, and that nothing leads to it.
  *
- * The page is served by the development server only. Every build answers the site's not-found
- * page at its path, and no file of the site outside the page's own three folders names the path
- * or imports from those folders: the page is reached by typing its address, and by nothing else.
+ * The page is served by the development server only. A plain `next build`, the build script pinned
+ * below, answers the site's not-found page at its path, and no file of the site outside the page's
+ * own three folders names the path or imports from those folders: the page is reached by typing
+ * its address, and by nothing else.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join, relative, sep } from "node:path";
