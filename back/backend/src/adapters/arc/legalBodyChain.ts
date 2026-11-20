@@ -149,8 +149,11 @@ export class LegalBodyChainFaultError extends Error {
 /**
  * The revert names that make a create's simulation a platform FAULT: every error the controller
  * declares (its grants, its target bindings, its checks of the relay bytes), the factory's
- * ownership errors (the controller must own it), and the errors of the factory's deployment of a
+ * ownership errors (the controller must own it), and the factory's errors about the code behind a
  * body.
+ *
+ * The factory creates each body as a proxy of its own, with no deployment library in between: if
+ * that creation itself fails, the revert carries no data and so no name, and cannot be listed here.
  *
  * Any other revert stays the ContractRevertError the relay seam built: the factory's refusals of
  * the link (`BadSignature`, `BadDeadline`, `LegalBodyExists`, `BadGuardian`, `BadDelay`), and a
@@ -163,8 +166,6 @@ const CREATE_FAULT_NAMES: ReadonlySet<string> = new Set([
   ...noviControllerAbi.flatMap((item) => (item.type === "error" ? [item.name] : [])),
   "OwnableUnauthorizedAccount",
   "OwnableInvalidOwner",
-  "FailedDeployment",
-  "InsufficientBalance",
   "NotContract",
   "NotImplementation",
 ]);

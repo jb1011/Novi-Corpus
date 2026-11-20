@@ -20,8 +20,9 @@ an ERC-8004 identity, a `LegalManager` that anchors the operating agreement, and
 `LegalManagerFactory` through `NoviController`.
 
 **2. A legal body on an identity you already own** ("bring your own"). The customer keeps their
-ERC-8004 identity and their own company; Novi Corpus creates a `LegalManager` clone bound to that
-identity, with no treasury. Created by `LegalBodyFactory`. On a sandbox deployment the company is
+ERC-8004 identity and their own company; Novi Corpus creates a legal body bound to that identity,
+with no treasury: a proxy of `LegalBody`, which is `LegalManager` plus an upgrade its guardian must
+sign. Created by `LegalBodyFactory`. On a sandbox deployment the company is
 a test declaration with an automatic check; on a production deployment an operator checks it
 against the registry.
 The browser flow is at `/legal-body` on the site.
@@ -54,10 +55,14 @@ on Circle developer-controlled wallets or on Turnkey, and it can only spend what
 allows.
 
 **`LegalBodyFactory`**: for identities the customer owns. When the identity's owner signs an
-EIP-712 `LegalBodyLink`, it creates an immutable EIP-1167 clone of `LegalManager` (no treasury)
-and is the manager of every body it creates. Its only power over a body is to schedule an
-operating-agreement amendment that the body's guardian has signed: it cannot dissolve, cancel a
-dissolution or sweep. The owner links the body by writing `encodePointer(body)` under the
+EIP-712 `LegalBodyLink`, it creates the body: an ERC-1967 proxy of `LegalBody` (`LegalManager`
+plus an upgrade entry point, no treasury) that keeps one address for life. The factory is the
+manager of every body it creates and has two powers over a body: to schedule an
+operating-agreement amendment the body's guardian has signed, and to carry out an upgrade of the
+body's code the body's guardian has signed. It cannot dissolve, cancel a dissolution or sweep. An
+upgrade takes two keys: the factory's owner publishes a version, which changes no body, and a body
+moves to it only when its guardian signs for that body and that version and the body's delay has
+passed without the guardian cancelling. The owner links the body by writing `encodePointer(body)` under the
 `legalBody` metadata key of their identity; `linkedLegalBody(agentId)` returns the linked body or
 `address(0)`. Deploy with `script/DeployLegalBodyFactory.s.sol`, then pin and grant the selectors
 of `ControllerSelectors.minimalGrants()` on the controller.

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {LegalBody} from "../src/LegalBody.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
 import {LegalManager} from "../src/LegalManager.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
@@ -9,12 +10,13 @@ import {MockERC1271Wallet} from "./mocks/MockERC1271Wallet.sol";
 import {RevertingInitializer} from "./mocks/RevertingInitializer.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Clones} from "@openzeppelin/contracts/proxy/Clones.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 import {UpgradeableBeacon} from "@openzeppelin/contracts/proxy/beacon/UpgradeableBeacon.sol";
 import {BeaconProxy} from "@openzeppelin/contracts/proxy/beacon/BeaconProxy.sol";
 
 abstract contract LegalBodyFactoryTestBase is Test {
     MockIdentityRegistry internal registry;
-    LegalManager internal impl;
+    LegalBody internal impl;
     LegalBodyFactory internal factory;
 
     /// @dev Stand-in for the NoviController: the factory's owner.
@@ -33,7 +35,7 @@ abstract contract LegalBodyFactoryTestBase is Test {
     function setUp() public virtual {
         vm.warp(1_700_000_000);
         registry = new MockIdentityRegistry();
-        impl = new LegalManager();
+        impl = new LegalBody();
         factory = new LegalBodyFactory(address(impl), address(registry), novi);
         idOwner = vm.addr(ownerPk);
         guardian = vm.addr(guardianPk);
@@ -101,7 +103,7 @@ contract LegalBodyFactoryConstructionTest is LegalBodyFactoryTestBase {
     }
 
     function test_constructor_acceptsLockedImplementation() public {
-        LegalManager locked = new LegalManager();
+        LegalBody locked = new LegalBody();
         LegalBodyFactory f = new LegalBodyFactory(address(locked), address(registry), novi);
         assertEq(f.implementation(), address(locked));
     }
@@ -172,12 +174,12 @@ contract LegalBodyFactoryConstructionTest is LegalBodyFactoryTestBase {
 ///      every test there at setup, before any test body that targets it runs.
 contract LegalBodyFactoryConstructorRefusalTest is Test {
     MockIdentityRegistry internal registry;
-    LegalManager internal impl;
+    LegalBody internal impl;
     address internal novi = makeAddr("novi");
 
     function setUp() public {
         registry = new MockIdentityRegistry();
-        impl = new LegalManager();
+        impl = new LegalBody();
     }
 
     /// @notice Valid input is accepted, so the refusals below cannot be a constructor that
@@ -209,6 +211,14 @@ contract LegalBodyFactoryConstructorRefusalTest is Test {
         RevertingInitializer bad = new RevertingInitializer();
         vm.expectRevert(abi.encodeWithSelector(LegalBodyFactory.NotImplementation.selector, address(bad)));
         new LegalBodyFactory(address(bad), address(registry), novi);
+    }
+
+    /// @notice A locked LegalManager with no upgrade entry point is refused: a body created
+    ///         on it could never leave it. Only the `proxiableUUID` check refuses it.
+    function test_constructor_refusesPlainLegalManager() public {
+        LegalManager plain = new LegalManager();
+        vm.expectRevert(abi.encodeWithSelector(LegalBodyFactory.NotImplementation.selector, address(plain)));
+        new LegalBodyFactory(address(plain), address(registry), novi);
     }
 
     /// @notice A locked target that already has a manager is refused on the manager check
@@ -269,7 +279,11 @@ contract LegalBodyFactoryCreateTest is LegalBodyFactoryTestBase {
         assertEq(bodyAgentId, agentId);
         assertEq(factory.identityOwnerAtCreation(body), idOwner);
         assertTrue(factory.isLegalBody(body));
-        assertEq(body.code.length, 45, "EIP-1167 minimal proxy");
+        assertEq(
+            address(uint160(uint256(vm.load(body, ERC1967Utils.IMPLEMENTATION_SLOT)))),
+            address(impl),
+            "an ERC-1967 proxy of version 1"
+        );
     }
 
     function test_create_cloneCannotBeReinitialised() public {
@@ -732,9 +746,11 @@ contract LegalBodyFactoryAmendmentTest is LegalBodyFactoryTestBase {
         assertEq(factory.amendmentNonce(wBody), 1);
     }
 
-    /// The factory's whole external surface, exactly. Anything added (a dissolution, sweep,
-    /// veto or cancel path, or anything else) fails this test until it is reviewed and listed.
-    function _expectedSignatures() internal pure returns (string[27] memory) {
+    /// The factory's whole external surface, exactly. Anything added (a dissolution, sweep or
+    /// veto path, or anything else) fails this test until it is reviewed and listed. The
+    /// upgrade functions are listed: the two that act on a body's code need its guardian's
+    /// signature, and the two cancels are the guardian's own.
+    function _expectedSignatures() internal pure returns (string[46] memory) {
         return [
             "AMENDMENT_TYPEHASH()",
             "LINK_TYPEHASH()",
@@ -743,12 +759,19 @@ contract LegalBodyFactoryAmendmentTest is LegalBodyFactoryTestBase {
             "MIN_AMENDMENT_DELAY()",
             "POINTER_KEY()",
             "POINTER_VERSION()",
+            "UPGRADE_CANCEL_TYPEHASH()",
+            "UPGRADE_EXECUTION_WINDOW()",
+            "UPGRADE_TYPEHASH()",
             "acceptOwnership()",
             "amendmentDigest(address,bytes32,uint256,uint256)",
             "amendmentNonce(address)",
+            "bodyRecord(address)",
+            "cancelLegalBodyUpgrade(address)",
+            "cancelLegalBodyUpgradeBySig(address,uint256,bytes)",
             "createLegalBody(uint256,address,uint256,bytes32,uint256,bytes)",
             "eip712Domain()",
             "encodePointer(address)",
+            "executeLegalBodyUpgrade(address)",
             "executeOperatingAgreementUpdate(address,bytes32)",
             "identityOwnerAtCreation(address)",
             "identityRegistry()",
@@ -759,17 +782,29 @@ contract LegalBodyFactoryAmendmentTest is LegalBodyFactoryTestBase {
             "owner()",
             "pendingAmendment(address)",
             "pendingOwner()",
+            "pendingUpgrade(address)",
             "predictLegalBody(bytes32)",
+            "proxyInitCodeHash()",
+            "publishVersion(address)",
             "renounceOwnership()",
+            "scheduleLegalBodyUpgrade(address,uint256,uint256,bytes)",
             "scheduleOperatingAgreementUpdate(address,bytes32,uint256,bytes)",
-            "transferOwnership(address)"
+            "transferOwnership(address)",
+            "upgradeCancelDigest(address,uint256,uint256,uint256)",
+            "upgradeDigest(address,uint256,address,uint256,uint256)",
+            "upgradeNonce(address)",
+            "versionCount()",
+            "versionInfo(uint256)",
+            "versionOf(address)",
+            "versionOfImplementation(address)",
+            "withdrawVersion(uint256)"
         ];
     }
 
     function test_factoryExposesNoDissolutionSweepOrVetoPath() public {
         string memory json = vm.readFile("out/LegalBodyFactory.sol/LegalBodyFactory.json");
         string[] memory actual = vm.parseJsonKeys(json, ".methodIdentifiers");
-        string[27] memory expected = _expectedSignatures();
+        string[46] memory expected = _expectedSignatures();
         // Same size, and every expected signature present exactly once: the two sets are equal.
         assertEq(actual.length, expected.length, "the factory's external surface changed");
         for (uint256 i = 0; i < expected.length; i++) {

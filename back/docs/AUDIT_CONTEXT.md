@@ -14,6 +14,11 @@ is deployed. The fixes made after the automated security scan by Olympix, arrang
 (2026-10-23), are in the tree ahead of a redeploy, so until then the deployed addresses in the
 scope table run the pre-fix code; the differences are the commits that cite the scan.
 
+The upgrade path of bring-your-own bodies (`src/LegalBody.sol`, and the version and upgrade
+functions of `src/LegalBodyFactory.sol`, section 5 item 18) was written after that scan and was not
+part of it. It is not deployed: the bodies of the deployed `LegalBodyFactory` are fixed EIP-1167
+clones of the `LegalManager` and stay so.
+
 ---
 
 ## 1. Scope
@@ -22,9 +27,10 @@ scope table run the pre-fix code; the differences are the commits that cite the 
 |---|---|---|
 | `src/NoviController.sol` | The governed root of platform authority: a selector-allowlisted relay with an admin and an executor. | `0x9526E228E94A125843B2d010c1155780CBBAFb5c` |
 | `src/LegalManagerFactory.sol` | Creates a full-product agent: registers its ERC-8004 identity, deploys its `LegalManager` (beacon proxy) and its `AgentTreasury`, and hands the identity to the controller. Deploys the beacon in its constructor. | `0x83D529E813Fe825b84250034A7A63f460A2ECA77` (beacon `0x432ed0814FcDDd03330add098093482128Ad2CfD`) |
-| `src/LegalManager.sol` | One agent's legal body: the operating-agreement hash, timelocked amendments with a guardian veto, and dissolution. Used behind the beacon (full product) and as EIP-1167 clones (bring your own). | implementation `0xc2e89ABf562f2EB366e4dde42325af16EeF542a6` |
+| `src/LegalManager.sol` | One agent's legal body: the operating-agreement hash, timelocked amendments with a guardian veto, and dissolution. Used behind the beacon (full product) and, through `LegalBody`, behind the proxy of each bring-your-own body. | implementation `0xc2e89ABf562f2EB366e4dde42325af16EeF542a6` |
 | `src/AgentTreasury.sol` | One agent's USDC vault: a per-period cap in a fixed window, an optional allowlist, guardian safety powers, timelocked policy changes. Immutable, one per agent. | one per agent, e.g. `0x11FCfd8d6DeB1BC820f7123989fD05EdA245a973` |
-| `src/LegalBodyFactory.sol` | Creates a legal body for an identity the customer owns and keeps: an immutable clone of the `LegalManager`, with no treasury, authorised by the identity owner's EIP-712 signature. | `0x069f4ADEabcBEd3ffFe2cB6Aaf9e7a66E8731456` |
+| `src/LegalBody.sol` | The logic contract of a bring-your-own body: `LegalManager`, unchanged, plus the UUPS upgrade entry point, open to the body's manager only. No storage of its own. | not deployed yet |
+| `src/LegalBodyFactory.sol` | Creates a legal body for an identity the customer owns and keeps: an ERC-1967 proxy of `LegalBody`, with no treasury, authorised by the identity owner's EIP-712 signature. Keeps the list of published versions of the body's code and carries out an upgrade only with the signature of the body's guardian. | `0x069f4ADEabcBEd3ffFe2cB6Aaf9e7a66E8731456` |
 | `src/BreakGlassOneShot.sol` | A single-use helper for one admin action through the controller (grant, act and revoke in one transaction). | one instance (`0x17dfFf8963E18a731f7Ec1c74e49f9d427057Dd1`), used once on 2026-08-18 to accept the factory's ownership |
 | `src/libraries/ControllerSelectors.sol` | The selectors the executor is granted, derived from the ABIs. | (library) |
 | `src/interfaces/*.sol` | The ERC-8004 identity registry and ERC-8183 interfaces we call or describe. | (interfaces) |
@@ -61,8 +67,8 @@ of failing). `slither.config.json` is the static-analysis configuration used bef
   both: immutable on the treasury; set once at initialisation, with no setter, on the legal body,
   which sits behind the beacon (item 16). The agent's wallet (the treasury's `operator`) spends within the treasury's rules.
 - **Bring your own:** the identity stays with its owner. The owner signs a `LegalBodyLink`; the
-  backend asks the controller to relay `LegalBodyFactory.createLegalBody`, which clones the
-  `LegalManager` with the factory as its `manager`. The owner then writes a pointer to the body in
+  backend asks the controller to relay `LegalBodyFactory.createLegalBody`, which creates a proxy
+  of `LegalBody` with the factory as its `manager`. The owner then writes a pointer to the body in
   their identity's metadata, and `linkedLegalBody(agentId)` is the one predicate anyone uses to
   read the binding.
 
@@ -72,10 +78,10 @@ of failing). `slither.config.json` is the static-analysis configuration used bef
 |---|---|---|---|
 | Controller admin (`DEFAULT_ADMIN_ROLE`) | `0x48191Ac42649274C4b3cbeBd16a76B8178e6F6e0`, a single key on testnet; a hardware wallet is planned for mainnet | Grant and revoke any selector role or `WILDCARD_ROLE` (to anyone, including itself), set target pins, start an admin handover | OpenZeppelin `AccessControlDefaultAdminRules`: handing the admin role over takes 24 hours (`defaultAdminDelay`); grants, revocations and pins take effect at once, so the delay protects the handover, not against a compromised admin key; the controller cannot hold a role itself |
 | Executor | `0xb43CbdA374e3CD2a3d67827683F81462BaCF703b`, the backend's key | Relay exactly its granted selectors: `AgentTreasury.schedulePolicyUpdate`, `executePolicyUpdate`; `LegalManager.scheduleOperatingAgreementUpdate`, `executeOperatingAgreementUpdate`; `LegalManagerFactory.createEntity`; the registry's `setAgentWallet`, `setMetadata`; `LegalBodyFactory.createLegalBody`, `scheduleOperatingAgreementUpdate` | The selector list; `setAgentWallet`/`setMetadata` are pinned to the identity registry and the two `LegalBodyFactory` selectors to that factory; it holds no role to upgrade, dissolve, sweep, withdraw or transfer ownership; nobody holds `WILDCARD_ROLE` |
-| Owner of `LegalManagerFactory`, the beacon, `LegalBodyFactory` | `NoviController` | Factory: `createEntity`. Beacon: `upgradeTo` (every full-product `LegalManager` at once). `LegalBodyFactory`: `createLegalBody`, `scheduleOperatingAgreementUpdate`. The controller also holds every full-product identity NFT (it accepts any ERC-721); moving one needs a `transferFrom` or `approve` grant the executor does not hold | Only through the relay; `upgradeTo` and ownership transfers are not granted to the executor, so they need an admin ceremony; renouncing ownership is disabled on both factories; the beacon is plain `Ownable` (single-step transfer, renounce allowed, which would freeze the implementation for good) |
+| Owner of `LegalManagerFactory`, the beacon, `LegalBodyFactory` | `NoviController` | Factory: `createEntity`. Beacon: `upgradeTo` (every full-product `LegalManager` at once). `LegalBodyFactory`: `createLegalBody`, `scheduleOperatingAgreementUpdate`, and `publishVersion`, `withdrawVersion` (neither granted to the executor). The controller also holds every full-product identity NFT (it accepts any ERC-721); moving one needs a `transferFrom` or `approve` grant the executor does not hold | Only through the relay; `upgradeTo` and ownership transfers are not granted to the executor, so they need an admin ceremony; renouncing ownership is disabled on both factories; the beacon is plain `Ownable` (single-step transfer, renounce allowed, which would freeze the implementation for good) |
 | Manager of a full-product `LegalManager` and `AgentTreasury` | `NoviController` (immutable on the treasury) | Schedule and execute policy and operating-agreement changes; initiate, cancel, sweep and finalize a dissolution | Every change waits out the delay and the guardian can veto it; the executor has no grant for the dissolution functions |
-| Manager of a bring-your-own body | `LegalBodyFactory` | Schedule an amendment the body's guardian signed; execute the last scheduled one | The factory exposes no dissolution or sweep function, so the platform cannot dissolve or sweep a body |
-| Guardian | A person verified with World ID, an EOA today, one per agent | Treasury: `pause`, `unpause`, `setOperator`, `setAllowlistEntry`, `emergencyWithdraw` (to the current `payoutAddress`, which the manager can change through a timelocked, vetoable policy update, item 6), `vetoPolicyUpdate`, `liftVeto`. Legal body: veto (`cancelOperatingAgreementUpdate`) and `liftVeto`; initiate, cancel, sweep and finalize a dissolution; sign amendments of a bring-your-own body | Roles must differ (constructor checks); the guardian cannot spend; the guardian cannot be changed on either contract (immutable on the treasury, no setter on the legal body): there is no guardian recovery path, by design |
+| Manager of a bring-your-own body | `LegalBodyFactory` | Schedule an amendment the body's guardian signed; execute the last scheduled one; carry out an upgrade of the body's code the body's guardian signed | The factory exposes no dissolution or sweep function, so the platform cannot dissolve or sweep a body; it upgrades a body only to a published version, with the guardian's signature, after the body's delay |
+| Guardian | A person verified with World ID, an EOA today, one per agent | Treasury: `pause`, `unpause`, `setOperator`, `setAllowlistEntry`, `emergencyWithdraw` (to the current `payoutAddress`, which the manager can change through a timelocked, vetoable policy update, item 6), `vetoPolicyUpdate`, `liftVeto`. Legal body: veto (`cancelOperatingAgreementUpdate`) and `liftVeto`; initiate, cancel, sweep and finalize a dissolution; sign amendments of a bring-your-own body; sign, and cancel, an upgrade of its code | Roles must differ (constructor checks); the guardian cannot spend; the guardian cannot be changed on either contract (immutable on the treasury, no setter on the legal body): there is no guardian recovery path, by design |
 | Operator | The agent's wallet, run by the platform: a Circle smart account or a Turnkey EOA | `spend`, within the per-period cap and, if on, the allowlist; `fundOperator` (to itself), within the same cap, allowlist not applied | Stops when paused or when the `LegalManager` is not Active; the guardian can rotate it |
 | Identity owner (bring your own) | The customer | Sign the `LegalBodyLink`; write and change the pointer in their own identity's metadata | A link names one identity, one guardian, one agreement hash and a deadline at most 24 hours ahead |
 
@@ -120,13 +126,15 @@ of failing). `slither.config.json` is the static-analysis configuration used bef
     `executeOperatingAgreementUpdate` is callable by anyone, because the body only executes a hash
     that was scheduled, not vetoed, and has waited out its delay. A new schedule supersedes any
     older pending one, so an old approval cannot be replayed to roll the agreement back.
-11. **`LegalBodyFactory` probes the implementation in its constructor** (`initialize` must revert
-    with `InvalidInitialization`, `manager()` must be empty), so it can only ever clone the locked
-    `LegalManager` logic, never a proxy that someone could upgrade.
+11. **`LegalBodyFactory` probes every version of the body's code**, in its constructor and in
+    `publishVersion` (`initialize` must revert with `InvalidInitialization`, `manager()` must be
+    empty, `proxiableUUID()` must return the ERC-1967 implementation slot), so a body only ever
+    points at a locked `LegalBody` logic contract, never at a proxy that someone else could
+    upgrade.
 12. **Signatures are checked ECDSA first, then ERC-1271**, the same rule the ERC-8004 registry uses.
     A plain ECDSA signature from an address that has code is accepted, which is what an EIP-7702
     delegated account looks like; nobody holds a key for an ordinary contract address.
-13. **Bodies are deterministic clones salted by the link digest**, so one signature creates at most
+13. **Bodies are deterministic proxies salted by the link digest**, so one signature creates at most
     one body; an identity may have several bodies over time, and the live one is the one its
     owner's pointer names. The identity owner is read from the registry at creation, so a link
     signed before an identity transfer stops working after it.
@@ -138,9 +146,27 @@ of failing). `slither.config.json` is the static-analysis configuration used bef
     the identity NFT last, after all state is written.
 16. **The beacon owner can upgrade every full-product `LegalManager` at once.** The owner is the
     controller, and `upgradeTo` is not granted to the executor, so an upgrade needs an admin
-    ceremony. Bring-your-own bodies are clones and cannot be upgraded at all.
+    ceremony. A bring-your-own body is never upgraded that way: each one moves alone, with its own
+    guardian's signature (item 18).
 17. **Native value.** The controller has no `receive` and is not payable, so it never holds native
     USDC. A `LegalManager` can receive native value and sweeps it with `sweepNative`.
+18. **The code of a bring-your-own body changes only with its guardian's signature, and only to a
+    version the factory's owner published.** Publishing a version changes no body. The guardian
+    signs for one body, one version and its implementation address; anyone may send the signature;
+    the delay recorded for the body at creation then runs, and the guardian can cancel during it,
+    by a transaction or by a signature anyone may send; after it, anyone may execute, for 30 days.
+    An upgrade only moves forward, versions may be skipped, only the upgrade scheduled last can
+    execute, and a withdrawn version can be neither scheduled nor executed. A version runs a
+    one-time step when a body moves to it, and the upgrade reverts unless that step ran under the
+    version's own number, so the steps a body has run always match the list. Upgrades are allowed in
+    any status, so the code a dissolving or dissolved body still needs stays repairable. The
+    factory reads the guardian and the delay from its own record, written at creation, never from
+    the body, so no version of a body's code can change who approves its next upgrade. Every body
+    is created on version 1, whatever was published since. Known limits: nothing on chain can
+    prove that a published version keeps the upgrade lock, so a version is only as sound as its
+    review and its verified source; a guardian who never signs stays on the old version; and the
+    wallet that approves a body's upgrades is the guardian recorded at creation, for the body's
+    whole life on this factory.
 
 Comment-only changes do not alter runtime code. `DeployLegalBodyFactory.s.sol` compares deployed
 code with the metadata stripped, so a changed comment does not trip it. The testnet treasuries were
@@ -157,7 +183,8 @@ compiled at commit `a6ecb26`; their source differs from the current tree only in
   native gas token, 6 decimals as a token (native amounts use 18). `AgentTreasury` uses it through
   `SafeERC20`.
 - **OpenZeppelin Contracts 5.1.0** and **Contracts Upgradeable 5.1.0**:
-  `AccessControlDefaultAdminRules`, `Ownable2Step`, `UpgradeableBeacon`, `BeaconProxy`, `Clones`,
+  `AccessControlDefaultAdminRules`, `Ownable2Step`, `UpgradeableBeacon`, `BeaconProxy`, `ERC1967Proxy`,
+  `UUPSUpgradeable`, `Create2`,
   `EIP712`, `ECDSA`, `SignatureChecker`, `SafeERC20`, `ReentrancyGuard`, `ReentrancyGuardUpgradeable`,
   `Initializable`.
 - **ERC-8183:** the job interface in `src/interfaces/` describes Arc's job contract for the backend;
