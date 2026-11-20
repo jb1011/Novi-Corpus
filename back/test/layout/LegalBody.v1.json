@@ -1,0 +1,17 @@
+{
+  "storage": [
+    { "label": "manager", "slot": "0", "offset": 0, "type": "address" },
+    { "label": "guardian", "slot": "1", "offset": 0, "type": "address" },
+    { "label": "amendmentDelay", "slot": "2", "offset": 0, "type": "uint256" },
+    { "label": "status", "slot": "3", "offset": 0, "type": "enum LegalManager.Status" },
+    { "label": "meta", "slot": "4", "offset": 0, "type": "struct LegalManager.LegalMeta" },
+    { "label": "meta.ein", "slot": "4", "offset": 0, "type": "string" },
+    { "label": "meta.formationDate", "slot": "5", "offset": 0, "type": "uint64" },
+    { "label": "meta.operatingAgreementHash", "slot": "6", "offset": 0, "type": "bytes32" },
+    { "label": "meta.agentId", "slot": "7", "offset": 0, "type": "uint256" },
+    { "label": "scheduledAt", "slot": "8", "offset": 0, "type": "mapping(bytes32 => uint256)" },
+    { "label": "vetoed", "slot": "9", "offset": 0, "type": "mapping(bytes32 => bool)" },
+    { "label": "dissolutionInitiator", "slot": "10", "offset": 0, "type": "address" },
+    { "label": "dissolutionExecutableAt", "slot": "11", "offset": 0, "type": "uint256" }
+  ]
+}
