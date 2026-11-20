@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 import {UUPSUpgradeable} from "@openzeppelin/contracts/proxy/utils/UUPSUpgradeable.sol";
 import {LegalManager} from "./LegalManager.sol";
 
@@ -14,8 +15,10 @@ import {LegalManager} from "./LegalManager.sol";
 ///         upgrades a body only to a version it lists and only with the signature of that
 ///         body's guardian (see LegalBodyFactory). This contract adds no storage: its layout
 ///         is LegalManager's.
-///         No function below is `virtual`, so a later version that inherits this contract
-///         cannot replace the lock, the entry point it guards or the counter it reports. A later version
+///         No function below is `virtual`, and the checks OpenZeppelin leaves open
+///         (`proxiableUUID`, `_checkProxy`, `_checkNotDelegated`) are restated here to close
+///         them, so a later version that inherits this contract cannot replace the lock, the
+///         entry point it guards, the proxy checks around it or the counter it reports. A later version
 ///         must also never write the ERC-1967 implementation slot itself.
 contract LegalBody is LegalManager, UUPSUpgradeable {
     /// @notice Move this body to `newImplementation` and run `data` on it. Manager only, and
@@ -32,6 +35,23 @@ contract LegalBody is LegalManager, UUPSUpgradeable {
     ///         largest value, because the logic contract is locked.
     function initializedVersion() external view returns (uint64) {
         return _getInitializedVersion();
+    }
+
+    /// @notice The storage slot a UUPS logic contract keeps its implementation in. Answers only
+    ///         on the logic contract itself, never through a body.
+    /// @dev    Restated only to seal it: the behaviour is OpenZeppelin's.
+    function proxiableUUID() external view override notDelegated returns (bytes32) {
+        return ERC1967Utils.IMPLEMENTATION_SLOT;
+    }
+
+    /// @dev Restated only to seal it: the behaviour is OpenZeppelin's.
+    function _checkProxy() internal view override {
+        super._checkProxy();
+    }
+
+    /// @dev Restated only to seal it: the behaviour is OpenZeppelin's.
+    function _checkNotDelegated() internal view override {
+        super._checkNotDelegated();
     }
 
     /// @dev The lock. `onlyManager` is the whole check.

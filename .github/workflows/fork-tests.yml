@@ -26,6 +26,8 @@ on:
       - "back/src/BreakGlassOneShot.sol"
       - "back/src/libraries/ControllerSelectors.sol"
       - "back/src/LegalBodyFactory.sol"
+      - "back/src/LegalBody.sol"
+      - "back/src/interfaces/ILegalBodyVersion.sol"
       - "back/src/NoviController.sol"
       - "back/src/LegalManagerFactory.sol"
       - ".github/workflows/fork-tests.yml"

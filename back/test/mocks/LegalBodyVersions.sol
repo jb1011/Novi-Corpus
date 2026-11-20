@@ -81,6 +81,32 @@ contract LegalBodyUncountedMigrateMock is LegalBody, ILegalBodyVersion {
     }
 }
 
+/// @dev A version 2 whose migration calls back into the factory that is upgrading the body, and
+///      records whether the factory let it execute the same upgrade a second time.
+contract LegalBodyReentrantMigrateMock is LegalBody, ILegalBodyVersion {
+    bool public reentered;
+    bytes public refusal;
+
+    function migrate(uint256) external onlyManager reinitializer(2) {
+        (bool ok, bytes memory ret) =
+            manager.call(abi.encodeWithSignature("executeLegalBodyUpgrade(address)", address(this)));
+        reentered = ok;
+        refusal = ret;
+    }
+}
+
+/// @dev A version 2 that leaves in the status slot a value the first version's code cannot read:
+///      the body's own `status()` reverts from then on.
+contract LegalBodyExtraStatusMock is LegalBody, ILegalBodyVersion {
+    function migrate(uint256) external onlyManager reinitializer(2) {
+        assembly {
+            let shift := mul(status.offset, 8)
+            let word := and(sload(status.slot), not(shl(shift, 0xff)))
+            sstore(status.slot, or(word, shl(shift, 3)))
+        }
+    }
+}
+
 /// @dev A version 2 that hands the body to another manager, as a move to a later factory would.
 contract LegalBodyMovesManagerMock is LegalBody, ILegalBodyVersion {
     address public immutable NEW_MANAGER;

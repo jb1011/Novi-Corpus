@@ -14,7 +14,9 @@ import {
     LegalBodyRevertingMigrateMock,
     LegalBodyMovesManagerMock,
     LegalBodyNumberedMock,
-    LegalBodyUncountedMigrateMock
+    LegalBodyUncountedMigrateMock,
+    LegalBodyReentrantMigrateMock,
+    LegalBodyExtraStatusMock
 } from "./mocks/LegalBodyVersions.sol";
 import {MockERC1271Wallet} from "./mocks/MockERC1271Wallet.sol";
 import {RevertingInitializer} from "./mocks/RevertingInitializer.sol";
@@ -597,6 +599,29 @@ contract LegalBodyUpgradeCancelTest is LegalBodyUpgradeUnitBase {
         assertEq(executableAt, 0);
     }
 
+    /// An upgrade signed on one chain cannot be scheduled after the chain id changes.
+    function test_schedule_refusesSignatureFromAnotherChainId() public {
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _signUpgrade(guardianPk, body, 2, deadline);
+        vm.chainId(block.chainid + 1);
+        _expectScheduleRevert(body, 2, deadline, sig, abi.encodeWithSelector(LegalBodyFactory.BadSignature.selector));
+        assertEq(factory.upgradeNonce(body), 0);
+    }
+
+    /// An upgrade that was not executed inside its window is dead, and the guardian can sign it
+    /// again.
+    function test_schedule_againAfterTheWindowLapsed() public {
+        uint256 executableAt = _schedule(body, 2);
+        vm.warp(executableAt + factory.UPGRADE_EXECUTION_WINDOW() + 1);
+        vm.expectRevert(LegalBodyFactory.UpgradeExpired.selector);
+        factory.executeLegalBodyUpgrade(body);
+        assertEq(_pendingVersion(body), 2, "the lapsed upgrade is still recorded");
+
+        _upgrade(body, 2);
+        assertEq(factory.versionOf(body), 2);
+        assertEq(factory.upgradeNonce(body), 2);
+    }
+
     function test_cancel_thenExecuteRefused() public {
         uint256 executableAt = _schedule(body, 2);
         vm.prank(guardian);
@@ -607,14 +632,23 @@ contract LegalBodyUpgradeCancelTest is LegalBodyUpgradeUnitBase {
         assertEq(_implementationOf(body), address(impl));
     }
 
-    function test_cancel_keepsNonceAndNewSignatureWorks() public {
+    /// A direct cancel uses up the nonce, so a signature the guardian made before it and never
+    /// sent is dead. A fresh signature works.
+    function test_cancel_usesNonceAndVoidsAnUnsentSignature() public {
+        if (factory.versionCount() < 3) _publishV3();
         _schedule(body, 2);
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory unsent = _signUpgrade(guardianPk, body, 3, deadline);
+
         vm.prank(guardian);
         factory.cancelLegalBodyUpgrade(body);
-        assertEq(factory.upgradeNonce(body), 1, "a direct cancel uses no nonce");
+        assertEq(factory.upgradeNonce(body), 2, "a direct cancel uses the nonce");
+        _expectScheduleRevert(body, 3, deadline, unsent, abi.encodeWithSelector(LegalBodyFactory.BadSignature.selector));
+        assertEq(_pendingVersion(body), 0, "nothing was scheduled");
+
         _upgrade(body, 2);
         assertEq(factory.versionOf(body), 2);
-        assertEq(factory.upgradeNonce(body), 2);
+        assertEq(factory.upgradeNonce(body), 3);
     }
 }
 
@@ -932,6 +966,18 @@ contract LegalBodyUpgradeMigrationTest is LegalBodyUpgradeUnitBase {
         assertEq(LegalBody(payable(legalBody)).initializedVersion(), 1);
     }
 
+    /// A migration that calls back into the factory cannot execute the upgrade a second time:
+    /// the pending upgrade was cleared before the body's code was called.
+    function test_migrate_cannotReenterTheUpgrade() public {
+        uint256 version = _publish(address(new LegalBodyReentrantMigrateMock()));
+        _upgrade(body, version);
+        LegalBodyReentrantMigrateMock upgraded = LegalBodyReentrantMigrateMock(payable(body));
+        assertFalse(upgraded.reentered(), "the second execute went through");
+        assertEq(upgraded.refusal(), abi.encodeWithSelector(LegalBodyFactory.NoPendingUpgrade.selector));
+        assertEq(factory.versionOf(body), version);
+        assertEq(LegalBody(payable(body)).initializedVersion(), version);
+    }
+
     function test_migrate_directCallRefused() public {
         _publishV2();
         _upgrade(body, 2);
@@ -1219,6 +1265,14 @@ contract LegalBodyUpgradeBodyTest is LegalBodyUpgradeUnitBase {
         impl.upgradeToAndCall(address(v2), "");
     }
 
+    /// The logic contract names the ERC-1967 implementation slot, and only the logic contract
+    /// answers: the same call through a body is refused.
+    function test_body_proxiableUUIDAnswersOnlyOnTheLogicContract() public {
+        assertEq(impl.proxiableUUID(), ERC1967Utils.IMPLEMENTATION_SLOT);
+        vm.expectRevert(UUPSUpgradeable.UUPSUnauthorizedCallContext.selector);
+        LegalBody(payable(body)).proxiableUUID();
+    }
+
     function test_body_initializeRefused() public {
         vm.expectRevert(Initializable.InvalidInitialization.selector);
         impl.initialize(address(1), address(2), 1 hours, 0, "", 0, bytes32(0));
@@ -1238,6 +1292,26 @@ contract LegalBodyUpgradeLinkTest is LegalBodyUpgradeUnitBase {
         assertEq(factory.linkedLegalBody(agentId), body);
         _publish(address(new LegalBodyMovesManagerMock(makeAddr("laterFactory"))));
         _upgrade(body, 2);
+        assertEq(factory.linkedLegalBody(agentId), address(0));
+    }
+
+    /// A body that reports a status this factory does not know is not linked, and the read does
+    /// not revert.
+    function test_linked_zeroForAStatusTheFactoryDoesNotKnow() public {
+        _point(body);
+        assertEq(factory.linkedLegalBody(agentId), body);
+        // What a later version with a fourth status would answer.
+        vm.mockCall(body, abi.encodeWithSignature("status()"), abi.encode(uint256(3)));
+        assertEq(factory.linkedLegalBody(agentId), address(0));
+    }
+
+    /// A body whose status cannot be read at all is not linked either.
+    function test_linked_zeroWhenTheStatusReadReverts() public {
+        _point(body);
+        _publish(address(new LegalBodyExtraStatusMock()));
+        _upgrade(body, 2);
+        (bool ok,) = body.staticcall(abi.encodeWithSignature("status()"));
+        assertFalse(ok, "the body's own status read reverts");
         assertEq(factory.linkedLegalBody(agentId), address(0));
     }
 

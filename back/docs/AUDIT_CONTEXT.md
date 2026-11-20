@@ -155,21 +155,26 @@ of failing). `slither.config.json` is the static-analysis configuration used bef
     signs for one body, one version and its implementation address; anyone may send the signature;
     the delay recorded for the body at creation then runs, and the guardian can cancel during it,
     by a transaction or by a signature anyone may send; after it, anyone may execute, for 30 days.
+    Either cancel uses up the body's upgrade nonce, so every upgrade signature the guardian made
+    before it is void, sent or not.
     An upgrade only moves forward, versions may be skipped, only the upgrade scheduled last can
     execute, and a withdrawn version can be neither scheduled nor executed. A version runs a
     one-time step when a body moves to it, and the upgrade reverts unless that step ran under the
     version's own number, so the steps a body has run always match the list. Upgrades are allowed in
     any status, so the code a dissolving or dissolved body still needs stays repairable. The
     factory reads the guardian and the delay from its own record, written at creation, never from
-    the body, so no version of a body's code can change who approves its next upgrade. Every body
+    the body, so no version of a body's code can change who approves its next upgrade. Amendments
+    are different on purpose: scheduling one reads `guardian()` from the body, as it did before
+    bodies could be upgraded. Every body
     is created on version 1, whatever was published since. Known limits: nothing on chain can
     prove that a published version keeps the upgrade lock, so a version is only as sound as its
     review and its verified source; a guardian who never signs stays on the old version; and the
     wallet that approves a body's upgrades is the guardian recorded at creation, for the body's
     whole life on this factory.
 
-Comment-only changes do not alter runtime code. `DeployLegalBodyFactory.s.sol` compares deployed
-code with the metadata stripped, so a changed comment does not trip it. The testnet treasuries were
+Comment-only changes do not alter runtime code. The fork test `LegalBodyFactoryDeployCheckForkTest`
+compares the live implementation's code with the metadata stripped, so a changed comment does not
+trip it. Deploys go through `script/DeployMinimal.s.sol`. The testnet treasuries were
 compiled at commit `a6ecb26`; their source differs from the current tree only in comments.
 
 ## 6. External dependencies

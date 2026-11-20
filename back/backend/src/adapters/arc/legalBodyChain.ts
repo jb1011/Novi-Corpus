@@ -152,8 +152,10 @@ export class LegalBodyChainFaultError extends Error {
  * ownership errors (the controller must own it), and the factory's errors about the code behind a
  * body.
  *
- * The factory creates each body as a proxy of its own, with no deployment library in between: if
- * that creation itself fails, the revert carries no data and so no name, and cannot be listed here.
+ * The factory creates each body as a proxy of its own, with no deployment library in between: a
+ * creation that fails at the CREATE2 itself reverts with no data and so no name, and cannot be
+ * listed here. A revert inside the proxy's constructor would carry its own error, which the
+ * factory's ABI does not declare; the factory's checks before the creation make neither reachable.
  *
  * Any other revert stays the ContractRevertError the relay seam built: the factory's refusals of
  * the link (`BadSignature`, `BadDeadline`, `LegalBodyExists`, `BadGuardian`, `BadDelay`), and a

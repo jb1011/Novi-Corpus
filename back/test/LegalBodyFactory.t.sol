@@ -495,7 +495,9 @@ contract LegalBodyFactoryCreateTest is LegalBodyFactoryTestBase {
         uint256 before = gasleft();
         factory.createLegalBody(agentId, guardian, DELAY, OA, deadline, sig);
         uint256 used = before - gasleft();
-        assertLt(used, 320_000, "createLegalBody grew; re-measure and justify");
+        // About 317,000 measured: a body is a full ERC-1967 proxy with a record in the factory,
+        // roughly 65,000 more than the minimal clone it replaced. The bound leaves about 5 %.
+        assertLt(used, 333_000, "createLegalBody grew; re-measure and justify");
     }
 }
 

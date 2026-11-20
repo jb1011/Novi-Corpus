@@ -64,8 +64,9 @@ upgrade takes two keys: the factory's owner publishes a version, which changes n
 moves to it only when its guardian signs for that body and that version and the body's delay has
 passed without the guardian cancelling. The owner links the body by writing `encodePointer(body)` under the
 `legalBody` metadata key of their identity; `linkedLegalBody(agentId)` returns the linked body or
-`address(0)`. Deploy with `script/DeployLegalBodyFactory.s.sol`, then pin and grant the selectors
-of `ControllerSelectors.minimalGrants()` on the controller.
+`address(0)`. Deploy with `script/DeployMinimal.s.sol`, which deploys the implementation, the
+factory and a controller in one broadcast: the controller grants the executor the selectors of
+`ControllerSelectors.minimalGrants()` and pins them to the factory.
 
 **Reused Arc infrastructure**: Arc testnet's ERC-8004 identity, reputation and validation registries,
 the ERC-8183 job contract, and USDC.
@@ -141,7 +142,7 @@ RPC: `https://rpc.testnet.arc.io`.
 ```
 .                       Foundry project (Solidity) at the root
   src/                  LegalManager, AgentTreasury, LegalManagerFactory, NoviController,
-                        LegalBodyFactory, BreakGlassOneShot, ens/ (offchain resolver), interfaces,
+                        LegalBodyFactory, LegalBody, BreakGlassOneShot, ens/ (offchain resolver), interfaces,
                         libraries (ControllerSelectors)
   test/                 Foundry tests (unit, fuzz, invariant, fork, security)
   script/               deploy scripts (Deploy, DeployController, DeployLegalBodyFactory,

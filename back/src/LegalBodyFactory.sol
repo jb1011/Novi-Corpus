@@ -77,12 +77,12 @@ contract LegalBodyFactory is Ownable2Step, EIP712 {
     uint8 public constant POINTER_VERSION = 1;
     uint256 private constant POINTER_LENGTH = 96;
 
-    /// @notice One published version of the body's code.
+    /// @notice One published version of the body's code. Ordered to take two storage slots.
     struct Version {
         address implementation;
-        bytes32 codehash; // the implementation's code hash when it was published
         uint64 publishedAt;
         bool withdrawn;
+        bytes32 codehash; // the implementation's code hash when it was published
     }
 
     /// @notice What this factory itself remembers about a body, in one storage slot. The
@@ -132,6 +132,10 @@ contract LegalBodyFactory is Ownable2Step, EIP712 {
 
     /// @notice body => the only upgrade that may execute: the one scheduled last. A new
     ///         schedule supersedes it; executing or cancelling it clears this slot.
+    /// @dev    An upgrade whose execution window has passed, or whose version was withdrawn,
+    ///         stays here with no event until a new schedule or a cancel. To know whether it
+    ///         can still execute, a reader also checks `executableAt + UPGRADE_EXECUTION_WINDOW`
+    ///         and `versionInfo(version).withdrawn`.
     mapping(address => PendingUpgrade) public pendingUpgrade;
 
     event LegalBodyCreated(
@@ -355,6 +359,9 @@ contract LegalBodyFactory is Ownable2Step, EIP712 {
     }
 
     /// @notice Cancel the pending upgrade of a body. Guardian only, by a direct call.
+    /// @dev    Uses up the body's current `upgradeNonce`, as the cancel by signature does: every
+    ///         upgrade or cancel signature the guardian made before this call is void, whether
+    ///         or not it was ever sent.
     function cancelLegalBodyUpgrade(address legalBody) external {
         if (msg.sender != bodyRecord[legalBody].guardian) revert NotGuardian();
         uint256 version = pendingUpgrade[legalBody].version;
@@ -377,7 +384,6 @@ contract LegalBodyFactory is Ownable2Step, EIP712 {
         uint256 nonce = upgradeNonce[legalBody];
         bytes32 digest = upgradeCancelDigest(legalBody, version, nonce, deadline);
         if (!_isValidSignature(bodyRecord[legalBody].guardian, digest, guardianSignature)) revert BadSignature();
-        upgradeNonce[legalBody] = nonce + 1;
         _cancelUpgrade(legalBody, version);
     }
 
@@ -522,7 +528,7 @@ contract LegalBodyFactory is Ownable2Step, EIP712 {
 
         LegalManager lm = LegalManager(payable(candidate));
         (,,, uint256 bodyAgentId) = lm.meta();
-        if (bodyAgentId != agentId || lm.status() != LegalManager.Status.Active) return address(0);
+        if (bodyAgentId != agentId || !_isActive(candidate)) return address(0);
         // True for every body today. It keeps two factories from both calling one body linked
         // if a later version ever hands a body to another manager.
         if (lm.manager() != address(this)) return address(0);
@@ -556,9 +562,21 @@ contract LegalBodyFactory is Ownable2Step, EIP712 {
         emit VersionPublished(version, implementation_, codehash);
     }
 
+    /// @dev Both cancels end here. Using up the nonce voids every signature the guardian made
+    ///      for it: the cancel signature just used, and any upgrade signed but not yet sent.
     function _cancelUpgrade(address legalBody, uint256 version) private {
+        upgradeNonce[legalBody] += 1;
         delete pendingUpgrade[legalBody];
         emit LegalBodyUpgradeCancelled(legalBody, version);
+    }
+
+    /// @dev Whether `legalBody` reports the Active status. Read as a raw word: a later version of
+    ///      the body's code may add a status this factory does not know, and decoding that as
+    ///      `LegalManager.Status` would revert where the answer is "not Active".
+    function _isActive(address legalBody) private view returns (bool) {
+        (bool ok, bytes memory ret) =
+            legalBody.staticcall(abi.encodeWithSelector(LegalManager(payable(legalBody)).status.selector));
+        return ok && ret.length == 32 && abi.decode(ret, (uint256)) == uint256(LegalManager.Status.Active);
     }
 
     function _version(uint256 version) private view returns (Version storage) {

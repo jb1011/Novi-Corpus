@@ -13,7 +13,8 @@ import {LegalBodyNumberedMock} from "./mocks/LegalBodyVersions.sol";
 ///      bodies with different guardians and delays. Inputs are bounded so most calls succeed;
 ///      reverts are swallowed so the engine keeps exploring. Every action records, for each
 ///      existing body, whether its implementation slot moved outside an execute and whether its
-///      version went down.
+///      version went down. The schedule and execute actions look for a body they can act on, so
+///      a run of 100 calls moves bodies through several versions.
 contract UpgradeHandler is Test {
     LegalBodyFactory public factory;
     address public novi;
@@ -123,7 +124,9 @@ contract UpgradeHandler is Test {
     function create(uint256 guardianSeed, uint256 delaySeed) public tracked(address(0)) {
         if (bodies.length >= MAX_BODIES) return;
         address g = vm.addr(guardianPks[guardianSeed % guardianPks.length]);
-        uint256 delay = bound(delaySeed, factory.MIN_AMENDMENT_DELAY(), factory.MAX_AMENDMENT_DELAY());
+        // Delays stay in the lower part of the range: a run's clock moves in days, and a body
+        // whose delay is a month would rarely see its upgrade executed.
+        uint256 delay = bound(delaySeed, factory.MIN_AMENDMENT_DELAY(), factory.MIN_AMENDMENT_DELAY() + 8 days);
         bytes32 oa = keccak256(abi.encode("oa", bodies.length));
         uint256 deadline = block.timestamp + 1 hours;
         bytes memory sig = _sign(ownerPk, factory.linkDigest(agentId, g, delay, oa, deadline));
@@ -152,6 +155,8 @@ contract UpgradeHandler is Test {
     /// Withdraws the first live version at or after the seed's pick. Never withdraws the last
     /// live later version, so scheduling stays possible for most of a run.
     function withdraw(uint256 seed) external tracked(address(0)) {
+        // One call in four acts: withdrawing as often as publishing leaves nothing to move to.
+        if (seed % 4 != 0) return;
         uint256 count = factory.versionCount();
         if (count < 3) return;
         uint256 live;
@@ -172,22 +177,43 @@ contract UpgradeHandler is Test {
         }
     }
 
-    /// The body's guardian signs an upgrade to a live version later than the body's; a stranger
-    /// sends it.
-    function schedule(uint256 bodySeed, uint256 versionSeed) external tracked(address(0)) {
-        address b = _body(bodySeed);
+    /// @dev A live version later than the one `b` runs, starting from the seed's pick, or zero.
+    function _liveLaterVersion(address b, uint256 versionSeed) internal view returns (uint256) {
         uint256 count = factory.versionCount();
         uint256 current = factory.versionOf(b);
-        if (current >= count) return;
+        if (current >= count) return 0;
         uint256 span = count - current;
-        uint256 version;
         uint256 first = versionSeed % span;
         for (uint256 k; k < span; k++) {
             uint256 v = current + 1 + (first + k) % span;
-            if (!withdrawn[v]) {
-                version = v;
-                break;
-            }
+            if (!withdrawn[v]) return v;
+        }
+        return 0;
+    }
+
+    /// @dev The first body, counting from the seed's pick, whose pending upgrade can still
+    ///      execute: its version is live and its window has not passed. Falls back to the
+    ///      seed's pick, so an execute with nothing to execute is still tried.
+    function _bodyWithLivePending(uint256 bodySeed) internal view returns (address) {
+        uint256 n = bodies.length;
+        uint256 window = factory.UPGRADE_EXECUTION_WINDOW();
+        for (uint256 i; i < n; i++) {
+            address b = bodies[(bodySeed % n + i) % n];
+            (uint64 version, uint64 executableAt) = factory.pendingUpgrade(b);
+            if (version != 0 && !withdrawn[version] && block.timestamp <= uint256(executableAt) + window) return b;
+        }
+        return _body(bodySeed);
+    }
+
+    /// The guardian of a body that has a live later version signs an upgrade to it; a stranger
+    /// sends it.
+    function schedule(uint256 bodySeed, uint256 versionSeed) public tracked(address(0)) {
+        // The first body, counting from the seed's pick, that has a live later version to go to.
+        address b;
+        uint256 version;
+        for (uint256 i; i < bodies.length && version == 0; i++) {
+            b = bodies[(bodySeed % bodies.length + i) % bodies.length];
+            version = _liveLaterVersion(b, versionSeed);
         }
         if (version == 0) return;
         uint256 deadline = block.timestamp + 1 hours;
@@ -224,13 +250,20 @@ contract UpgradeHandler is Test {
         } catch {}
     }
 
-    /// Waits until a point in or just past the execution window (never back in time), then has
-    /// `caller` execute.
-    function execute(uint256 bodySeed, uint256 waitSeed, address caller) external tracked(_body(bodySeed)) {
-        address b = _body(bodySeed);
+    /// Picks a body whose pending upgrade can still execute, waits until shortly after it
+    /// becomes executable (never back in time), then has `caller` execute. One call in eight
+    /// waits past the window instead, so an expired upgrade is tried too.
+    function execute(uint256 bodySeed, uint256 waitSeed, address caller)
+        public
+        tracked(_bodyWithLivePending(bodySeed))
+    {
+        address b = _bodyWithLivePending(bodySeed);
         (uint64 version, uint64 executableAt) = factory.pendingUpgrade(b);
         if (version != 0) {
-            uint256 target = uint256(executableAt) + bound(waitSeed, 0, factory.UPGRADE_EXECUTION_WINDOW() + 2 days);
+            uint256 wait = waitSeed % 8 == 0
+                ? factory.UPGRADE_EXECUTION_WINDOW() + bound(waitSeed, 1, 2 days)
+                : bound(waitSeed, 0, 6 hours);
+            uint256 target = uint256(executableAt) + wait;
             if (target > block.timestamp) vm.warp(target);
         }
         bool wasWithdrawn = withdrawn[version];
@@ -244,7 +277,9 @@ contract UpgradeHandler is Test {
     }
 
     function warp(uint256 dt) external tracked(address(0)) {
-        vm.warp(block.timestamp + bound(dt, 0, 10 days));
+        // Short steps: the clock already moves whenever an upgrade, an amendment or a dissolution
+        // is waited out, and long jumps would lapse every other pending upgrade.
+        vm.warp(block.timestamp + bound(dt, 0, 12 hours));
         warpOk++;
     }
 
@@ -354,6 +389,21 @@ contract LegalBodyUpgradeInvariantTest is LegalBodyUpgradeTestBase {
 
     function _initializedOf(address b) internal view returns (uint64) {
         return uint64(uint256(vm.load(b, INITIALIZABLE_SLOT)));
+    }
+
+    /// Sanity: the handler really moves a body, so the invariants cannot pass with no upgrade ever
+    /// executed. Drives one schedule and one execute end to end.
+    function test_handlerUpgradesABodyNonVacuous() public {
+        address b = handler.bodies(0);
+        handler.schedule(0, 0);
+        assertEq(handler.scheduleOk(), 1);
+        assertEq(_pendingVersion(b), 2);
+        handler.execute(0, 1, stranger);
+        assertEq(handler.executeOk(), 1);
+        assertEq(factory.versionOf(b), 2);
+        assertEq(_implementationOf(b), factory.versionInfo(2).implementation);
+        assertFalse(handler.implementationMovedOutsideExecute());
+        assertFalse(handler.executeLandedElsewhere());
     }
 
     /// A body's implementation slot always holds the implementation of the version the factory
