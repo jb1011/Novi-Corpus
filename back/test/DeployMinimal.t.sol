@@ -6,10 +6,14 @@ import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 import {DeployMinimal} from "../script/DeployMinimal.s.sol";
 import {ControllerSelectors} from "../src/libraries/ControllerSelectors.sol";
 import {NoviController} from "../src/NoviController.sol";
+import {LegalBody} from "../src/LegalBody.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
 import {LegalManager} from "../src/LegalManager.sol";
 import {LegalManagerFactory} from "../src/LegalManagerFactory.sol";
 import {IIdentityRegistry} from "../src/interfaces/IIdentityRegistry.sol";
+import {LegalBodyV2Mock} from "./mocks/LegalBodyVersions.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 
 /// @dev The shipped script accepts only the registry pinned for Arc mainnet or Arc testnet. A
 ///      local chain (id 31337) has neither, so this subclass accepts the mock registry there and
@@ -85,6 +89,28 @@ abstract contract DeployMinimalChecks is ControllerRelayHarness {
             assertEq(controller.boundTarget(full[i]), address(0), "no full-product pin");
         }
 
+        bytes4[] memory release = ControllerSelectors.minimalReleaseSelectors();
+        assertEq(release.length, 2);
+        for (uint256 i = 0; i < release.length; i++) {
+            assertEq(controller.boundTarget(release[i]), address(factory), "release selector pinned to the factory");
+            assertFalse(controller.hasRole(bytes32(release[i]), executor), "executor holds no release selector");
+            assertFalse(controller.hasRole(bytes32(release[i]), admin), "admin holds no release selector");
+            assertFalse(controller.hasRole(bytes32(release[i]), deployer), "deployer holds no release selector");
+        }
+
+        assertEq(factory.versionCount(), 1, "one version listed");
+        LegalBodyFactory.Version memory first = factory.versionInfo(1);
+        assertEq(first.implementation, address(d.implementation), "version 1 is the implementation");
+        assertEq(first.codehash, address(d.implementation).codehash, "version 1 code hash");
+        assertFalse(first.withdrawn, "version 1 is live");
+        assertEq(
+            factory.proxyInitCodeHash(),
+            keccak256(
+                abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(address(d.implementation), bytes("")))
+            ),
+            "the proxy the factory predicts addresses for"
+        );
+
         bytes32 wildcard = controller.WILDCARD_ROLE();
         assertFalse(controller.hasRole(wildcard, admin), "admin holds no wildcard");
         assertFalse(controller.hasRole(wildcard, executor), "executor holds no wildcard");
@@ -127,6 +153,80 @@ abstract contract DeployMinimalChecks is ControllerRelayHarness {
             _relay(executor, registry, abi.encodeCall(IIdentityRegistry.setMetadata, (agentId, "legalBody", "")));
         assertFalse(ok, "setMetadata relayed");
         assertEq(ret, abi.encodeWithSelector(NoviController.NotAuthorized.selector, setMetadata, executor));
+    }
+
+    /// @dev Neither the executor nor the administrator can relay a release selector as deployed:
+    ///      nobody holds either one.
+    function _assertNobodyCanRelayRelease() internal {
+        bytes memory publish = abi.encodeCall(LegalBodyFactory.publishVersion, (address(d.implementation)));
+        bytes memory withdraw = abi.encodeCall(LegalBodyFactory.withdrawVersion, (1));
+        address[2] memory callers = [executor, admin];
+        for (uint256 i = 0; i < callers.length; i++) {
+            (bool ok, bytes memory ret) = _relay(callers[i], address(d.factory), publish);
+            assertFalse(ok, "publishVersion relayed");
+            assertEq(
+                ret,
+                abi.encodeWithSelector(
+                    NoviController.NotAuthorized.selector, LegalBodyFactory.publishVersion.selector, callers[i]
+                )
+            );
+            (ok, ret) = _relay(callers[i], address(d.factory), withdraw);
+            assertFalse(ok, "withdrawVersion relayed");
+            assertEq(
+                ret,
+                abi.encodeWithSelector(
+                    NoviController.NotAuthorized.selector, LegalBodyFactory.withdrawVersion.selector, callers[i]
+                )
+            );
+        }
+    }
+
+    /// @dev A whole release on the deployed contracts: the administrator publishes a version 2
+    ///      through a single-use helper, the guardian signs, a stranger schedules, the guardian
+    ///      cancels, signs again, the delay passes, a stranger executes, and the administrator
+    ///      withdraws the version afterwards. The body ends on version 2 with its record intact.
+    function _assertReleaseAndGuardianUpgrade(address body) internal {
+        LegalBodyFactory factory = d.factory;
+        address stranger = makeAddr("releaseStranger");
+        LegalBodyV2Mock v2 = new LegalBodyV2Mock();
+
+        bytes memory ret = _breakGlass(address(factory), abi.encodeCall(LegalBodyFactory.publishVersion, (address(v2))));
+        assertEq(abi.decode(ret, (uint256)), 2, "published as version 2");
+        assertEq(factory.versionCount(), 2);
+        assertEq(factory.versionOf(body), 1, "publishing moves no body");
+
+        uint256 deadline = block.timestamp + 1 hours;
+        bytes memory sig = _sig(guardianPk, factory.upgradeDigest(body, 2, address(v2), 0, deadline));
+        vm.prank(stranger);
+        factory.scheduleLegalBodyUpgrade(body, 2, deadline, sig);
+        vm.prank(guardian);
+        factory.cancelLegalBodyUpgrade(body);
+        (uint64 pending,) = factory.pendingUpgrade(body);
+        assertEq(pending, 0, "cancelled");
+
+        // The cancel used up a nonce, so the second signature carries the body's current one.
+        assertEq(factory.upgradeNonce(body), 2);
+        sig = _sig(guardianPk, factory.upgradeDigest(body, 2, address(v2), 2, deadline));
+        vm.prank(stranger);
+        factory.scheduleLegalBodyUpgrade(body, 2, deadline, sig);
+        vm.warp(block.timestamp + DELAY);
+        vm.prank(stranger);
+        factory.executeLegalBodyUpgrade(body);
+
+        assertEq(factory.versionOf(body), 2);
+        assertEq(address(uint160(uint256(vm.load(body, ERC1967Utils.IMPLEMENTATION_SLOT)))), address(v2));
+        assertEq(LegalBody(payable(body)).initializedVersion(), 2);
+        assertEq(LegalBodyV2Mock(payable(body)).added(), 42, "the version's one-time step ran");
+        assertEq(LegalManager(payable(body)).guardian(), guardian);
+        assertEq(LegalManager(payable(body)).manager(), address(factory));
+        (address recordedGuardian, uint64 recordedDelay, uint32 recordedVersion) = factory.bodyRecord(body);
+        assertEq(recordedGuardian, guardian);
+        assertEq(recordedDelay, DELAY);
+        assertEq(recordedVersion, 2);
+
+        _breakGlass(address(factory), abi.encodeCall(LegalBodyFactory.withdrawVersion, (2)));
+        assertTrue(factory.versionInfo(2).withdrawn, "withdrawn");
+        assertEq(factory.versionOf(body), 2, "a body already on a withdrawn version stays on it");
     }
 
     function _assertGuardianInitiatesAndCancels(address body) internal {
@@ -201,6 +301,14 @@ contract DeployMinimalTest is DeployMinimalChecks {
         _assertExecutorCannotRelayFullProduct(address(registry), agentId);
     }
 
+    function test_nobodyCanRelayReleaseSelectors() public {
+        _assertNobodyCanRelayRelease();
+    }
+
+    function test_releaseCeremonyThenGuardianUpgrade() public {
+        _assertReleaseAndGuardianUpgrade(_createBodyViaExecutor(agentId));
+    }
+
     function test_run_readsTheEnvironment() public {
         (, uint256 pk) = makeAddrAndKey("envDeployer");
         vm.deal(vm.addr(pk), 100 ether);
@@ -258,6 +366,35 @@ contract DeployMinimalTest is DeployMinimalChecks {
         DeployMinimal.Deployment memory e = _deployWithTwoDayDelay(makeAddr("anotherAdmin"));
         _setVerifyEnv();
         vm.expectRevert(bytes("default admin is not CONTROLLER_ADMIN"));
+        script.verify(address(e.implementation), address(e.factory), address(e.controller));
+    }
+
+    function test_verify_revertsWhenAReleaseSelectorIsGranted() public {
+        DeployMinimal.Deployment memory e = _deployWithTwoDayDelay(admin);
+        _setVerifyEnv();
+        vm.prank(admin);
+        e.controller.grantRole(bytes32(LegalBodyFactory.publishVersion.selector), executor);
+        vm.expectRevert(bytes("a release selector is granted"));
+        script.verify(address(e.implementation), address(e.factory), address(e.controller));
+    }
+
+    function test_verify_revertsWhenAReleaseSelectorIsUnpinned() public {
+        DeployMinimal.Deployment memory e = _deployWithTwoDayDelay(admin);
+        _setVerifyEnv();
+        vm.prank(admin);
+        e.controller.setBoundTarget(LegalBodyFactory.withdrawVersion.selector, address(0));
+        vm.expectRevert(bytes("release selector not pinned to the factory"));
+        script.verify(address(e.implementation), address(e.factory), address(e.controller));
+    }
+
+    /// The read-back is for a fresh deployment: once a second version is listed it no longer
+    /// passes, and says why.
+    function test_verify_revertsOnceASecondVersionIsListed() public {
+        DeployMinimal.Deployment memory e = _deployWithTwoDayDelay(admin);
+        _setVerifyEnv();
+        controller = e.controller;
+        _breakGlass(address(e.factory), abi.encodeCall(LegalBodyFactory.publishVersion, (address(new LegalBodyV2Mock()))));
+        vm.expectRevert(bytes("the factory does not list exactly one version"));
         script.verify(address(e.implementation), address(e.factory), address(e.controller));
     }
 

@@ -18,6 +18,8 @@ on:
       - "back/test/DeployMinimalFork.t.sol"
       - "back/test/DeployMinimal.t.sol"
       - "back/test/helpers/ControllerRelayHarness.sol"
+      - "back/test/helpers/BytecodeMetadata.sol"
+      - "back/test/mocks/LegalBodyVersions.sol"
       - "back/test/mocks/MockIdentityRegistry.sol"
       - "back/src/interfaces/IIdentityRegistry.sol"
       - "back/foundry.toml"

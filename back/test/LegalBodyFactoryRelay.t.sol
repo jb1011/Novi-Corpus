@@ -8,6 +8,7 @@ import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
 import {LegalBody} from "../src/LegalBody.sol";
 import {LegalManager} from "../src/LegalManager.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
+import {LegalBodyV2Mock} from "./mocks/LegalBodyVersions.sol";
 
 contract LegalBodyFactoryRelayTest is ControllerRelayHarness {
     MockIdentityRegistry internal registry;
@@ -58,15 +59,31 @@ contract LegalBodyFactoryRelayTest is ControllerRelayHarness {
         assertEq(s[1], LegalBodyFactory.scheduleOperatingAgreementUpdate.selector);
     }
 
+    function test_minimalReleaseSelectorsOrder() public pure {
+        bytes4[] memory s = ControllerSelectors.minimalReleaseSelectors();
+        assertEq(s.length, 2);
+        assertEq(s[0], LegalBodyFactory.publishVersion.selector);
+        assertEq(s[1], LegalBodyFactory.withdrawVersion.selector);
+    }
+
+    /// The pins are the grants followed by the release selectors, each once, each to the factory.
     function test_minimalPinsPairEverySelectorWithTheFactory() public view {
         bytes4[] memory grants = ControllerSelectors.minimalGrants();
+        bytes4[] memory release = ControllerSelectors.minimalReleaseSelectors();
         (bytes4[] memory s, address[] memory t) = ControllerSelectors.minimalPins(address(factory));
-        assertEq(s.length, grants.length);
-        assertEq(t.length, grants.length);
+        assertEq(s.length, 4);
+        assertEq(t.length, 4);
         assertEq(s[0], LegalBodyFactory.createLegalBody.selector);
         assertEq(s[1], LegalBodyFactory.scheduleOperatingAgreementUpdate.selector);
-        for (uint256 i = 0; i < s.length; i++) {
+        assertEq(s[2], LegalBodyFactory.publishVersion.selector);
+        assertEq(s[3], LegalBodyFactory.withdrawVersion.selector);
+        for (uint256 i = 0; i < grants.length; i++) {
             assertEq(s[i], grants[i]);
+        }
+        for (uint256 i = 0; i < release.length; i++) {
+            assertEq(s[grants.length + i], release[i]);
+        }
+        for (uint256 i = 0; i < s.length; i++) {
             assertEq(t[i], address(factory));
         }
     }
@@ -77,7 +94,61 @@ contract LegalBodyFactoryRelayTest is ControllerRelayHarness {
             assertEq(controller.boundTarget(s[i]), address(factory));
             assertTrue(controller.hasRole(bytes32(s[i]), executor));
         }
+        bytes4[] memory release = ControllerSelectors.minimalReleaseSelectors();
+        for (uint256 i = 0; i < release.length; i++) {
+            assertEq(controller.boundTarget(release[i]), address(factory), "release selector pinned");
+            assertFalse(controller.hasRole(bytes32(release[i]), executor), "never granted to the executor");
+            assertFalse(controller.hasRole(bytes32(release[i]), admin), "not held by the administrator");
+        }
         assertEq(factory.owner(), address(controller), "owned from construction, no acceptOwnership ceremony");
+    }
+
+    function test_executorCannotRelayReleaseSelectors() public {
+        bytes memory publish = abi.encodeCall(LegalBodyFactory.publishVersion, (address(impl)));
+        (bool ok, bytes memory ret) = _relay(executor, address(factory), publish);
+        assertFalse(ok);
+        assertEq(
+            ret,
+            abi.encodeWithSelector(
+                NoviController.NotAuthorized.selector, LegalBodyFactory.publishVersion.selector, executor
+            )
+        );
+        (ok, ret) = _relay(executor, address(factory), abi.encodeCall(LegalBodyFactory.withdrawVersion, (1)));
+        assertFalse(ok);
+        assertEq(
+            ret,
+            abi.encodeWithSelector(
+                NoviController.NotAuthorized.selector, LegalBodyFactory.withdrawVersion.selector, executor
+            )
+        );
+        assertEq(factory.versionCount(), 1);
+    }
+
+    /// A release is one ceremony: a single-use helper holds the selector for one call.
+    function test_releaseCeremonyPublishesAndWithdraws() public {
+        LegalBodyV2Mock v2 = new LegalBodyV2Mock();
+        bytes memory ret = _breakGlass(address(factory), abi.encodeCall(LegalBodyFactory.publishVersion, (address(v2))));
+        assertEq(abi.decode(ret, (uint256)), 2);
+        assertEq(factory.versionInfo(2).implementation, address(v2));
+
+        _breakGlass(address(factory), abi.encodeCall(LegalBodyFactory.withdrawVersion, (2)));
+        assertTrue(factory.versionInfo(2).withdrawn);
+    }
+
+    /// Even a holder of a release selector can reach nothing but the factory with it.
+    function test_releaseSelectorIsPinnedToTheFactory() public {
+        LegalBodyFactory decoy = new LegalBodyFactory(address(impl), address(registry), address(controller));
+        address releaseKey = makeAddr("releaseKey");
+        _grant(LegalBodyFactory.publishVersion.selector, releaseKey);
+        (bool ok, bytes memory ret) =
+            _relay(releaseKey, address(decoy), abi.encodeCall(LegalBodyFactory.publishVersion, (address(impl))));
+        assertFalse(ok);
+        assertEq(
+            ret,
+            abi.encodeWithSelector(
+                NoviController.TargetNotBound.selector, LegalBodyFactory.publishVersion.selector, address(decoy)
+            )
+        );
     }
 
     function test_executorRelaysCreate() public {

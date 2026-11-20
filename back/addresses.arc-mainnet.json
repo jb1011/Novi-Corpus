@@ -4,9 +4,9 @@
   "rpc": "",
   "explorer": "",
   "updatedAt": "",
-  "note": "Template. The Minimal Novi deploy ceremony fills it from the block script/DeployMinimal.s.sol prints (see docs/runbooks/minimal-mainnet-deploy.md); controllerDeployTx and controllerDeployBlock come from the controller's receipt in broadcast/DeployMinimal.s.sol/5042/run-latest.json, never from the simulated block. noviController owns legalBodyFactory from construction. Legal bodies (EIP-1167 clones of legalManagerImpl) are created at runtime by legalBodyFactory; none is listed here.",
+  "note": "Template. The Minimal Novi deploy ceremony fills it from the block script/DeployMinimal.s.sol prints (see docs/runbooks/minimal-mainnet-deploy.md); controllerDeployTx and controllerDeployBlock come from the controller's receipt in broadcast/DeployMinimal.s.sol/5042/run-latest.json, never from the simulated block. noviController owns legalBodyFactory from construction. Legal bodies (ERC-1967 proxies that start on legalBodyImpl, version 1 of the body's code) are created at runtime by legalBodyFactory; none is listed here. noviController pins publishVersion and withdrawVersion to legalBodyFactory and grants them to no one.",
   "ours": {
-    "legalManagerImpl": "",
+    "legalBodyImpl": "",
     "legalBodyFactory": "",
     "noviController": "",
     "controllerDeployTx": "",

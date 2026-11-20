@@ -37,18 +37,35 @@ library ControllerSelectors {
         s[1] = LegalBodyFactory.scheduleOperatingAgreementUpdate.selector;
     }
 
-    /// @notice The Minimal grants paired with their only target. Every selector of
-    ///         `minimalGrants()` appears exactly once, pinned to `factory`, so no deploy script or
-    ///         test can grant one of them without naming where it may go. They can be passed to
-    ///         the controller's constructor as its pin arrays when the factory exists first, and
-    ///         they drive the printed admin ceremony otherwise (pins before grants).
-    function minimalPins(address factory)
-        internal
-        pure
-        returns (bytes4[] memory selectors, address[] memory targets)
-    {
-        selectors = minimalGrants();
+    /// @notice The factory's release selectors: publishing and withdrawing a version of the legal
+    ///         body's code. They are pinned to the LegalBodyFactory like the Minimal grants and
+    ///         granted to no one. The executor never holds them: a release is a one-off ceremony
+    ///         of the role administrator, who grants the selector to a single-use helper for one
+    ///         call.
+    function minimalReleaseSelectors() internal pure returns (bytes4[] memory s) {
+        s = new bytes4[](2);
+        s[0] = LegalBodyFactory.publishVersion.selector;
+        s[1] = LegalBodyFactory.withdrawVersion.selector;
+    }
+
+    /// @notice Every Minimal selector the controller pins, paired with its only target: the
+    ///         selectors of `minimalGrants()` first, then those of `minimalReleaseSelectors()`,
+    ///         each exactly once and each pinned to `factory`. No deploy script or test can grant
+    ///         one of them without naming where it may go. They can be passed to the controller's
+    ///         constructor as its pin arrays when the factory exists first.
+    /// @dev    These are the PINS, not the grants: only `minimalGrants()` is ever granted to the
+    ///         executor.
+    function minimalPins(address factory) internal pure returns (bytes4[] memory selectors, address[] memory targets) {
+        bytes4[] memory grants = minimalGrants();
+        bytes4[] memory release = minimalReleaseSelectors();
+        selectors = new bytes4[](grants.length + release.length);
         targets = new address[](selectors.length);
+        for (uint256 i = 0; i < grants.length; i++) {
+            selectors[i] = grants[i];
+        }
+        for (uint256 i = 0; i < release.length; i++) {
+            selectors[grants.length + i] = release[i];
+        }
         for (uint256 i = 0; i < selectors.length; i++) {
             targets[i] = factory;
         }

@@ -1,6 +1,6 @@
 # Runbook — Minimal Novi mainnet deploy
 
-Last revised: 2026-11-13
+Last revised: 2026-11-20
 
 Script: `back/script/DeployMinimal.s.sol` · tests: `back/test/DeployMinimal.t.sol` (local) and
 `back/test/DeployMinimalFork.t.sol` (live Arc testnet) · addresses: `back/addresses.arc-mainnet.json`.
@@ -11,11 +11,14 @@ One `forge script` broadcast sends three contract creations from a throwaway dep
 
 | Order | Contract | Constructed with | Ends up |
 |---|---|---|---|
-| 1 | `LegalManager` | nothing | The locked implementation every legal body clones. |
+| 1 | `LegalBody` | nothing | The locked implementation every legal body starts on: version 1 of the body's code. Each body is an ERC-1967 proxy that points at it. |
 | 2 | `LegalBodyFactory` | the implementation, the identity registry, the controller's predicted address | Owned by the controller from construction, with no pending owner. |
-| 3 | `NoviController` | admin delay, admin, executor, the two legal-body selectors, both pinned to the factory | The executor may relay `createLegalBody` and `scheduleOperatingAgreementUpdate` to the factory, and nothing else. |
+| 3 | `NoviController` | admin delay, admin, executor, the two legal-body selectors as the executor's grants, and four pins to the factory: those two and the two release selectors | The executor may relay `createLegalBody` and `scheduleOperatingAgreementUpdate` to the factory, and nothing else. `publishVersion` and `withdrawVersion` are pinned to the factory and granted to no one. |
 
 No admin transaction follows: there is no `acceptOwnership`, no pin ceremony and no break-glass.
+Publishing a later version of the body's code is a separate ceremony of the admin, described in
+[legal-body-version-release.md](./legal-body-version-release.md). This deploy publishes nothing
+beyond version 1.
 No contract in this deploy holds funds. The deployer holds no role once the script finishes.
 
 The script refuses to run, and a dry run reverts before anything is sent, when any of these fails:
@@ -135,7 +138,7 @@ export CONTROLLER_EXECUTOR=<executor address>
    ```bash
    export DEPLOYER=<deployer address>
    forge script script/DeployMinimal.s.sol --sig "verify(address,address,address)" \
-     <legalManagerImpl> <legalBodyFactory> <noviController> --rpc-url <arc mainnet rpc url>
+     <legalBodyImpl> <legalBodyFactory> <noviController> --rpc-url <arc mainnet rpc url>
    ```
 
 7. Clear the key from the shell with `unset PRIVATE_KEY`.
@@ -152,7 +155,7 @@ these:
   new, consistent triple, and the post-conditions check it as before. Contracts from the earlier
   attempt become harmless orphans: a factory without its controller is owned by an address that
   nothing can create any more, so no one can ever call its owner functions, and a lone
-  implementation is inert because it is locked and only a factory clones it.
+  implementation is inert because it is locked and only a factory creates bodies on it.
 
 If the RPC drops transactions sent back to back, add `--slow` to the broadcast command: it waits
 for each transaction to land before sending the next.
@@ -168,6 +171,10 @@ run, then broadcast" runs the same checks against the deployed contracts. Togeth
 - The controller sits at the predicted address, and it owns the factory with no pending owner.
 - The factory uses the new implementation and the pinned registry.
 - Both legal-body selectors are pinned to the factory and granted to the executor, and to no one else.
+- `publishVersion` and `withdrawVersion` are pinned to the factory, and neither the executor, the
+  admin nor the deployer holds them.
+- The factory lists exactly one version, the implementation, and predicts body addresses for the
+  proxy this repository compiles around it.
 - None of the seven full-product selectors is granted to the executor or pinned.
 - No one holds `WILDCARD_ROLE`.
 - `defaultAdmin()` is the admin, with the configured delay and no pending handover; neither the
@@ -178,8 +185,9 @@ Then check on the explorer:
 1. The deployer sent exactly three contract creations, in the order of the table in "What gets
    deployed", and nothing else.
 2. The controller's creation transaction emits `RoleGranted` for `DEFAULT_ADMIN_ROLE` to the admin,
-   two `RoleGranted` for the selector roles to the executor, and two `BoundTargetSet` naming the
-   factory.
+   two `RoleGranted` for the selector roles to the executor, and four `BoundTargetSet` naming the
+   factory: the two legal-body selectors and the two release selectors. The factory's creation
+   transaction emits `VersionPublished` for version 1.
 3. Read the wiring back independently of the script, with `cast` rather than `verify`.
 
    ```bash
@@ -194,14 +202,24 @@ Then check on the explorer:
      cast call $CONTROLLER "hasRole(bytes32,address)(bool)" \
        $(cast to-bytes32 $SEL) <executor address> --rpc-url $RPC                        # true
    done
+   for SIG in "publishVersion(address)" "withdrawVersion(uint256)"; do
+     SEL=$(cast sig "$SIG")
+     cast call $CONTROLLER "boundTarget(bytes4)(address)" $SEL --rpc-url $RPC            # the factory
+     cast call $CONTROLLER "hasRole(bytes32,address)(bool)" \
+       $(cast to-bytes32 $SEL) <executor address> --rpc-url $RPC                        # false
+   done
+   cast call $FACTORY "versionCount()(uint256)" --rpc-url $RPC      # 1
    cast call $CONTROLLER "defaultAdmin()(address)" --rpc-url $RPC   # the admin
    ```
 
 4. Verify the three contracts' source on the explorer.
+5. After the first legal body is created, open it on the explorer: it is an ERC-1967 proxy whose
+   implementation is the `LegalBody` of this deploy. Verify the proxy's source once; every later
+   body has the same code.
 
 ## Record the deployment
 
-1. Fill `back/addresses.arc-mainnet.json` from the printed block: `legalManagerImpl`,
+1. Fill `back/addresses.arc-mainnet.json` from the printed block: `legalBodyImpl`,
    `legalBodyFactory`, `noviController`. Fill `rpc`, `explorer` and `updatedAt` too.
 2. Fill `controllerDeployTx` and `controllerDeployBlock` from the controller's receipt. The printed
    block leaves both empty: the simulation knows neither the hash nor the block the transaction
@@ -253,13 +271,18 @@ Then check on the explorer:
 ## Rollback
 
 - **Replace the factory.** The admin can call `setBoundTarget` on the controller for both
-  legal-body selectors, naming a replacement factory owned by the same controller. The executor's
+  legal-body selectors and both release selectors, naming a replacement factory owned by the same
+  controller. The executor's
   grants stay; from that transaction on, the executor reaches only the replacement. Bodies created
   by the old factory keep their status, their pointer and their guardian's veto and dissolve, and
   an amendment already scheduled on one still executes. The executor can no longer schedule new
-  amendments on them, so a factory replacement is a migration notice to every guardian.
+  amendments on them, so a factory replacement is a migration notice to every guardian. A guardian
+  can still move such a body to a version the old factory already lists; publishing a further
+  version there needs `publishVersion` pinned back to the old factory for that ceremony.
 - **Re-key a role.** The admin can revoke and grant the selector roles, and hand the admin role
   over after the admin delay.
-- **Nothing else is reversible.** The implementation, the factory's registry and implementation,
-  and the controller's code are fixed. A wrong registry or implementation needs a new deploy.
+- **Nothing else is reversible.** The implementation, the factory's registry and its version 1,
+  and the controller's code are fixed. A wrong registry or implementation needs a new deploy. The
+  code of a body that exists changes only through a published version and that body's guardian's
+  signature.
   No contract in this deploy holds funds, so nothing needs recovering.

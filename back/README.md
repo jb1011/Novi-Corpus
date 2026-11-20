@@ -66,7 +66,10 @@ passed without the guardian cancelling. The owner links the body by writing `enc
 `legalBody` metadata key of their identity; `linkedLegalBody(agentId)` returns the linked body or
 `address(0)`. Deploy with `script/DeployMinimal.s.sol`, which deploys the implementation, the
 factory and a controller in one broadcast: the controller grants the executor the selectors of
-`ControllerSelectors.minimalGrants()` and pins them to the factory.
+`ControllerSelectors.minimalGrants()`, and pins those and the two release selectors
+(`publishVersion`, `withdrawVersion`) to the factory. Nobody holds a release selector: publishing
+or withdrawing a version is a one-off ceremony of the controller's administrator
+(`docs/runbooks/legal-body-version-release.md`).
 
 **Reused Arc infrastructure**: Arc testnet's ERC-8004 identity, reputation and validation registries,
 the ERC-8183 job contract, and USDC.
@@ -145,8 +148,7 @@ RPC: `https://rpc.testnet.arc.io`.
                         LegalBodyFactory, LegalBody, BreakGlassOneShot, ens/ (offchain resolver), interfaces,
                         libraries (ControllerSelectors)
   test/                 Foundry tests (unit, fuzz, invariant, fork, security)
-  script/               deploy scripts (Deploy, DeployController, DeployLegalBodyFactory,
-                        DeployMinimal)
+  script/               deploy scripts (Deploy, DeployController, DeployMinimal)
   addresses.arc-testnet.json   deployed addresses (machine-readable)
   addresses.arc-mainnet.json   the mainnet template the deploy ceremony fills
 backend/                TypeScript backend
