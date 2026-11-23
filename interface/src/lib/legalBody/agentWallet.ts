@@ -279,20 +279,32 @@ export function isErc6492Wrapped(signature: Hex): boolean {
 
 export type WalletSignatureVerdict =
   | { ok: true }
-  | { ok: false; problem: "wrong_key" | "wrapped" | "not_on_chain" | "contract_refused" };
+  | {
+      ok: false;
+      problem: "wrong_key" | "compact" | "wrapped" | "not_on_chain" | "contract_refused";
+    };
 
-const refused = (
-  problem: "wrong_key" | "wrapped" | "not_on_chain" | "contract_refused",
-): WalletSignatureVerdict => ({ ok: false, problem });
+type VerdictProblem = Extract<WalletSignatureVerdict, { ok: false }>["problem"];
+
+const refused = (problem: VerdictProblem): WalletSignatureVerdict => ({ ok: false, problem });
+
+/** The 65 bytes of `r`, `s` and `v`: the only key signature the registry takes. */
+const KEY_SIGNATURE_BYTES = 65;
+/** The same signature in EIP-2098's compact form, `r` and `yParity` with `s`. */
+const COMPACT_SIGNATURE_BYTES = 64;
 
 /**
  * What a pasted signature is worth before the transaction is offered, in this order:
  *  1. a wrapped signature (`isErc6492Wrapped`) is `wrapped`, whatever else is true;
- *  2. for a key and a delegated key, a signature of 64 or 65 bytes that recovers to `newWallet`
- *     is ok; one of another length is `not_on_chain`, since a wallet with no code cannot sign any
- *     other way; anything else is `wrong_key`;
- *  3. for a contract, its own `isValidSignature` saying yes is ok, anything else
- *     `contract_refused`.
+ *  2. a key (no code): 65 bytes that recover to `newWallet` are ok; exactly 64 bytes are
+ *     `compact`; 65 bytes that do not recover are `wrong_key`; any other length is
+ *     `not_on_chain`, since a wallet with no code cannot sign any other way;
+ *  3. a delegated key (EIP-7702, the address has code): 65 bytes that recover to `newWallet` are
+ *     ok; otherwise the wallet's own `isValidSignature` saying yes is ok; otherwise exactly 64
+ *     bytes are `compact`, 65 bytes `wrong_key`, any other length `contract_refused`;
+ *  4. a contract: its own `isValidSignature` saying yes is ok, anything else `contract_refused`.
+ * 64 bytes are refused because the registry takes a key's signature in its 65-byte form only: the
+ * compact form of the very same signature is refused on chain, so it is asked for again in 65.
  * `kind` is `walletKindOf(getCode(newWallet))`; `recovered` is the address the signature recovers
  * to over the typed data, or null when it does not recover; `contractAccepts` is the wallet's own
  * `isValidSignature` answer, or null when not asked.
@@ -305,9 +317,25 @@ export function walletSignatureVerdict(p: {
   contractAccepts: boolean | null;
 }): WalletSignatureVerdict {
   if (isErc6492Wrapped(p.signature)) return refused("wrapped");
-  if (p.kind === "contract")
-    return p.contractAccepts === true ? { ok: true } : refused("contract_refused");
   const length = (p.signature.length - 2) / 2;
-  if (length !== 64 && length !== 65) return refused("not_on_chain");
-  return sameAddress(p.recovered, p.newWallet) ? { ok: true } : refused("wrong_key");
+  const recovers = length === KEY_SIGNATURE_BYTES && sameAddress(p.recovered, p.newWallet);
+  switch (p.kind) {
+    case "key":
+      if (recovers) return { ok: true };
+      if (length === COMPACT_SIGNATURE_BYTES) return refused("compact");
+      return refused(length === KEY_SIGNATURE_BYTES ? "wrong_key" : "not_on_chain");
+    case "delegated":
+      if (recovers || p.contractAccepts === true) return { ok: true };
+      if (length === COMPACT_SIGNATURE_BYTES) return refused("compact");
+      return refused(length === KEY_SIGNATURE_BYTES ? "wrong_key" : "contract_refused");
+    case "contract":
+      return p.contractAccepts === true ? { ok: true } : refused("contract_refused");
+    default: {
+      // A fourth kind fails the type check here; at run time, a kind this build does not know is
+      // never ok.
+      const unknownKind: never = p.kind;
+      void unknownKind;
+      return refused("contract_refused");
+    }
+  }
 }

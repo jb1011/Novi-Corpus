@@ -10,7 +10,14 @@
  * for the guardian and the agent's wallet.
  */
 import { describe, expect, it } from "vitest";
-import { hashTypedData, recoverTypedDataAddress, type Hex } from "viem";
+import {
+  hashTypedData,
+  parseSignature,
+  recoverTypedDataAddress,
+  serializeCompactSignature,
+  signatureToCompactSignature,
+  type Hex,
+} from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { Address } from "@/lib/api/types";
 import { walletKindOf, type WalletKind } from "@/lib/legalBody/chain";
@@ -373,18 +380,26 @@ describe("walletSignatureVerdict", () => {
     });
   });
 
-  it("a signature that does not recover is wrong_key", () => {
+  it("65 bytes that do not recover are wrong_key", () => {
     expect(verdict({ kind: KEY, signature: bytes(65), recovered: null })).toEqual({
       ok: false,
       problem: "wrong_key",
     });
   });
 
-  it("a 64-byte signature that recovers to the wallet is accepted, as a 65-byte one is", () => {
-    for (const n of [64, 65])
-      expect(verdict({ kind: KEY, signature: bytes(n), recovered: lower(AGENT) })).toEqual({
-        ok: true,
-      });
+  it("a key's 64-byte compact form of a valid signature is compact", async () => {
+    const { account, message, typed } = agentKey();
+    const full = await account.signTypedData(typed);
+    const signature = serializeCompactSignature(signatureToCompactSignature(parseSignature(full)));
+    expect(signature.length).toBe(2 + 2 * 64);
+    // The same signature in 65 bytes is accepted; the compact form is refused, whether or not the
+    // page could recover it.
+    const recovered = await recoverTypedDataAddress({ ...typed, signature: full });
+    expect(verdict({ kind: KEY, newWallet: message.newWallet, signature: full, recovered }))
+      .toEqual({ ok: true });
+    for (const r of [account.address, null])
+      expect(verdict({ kind: KEY, newWallet: message.newWallet, signature, recovered: r }))
+        .toEqual({ ok: false, problem: "compact" });
   });
 
   it("a 200-byte signature for an address with no code is not_on_chain", () => {
@@ -394,7 +409,7 @@ describe("walletSignatureVerdict", () => {
     });
   });
 
-  it("any length but 64 or 65 bytes is not_on_chain, even when told it recovers", () => {
+  it("any length but 64 or 65 bytes is not_on_chain for a key, even when told it recovers", () => {
     for (const n of [0, 63, 66, 130])
       expect(verdict({ kind: KEY, signature: bytes(n), recovered: AGENT })).toEqual({
         ok: false,
@@ -402,17 +417,44 @@ describe("walletSignatureVerdict", () => {
       });
   });
 
-  it("a delegated key is read as a key: its own signature, another key's, another length", () => {
-    expect(verdict({ kind: DELEGATED, signature: bytes(65), recovered: AGENT })).toEqual({
-      ok: true,
+  describe("a delegated wallet (EIP-7702)", () => {
+    it("its key's own 65 bytes are ok, in any letter case", () => {
+      expect(verdict({ kind: DELEGATED, signature: bytes(65), recovered: lower(AGENT) })).toEqual({
+        ok: true,
+      });
     });
-    expect(verdict({ kind: DELEGATED, signature: bytes(65), recovered: GUARDIAN })).toEqual({
-      ok: false,
-      problem: "wrong_key",
+
+    it("a signature that does not recover is ok when the wallet's own check says yes", () => {
+      for (const n of [64, 65, 200])
+        expect(
+          verdict({
+            kind: DELEGATED,
+            signature: bytes(n),
+            recovered: GUARDIAN,
+            contractAccepts: true,
+          }),
+        ).toEqual({ ok: true });
     });
-    expect(verdict({ kind: DELEGATED, signature: bytes(200), recovered: null })).toEqual({
-      ok: false,
-      problem: "not_on_chain",
+
+    it("65 bytes that do not recover, with no yes from the wallet, are wrong_key", () => {
+      for (const contractAccepts of [false, null])
+        for (const recovered of [GUARDIAN, null])
+          expect(verdict({ kind: DELEGATED, signature: bytes(65), recovered, contractAccepts }))
+            .toEqual({ ok: false, problem: "wrong_key" });
+    });
+
+    it("64 bytes with no yes from the wallet are compact, even when told they recover", () => {
+      for (const contractAccepts of [false, null])
+        expect(
+          verdict({ kind: DELEGATED, signature: bytes(64), recovered: AGENT, contractAccepts }),
+        ).toEqual({ ok: false, problem: "compact" });
+    });
+
+    it("any other length with no yes from the wallet is contract_refused", () => {
+      for (const contractAccepts of [false, null])
+        expect(
+          verdict({ kind: DELEGATED, signature: bytes(200), recovered: null, contractAccepts }),
+        ).toEqual({ ok: false, problem: "contract_refused" });
     });
   });
 
@@ -423,6 +465,16 @@ describe("walletSignatureVerdict", () => {
     expect(contract(false)).toEqual({ ok: false, problem: "contract_refused" });
     expect(contract(null)).toEqual({ ok: false, problem: "contract_refused" });
     expect(contract(false, AGENT)).toEqual({ ok: false, problem: "contract_refused" });
+    expect(verdict({ kind: CONTRACT, signature: bytes(65), recovered: AGENT })).toEqual({
+      ok: false,
+      problem: "contract_refused",
+    });
+  });
+
+  it("a kind this build does not know is never ok", () => {
+    const kind = "account" as WalletKind;
+    expect(verdict({ kind, signature: bytes(65), recovered: AGENT, contractAccepts: true }))
+      .toEqual({ ok: false, problem: "contract_refused" });
   });
 
   it("a signature ending in the 6492 marker is wrapped, whatever else is true", () => {
