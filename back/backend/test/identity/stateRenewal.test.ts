@@ -3,9 +3,11 @@
  * keeps the pass counting. While the tenant's latest row is `started`, `failed`, or a review whose
  * reasons are neither a sanctions hit nor a blocked country, its latest pass reads `verified` and
  * is the current record, held to every rule a latest pass is held to (its expiry, its erased
- * names, a test record on production). A revocation, or a review that found a sanctions hit or a
- * blocked country, decides, and ends that pass for good. The gate and the `/me` block follow the
- * pass, and the retention sweep keeps its names as it keeps a latest pass's.
+ * names, a test record on production). Only a new attempt does so: a revocation, a review that
+ * found a sanctions hit or a blocked country, or an operator's decision written since the pass (a
+ * correction of it, a refusal of an attempt), decides, and ends that pass for good. The gate and
+ * the `/me` block follow the pass, and the retention sweep keeps its names as it keeps a latest
+ * pass's.
  *
  * The database is real (in memory). Every name is a made-up fixture, every tenant an invented
  * address, and the PII key a constant test key.
@@ -388,6 +390,71 @@ describe("identityState and currentRecord: a renewal over a still-valid pass", (
       }
   });
 
+  test("a correction of the counting pass that lands in review ends the pass: needs_review, and a refusal of that review reads failed", () => {
+    const pass = append(passed(tenant(1)), event());
+    // identity:correct-name on the pass, to a name another account holds: a review that is a
+    // decision on the pass itself.
+    const corrected = append(
+      review(tenant(1), ["duplicate_identity"], {
+        supersedesCheckId: pass.checkId,
+        operator: "ops.example",
+        operatorOsUser: "ops",
+      }),
+      event({ kind: "name_corrected", reasonCode: "name_change", reason: "check 1 corrected" }),
+    );
+    for (const environment of ENVIRONMENTS) {
+      expect(identityState(repo, tenant(1), NOW, environment), `${environment}`).toBe(
+        "needs_review",
+      );
+      expect(currentRecord(repo, tenant(1), NOW, environment), `${environment}`).toBeUndefined();
+    }
+    refuse(tenant(1), corrected, "duplicate_identity");
+    for (const environment of ENVIRONMENTS) {
+      expect(identityState(repo, tenant(1), NOW, environment), `${environment}`).toBe("failed");
+      expect(currentRecord(repo, tenant(1), NOW, environment), `${environment}`).toBeUndefined();
+    }
+  });
+
+  test("an operator's decision on a renewal attempt ends the earlier pass: a refused review, or a refused started row, reads failed", () => {
+    // The automatic check's renewal went to review, and the operator refused it.
+    append(passed(tenant(1)), event());
+    append(started(tenant(1)));
+    const reviewed = append(review(tenant(1), ["name_mismatch"]));
+    expect(identityState(repo, tenant(1), NOW)).toBe("verified");
+    refuse(tenant(1), reviewed, "other");
+    // The operator refused the attempt that never completed.
+    append(passed(tenant(2)), event());
+    const begun = append(started(tenant(2)));
+    refuse(tenant(2), begun, "other");
+
+    for (const n of [1, 2])
+      for (const environment of ENVIRONMENTS) {
+        expect(identityState(repo, tenant(n), NOW, environment), `${n} ${environment}`).toBe(
+          "failed",
+        );
+        expect(
+          currentRecord(repo, tenant(n), NOW, environment),
+          `${n} ${environment}`,
+        ).toBeUndefined();
+      }
+  });
+
+  test("only a new attempt leaves the pass counting: an operator's identity:record over the pass that lands in review keeps it verified", () => {
+    const pass = append(passed(tenant(1)), event());
+    append(
+      review(tenant(1), ["name_mismatch"], {
+        supersedesCheckId: pass.checkId,
+        operator: "ops.example",
+        operatorOsUser: "ops",
+      }),
+      event(),
+    );
+    for (const environment of ENVIRONMENTS) {
+      expect(identityState(repo, tenant(1), NOW, environment), `${environment}`).toBe("verified");
+      expect(currentRecord(repo, tenant(1), NOW, environment), `${environment}`).toEqual(pass);
+    }
+  });
+
   test("the pass renewed is the latest passed row: an older pass never stands in for it", () => {
     // In date for three years.
     append(passed(tenant(1)), event());
@@ -532,6 +599,44 @@ describe("the retention sweep keeps the names of the pass the renewal rule count
     revoke(tenant(1), pass);
     expect(repo.erasureCandidates(real + 31 * DAY, ...WINDOWS)).toEqual([
       { checkId: pass.checkId, rule: "superseded" },
+    ]);
+  });
+
+  test("a pass an operator's decision ended is superseded: a correction of it that landed in review, a refused renewal attempt", () => {
+    const real = Date.now();
+    const later = real + 31 * DAY;
+    // A correction of the pass, gone to review.
+    const p1 = passAt(tenant(1), real);
+    append(
+      review(tenant(1), ["duplicate_identity"], {
+        startedAt: real,
+        completedAt: real,
+        expiresAt: real + THREE_YEARS,
+        supersedesCheckId: p1.checkId,
+        operator: "ops.example",
+        operatorOsUser: "ops",
+      }),
+      event({ kind: "name_corrected", reasonCode: "name_change", reason: "corrected" }),
+    );
+    // A renewal attempt the operator refused.
+    const p2 = passAt(tenant(2), real);
+    const begun = append(started(tenant(2), { startedAt: real }));
+    append(
+      failed(tenant(2), {
+        startedAt: real,
+        completedAt: real,
+        supersedesCheckId: begun.checkId,
+        operator: "ops.example",
+      }),
+      event({ kind: "refused", reasonCode: "other", reason: "refused" }),
+    );
+
+    // The sweep agrees with the state.
+    expect(identityState(repo, tenant(1), later)).toBe("needs_review");
+    expect(identityState(repo, tenant(2), later)).toBe("failed");
+    expect(repo.erasureCandidates(later, ...WINDOWS)).toEqual([
+      { checkId: p1.checkId, rule: "superseded" },
+      { checkId: p2.checkId, rule: "superseded" },
     ]);
   });
 

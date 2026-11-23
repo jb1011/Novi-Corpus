@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { getAddress } from "viem";
 import {
+  DECISION_EVENT_KINDS,
   type DocumentType,
   type IdentityProvider,
   type IdentityRowStatus,
@@ -452,13 +453,16 @@ const IS_LATEST = `g.check_id = (SELECT MAX(l.check_id) FROM guardian_identity_c
                                   WHERE l.tenant_id = g.tenant_id)`;
 /** The review reasons that end an earlier pass, as SQL text: constants, never a caller's value. */
 const PASS_ENDING_SQL = PASS_ENDING_REVIEW_REASONS.map((code) => `'${code}'`).join(", ");
+/** The events of an operator's decision, as SQL text: constants, never a caller's value. */
+const DECISION_EVENTS_SQL = DECISION_EVENT_KINDS.map((kind) => `'${kind}'`).join(", ");
 /**
  * The pass the renewal rule still counts (`identity/state.ts`): the tenant's latest passed row, in
- * date (`@now_ms`), with no revocation and no review that found a sanctions hit or a blocked
- * country written since it. Its tenant's latest row, when not the pass itself, is then a renewal
- * attempt begun, failed, or under another review. Read as the deployment that wrote that latest
- * row reads it: on a production one a test pass (written on a sandbox, or synthetic) counts for
- * nothing. Its names are kept as a latest pass's are (the names held are checked by the caller).
+ * date (`@now_ms`), with no revocation, no review that found a sanctions hit or a blocked country,
+ * and no row an operator's decision wrote (`DECISION_EVENT_KINDS`) since it. Its tenant's latest
+ * row, when not the pass itself, is then a new attempt begun, failed, or under another review.
+ * Read as the deployment that wrote that latest row reads it: on a production one a test pass
+ * (written on a sandbox, or synthetic) counts for nothing. Its names are kept as a latest pass's
+ * are (the names held are checked by the caller).
  */
 const COUNTED_BY_RENEWAL = `(g.status = 'passed'
      AND g.check_id = (SELECT MAX(p.check_id) FROM guardian_identity_checks p
@@ -469,7 +473,10 @@ const COUNTED_BY_RENEWAL = `(g.status = 'passed'
                         AND (x.status = 'revoked'
                              OR (x.status = 'needs_review'
                                  AND EXISTS (SELECT 1 FROM json_each(x.review_reasons) r
-                                              WHERE r.value IN (${PASS_ENDING_SQL})))))
+                                              WHERE r.value IN (${PASS_ENDING_SQL})))
+                             OR EXISTS (SELECT 1 FROM identity_check_events e
+                                         WHERE e.check_id = x.check_id
+                                           AND e.kind IN (${DECISION_EVENTS_SQL}))))
      AND ((g.environment = 'production' AND g.synthetic = 0)
           OR (SELECT l.environment FROM guardian_identity_checks l
                WHERE l.tenant_id = g.tenant_id ORDER BY l.check_id DESC LIMIT 1) = 'sandbox'))`;

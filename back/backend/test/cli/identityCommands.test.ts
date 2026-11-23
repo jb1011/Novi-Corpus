@@ -1328,6 +1328,39 @@ describe("identity:correct-name", () => {
     expect(output).toMatchObject({ status: "needs_review", reviewReasons: ["duplicate_identity"] });
   });
 
+  test("a correction of a valid pass that lands in review ends the pass: show reads needs_review, and the refusal of that review reads failed", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    await recorded(guardian);
+    const pass = await recorded(second, {
+      "--name-last": "Dupond",
+      "--provider-ref": "vs_test_0002",
+    });
+    expect((await run<Shown>(["identity:show", second])).output.state).toBe("verified");
+
+    const { output } = await run<Recorded>(
+      decisionLine("identity:correct-name", second, pass.checkId, "transliteration", {
+        "--name-first": FIRST,
+        "--name-last": LAST,
+      }),
+    );
+    expect(output).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["duplicate_identity"],
+      supersedesCheckId: pass.checkId,
+    });
+    expect((await run<Shown>(["identity:show", second])).output).toMatchObject({
+      state: "needs_review",
+      countsAtTheDoors: false,
+    });
+
+    await run(decisionLine("identity:refuse", second, output.checkId, "duplicate_identity"));
+    expect((await run<Shown>(["identity:show", second])).output).toMatchObject({
+      state: "failed",
+      countsAtTheDoors: false,
+    });
+  });
+
   test("correct-name after a key rotation finds a pass sealed under the old key as a duplicate, the old key no longer configured", async () => {
     human(guardian, "1001");
     human(second, "1002");

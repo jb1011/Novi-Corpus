@@ -8,7 +8,7 @@ import type {
   IdentityRepository,
 } from "../persistence/identityRepository";
 import { IDENTITY_AAD } from "./names";
-import { type IdentityState, PASS_ENDING_REVIEW_REASONS } from "./types";
+import { DECISION_EVENT_KINDS, type IdentityState, PASS_ENDING_REVIEW_REASONS } from "./types";
 
 /**
  * THE GUARDIAN'S IDENTITY STATE, AND THE GATE ON IT. What a tenant's identity rows add up to
@@ -92,37 +92,43 @@ function stateOf(
 }
 
 /**
- * A row that ends the pass before it for good (Martin, 6 November): its revocation, or a review
- * that found a sanctions hit or a blocked country, refused since or not. Whatever is written after
- * it, that pass is never renewed again; only a new pass counts.
+ * A row that ends the pass before it for good: its revocation, or a review that found a sanctions
+ * hit or a blocked country, refused since or not (Martin, 6 November); or any row an operator's
+ * decision wrote since the pass (`DECISION_EVENT_KINDS`), on the pass itself (a correction of it)
+ * or on a renewal attempt over it (a refusal of the attempt, a correction of its review): a
+ * renewal an operator settled ends the old pass, which is what a decision means. Whatever is
+ * written after it, that pass is never renewed again; only a new pass counts.
  */
-function endsEarlierPass(row: GuardianIdentityCheck): boolean {
+function endsEarlierPass(repo: IdentityRepository, row: GuardianIdentityCheck): boolean {
   return (
     row.status === "revoked" ||
     (row.status === "needs_review" &&
-      row.reviewReasons.some((code) => PASS_ENDING_REVIEW_REASONS.includes(code)))
+      row.reviewReasons.some((code) => PASS_ENDING_REVIEW_REASONS.includes(code))) ||
+    repo.events(row.checkId).some((e) => DECISION_EVENT_KINDS.includes(e.kind))
   );
 }
 
-/** A latest row that leaves the pass before it counting: a renewal attempt begun, failed, or under
- *  a review for a reason that does not end the pass. A pass decides by itself; a revocation ends. */
+/** A latest row that may leave the pass before it counting: a renewal attempt begun, failed, or
+ *  under a review. A pass decides by itself; a revocation ends. Whether the attempts since the
+ *  pass are new ones is `endsEarlierPass`'s question. */
 function isRenewalAttempt(latest: GuardianIdentityCheck): boolean {
   return (
-    latest.status === "started" ||
-    latest.status === "failed" ||
-    (latest.status === "needs_review" && !endsEarlierPass(latest))
+    latest.status === "started" || latest.status === "failed" || latest.status === "needs_review"
   );
 }
 
 /**
  * THE RENEWAL RULE (Martin, 6 November, with I-A): a renewal under way keeps the earlier pass
- * counting. Under a latest row that is a renewal attempt (`isRenewalAttempt`), the tenant's latest
- * passed row counts while it reads `verified` by itself, at `nowMs`, on `environment` (in date,
- * its names held, and on production not a test record), and no row written since it ends it
- * (`endsEarlierPass`). A failed attempt is among them: a failed renewal, the automatic check's or
- * an operator's refusal of an attempt, must not take away a still-valid verification; ending it is
- * a revocation's work, or a review's that found a sanctions hit or a blocked country. Undefined
- * when no pass counts.
+ * counting, and only a new attempt does. Under a latest row that is a renewal attempt
+ * (`isRenewalAttempt`), the tenant's latest passed row counts while it reads `verified` by itself,
+ * at `nowMs`, on `environment` (in date, its names held, and on production not a test record), and
+ * no row written since it ends it (`endsEarlierPass`). The rows that leave it counting are new
+ * attempts only: the adapter's `started` row and the completion of that session (a failed attempt,
+ * or a review without a sanctions hit or a blocked country), and an operator's `identity:record`.
+ * An operator's decision since the pass (a correction of it, a refusal of an attempt) ends it, as
+ * do a revocation and a review that found a sanctions hit or a blocked country: the gate is never
+ * looser than the latest row alone would make it, but for a new attempt. Undefined when no pass
+ * counts.
  */
 function renewedPass(
   repo: IdentityRepository,
@@ -135,7 +141,7 @@ function renewedPass(
   const pass = repo.latestPassed(tenantId);
   if (pass === undefined || stateOf(pass, nowMs, environment) !== "verified") return undefined;
   const since = repo.list(tenantId).filter((row) => row.checkId > pass.checkId);
-  return since.some(endsEarlierPass) ? undefined : pass;
+  return since.some((row) => endsEarlierPass(repo, row)) ? undefined : pass;
 }
 
 /**
@@ -162,9 +168,10 @@ function standing(
 
 /**
  * What the tenant's rows add up to at `nowMs`: its latest row decides, except under a renewal
- * under way, where the pass it renews still counts (`renewedPass`: a `started` or `failed` row,
- * or a review whose reasons are neither `watchlist_hit` nor `country_blocked`, on top of a pass
- * that is still valid, reads `verified`). With `environment` "production", a passed row written on
+ * under way, where the pass it renews still counts (`renewedPass`: a new attempt, a `started` or
+ * `failed` row or a review whose reasons are neither `watchlist_hit` nor `country_blocked`, on top
+ * of a pass that is still valid and that no operator's decision has settled since, reads
+ * `verified`). With `environment` "production", a passed row written on
  * a sandbox or synthetic reads `none`, and is never renewed; without it, a row reads as it is. The
  * operator's writers read it without the environment; `identity:show` reads it as the deployment
  * does.

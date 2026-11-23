@@ -758,9 +758,10 @@ export function reviewIdentity(
 
 /**
  * Revokes a passed check: a revoked row without names, superseding it. The latest passed check,
- * or, at any time during a renewal under way (the latest row a renewal attempt begun, failed, or
- * under a review without a sanctions hit or a blocked country), the pass the renewal rule still
- * counts (`currentRecord`, read as the operator's writers read the state). The identity side only:
+ * or, at any time during a renewal under way (the latest row a new attempt begun, failed, or under
+ * a review without a sanctions hit or a blocked country, and no decision written since the pass),
+ * the pass the renewal rule still counts (`currentRecord`, read as the operator's writers read the
+ * state). The identity side only:
  * a live company stays the company's to revoke (`company:revoke`).
  */
 export function revokeIdentity(
