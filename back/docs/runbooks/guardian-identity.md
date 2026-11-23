@@ -1,11 +1,18 @@
-# Runbook: the guardian's identity check (slice I-0)
+# Runbook: the guardian's identity check (slices I-0 and I-A)
 
 World ID proves one real person; the identity check says who. On a production deployment (Arc
 mainnet) a guardian cannot use the legal-body doors until their identity record reads `verified`.
-In slice I-0 the provider is **Stripe Identity**, and nothing is automatic: an operator sends the
-guardian a link and asks for their legal name, reads the finished session in the Stripe dashboard,
-compares the name, and records it from the box with the `identity:*` commands. The doors read what
-those commands write.
+The provider is **Stripe Identity**, and two paths write the record:
+
+- **the automatic check** (section 0, slice I-A), on a box that holds the Stripe Identity block: the
+  guardian types their name, verifies on Stripe's page, and the server reads the result back with
+  its own key, screens the person against the sanctions lists and writes the record itself;
+- **the operator path** (section 1, slice I-0), on a box without the block, and as the fallback
+  everywhere: an operator sends the guardian a link and asks for their legal name, reads the
+  finished session in the Stripe dashboard, compares the name, and records it from the box with the
+  `identity:*` commands.
+
+The doors read the same record, whichever path wrote it.
 
 Every command below runs on the box, from the backend directory:
 
@@ -21,7 +28,339 @@ events are kept for ever. A reason holds ids, codes and facts ("stripe requires_
 document_unverified_other"), never a person's name, address, email or document number.
 `identity:show` is the only command that prints a name, and it writes no ops line.
 
-## 1. The procedure, one guardian
+## 0. The automatic check
+
+Where the three `STRIPE_IDENTITY_*` settings are set, the API runs the check itself. On production
+it is **required**: the gate refuses a guardian whose record is not `verified`. On a sandbox it is
+**offered**: the guardian may run it, and the gate stays skipped. The API says which at boot, in one
+line of its log (`⚠ identity check: automatic (stripe, test|live), offered|required`):
+
+```
+⚠ identity check: automatic (stripe, test), offered      # a testnet box
+⚠ identity check: automatic (stripe, live), required     # a mainnet box
+```
+
+The boot rules refuse the other two pairs. No such line: the block is not set, the check is the
+operator's (section 1), and the three `/identity-check` routes answer 404
+`identity_check_not_offered`.
+
+How one check runs:
+
+1. The guardian types their first and last name as the document prints them, and starts the check
+   (`POST /identity-check/sessions`). The API writes a `started` row by `system`, opens a session at
+   Stripe under our own session id (Stripe's `client_reference_id`, never the tenant id), and seals
+   the typed names in the session row.
+2. The person verifies on Stripe's page. Its link lasts 48 hours; starting again answers a fresh
+   link to the same session. One session takes `IDENTITY_ATTEMPTS_PER_SESSION` attempts (three).
+3. A read follows each change: woken by Stripe's webhook, by the guardian's return to the site
+   (`POST /identity-check/sync`), or made by the job `identity_sessions_sync`. The webhook carries
+   no fact: every fact comes from the read, made over TLS with our key.
+4. A verified session: the sanctions and PEP search on the typed name and the birth date (where
+   `OPENSANCTIONS_API_KEY` is set), then the row, `passed` or `needs_review` (0.5). A failed one:
+   after the last attempt, or a code no retry changes (`consent_declined`, `under_supported_age`,
+   `country_not_supported`), a `failed` row. A session nobody finishes closes as `abandoned` after
+   `IDENTITY_SESSION_DAYS` (14). The close erases the typed names.
+5. `IDENTITY_REDACT_AFTER_DAYS` (seven) days after the row, or after the operator's decision when
+   the row went to review, the job asks Stripe to redact the session.
+
+The rows carry `operator: null` and their events the actor `system`. The name of record is the
+guardian's typed name, confirmed against the document's; Stripe's extracted names are compared and
+dropped.
+
+### 0.1 Setting it up, per box
+
+In the Stripe dashboard, in the mode of the box (the founder who holds the account does it):
+
+|                         | testnet box                                           | mainnet box                                              |
+| ----------------------- | ----------------------------------------------------- | -------------------------------------------------------- |
+| Stripe mode             | test mode (0.2)                                       | live mode                                                |
+| `ARC_NETWORK`           | `testnet` (or unset)                                  | `mainnet`                                                |
+| the key                 | `rk_test_…`                                           | `rk_live_…`                                              |
+| the webhook endpoint    | `https://<api host>/webhooks/stripe-identity/sandbox` | `https://<api host>/webhooks/stripe-identity/production` |
+| `OPENSANCTIONS_API_KEY` | optional: without it no search runs (`watchlist: not_run`) | required                                            |
+
+1. **A restricted key**, named `novi-identity-<box>`, with two permissions and nothing else:
+   "Identity verification sessions and reports: Write" and "Recent detailed verification results:
+   Read". If the dashboard words them otherwise, the key must be able to create a session, read it
+   with the birth date expanded, cancel it and redact it, and nothing more. A restricted key, not
+   the account's secret key: the box holds only what the check needs.
+2. **A webhook endpoint** at the API's own host (the box's `PUBLIC_API_URL`), never at the website's
+   `/backend` proxy: the proxy drops the `Stripe-Signature` header, and every delivery would fail.
+   One path per environment, as in the table. Subscribe the six session events, and tick
+   `.redacted` explicitly:
+
+   ```
+   identity.verification_session.canceled
+   identity.verification_session.created
+   identity.verification_session.processing
+   identity.verification_session.redacted
+   identity.verification_session.requires_input
+   identity.verification_session.verified
+   ```
+
+   Copy its signing secret (`whsec_…`).
+3. **The verification flow** of that mode (`vf_…`), made once in the dashboard. It asks for a
+   document (passport, identity card or driving licence) and a selfie. On production a pass needs
+   the face match: from a flow without the selfie, a verified session is refused by the record's
+   rules (`identity_session_refused`, 0.4).
+
+Then the box's settings, in its environment file (`.env.example` describes each):
+
+```
+STRIPE_IDENTITY_KEY=rk_test_…             # rk_live_… on mainnet
+STRIPE_IDENTITY_FLOW_ID=vf_…
+STRIPE_IDENTITY_WEBHOOK_SECRET=whsec_…
+FORMATION_PII_KEY=…                       # openssl rand -base64 32, generated for this box
+IDENTITY_NAME_HMAC_KEY=…                  # openssl rand -hex 32, generated for this box
+WEB_ORIGIN=https://<the site's origin>    # a scheme and a host (a port if any): no '*', no path
+OPENSANCTIONS_API_KEY=…                   # mainnet: a paid key (the smallest bundle, 500 credits)
+```
+
+A box that has neither `FORMATION_PII_KEY` nor `IDENTITY_NAME_HMAC_KEY` (the testnet box today)
+gets both generated fresh for it, never the production ones. A box that holds them already keeps
+them: a new PII key is a rotation, and the fingerprint key never changes (section 6).
+
+Keys and secrets go into the password manager and the box's environment file, and nowhere else:
+never into a chat, a ticket or the repo.
+
+Restart, then check:
+
+```bash
+sudo systemctl restart legalbody-api
+journalctl -u legalbody-api -n 200 | grep 'identity check: automatic'
+curl -s -o /dev/null -w '%{http_code}\n' -X POST https://<api host>/webhooks/stripe-identity/sandbox
+npm run cli -- scheduler:list
+```
+
+The curl answers 401: the route is live and refuses the unsigned request. A 404 means the path's
+environment is not the box's (`/production` on mainnet), or the block is not set. `scheduler:list`
+shows `identity_sessions_sync`, with its note "runs in the API process only", beside
+`identity_sweep`.
+
+The boot refuses, with the reason: one or two of the three `STRIPE_IDENTITY_*` settings without the
+others; a live key on a testnet box, or a test key on a mainnet box; the block without
+`FORMATION_PII_KEY`; the PII key without `IDENTITY_NAME_HMAC_KEY`; the block on mainnet without
+`OPENSANCTIONS_API_KEY`; a `WEB_ORIGIN` that is not exactly a scheme and a host. A box whose doola
+block is in sandbox (the testnet box) takes the PII key only with the block, and its formation still
+refuses any SSN.
+
+> **⚠ A testnet box never holds a production key.** Its `FORMATION_PII_KEY` and
+> `IDENTITY_NAME_HMAC_KEY` are generated for it alone, and its Stripe key is a test key. The
+> production keys stay on the production box and in the password manager.
+
+### 0.2 The testnet is Stripe's test mode
+
+The testnet box runs in Stripe's legacy **test mode**, not in a Stripe sandbox: a copied sandbox
+asked for its own Identity application, and its account-holder verification step failed.
+
+- Test mode shares its settings with live mode. Change settings in live mode only.
+- In test mode, create only what belongs to the mode: the flow, the restricted key, and the webhook
+  endpoint with its signing secret.
+- The test page lets the person choose the outcome (a success, an expired document, and others): no
+  document, no real person. Every row a sandbox writes is `synthetic`, and no production door ever
+  counts one.
+
+### 0.3 Rotating the webhook secret
+
+Zero downtime, as doola's (`doola-webhooks.md`): the box verifies each delivery against the current
+and the previous secret.
+
+1. In the dashboard, roll the endpoint's signing secret, and keep the old one valid for a day. While
+   both are valid, Stripe signs each delivery with both.
+2. On the box:
+
+   ```
+   STRIPE_IDENTITY_WEBHOOK_SECRET=<the new secret>
+   STRIPE_IDENTITY_WEBHOOK_SECRET_PREVIOUS=<the secret in use until now>
+   ```
+
+3. `sudo systemctl restart legalbody-api`, then watch the deliveries:
+
+   ```bash
+   journalctl -u legalbody-api -f | grep -E 'identity_webhook_(received|unauthorized|dropped)'
+   ```
+
+4. Once the old secret has expired at Stripe and the deliveries still read
+   `identity_webhook_received`, remove `STRIPE_IDENTITY_WEBHOOK_SECRET_PREVIOUS` and restart. Left
+   set, it keeps a retired secret live.
+
+### 0.4 Reading a session
+
+The operator's tools:
+
+```bash
+npm run cli -- identity:session <tenantId>    # the open session, or the newest closed one
+npm run cli -- identity:show <tenantId>       # the record the session wrote (prints the names)
+npm run cli -- scheduler:list                 # the jobs, identity_sessions_sync among them
+```
+
+`identity:session` is read-only, writes no ops line and never prints a name. It shows our session
+id; Stripe's session (`providerRef`, `vs_…`: search it in the dashboard) and report (`reportId`,
+`vr_…`); the rows it points at (`startedCheckId`, `completedCheckId`); its dates; `lastStatus` and
+`lastErrorCode` (Stripe's code, never its sentence); `failedAttempts` of `attemptsPerSession`;
+`dobUnavailable`; `screenPendingSince`; whether it still holds the typed names (`typedNamesHeld`,
+`typedErasedAt`); and the redaction (`redactDueAt`, `redactionRequestedAt`, `redactedAt`). `shown`
+says which session it is: `open`, `newest_closed`, or `none`.
+
+**The job.** `identity_sessions_sync` runs inside the API process, 30 seconds after boot and then
+every `IDENTITY_SYNC_EVERY_MS` (ten minutes). Each pass reads the open sessions nobody read for two
+minutes (50 at a time); closes those past `IDENTITY_SESSION_DAYS` as abandoned, after redacting or
+canceling them at Stripe; gives a review's session its redaction date once the review is decided;
+and asks Stripe to redact the sessions due (again a week later, if a request did not complete). Each
+pass writes `job_ran { name: "identity_sessions_sync", synced, abandoned, redactRequested, redacted,
+errors, ms }`, or `job_failed` (CRITICAL from the third failure in a row). It needs the API's
+Stripe client and screener, so `scheduler:run identity_sessions_sync` is refused from the shell:
+no command reads a session on demand. A session is read again by the next webhook, the guardian's
+next return, or the job's next pass.
+
+**The ops lines.** One JSON line each, ids, states and codes only: the tenant as its first ten
+characters, our session id, never Stripe's.
+
+```bash
+journalctl -u legalbody-api --since today | grep -E '"opslog":"(identity_|person_screen_error)'
+journalctl -u legalbody-api --since '7 days ago' | grep <sessionId>
+```
+
+| Line | What it means, and what to do |
+| ---- | ----------------------------- |
+| `identity_session_started { tenant, sessionId }` | A guardian started a check: a `started` row, a session at Stripe. |
+| `identity_session_reused { tenant, sessionId }` | The guardian started again while their session waited for them: the same session, the new typed names, Stripe's fresh link. |
+| `identity_webhook_received { environment, eventId, type, sessionId }` | Stripe woke us about one of our sessions; the read follows. |
+| `identity_session_completed { tenant, sessionId, status, reviewReasons }` | A verified session became a row: `passed`, or `needs_review` with its reasons (0.5). The session is closed. |
+| `identity_session_closed { tenant, sessionId, reasonCode }` | The session closed with a `failed` row: the last attempt failed, a code no retry changes, a cancellation or redaction at Stripe, or its days ran out (`abandoned`). `reasonCode` is the row's (section 1, step 5). |
+| `identity_screen_pending { sessionId }` | The search gave no verdict: no row yet, the job tries again each pass. See below. |
+| `person_screen_error { status }` | Why the search gave none: OpenSanctions' HTTP status, or `timeout`, `unreachable`, `unreadable`, `invalid_query`, `query_<status>`. A 401 or 403 is the OpenSanctions key. |
+| `identity_dob_not_read { sessionId }` | Stripe served no birth date for this session (a key without "Recent detailed verification results", or more than 48 hours after the document was processed): the search runs on the name alone. Said once per session. Repeated across sessions, check the key. |
+| `identity_session_refused { sessionId, reason }` | The session waits for an operator. See "A result the rules refuse" below. |
+| `identity_session_dropped { sessionId, reason }` | A read came back in the other mode (`mode`) or naming another session (`reference`): nothing written. `mode`: the key and the box disagree. |
+| `identity_session_unreadable { sessionId, field }` (error) | Stripe's answer lacked the shape we read, at the field named: nothing written, the caller got 503. Report it. |
+| `identity_session_names_unreadable { sessionId, keyId }` (CRITICAL) | The typed names are sealed under a PII key this box no longer holds: configure the key `keyId` names again (section 6). |
+| `identity_session_orphan_not_canceled { sessionId, status }` (warn) | Two starts of one account raced, and the extra session made at Stripe could not be canceled. No row points at it, and nobody holds its link. |
+| `identity_provider_unavailable { op, status, code, requestId }` (warn) | Stripe did not answer (429, 5xx, a timeout): the caller got 503, the job reads again. Act if it lasts. |
+| `identity_provider_error { op, status, code, requestId }` (error) | Stripe refused the call (another 4xx), with its machine code; `requestId` finds the request in Stripe's logs. |
+| `identity_provider_key_rejected { op, status, code, requestId }` (CRITICAL) | Stripe refused the key (401, 403): wrong, revoked, or missing a permission. No check moves until the key is fixed (0.1). |
+| `identity_provider_mode_mismatch { tenant, sessionId, livemode, environment }` (CRITICAL) | Stripe made a session in the other mode than the box's; nothing written. Check the key's prefix against `ARC_NETWORK`. |
+| `identity_redaction_refused { sessionId, op, status, code }` (warn) | Stripe refused a redaction for good; it is asked again a week later. A session Stripe canceled cannot be redacted, and its line comes back each week. |
+| `identity_sessions_sweep_error { step, sessionId, failure }` (warn) | One session failed in the job's pass (`sync`, `decision` or `redact`), with a refusal's code or an error's class; the others went on. The lines before it say why. |
+| `identity_webhook_unauthorized { environment }` (warn) | A delivery failed the signature check: 401. Repeated, the box's secret is not the endpoint's (0.3). |
+| `identity_webhook_oversize { environment }` (warn) | A body over 256 KiB: 413. Not Stripe's. |
+| `identity_webhook_stale { environment, eventId, type }` (warn) | Authentic, but more than five minutes off our clock: ignored with 200. Check the clock (`timedatectl status`); the job reads the session anyway. |
+| `identity_webhook_unparsable { environment }` (warn) | Authentic, but not an event: ignored with 200. |
+| `identity_webhook_dropped { environment, eventId, type, reason }` | `mode` (warn): an event of the other mode, the endpoint is in the wrong mode. `no_session_object` (warn): a session event without its session, Stripe's shape changed. `unknown_session`: a session that is not ours (made in the dashboard, or by another box). |
+| `identity_webhook_sync_failed { environment, eventId, type, sessionId, failure }` (warn) | The read the event woke failed, with its code or class; the job reads again. |
+| `identity_check_route_failed { route, errorName }` (error) | An identity check route met an error it did not expect, and answered 500. Report it. |
+
+The operator's own commands write theirs (`identity_recorded`, `identity_accepted`,
+`identity_refused`, `identity_revoked`, `identity_name_corrected`), as on the operator path.
+
+**A search that gives no verdict** (`identity_screen_pending`). The session is verified at Stripe,
+the search gave no verdict, and no row is written yet; the job tries again each pass. No line raises
+an alarm by itself: treat a `screenPendingSince` more than a day old as CRITICAL. Read
+`person_screen_error` first. Stripe serves the birth date for 48 hours after the document is
+processed: a search retried later runs on the name alone (`identity_dob_not_read`).
+
+To finish by hand: search the name on OpenSanctions (section 1, step 4) with the birth date the
+session shows in the dashboard, then record the check with `identity:record` (section 1, step 5),
+`--expect-latest` the session's `started` row. That closes nothing in `identity_sessions`: the job
+keeps the session and closes it as abandoned after `IDENTITY_SESSION_DAYS`, and that failed row
+leaves your pass counting (the renewal rule, below). Should the search answer first, the job plans
+its result over your pass as a renewal, under the record's rules. Check with `identity:session` and
+`identity:show`.
+
+**A result the rules refuse** (`identity_session_refused`). With `plan_refused`, the record's rules
+refused a verified result. On production that is a session without the face match: the flow lacks
+the selfie (0.1), so fix the flow. The session stays open, waiting for an operator: it is not read
+or searched again until an operator writes a row for that guardian. Until it closes, the guardian's
+start answers 409 `identity_under_review`, and no command closes it sooner than the job, which
+closes it as abandoned after `IDENTITY_SESSION_DAYS`. With `no_typed_names`, the session holds no
+typed name: that should never happen, so report it.
+
+**A renewal.** A verified guardian may start the check again from 90 days before the pass expires
+(`expiresAt`); earlier, the start answers 409 `identity_already_verified`. While the renewal runs,
+the earlier pass keeps counting: a `started` row, a failed attempt or a review on top of it leave
+the guardian `verified`, unless a revocation, or a review with `watchlist_hit` or
+`country_blocked`, is written after the pass. The new pass supersedes the earlier one, and its
+expiry counts from its own completion.
+
+### 0.5 A review from the adapter
+
+A verified result lands in review (`needs_review`) for the reasons of section 2, read from the
+session. `identity_session_completed` names them (`reviewReasons`), and so does `identity:show`.
+
+| Reason | From the automatic check | Settle it with |
+| ------ | ------------------------ | -------------- |
+| `name_mismatch` | **New**: the typed name and the document's differ beyond case and spacing. | Compare in the dashboard and ask the guardian, then `identity:correct-name` to the name the document prints (section 4), or `identity:refuse`. `identity:accept` refuses this reason. |
+| `watchlist_hit` | The sanctions and PEP search found a possible match. | Search OpenSanctions by hand with the name and the birth date the session shows: `identity:accept --reason-code watchlist_false_positive`, or `identity:refuse --reason-code watchlist_confirmed`. |
+| `country_blocked` | The document's country is in `SCREENING_BLOCKED_COUNTRIES`. | `identity:refuse --reason-code country_blocked`. |
+| `name_rule_failed` | The typed name breaks the name rule. | `identity:correct-name` when the document shows a usable name; else section 2's note. |
+| `duplicate_identity` | Another account holds a current pass with the same name and document country. | Section 2 finds the other account; then decide (section 3). |
+| `provider_flag` | The document's country has no ISO 3166-1 code (Kosovo's `XK`). A pass needs a document country, so `identity:accept` is refused. | `identity:refuse --reason-code other` (the reason: the document's country is outside ISO 3166-1); the guardian verifies again with another document. |
+
+Each decision also takes `--operator`, `--expect-latest <the review's check id>`, a `--reason` and
+`--yes`, as section 3 says.
+
+**Comparing in the dashboard.** Find the session by its `vs_` id (`providerRef` in
+`identity:session`). A review's session is not redacted until a decision row supersedes the review,
+so it still shows the document, the selfie and the extracted data. Do not redact it by hand: the job
+redacts it `IDENTITY_REDACT_AFTER_DAYS` after it sees the decision.
+
+**The queue.** The decisions that count are `identity:accept`, `identity:refuse` and
+`identity:correct-name` (a correction that leaves the check in review counts once the next decision
+settles it). A new check recorded over the review with `identity:record` is not a decision. A review
+nobody decides is never redacted at Stripe: it is the operator's queue. To list the reviews of the
+automatic check that wait:
+
+```bash
+sqlite3 -readonly -cmd ".timeout 5000" "$DATA_DIR/legalbody.db" \
+  "SELECT session_id, tenant_id, completed_check_id, datetime(closed_at / 1000, 'unixepoch')
+     FROM identity_sessions
+    WHERE closed_at IS NOT NULL AND completed_check_id IS NOT NULL
+      AND redact_due_at IS NULL AND redacted_at IS NULL
+    ORDER BY closed_at;"
+journalctl -u legalbody-api --since '30 days ago' | grep identity_session_completed | grep needs_review
+```
+
+then `identity:show <tenant_id>` for each. A review decided since the job's last pass stays on the
+list until its next one.
+
+**A confirmed sanctions match during a renewal.** A refusal does not by itself end an earlier pass
+that still counts: the failed row `identity:refuse` writes leaves it counting, unless the review was
+a `watchlist_hit` or a `country_blocked` one. So refuse, read `identity:show`, and while it reads
+`verified`, revoke the pass (`identity:revoke` takes the pass a renewal under way still counts):
+
+```bash
+npm run cli -- identity:refuse <tenantId> --reason-code watchlist_confirmed \
+  --reason '<ids and facts, no name>' --operator <your operator name> \
+  --expect-latest <the review's check id> --yes
+npm run cli -- identity:show <tenantId>
+npm run cli -- identity:revoke <tenantId> --reason-code watchlist_confirmed \
+  --reason '<ids and facts, no name>' --operator <your operator name> \
+  --expect-latest <the refusal's check id> --yes
+```
+
+A `watchlist_hit` review has ended the earlier pass already: after the refusal `identity:show`
+reads `failed`, and `identity:revoke` is refused, since no pass counts. A live company is its own
+decision (`company:revoke`, section 3).
+
+### 0.6 What is never there
+
+- **The document and selfie images, the document number**: never fetched. A read expands the
+  verified outputs and the last report, nothing else.
+- **The address**: Stripe returns the document's address with any read that expands the verified
+  outputs, and its API cannot leave it out. It is never read out of the answer, never stored, never
+  logged.
+- **The birth date**: its one use is the sanctions query, and it is never stored or logged. That
+  query, to OpenSanctions' match API, is the one place it passes; a sandbox without the key sends it
+  nowhere.
+- **Stripe's extracted names**: compared with the typed names, then dropped.
+- **The typed names**: sealed under the PII key in the session row, and only until the session
+  closes.
+- **Stripe's error sentence** (`last_error.reason`): never read; its code only.
+
+## 1. The operator path, when the automatic check is not there
+
+On a box without the Stripe Identity block, during a Stripe outage, or to finish a check the
+automatic path could not (0.4), an operator runs the check by hand, one guardian at a time:
 
 1. **The link.** In the Stripe dashboard, open the guardian-check Verification Flow and copy its
    static link. Append a fresh opaque reference and the person's email address:
@@ -184,6 +523,8 @@ review reason on the row:
 | `name_mismatch`      | You recorded `--name-mismatch`: the guardian's name differs from the document's beyond case and spacing. Ask the guardian, then `identity:correct-name` (section 4). |
 | `duplicate_identity` | Another guardian's current passed check holds the same name and document country. The output lists those check ids (`duplicateOf`), never the name. |
 
+The automatic check writes the same reasons from what it reads (0.5).
+
 To see who holds a duplicate, read the tenant of each listed check, then show it:
 
 ```bash
@@ -330,5 +671,157 @@ and the rest of the record as usual.
 
 A lawful request for the evidence file of a check is answered that none exists: the Stripe session
 is redacted once our record is written, and we hold no document, no photo, no date of birth and no
-document number. What we hold is the record itself: the result, the dates, the document's country
-and type, and the names of record, encrypted.
+document number. The operator redacts within the week; the automatic check asks Stripe
+`IDENTITY_REDACT_AFTER_DAYS` (seven) days after its row, or after the decision of its review, and
+until then the session is at Stripe. What we hold is the record itself: the result, the dates, the
+document's country and type, and the names of record, encrypted.
+
+## 8. First run against Stripe's test mode
+
+A one-off run on a builder's machine, before the testnet box gets the block. It needs the
+test-mode restricted key and flow (0.1, 0.2), the Stripe CLI signed in to the account
+(`stripe login`; `stripe listen` stays in test mode unless told otherwise), and a test wallet. It
+confirms three facts the tests cannot:
+
+1. Stripe accepts both `verified_outputs` and `verified_outputs.dob` as expands in one read.
+2. A redaction cancels a session still waiting for the person.
+3. Stripe's ids are `vs_` (a session) and `vr_` (a report) followed by letters and digits only.
+
+**1. Forward Stripe's events to the local API** (port 8789, the `PORT` default), in a terminal of
+its own, for the whole run:
+
+```bash
+stripe listen --forward-to localhost:8789/webhooks/stripe-identity/sandbox \
+  --events identity.verification_session.canceled,identity.verification_session.created,identity.verification_session.processing,identity.verification_session.redacted,identity.verification_session.requires_input,identity.verification_session.verified
+```
+
+It prints a signing secret (`whsec_…`): the run's `STRIPE_IDENTITY_WEBHOOK_SECRET`. If it stops,
+the job still reads each open session at its next pass.
+
+**2. The run's settings**, in `back/backend/.env.sandbox` (made from `.env.sandbox.example`, see
+`world-sandbox-testing.md`; git-ignored), with `ARC_NETWORK` testnet:
+
+```
+WEB_ORIGIN=http://localhost:3000
+FORMATION_PII_KEY=<openssl rand -base64 32>      # fresh, for this run only
+IDENTITY_NAME_HMAC_KEY=<openssl rand -hex 32>    # fresh, for this run only
+STRIPE_IDENTITY_KEY=rk_test_…
+STRIPE_IDENTITY_FLOW_ID=vf_…                     # the test-mode flow
+STRIPE_IDENTITY_WEBHOOK_SECRET=whsec_…           # the one stripe listen printed
+IDENTITY_SESSION_MAX_PER_DAY=10                  # the run opens three sessions on one account
+IDENTITY_SYNC_EVERY_MS=60000                     # the job every minute
+```
+
+No `OPENSANCTIONS_API_KEY`: no search runs (`watchlist: not_run`). The example file's warning
+against a PII key holds without the Stripe block only: with the block, the box takes the key.
+`/world-id/me` carries its `identity` block only where the legal-body doors are mounted
+(`LEGAL_BODY_FACTORY_ADDRESS` set); without them, `identity:show` reads the same record.
+
+**3. Start the API**, keeping its output:
+
+```bash
+cd back/backend
+npm run api:sandbox 2>&1 | tee ~/identity-first-run.log
+```
+
+The boot prints `⚠ identity check: automatic (stripe, test), offered`. In another terminal, run the
+operator commands on the same file (`.env`, if there is one, fills only what `.env.sandbox` leaves
+unset):
+
+```bash
+cd back/backend
+cli() { npx tsx --env-file=.env.sandbox src/cli/index.ts "$@"; }
+cli scheduler:list      # identity_sessions_sync, with its note
+```
+
+**4. Sign in, and give the account a World ID row.** Sign in with the test wallet: the local
+interface does it (`npm run dev` in `interface/`, which talks to `localhost:8789`), or by hand as
+`back/backend/README.md` says ("Auth"). Copy the `token` of the `auth/verify` answer. The check
+needs a World ID verification of the guardian action: verify with the sandbox World App
+(`world-sandbox-testing.md`), or redeem a waiver code, which a sandbox takes:
+
+```bash
+cli waiver create --note 'identity check first run'    # prints nvw_…
+API=http://localhost:8789
+TOKEN='<the session token>'
+curl -s -X POST "$API/world-id/waiver" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"code":"nvw_…"}'
+```
+
+The names typed below are test names, never a real person's.
+
+**5. A waiting session, redacted (fact 2).** Start a session and leave it waiting:
+
+```bash
+curl -s -X POST "$API/identity-check/sessions" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' -d '{"firstName":"Test","lastName":"Person"}'
+cli identity:session <tenantId>     # shown: open, providerRef: vs_…, lastStatus: requires_input
+stripe post /v1/identity/verification_sessions/<vs_…>/redact
+stripe get /v1/identity/verification_sessions/<vs_…>
+```
+
+The start answers 201 with `sessionId`, `url` and `expiresAt` (`lastStatus` is null until the first
+read). Fact 2 holds when the read shows `"status": "canceled"` beside its `redaction`. The
+`.redacted` event arrives (`identity_webhook_received` with `type`
+`identity.verification_session.redacted`); its read writes no row, and `identity:session` shows
+`redactedAt` once Stripe says `redacted`.
+
+**6. "Document expired", three times.** Start again with the same command: the redacted session
+closes as abandoned (`identity_session_closed`, `reasonCode` `abandoned`) and a new one opens
+(`identity_session_started`). Open the answer's `url` and choose "Document expired" on the test
+page. Then:
+
+```bash
+cli identity:session <tenantId>     # open, lastErrorCode: document_expired, failedAttempts: 1
+curl -s -X POST "$API/identity-check/sync" -H "Authorization: Bearer $TOKEN"
+                                    # {"outcome":"attempt_failed","state":"pending"}
+```
+
+Start again (the same `sessionId` with a fresh `url`, `identity_session_reused`) and fail twice
+more. The third failure closes the session: `identity_session_closed` with `reasonCode`
+`document_expired`. `identity:session` then shows `newest_closed`, `failedAttempts` 3, a
+`completedCheckId` and a `redactDueAt`, and `/world-id/me` reads `"state": "failed"` in its
+`identity` block:
+
+```bash
+curl -s "$API/world-id/me" -H "Authorization: Bearer $TOKEN"
+```
+
+**7. "Verification success" (facts 1 and 3).** Start again, typing the names of test mode's sample
+person if you know them (the dashboard shows a verified test session's outputs), and choose
+"Verification success". The `processing` and `verified` events arrive, then
+`identity_session_completed` with `status` `passed`. A typed name that differs from the sample's
+lands the check in `needs_review` with `name_mismatch`, which is worth seeing too: settle it as 0.5
+says, with `identity:correct-name`, and the job gives the session its redaction date at its next
+pass. Then:
+
+- `identity:session`: `newest_closed`, `lastStatus` `verified`, `dobUnavailable` `false`,
+  `typedNamesHeld` `false`, and a `redactDueAt` seven days after `closedAt` (on the review path,
+  seven days after the job saw your correction);
+- `POST /identity-check/sync`: `{"outcome":"unchanged","state":"verified"}` (no open session);
+- `/world-id/me`: `identity` reads `"required": false`, `"automatic": true`, `"state": "verified"`,
+  with the typed names and the dates;
+- `identity:show`: the passed row, `synthetic` `true`, `watchlist` `not_run`, `operator` null, and
+  its event by `system`.
+
+Fact 1 holds when no `identity_dob_not_read` line came and `dobUnavailable` is `false`. A line means
+Stripe refused the read with the birth date or served none: check that the key has "Recent detailed
+verification results: Read", and note at which step the line came. Fact 3 holds when `providerRef`
+and `reportId` read `vs_` and `vr_` followed by letters and digits only, and no
+`identity_session_unreadable` line came.
+
+The redaction of a finished session falls due `IDENTITY_REDACT_AFTER_DAYS` after its row (one day at
+the least). The job's tests cover it; waiting for it is optional.
+
+**8. What to send back.** The ops lines of the run, which carry ids, states and codes, never a name:
+
+```bash
+grep -E '"opslog":"(identity_|person_screen_error|job_ran|job_failed)' ~/identity-first-run.log
+```
+
+the three facts (each holds, or the line that says it does not), and the `identity:session` outputs
+with `providerRef` and `reportId` cut to their prefix. Never the output of `identity:show` or
+`/world-id/me` (they print the names), a key, the `whsec_` secret, the flow id or a session `url`.
+
+Afterwards, the run's database is disposable (`rm -rf back/backend/data-sandbox`), and so is the
+log.
