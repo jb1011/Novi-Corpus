@@ -38,6 +38,7 @@ import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
 import { SqliteIdentitySessionRepository } from "../../src/persistence/identitySessionRepository";
+import type { PersonScreener, ScreenVerdict } from "../../src/screening/personScreener";
 import { TaskTracker } from "../../src/util/taskTracker";
 import { TEST_PII_RING, recordHuman, worldFor } from "../helpers/customerCompanyFixtures";
 import { openLegalBodyStores } from "../helpers/legalBodyFixtures";
@@ -81,8 +82,13 @@ class FakeProvider implements IdentityProviderClient {
   reads = 0;
   /** An error the next read throws once. */
   failNextRead: Error | undefined;
-  /** While set, every read waits for it: the ack can then be shown to precede the read. */
+  /** While set (`holdReads`), every read waits for it: the ack can then be shown to precede the
+   *  read. The read answers the session as it stood when the read began. */
   hold: Promise<void> | undefined;
+  #release: (() => void) | undefined;
+  /** Reads under way now, and the most there ever were at once. */
+  inflight = 0;
+  maxInflight = 0;
   #count = 0;
   #urls = 0;
 
@@ -104,20 +110,26 @@ class FakeProvider implements IdentityProviderClient {
   }
 
   async retrieveSession(ref: string, opts: { withDob: boolean }): Promise<ProviderSession> {
-    if (this.hold !== undefined) await this.hold;
-    this.reads += 1;
-    const err = this.failNextRead;
-    this.failNextRead = undefined;
-    if (err) throw err;
     const s = this.sessions.get(ref);
-    if (s === undefined) throw new StripeNotFound(404, "Stripe Identity retrieve: HTTP 404");
-    const waiting = s.status === "requires_input" && s.redaction === null;
-    return {
-      ...s,
-      url: waiting ? this.#freshUrl() : null,
-      outputs:
-        s.outputs === null ? null : { ...s.outputs, dob: opts.withDob ? s.outputs.dob : null },
-    };
+    this.inflight += 1;
+    this.maxInflight = Math.max(this.maxInflight, this.inflight);
+    try {
+      if (this.hold !== undefined) await this.hold;
+      this.reads += 1;
+      const err = this.failNextRead;
+      this.failNextRead = undefined;
+      if (err) throw err;
+      if (s === undefined) throw new StripeNotFound(404, "Stripe Identity retrieve: HTTP 404");
+      const waiting = s.status === "requires_input" && s.redaction === null;
+      return {
+        ...s,
+        url: waiting ? this.#freshUrl() : null,
+        outputs:
+          s.outputs === null ? null : { ...s.outputs, dob: opts.withDob ? s.outputs.dob : null },
+      };
+    } finally {
+      this.inflight -= 1;
+    }
   }
 
   async cancelSession(ref: string): Promise<void> {
@@ -126,6 +138,18 @@ class FakeProvider implements IdentityProviderClient {
 
   async redactSession(ref: string): Promise<void> {
     this.update(ref, { redaction: "processing" });
+  }
+
+  /** Every read from now on waits until `releaseReads`. */
+  holdReads(): void {
+    this.hold = new Promise<void>((resolve) => {
+      this.#release = resolve;
+    });
+  }
+
+  /** Lets the held reads go; also called after each test, so a failed assertion cannot hang it. */
+  releaseReads(): void {
+    this.#release?.();
   }
 
   #freshUrl(): string {
@@ -153,6 +177,16 @@ class FakeProvider implements IdentityProviderClient {
         selfieStatus: "verified",
       },
     });
+  }
+}
+
+/** The sanctions screen, in memory: it counts the people it is asked about, and clears them. */
+class FakeScreener implements PersonScreener {
+  screens = 0;
+
+  async screenPerson(): Promise<ScreenVerdict> {
+    this.screens += 1;
+    return "clear";
   }
 }
 
@@ -206,7 +240,8 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Every deferred read is joined before the database closes.
+  // Every deferred read is joined before the database closes, a held one let go first.
+  provider.releaseReads();
   await tasks.settled();
   vi.restoreAllMocks();
   db.close();
@@ -625,18 +660,76 @@ describe("the Stripe Identity webhook: the wake-up", () => {
     const app = makeApp();
     const { sessionId, ref } = await openSession();
     provider.verify(ref);
-    let release: () => void = () => {};
-    provider.hold = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    provider.holdReads();
     const res = await deliver(app, event({ ref, reference: sessionId }));
     expect(res.status).toBe(200);
     expect(tasks.size).toBe(1);
     expect(provider.reads).toBe(0);
     expect(sessions.byId(sessionId)?.closedAt).toBeNull();
-    release();
+    provider.releaseReads();
     await tasks.settled();
     expect(sessions.byId(sessionId)?.closedAt).not.toBeNull();
+  });
+
+  test("two events for one session delivered back to back run one read at a time, and the screener is called once for one verified result", async () => {
+    const screener = new FakeScreener();
+    identityCheck.screener = screener;
+    const app = makeApp();
+    const { sessionId, ref } = await openSession();
+    provider.verify(ref);
+    provider.holdReads();
+    // Stripe's pair for one result, moments apart: the second arrives while the first is read.
+    for (const [n, type] of ["processing", "verified"].entries()) {
+      const body = event({
+        id: `evt_test_${n}`,
+        type: `identity.verification_session.${type}`,
+        ref,
+        reference: sessionId,
+      });
+      expect((await deliver(app, body)).status, type).toBe(200);
+    }
+    expect(provider.inflight).toBe(1);
+    expect(tasks.size).toBe(1);
+    provider.releaseReads();
+    await tasks.settled();
+    expect(provider.maxInflight).toBe(1);
+    // The read that followed found the session completed, and read nothing.
+    expect(provider.reads).toBe(1);
+    expect(screener.screens).toBe(1);
+    expect(sessions.byId(sessionId)?.closedAt).not.toBeNull();
+    expect(identityState(identityCheck.identity.repo, GUARDIAN, now, "sandbox")).toBe("verified");
+    expect(
+      identityCheck.identity.repo.list(GUARDIAN).filter((r) => r.status === "passed"),
+    ).toHaveLength(1);
+    expect(opsLines("identity_webhook_received").map((l) => l.eventId)).toEqual([
+      "evt_test_0",
+      "evt_test_1",
+    ]);
+  });
+
+  test("an event that arrives during a read is not lost: one more read follows it, and sees the change it told of", async () => {
+    const app = makeApp();
+    const { sessionId, ref } = await openSession();
+    provider.update(ref, { status: "processing" });
+    provider.holdReads();
+    const processing = event({
+      id: "evt_test_0",
+      type: "identity.verification_session.processing",
+      ref,
+      reference: sessionId,
+    });
+    expect((await deliver(app, processing)).status).toBe(200);
+    // The first read began on a session still being processed; the result lands during it.
+    provider.verify(ref);
+    const verified = event({ id: "evt_test_1", ref, reference: sessionId });
+    expect((await deliver(app, verified)).status).toBe(200);
+    expect(provider.inflight).toBe(1);
+    provider.releaseReads();
+    await tasks.settled();
+    expect(provider.maxInflight).toBe(1);
+    expect(provider.reads).toBe(2);
+    expect(sessions.byId(sessionId)?.closedAt).not.toBeNull();
+    expect(identityState(identityCheck.identity.repo, GUARDIAN, now, "sandbox")).toBe("verified");
   });
 
   test("the event's own claims are never read: a verified event for a session still waiting at the provider completes nothing", async () => {

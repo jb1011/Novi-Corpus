@@ -141,6 +141,12 @@ async function readCappedBody(c: Context, max: number): Promise<string | undefin
   }
 }
 
+/** One event's wake-up, as a coalesced read batches it: ids only, never the payload. */
+interface WakeUp {
+  eventId: string;
+  type: string;
+}
+
 /** What a failed read is logged as: the refusal's code, or the error's class, never a message. */
 const failureOf = (e: unknown): string =>
   e instanceof ApiError ? e.code : e instanceof Error ? e.name : "unknown";
@@ -245,18 +251,33 @@ export function mountStripeIdentityWebhookRoutes(
     //       is harmless. A failed read is the service's to log in full; here it is one line with
     //       its code, caught, so the tracker's own failure line (which carries an error's
     //       message) is never reached. The sweep reads the session again.
-    check.tasks.track(async () => {
-      try {
-        await syncSession(check, sessionId);
-      } catch (e) {
-        opsLog("identity_webhook_sync_failed", {
-          level: "warn",
-          ...ids,
-          sessionId,
-          failure: failureOf(e),
-        });
-      }
-    });
+    //
+    //       COALESCED per session (ruling R25, the doola receiver's M5). Stripe sends
+    //       `processing` then `verified` within moments, and two reads at once would each read
+    //       the birth date and screen the person. So one read runs at a time per session: an
+    //       event that arrives while one runs joins one further read after it, never lost (that
+    //       read may have begun before the change the event tells of), and every event arriving
+    //       meanwhile joins the same one. After a completion that further read finds the session
+    //       closed and reads nothing.
+    check.tasks.trackCoalesced<WakeUp>(
+      `identity_session:${sessionId}`,
+      { eventId: event.eventId, type: event.type },
+      async (batch) => {
+        // The newest wake-up names the read in its ops line: it is the one a stale read missed.
+        const lead = batch[batch.length - 1] ?? { eventId: event.eventId, type: event.type };
+        try {
+          await syncSession(check, sessionId);
+        } catch (e) {
+          opsLog("identity_webhook_sync_failed", {
+            level: "warn",
+            environment,
+            ...lead,
+            sessionId,
+            failure: failureOf(e),
+          });
+        }
+      },
+    );
     return c.json(OK_BODY, 200);
   });
 }
