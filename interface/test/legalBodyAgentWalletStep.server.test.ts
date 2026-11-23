@@ -15,7 +15,7 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-const calls = vi.hoisted(() => ({ allowedWrites: 0, chainReads: 0, effects: 0 }));
+const calls = vi.hoisted(() => ({ allowedWrites: 0, chainReads: 0, effects: 0, signatures: 0 }));
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
@@ -49,10 +49,21 @@ vi.mock("wagmi", async (importOriginal) => {
     simulateContract: read,
     waitForTransactionReceipt: read,
   };
+  /** The browser wallet's signature, counted: rendering must never ask for one. */
+  const signTypedDataAsync = async () => {
+    calls.signatures += 1;
+    throw new Error("not in this test");
+  };
   return {
     ...(await importOriginal<typeof import("wagmi")>()),
     usePublicClient: () => client,
-    useConnection: () => ({ address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", chainId: 5042002 }),
+    // The guardian selected, and a second account of the same wallet connected to the site.
+    useConnection: () => ({
+      address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+      addresses: ["0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"],
+      chainId: 5042002,
+    }),
+    useSignTypedData: () => ({ signTypedDataAsync }),
   };
 });
 
@@ -158,6 +169,7 @@ beforeEach(() => {
   calls.allowedWrites = 0;
   calls.chainReads = 0;
   calls.effects = 0;
+  calls.signatures = 0;
 });
 
 afterEach(() => {
@@ -191,6 +203,12 @@ describe("the browser branch, before any click", () => {
     expect(text(m)).not.toContain(AW.noKeyCommand);
   });
 
+  test("no account button before a choice, though another account is connected", () => {
+    const m = markup(kit(NEEDED));
+    expect(text(m)).not.toContain(AW.otherAccountTitle);
+    expect(text(m)).not.toContain("Sign with 0x");
+  });
+
   test("rendering, effects included, reads no chain, opens no wallet and remembers nothing", () => {
     const k = kit(NEEDED);
     markup(k);
@@ -198,6 +216,7 @@ describe("the browser branch, before any click", () => {
     expect(calls.effects).toBeGreaterThan(0);
     expect(calls.allowedWrites).toBe(0);
     expect(calls.chainReads).toBe(0);
+    expect(calls.signatures).toBe(0);
     expect(k.refreshAgentWallet).not.toHaveBeenCalled();
     expect(k.remember).not.toHaveBeenCalled();
     expect(k.startAnother).not.toHaveBeenCalled();
@@ -265,7 +284,7 @@ describe("the step's source", () => {
     "utf8",
   );
 
-  test("the one way to the wallet is the allowlist: no signature, no other write, no key", () => {
+  test("the one way to the wallet is the allowlist: no other write, no key", () => {
     expect(code).toContain("useAllowedWrite()");
     for (const reach of [
       "useWriteContract",
@@ -273,13 +292,28 @@ describe("the step's source", () => {
       "useSendTransaction",
       "sendTransaction",
       "sendAllowedCall",
-      "useSignTypedData",
-      "signTypedData",
       "signMessage",
       "apiKey",
       "x-api-key",
     ])
       expect(code).not.toContain(reach);
+  });
+
+  test("the one signature asked of the browser wallet: the step's own message, from the agent's account named", () => {
+    expect(code).toContain("useSignTypedData()");
+    // One call site, and it names the account: never the guardian's selected account by default.
+    expect(code.match(/signTypedDataAsync\(/g)).toHaveLength(1);
+    expect(code).toMatch(/signTypedDataAsync\(\{\s*\.\.\.walletSetTypedData\([^)]*\),\s*account\s*\}\)/);
+    // The offered accounts never include the guardian or the identity's owner.
+    expect(code).toContain("browserAgentAccounts(");
+    // The browser's signature fills the field: the send parses and checks it as a pasted one.
+    const signAt = code.indexOf("signTypedDataAsync({");
+    const sendAt = code.indexOf("await send(");
+    expect(signAt).toBeGreaterThan(0);
+    expect(code.slice(signAt, signAt + 600)).toContain("setSignatureDraft(");
+    expect(code.slice(code.lastIndexOf("async function onSend", sendAt), sendAt)).toContain(
+      "parsePastedSignature(signatureDraft)",
+    );
   });
 
   test("the page never makes a key", () => {
@@ -299,6 +333,8 @@ describe("the step's source", () => {
     const simulate = code.lastIndexOf("simulateContract(", send);
     expect(preflight).toBeGreaterThan(0);
     expect(simulate).toBeGreaterThan(preflight);
+    // The owner the message was prepared for is part of that check (ruling R13).
+    expect(code.slice(preflight, simulate)).toContain("preparedFor: message.owner");
     expect(code.slice(simulate, send)).toContain("walletSetSendable(");
     expect(code).not.toContain("setTimeout");
     expect(code).not.toContain("setInterval");

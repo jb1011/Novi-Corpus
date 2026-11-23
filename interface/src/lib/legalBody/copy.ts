@@ -560,8 +560,18 @@ export const LEGAL_BODY_COPY = {
     domainMismatch:
       "The registry's signing domain is not the one this deployment names, so no message was prepared.",
     declined: "Your wallet did not send the transaction, so nothing was written.",
+    /** `{minutes}` is the receipt's wait, from `REGISTER_RECEIPT_TIMEOUT_MS`. */
     noReceipt:
-      "No receipt came back within 3 minutes, so whether the wallet was written is not known yet. Look at the transaction, then check again.",
+      "No receipt came back within {minutes} minutes, so whether the wallet was written is not known yet. Look at the transaction, then check again. If it is not on the chain, prepare a new message.",
+    ownerChanged:
+      "The identity's owner changed since the message was prepared. Prepare a new message.",
+    /** The one-click way to sign, when the agent's key is another account of the browser wallet. */
+    otherAccountTitle: "Sign with another account of your browser wallet",
+    otherAccountHow:
+      "In your wallet, connect the agent's account to this site as well, and keep your own account selected.",
+    otherAccountSign: "Sign with {address}",
+    otherAccountDeclined:
+      "Your wallet did not sign with that account. You can paste the signature instead.",
     elsewhere:
       "This identity is owned by another key. That key must write the agent's wallet on the registry (setAgentWallet), with a signature of the new wallet that is at most five minutes old. This page checks again by itself.",
     checkAgain: "Check again",

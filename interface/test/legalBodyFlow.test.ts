@@ -732,6 +732,28 @@ describe("deriveLegalBodyPhase: the agent's wallet, between the identity and the
         deriveLegalBodyPhase(drafted({ ownerChoice, sessionAddress: lower(GUARDIAN), agentWallet: GUARDIAN })),
       ).toStrictEqual(needed);
     });
+
+    // Ruling R9: the gate's default is the closed side. Only an address that is not the
+    // guardian's opens the link; a value the page does not recognise reads as unreadable.
+    test.each([
+      ["undefined", undefined],
+      ["text that is not an address", "garbage"],
+      ["an address cut short", "0x1234"],
+      ["an address one digit long", `${AGENT_WALLET}0`],
+      ["an address without its 0x", AGENT_WALLET.slice(2)],
+      ["a number", 42],
+      ["an object", { address: AGENT_WALLET }],
+    ])("a read this page does not recognise (%s): unreadable, never the link", (_name, odd) => {
+      expect(
+        deriveLegalBodyPhase(drafted({ ownerChoice, agentWallet: odd as unknown as AgentWalletRead })),
+      ).toStrictEqual({ phase: "wallet", walletStep: "unreadable", branch });
+    });
+
+    test("the zero address is no wallet: needed, never the link", () => {
+      expect(
+        deriveLegalBodyPhase(drafted({ ownerChoice, agentWallet: `0x${"0".repeat(40)}` as AgentWalletRead })),
+      ).toStrictEqual(needed);
+    });
   });
 
   const EVERY_READ: (AgentWalletRead | null)[] = [

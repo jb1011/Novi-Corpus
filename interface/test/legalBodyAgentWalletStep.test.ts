@@ -39,17 +39,20 @@ import {
   agentWalletSendPreflight,
   agentWalletSignatureCheck,
   agentWalletStepView,
+  browserAgentAccounts,
   chainClockAt,
   chainNowSeconds,
   erc1271Accepts,
   walletAddressSentence,
   walletCallRefusalSentence,
+  walletNoReceiptLine,
   walletPreflightSentence,
   walletSendFailureLines,
   walletSignatureSentence,
   type AgentWalletStage,
 } from "@/lib/legalBody/agentWalletStep";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
+import { REGISTER_RECEIPT_TIMEOUT_MS } from "@/lib/legalBody/identity";
 
 const AW = LEGAL_BODY_COPY.agentWallet;
 
@@ -77,6 +80,7 @@ const CONTRACT_CODE = "0x6080604052" as Hex;
 const MARKER = "6492".repeat(16);
 
 const lower = (a: string) => a.toLowerCase() as Address;
+const upper = (a: string) => `0x${a.slice(2).toUpperCase()}` as Address;
 
 const message = (over: Partial<WalletSetMessage> = {}): WalletSetMessage => ({
   agentId: AGENT_ID,
@@ -94,6 +98,11 @@ function viewStrings(v: ReturnType<typeof agentWalletStepView>): string[] {
   if (v.sign) out.push(v.sign.intro, v.sign.heading, v.sign.ask, v.sign.commandIntro, v.sign.command);
   if (v.countdown) out.push(v.countdown);
   if (v.status) out.push(v.status.text);
+  if (v.otherAccounts) {
+    out.push(v.otherAccounts.title, ...v.otherAccounts.accounts.map((a) => a.label));
+    if (v.otherAccounts.how) out.push(v.otherAccounts.how);
+    if (v.otherAccounts.declined) out.push(v.otherAccounts.declined);
+  }
   return out;
 }
 
@@ -234,6 +243,78 @@ describe("agentWalletSendPreflight", () => {
     expect(
       agentWalletSendPreflight({ ownerOf: GUARDIAN, connected: null, deadline, nowSeconds: at(0) }),
     ).toEqual({ ok: false, reason: "not_this_wallet" });
+  });
+
+  describe("the owner the message was prepared for (ruling R13)", () => {
+    it("the same owner, in any letter case: the send goes on", () => {
+      for (const preparedFor of [GUARDIAN, lower(GUARDIAN), upper(GUARDIAN)])
+        expect(agentWalletSendPreflight({ ...base, preparedFor, nowSeconds: at(200) })).toEqual({ ok: true });
+    });
+
+    it("the identity's owner now is another key: owner_changed, even when that key is connected", () => {
+      expect(
+        agentWalletSendPreflight({ ...base, ownerOf: OTHER, connected: OTHER, preparedFor: GUARDIAN, nowSeconds: at(200) }),
+      ).toEqual({ ok: false, reason: "owner_changed" });
+    });
+
+    it("owner_changed is said before the wallet and the time; no identity is said before it", () => {
+      expect(
+        agentWalletSendPreflight({ ownerOf: OTHER, connected: GUARDIAN, deadline, preparedFor: GUARDIAN, nowSeconds: at(0) }),
+      ).toEqual({ ok: false, reason: "owner_changed" });
+      expect(
+        agentWalletSendPreflight({ ownerOf: "none", connected: GUARDIAN, deadline, preparedFor: GUARDIAN, nowSeconds: at(200) }),
+      ).toEqual({ ok: false, reason: "no_identity" });
+    });
+
+    it("its sentence asks for a new message", () => {
+      expect(AW.ownerChanged).toBe(
+        "The identity's owner changed since the message was prepared. Prepare a new message.",
+      );
+      expect(walletPreflightSentence("owner_changed", { agentId: AGENT_ID, environment: "sandbox" })).toBe(
+        AW.ownerChanged,
+      );
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The other accounts of the browser wallet
+// ---------------------------------------------------------------------------------------------
+
+describe("browserAgentAccounts: the connected accounts that could sign as the agent's wallet", () => {
+  it("no accounts known: none", () => {
+    expect(browserAgentAccounts(undefined, GUARDIAN, GUARDIAN)).toEqual([]);
+    expect(browserAgentAccounts([], GUARDIAN, "none")).toEqual([]);
+  });
+
+  it("only the guardian connected: none, in any letter case", () => {
+    expect(browserAgentAccounts([GUARDIAN], GUARDIAN, GUARDIAN)).toEqual([]);
+    expect(browserAgentAccounts([lower(GUARDIAN)], GUARDIAN, "none")).toEqual([]);
+    expect(browserAgentAccounts([GUARDIAN], lower(GUARDIAN), "none")).toEqual([]);
+  });
+
+  it("the guardian and one other, in any letter case: the other, checksummed", () => {
+    expect(browserAgentAccounts([lower(GUARDIAN), lower(AGENT)], GUARDIAN, GUARDIAN)).toEqual([AGENT]);
+    expect(browserAgentAccounts([upper(AGENT), upper(GUARDIAN)], lower(GUARDIAN), GUARDIAN)).toEqual([AGENT]);
+  });
+
+  it("the identity's owner is never offered, in any letter case", () => {
+    expect(browserAgentAccounts([GUARDIAN, OTHER, AGENT], GUARDIAN, OTHER)).toEqual([AGENT]);
+    expect(browserAgentAccounts([GUARDIAN, lower(OTHER), AGENT], GUARDIAN, upper(OTHER))).toEqual([AGENT]);
+    // No identity now: only the guardian is left out.
+    expect(browserAgentAccounts([GUARDIAN, OTHER, AGENT], GUARDIAN, "none")).toEqual([OTHER, AGENT]);
+  });
+
+  it("one account once, whatever its letter case; the wallet's order kept", () => {
+    expect(browserAgentAccounts([GUARDIAN, OTHER, lower(AGENT), lower(OTHER), AGENT], GUARDIAN, GUARDIAN)).toEqual([
+      OTHER,
+      AGENT,
+    ]);
+  });
+
+  it("a value that is not an address, and the zero address, are never offered", () => {
+    const odd = ["", "0x1234", "not an address", `0x${"0".repeat(40)}`, undefined, 42] as unknown as Address[];
+    expect(browserAgentAccounts([...odd, AGENT], GUARDIAN, GUARDIAN)).toEqual([AGENT]);
   });
 });
 
@@ -673,12 +754,140 @@ describe("agentWalletStepView", () => {
     const v = agentWalletStepView({ ...base, stage: { at }, choice: "provider" });
     expect(v.status).toEqual({ text, tone: "warn", busy: false });
     expect(v.button).toBe("prepare");
+    expect(v.secondButton).toBeNull();
     expect(v.addressField).toBe(true);
     expect(v.signatureField).toBe(false);
     expect(v.choices.find((c) => c.chosen)?.choice).toBe("provider");
   });
 
+  it("one button everywhere else: no second button", () => {
+    for (const stage of [{ at: "choose" }, { at: "address", choice: "has_key" }, prepared, { at: "sending" }] as AgentWalletStage[])
+      expect(agentWalletStepView({ ...base, stage, choice: "has_key", secondsLeft: 200 }).secondButton).toBeNull();
+    const hash = `0x${"cd".repeat(32)}` as Hex;
+    expect(agentWalletStepView({ ...base, stage: { at: "waiting", hash }, choice: "has_key" }).secondButton).toBeNull();
+  });
+
+  describe("no receipt within the wait (ruling R12)", () => {
+    const hash = `0x${"cd".repeat(32)}` as Hex;
+    const stage: AgentWalletStage = { at: "no_receipt", hash };
+
+    it("says so, and offers Check again with Prepare the message beside it", () => {
+      const v = agentWalletStepView({ ...base, stage, choice: "has_key" });
+      expect(v.status).toEqual({ text: walletNoReceiptLine(), tone: "warn", busy: false });
+      expect(v.button).toBe("check_again");
+      expect(v.secondButton).toBe("prepare");
+      // Back to the message flow: the card chosen and its address, no message and no send.
+      expect(v.choices.find((c) => c.chosen)?.choice).toBe("has_key");
+      expect(v.addressField).toBe(true);
+      expect(v.sign).toBeNull();
+      expect(v.signatureField).toBe(false);
+    });
+
+    it("the wait's minutes come from the receipt timeout, so the two cannot drift", () => {
+      expect(AW.noReceipt).toContain("{minutes}");
+      expect(REGISTER_RECEIPT_TIMEOUT_MS).toBe(180_000);
+      expect(walletNoReceiptLine()).toBe(
+        fillCopy(AW.noReceipt, { minutes: String(REGISTER_RECEIPT_TIMEOUT_MS / 60_000) }),
+      );
+      expect(walletNoReceiptLine()).toBe(
+        "No receipt came back within 3 minutes, so whether the wallet was written is not known yet. Look at the transaction, then check again. If it is not on the chain, prepare a new message.",
+      );
+      expect(walletNoReceiptLine()).not.toMatch(/\{[a-zA-Z]+\}/);
+    });
+
+    it("the paste branch never shows it", () => {
+      const v = agentWalletStepView({ ...base, branch: "paste", stage, choice: "has_key" });
+      expect(v.panel).toBe("elsewhere");
+      expect(v.secondButton).toBeNull();
+    });
+  });
+
+  it("the owner changed since the message (ruling R13): said, the message gone, a new one offered", () => {
+    const v = agentWalletStepView({ ...base, stage: { at: "owner_changed" }, choice: "has_key" });
+    expect(v.status).toEqual({ text: AW.ownerChanged, tone: "warn", busy: false });
+    expect(v.button).toBe("prepare");
+    expect(v.addressField).toBe(true);
+    expect(v.sign).toBeNull();
+    expect(v.signatureField).toBe(false);
+    expect(v.choices.find((c) => c.chosen)?.choice).toBe("has_key");
+  });
+
+  describe("signing with another account of the browser wallet", () => {
+    const onAddress: AgentWalletStage = { at: "address", choice: "has_key" };
+
+    it("one button per account on the address of 'My agent has its own key', each naming its account", () => {
+      const v = agentWalletStepView({ ...base, stage: onAddress, browserAccounts: [AGENT, OTHER] });
+      expect(v.otherAccounts).toEqual({
+        title: AW.otherAccountTitle,
+        how: null,
+        accounts: [
+          { account: AGENT, label: fillCopy(AW.otherAccountSign, { address: AGENT }) },
+          { account: OTHER, label: fillCopy(AW.otherAccountSign, { address: OTHER }) },
+        ],
+        declined: null,
+      });
+      expect(v.otherAccounts?.accounts[0].label).toBe(`Sign with ${AGENT}`);
+      // The paste way stays: the address field and Prepare the message.
+      expect(v.addressField).toBe(true);
+      expect(v.button).toBe("prepare");
+    });
+
+    it("no other account connected: only how to connect one, no button", () => {
+      for (const browserAccounts of [[], undefined]) {
+        const v = agentWalletStepView({ ...base, stage: onAddress, browserAccounts });
+        expect(v.otherAccounts).toEqual({
+          title: AW.otherAccountTitle,
+          how: AW.otherAccountHow,
+          accounts: [],
+          declined: null,
+        });
+      }
+    });
+
+    it.each(["no_key", "provider"] as const)("never on %s: that key or wallet signs elsewhere", (choice) => {
+      const v = agentWalletStepView({ ...base, stage: { at: "address", choice }, browserAccounts: [AGENT] });
+      expect(v.otherAccounts).toBeNull();
+    });
+
+    it("never before a choice, never while the wallet is open or the registry awaited, never on the paste branch", () => {
+      const hash = `0x${"cd".repeat(32)}` as Hex;
+      for (const stage of [{ at: "choose" }, { at: "sending" }, { at: "waiting", hash }] as AgentWalletStage[])
+        expect(
+          agentWalletStepView({ ...base, stage, choice: "has_key", browserAccounts: [AGENT] }).otherAccounts,
+        ).toBeNull();
+      expect(
+        agentWalletStepView({ ...base, branch: "paste", stage: onAddress, browserAccounts: [AGENT] }).otherAccounts,
+      ).toBeNull();
+      expect(
+        agentWalletStepView({ ...base, walletStep: "unreadable", stage: onAddress, browserAccounts: [AGENT] })
+          .otherAccounts,
+      ).toBeNull();
+    });
+
+    it("after a decline: the sentence, and the paste field and the send still in place", () => {
+      const v = agentWalletStepView({
+        ...base,
+        stage: prepared,
+        choice: "has_key",
+        secondsLeft: 200,
+        browserAccounts: [AGENT],
+        accountDeclined: true,
+      });
+      expect(v.otherAccounts?.declined).toBe(AW.otherAccountDeclined);
+      expect(v.otherAccounts?.accounts.map((a) => a.account)).toEqual([AGENT]);
+      expect(v.signatureField).toBe(true);
+      expect(v.sign).not.toBeNull();
+      expect(v.button).toBe("send");
+    });
+
+    it("no decline said when none happened", () => {
+      const v = agentWalletStepView({ ...base, stage: prepared, choice: "has_key", secondsLeft: 200, browserAccounts: [AGENT] });
+      expect(v.otherAccounts?.declined).toBeNull();
+    });
+  });
+
   it("no template is left half-filled in any view", () => {
+    const hash = `0x${"cd".repeat(32)}` as Hex;
     const stages: AgentWalletStage[] = [
       { at: "choose" },
       { at: "address", choice: "has_key" },
@@ -686,26 +895,32 @@ describe("agentWalletStepView", () => {
       { at: "address", choice: "provider" },
       prepared,
       { at: "sending" },
-      { at: "waiting", hash: `0x${"cd".repeat(32)}` },
+      { at: "waiting", hash },
+      { at: "no_receipt", hash },
       { at: "reverted" },
       { at: "would_revert" },
+      { at: "owner_changed" },
     ];
     for (const environment of ["sandbox", "production"] as const)
       for (const branch of ["browser", "paste"] as const)
         for (const walletStep of ["checking", "unreadable", "needed"] as const)
           for (const stage of stages)
-            for (const secondsLeft of [null, 0, 200]) {
-              const v = agentWalletStepView({
-                ...base,
-                walletStep,
-                branch,
-                stage,
-                secondsLeft,
-                environment,
-                choice: "provider",
-              });
-              for (const s of viewStrings(v)) expect(s).not.toMatch(/\{[a-zA-Z]+\}/);
-            }
+            for (const secondsLeft of [null, 0, 200])
+              for (const choice of ["has_key", "provider"] as const)
+                for (const browserAccounts of [[], [AGENT, OTHER]]) {
+                  const v = agentWalletStepView({
+                    ...base,
+                    walletStep,
+                    branch,
+                    stage,
+                    secondsLeft,
+                    environment,
+                    choice,
+                    browserAccounts,
+                    accountDeclined: true,
+                  });
+                  for (const s of viewStrings(v)) expect(s).not.toMatch(/\{[a-zA-Z]+\}/);
+                }
   });
 });
 

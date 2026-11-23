@@ -8,7 +8,8 @@
  * Here: the chain's time as the step estimates it (`chainClockAt`, `chainNowSeconds`, ruling R1);
  * the message prepared from what the chain answered (`agentWalletPrepare`); what a pasted signature
  * is worth once the chain is asked (`agentWalletSignatureCheck`); the check before any wallet prompt
- * (`agentWalletSendPreflight`); what the screen shows for a derivation and a stage
+ * (`agentWalletSendPreflight`); the other accounts of the browser wallet that could sign as the
+ * agent's wallet (`browserAgentAccounts`); what the screen shows for a derivation and a stage
  * (`agentWalletStepView`); the line on the link screens (`agentWalletLineText`); and the sentence of
  * every refusal.
  *
@@ -18,6 +19,7 @@
 import type { Address, Hex } from "@/lib/api/types";
 import {
   agentWalletStanding,
+  parseAgentWalletAddress,
   walletSetDeadline,
   walletSetSecondsLeft,
   walletSetSendable,
@@ -32,7 +34,14 @@ import {
 import { walletKindOf } from "./chain";
 import { LEGAL_BODY_COPY, fillCopy } from "./copy";
 import { sameAddress, type OwnerBranch, type WalletStep } from "./flow";
-import { isRevert, networkName, noGasLine, registerSendFailure, type OwnerRead } from "./identity";
+import {
+  REGISTER_RECEIPT_TIMEOUT_MS,
+  isRevert,
+  networkName,
+  noGasLine,
+  registerSendFailure,
+  type OwnerRead,
+} from "./identity";
 
 const AW = LEGAL_BODY_COPY.agentWallet;
 
@@ -55,8 +64,13 @@ export type AgentWalletStage =
   | { at: "message"; message: WalletSetMessage; domain: RegistryDomain }
   | { at: "sending" }
   | { at: "waiting"; hash: Hex }
+  /** No receipt within `REGISTER_RECEIPT_TIMEOUT_MS`: the transaction may still land, or was
+   *  dropped. Check again, or a new message (ruling R12). */
+  | { at: "no_receipt"; hash: Hex }
   | { at: "reverted" }
-  | { at: "would_revert" };
+  | { at: "would_revert" }
+  /** The identity's owner at the send is not the one the message names: nothing sent (ruling R13). */
+  | { at: "owner_changed" };
 
 /** The registry's function, as the owning key calls it. Data, not a sentence. */
 export const SET_AGENT_WALLET_FUNCTION = "setAgentWallet(uint256,address,uint256,bytes)";
@@ -220,24 +234,56 @@ export async function agentWalletSignatureCheck(p: {
 
 export type AgentWalletSendPreflight =
   | { ok: true }
-  | { ok: false; reason: "no_identity" | "not_this_wallet" | "expired" };
+  | { ok: false; reason: "no_identity" | "owner_changed" | "not_this_wallet" | "expired" };
 
 /**
  * Before any wallet prompt, in this order: the identity's owner now (none: no identity with this
- * id); the wallet connected, which must be that owner, in any letter case; and the time left, at
- * least 30 whole seconds (`walletSetSendable`). `nowSeconds` is the step's estimate of the chain's
- * time (`chainNowSeconds`).
+ * id); at the send, that owner against the one the message was prepared for (`preparedFor`), since
+ * the signature names its owner and holds for no other (ruling R13); the wallet connected, which
+ * must be that owner, in any letter case; and the time left, at least 30 whole seconds
+ * (`walletSetSendable`). `nowSeconds` is the step's estimate of the chain's time
+ * (`chainNowSeconds`). At preparation there is no message yet, so no `preparedFor`.
  */
 export function agentWalletSendPreflight(p: {
   ownerOf: Address | "none";
   connected: Address | null;
   deadline: bigint;
   nowSeconds: number;
+  preparedFor?: Address;
 }): AgentWalletSendPreflight {
   if (p.ownerOf === "none") return { ok: false, reason: "no_identity" };
+  if (p.preparedFor !== undefined && !sameAddress(p.ownerOf, p.preparedFor))
+    return { ok: false, reason: "owner_changed" };
   if (!sameAddress(p.connected, p.ownerOf)) return { ok: false, reason: "not_this_wallet" };
   if (!walletSetSendable(p.deadline, p.nowSeconds)) return { ok: false, reason: "expired" };
   return { ok: true };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The other accounts of the browser wallet
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The accounts of the browser wallet connected to this site that could sign as the agent's wallet:
+ * each one that is an address (`parseAgentWalletAddress`: never the zero address, never the
+ * guardian's), never the identity's owner, in any letter case; each once, checksummed, in the
+ * wallet's order. Empty when the wallet names no accounts (`undefined` while none is connected).
+ */
+export function browserAgentAccounts(
+  addresses: readonly Address[] | undefined,
+  guardian: Address,
+  ownerOf: Address | "none",
+): Address[] {
+  const out: Address[] = [];
+  for (const raw of addresses ?? []) {
+    if (typeof raw !== "string") continue;
+    const account = parseAgentWalletAddress(raw, guardian);
+    if (typeof account === "object") continue;
+    if (ownerOf !== "none" && sameAddress(account, ownerOf)) continue;
+    if (out.some((a) => sameAddress(a, account))) continue;
+    out.push(account);
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -257,6 +303,15 @@ export type AgentWalletStepView = {
   /** How to make a key where the agent runs, for "My agent has no key yet". Never made here. */
   noKey: { ask: string; commandIntro: string; command: string } | null;
   addressField: boolean;
+  /** The one-click way to sign, for "My agent has its own key" while its address field shows: a
+   *  button per other account of the browser wallet, or how to connect one when there is none; and
+   *  the wallet's no, said, with the paste field still in place. */
+  otherAccounts: {
+    title: string;
+    how: string | null;
+    accounts: { account: Address; label: string }[];
+    declined: string | null;
+  } | null;
   /** The ways to sign the prepared message, while it can still be sent. */
   sign: { intro: string; heading: string; ask: string; commandIntro: string; command: string } | null;
   countdown: string | null;
@@ -264,8 +319,11 @@ export type AgentWalletStepView = {
   /** Where the step is, when it says so: the other key's part, the wallet open, the registry
    *  awaited, the message expired, a refusal. */
   status: { text: string; tone: "info" | "warn"; busy: boolean } | null;
-  /** The one button: Try again, Check again, Prepare the message, or the send. */
+  /** The main button: Try again, Check again, Prepare the message, or the send. */
   button: AgentWalletButton | null;
+  /** A second button beside it, where two are offered: after no receipt, Prepare the message
+   *  beside Check again. */
+  secondButton: AgentWalletButton | null;
 };
 
 const CHOICES: readonly AgentWalletChoice[] = ["has_key", "no_key", "provider"];
@@ -301,12 +359,28 @@ const NOTHING = {
   choices: [],
   noKey: null,
   addressField: false,
+  otherAccounts: null,
   sign: null,
   countdown: null,
   signatureField: false,
   status: null,
   button: null,
+  secondButton: null,
 } as const satisfies Omit<AgentWalletStepView, "title" | "lines" | "panel">;
+
+/** The one-click way's words: a button per account, or how to connect one; the decline, if any. */
+function otherAccountsView(
+  accounts: readonly Address[] | undefined,
+  declined: boolean,
+): NonNullable<AgentWalletStepView["otherAccounts"]> {
+  const list = accounts ?? [];
+  return {
+    title: AW.otherAccountTitle,
+    how: list.length === 0 ? AW.otherAccountHow : null,
+    accounts: list.map((account) => ({ account, label: fillCopy(AW.otherAccountSign, { address: account }) })),
+    declined: declined ? AW.otherAccountDeclined : null,
+  };
+}
 
 /**
  * What the screen shows for the derivation's wallet step and branch, and the step's own stage.
@@ -317,6 +391,12 @@ const NOTHING = {
  * field and the send while at least 30 seconds are left, and otherwise "expired" with Prepare the
  * message. `choice` is the card chosen, as the step keeps it once the stage has moved past the
  * address; on the address stage the stage's own choice counts.
+ *
+ * For "My agent has its own key", wherever its address field shows: one button per account of
+ * `browserAccounts` (`browserAgentAccounts`'s answer), or how to connect one when it is empty; and,
+ * after the wallet declined (`accountDeclined`), that sentence, the paste field kept. After no
+ * receipt, Check again with Prepare the message beside it; after the owner changed, Prepare the
+ * message.
  */
 export function agentWalletStepView(p: {
   walletStep: WalletStep;
@@ -327,6 +407,8 @@ export function agentWalletStepView(p: {
   secondsLeft: number | null;
   environment: Environment;
   choice?: AgentWalletChoice | null;
+  browserAccounts?: readonly Address[];
+  accountDeclined?: boolean;
 }): AgentWalletStepView {
   const title = AW.title;
   if (p.walletStep === "checking") return { ...NOTHING, title, lines: [AW.checking], panel: "checking" };
@@ -372,15 +454,26 @@ export function agentWalletStepView(p: {
         ? { ask: AW.noKeyAsk, commandIntro: AW.noKeyCommandIntro, command: AW.noKeyCommand }
         : null,
     addressField: true,
+    otherAccounts:
+      chosen === "has_key" ? otherAccountsView(p.browserAccounts, p.accountDeclined === true) : null,
     button: "prepare" as const,
   };
   switch (stage.at) {
     case "address":
       return open;
+    case "no_receipt":
+      return {
+        ...open,
+        status: { text: walletNoReceiptLine(), tone: "warn", busy: false },
+        button: "check_again",
+        secondButton: "prepare",
+      };
     case "reverted":
       return { ...open, status: { text: AW.reverted, tone: "warn", busy: false } };
     case "would_revert":
       return { ...open, status: { text: AW.wouldRevert, tone: "warn", busy: false } };
+    case "owner_changed":
+      return { ...open, status: { text: AW.ownerChanged, tone: "warn", busy: false } };
     case "message": {
       // A time not known counts as none left.
       const left = p.secondsLeft ?? 0;
@@ -446,11 +539,19 @@ export function walletPreflightSentence(
   switch (reason) {
     case "no_identity":
       return fillCopy(AW.noIdentity, { agentId: p.agentId, network: networkName(p.environment) });
+    case "owner_changed":
+      return AW.ownerChanged;
     case "not_this_wallet":
       return AW.notThisWallet;
     case "expired":
       return AW.expired;
   }
+}
+
+/** No receipt within the wait: the minutes said are the wait's own (`REGISTER_RECEIPT_TIMEOUT_MS`),
+ *  so the sentence and the timeout cannot drift apart. */
+export function walletNoReceiptLine(): string {
+  return fillCopy(AW.noReceipt, { minutes: String(REGISTER_RECEIPT_TIMEOUT_MS / 60_000) });
 }
 
 /** A refusal of the allowlist or of the chain check, before the wallet opened: each problem of the

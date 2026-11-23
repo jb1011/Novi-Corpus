@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { hashTypedData, recoverTypedDataAddress } from "viem";
-import { useConnection, usePublicClient } from "wagmi";
+import { useConnection, usePublicClient, useSignTypedData } from "wagmi";
 import { StepNav } from "@/components/onboarding/OnboardingFlow";
 import {
   Button,
@@ -34,6 +34,7 @@ import {
   agentWalletSendPreflight,
   agentWalletSignatureCheck,
   agentWalletStepView,
+  browserAgentAccounts,
   chainClockAt,
   chainNowSeconds,
   erc1271Abi,
@@ -83,6 +84,9 @@ function signatureFieldSentence(problem: SignatureProblem): string {
   return problem === "empty" ? AW.signatureEmpty : P.problems[problem];
 }
 
+/** The prepared message and its domain, as the message stage holds them. */
+type Prepared = { message: WalletSetMessage; domain: RegistryDomain };
+
 /**
  * Your agent's wallet: the agent's own wallet, written on its identity before the link, so anyone
  * it pays can find its company.
@@ -94,17 +98,23 @@ function signatureFieldSentence(problem: SignatureProblem): string {
  * identity's owner and the wallet's code, read through the public client (`agentWalletPrepare`
  * refuses a provider's address with no code, and prepares nothing). Then the message to copy, the
  * two ways to sign it, a countdown from the step's estimate of the chain's time (`chainNowSeconds`),
- * and the signature field. "Write the wallet on the identity" checks the signature against the chain
- * (`agentWalletSignatureCheck`), then the owner and the time (`agentWalletSendPreflight`), then
+ * and the signature field. For "My agent has its own key", each other account of the browser
+ * wallet connected to this site (`browserAgentAccounts`: never the guardian, never the identity's
+ * owner) is a button: a click takes it as the address, prepares the message, and asks the wallet to
+ * sign it with that account; the signature fills the field, nothing more. "Write the wallet on the
+ * identity" checks the signature against the chain (`agentWalletSignatureCheck`), then the owner,
+ * the owner the message was prepared for, and the time (`agentWalletSendPreflight`), then
  * simulates the exact call from the owner, checks the time once more, and only then opens the
  * wallet through the one allowlist (`useAllowedWrite`). After the receipt the registry is read
- * again, and the derivation moves on to the link by itself.
+ * again, and the derivation moves on to the link by itself; with no receipt in time, Check again
+ * or a new message.
  *
  * On the paste branch, no field and no wallet: what the owning key must do, and the registry read
  * again every 30 seconds for two minutes, and on Check again.
  *
- * Every read and the one transaction are a click's, the paste branch's timed reads aside; nothing
- * is sent on mount. The address and the signature are this step's state only, never stored.
+ * Every read, the browser wallet's signature and the one transaction are a click's, the paste
+ * branch's timed reads aside; nothing is sent on mount. The address and the signature are this
+ * step's state only, never stored.
  * Timers go through a lifetime that the effect's cleanup ends, and a click's continuation stops
  * after its next await once the step is gone.
  */
@@ -112,9 +122,11 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
   const { config, tenant, derivation } = kit;
   const environment = config.environment;
   const publicClient = usePublicClient({ chainId: config.chainId });
-  const { address } = useConnection();
+  const { address, addresses } = useConnection();
   const connected = (address ?? null) as Address | null;
   const send = useAllowedWrite();
+  // Only ever called with the agent's account named, over the step's own message.
+  const { signTypedDataAsync } = useSignTypedData();
 
   // On screen from the effect below, gone at its cleanup.
   const [life] = useState(() => stepLifetime());
@@ -130,6 +142,8 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
   const [addressProblem, setAddressProblem] = useState<string | null>(null);
   const [signatureDraft, setSignatureDraft] = useState("");
   const [signatureProblem, setSignatureProblem] = useState<string | null>(null);
+  // The browser wallet did not sign with the account asked: said, and the field stays for a paste.
+  const [accountDeclined, setAccountDeclined] = useState(false);
   // The sentences of the last click that did not move the step.
   const [lines, setLines] = useState<string[]>([]);
   // The head's timestamp read at preparation, and this browser's clock then; ticked once a second.
@@ -155,6 +169,11 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
     return () => countdown.end();
   }, [ticking]);
 
+  // The identity's owner, as far as the step knows it without a read: the registry's answer once a
+  // message is prepared; before, the wallet connected, which the browser branch requires to be it.
+  const ownerKnown: Address | "none" = stage.at === "message" ? stage.message.owner : (connected ?? "none");
+  const browserAccounts = browserAgentAccounts(addresses, tenant, ownerKnown);
+
   const view = agentWalletStepView({
     walletStep: derivation.walletStep ?? "checking",
     // A branch not given is the one that opens no wallet.
@@ -165,15 +184,23 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
     secondsLeft,
     environment,
     choice,
+    browserAccounts,
+    accountDeclined,
   });
+
+  /** The prepared message is dropped, with its clock and any signature. */
+  function dropMessage() {
+    setClock(null);
+    setSignatureDraft("");
+    setSignatureProblem(null);
+    setAccountDeclined(false);
+  }
 
   /** Back to the address of the card chosen: the prepared message, if any, is dropped. */
   function toAddress(next: AgentWalletChoice) {
     setChoice(next);
     setStage({ at: "address", choice: next });
-    setClock(null);
-    setSignatureDraft("");
-    setSignatureProblem(null);
+    dropMessage();
   }
 
   function choose(next: AgentWalletChoice) {
@@ -190,73 +217,112 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
     if (choice !== null && stage.at !== "address") toAddress(choice);
   }
 
-  /** "Prepare the message": the four reads, then the message, or the sentence of why not. */
-  async function onPrepare() {
-    if (inFlight.current || choice === null) return;
+  /** The four reads for this address, then the message stage; or the sentence of why not, and
+   *  null. The click that calls it holds `inFlight`. */
+  async function prepareFor(raw: string, chosen: AgentWalletChoice): Promise<Prepared | null> {
     setLines([]);
-    const newWallet = parseAgentWalletAddress(addressDraft, tenant);
+    setAccountDeclined(false);
+    const newWallet = parseAgentWalletAddress(raw, tenant);
     if (typeof newWallet === "object") {
       setAddressProblem(walletAddressSentence(newWallet.problem));
-      return;
+      return null;
     }
     setAddressProblem(null);
     const client = publicClient;
     if (!client) {
       setLines([walletCallRefusalSentence("chain_not_configured", environment)]);
-      return;
+      return null;
     }
-    inFlight.current = true;
-    setBusy(true);
+    // This browser's clock is read before the head is asked for, so the time the reads take
+    // counts as time already spent on the message.
+    const readAtMs = Date.now();
+    let reads;
     try {
-      // This browser's clock is read before the head is asked for, so the time the reads take
-      // counts as time already spent on the message.
-      const readAtMs = Date.now();
-      let reads;
-      try {
-        reads = await Promise.all([
-          client.getBlock(),
+      reads = await Promise.all([
+        client.getBlock(),
+        client.readContract({
+          address: config.identityRegistry,
+          abi: identityRegistryAbi,
+          functionName: "eip712Domain",
+        }),
+        client.getCode({ address: newWallet }),
+        readOwnerOf(() =>
           client.readContract({
             address: config.identityRegistry,
             abi: identityRegistryAbi,
-            functionName: "eip712Domain",
+            functionName: "ownerOf",
+            args: [BigInt(agentId)],
           }),
-          client.getCode({ address: newWallet }),
-          readOwnerOf(() =>
-            client.readContract({
-              address: config.identityRegistry,
-              abi: identityRegistryAbi,
-              functionName: "ownerOf",
-              args: [BigInt(agentId)],
-            }),
-          ),
-        ]);
+        ),
+      ]);
+    } catch {
+      if (life.alive()) setLines([AW.unreadable]);
+      return null;
+    }
+    if (!life.alive()) return null;
+    const [head, domain, code, ownerOf] = reads;
+    const prepared = agentWalletPrepare({
+      choice: chosen,
+      agentId,
+      newWallet,
+      ownerOf,
+      connected,
+      domain: registryDomainOf(domain, config),
+      code,
+      headTimestamp: head.timestamp,
+      environment,
+    });
+    if (!prepared.ok) {
+      setLines([prepared.line]);
+      return null;
+    }
+    setClock(chainClockAt(head.timestamp, readAtMs));
+    setTickMs(Date.now());
+    setSignatureDraft("");
+    setSignatureProblem(null);
+    setTxHash(null);
+    setStage({ at: "message", message: prepared.message, domain: prepared.domain });
+    return { message: prepared.message, domain: prepared.domain };
+  }
+
+  /** "Prepare the message": the four reads, then the message, or the sentence of why not. */
+  async function onPrepare() {
+    if (inFlight.current || choice === null) return;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      await prepareFor(addressDraft, choice);
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  /**
+   * "Sign with {address}": that account as the address, the message prepared for it, then the
+   * browser wallet asked to sign it with that account. The signature only fills the field: the send
+   * parses and checks it as it would a pasted one. A refusal or an error of the wallet is said, and
+   * the field stays for a paste.
+   */
+  async function onSignWith(account: Address) {
+    if (inFlight.current || choice !== "has_key") return;
+    // As if typed: a message prepared for another wallet is dropped first.
+    editAddress(account);
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      const prepared = await prepareFor(account, choice);
+      if (prepared === null || !life.alive()) return;
+      let signed: Hex;
+      try {
+        signed = await signTypedDataAsync({ ...walletSetTypedData(prepared.domain, prepared.message), account });
       } catch {
-        if (life.alive()) setLines([AW.unreadable]);
+        if (life.alive()) setAccountDeclined(true);
         return;
       }
       if (!life.alive()) return;
-      const [head, domain, code, ownerOf] = reads;
-      const prepared = agentWalletPrepare({
-        choice,
-        agentId,
-        newWallet,
-        ownerOf,
-        connected,
-        domain: registryDomainOf(domain, config),
-        code,
-        headTimestamp: head.timestamp,
-        environment,
-      });
-      if (!prepared.ok) {
-        setLines([prepared.line]);
-        return;
-      }
-      setClock(chainClockAt(head.timestamp, readAtMs));
-      setTickMs(Date.now());
-      setSignatureDraft("");
+      setSignatureDraft(signed);
       setSignatureProblem(null);
-      setTxHash(null);
-      setStage({ at: "message", message: prepared.message, domain: prepared.domain });
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -326,10 +392,17 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
         connected,
         deadline: message.deadline,
         nowSeconds: chainNowSeconds(clock, Date.now()),
+        preparedFor: message.owner,
       });
       // An owner of "none" is always refused here; the second test only tells the type so.
       if (!preflight.ok || ownerOf === "none") {
         setTickMs(Date.now());
+        // The signature names the owner it was made for: the message is dropped, a new one offered.
+        if (!preflight.ok && preflight.reason === "owner_changed") {
+          setStage({ at: "owner_changed" });
+          dropMessage();
+          return;
+        }
         // An expired message is said by the view itself.
         if (!preflight.ok && preflight.reason !== "expired")
           setLines([walletPreflightSentence(preflight.reason, { agentId, environment })]);
@@ -402,7 +475,8 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
         setStage({ at: "reverted" });
         return;
       }
-      if (outcome === "no_receipt") setLines([AW.noReceipt]);
+      // The transaction may still land, or was dropped: Check again, or a new message.
+      if (outcome === "no_receipt") setStage({ at: "no_receipt", hash });
       // The registry decides: once it names the wallet, the derivation moves on to the link.
       await kit.refreshAgentWallet();
     } finally {
@@ -445,7 +519,10 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
   }
 
   const button = view.button;
-  const reading = button === "retry" || button === "check_again";
+  const secondButton = view.secondButton;
+  // A read's button spins while the registry is read; the others while a click is in flight.
+  const buttonLoading = button === "retry" || button === "check_again" ? rereading : busy;
+  const secondLoading = secondButton === "retry" || secondButton === "check_again" ? rereading : busy;
 
   return (
     <div>
@@ -482,6 +559,7 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
           view={view}
           busy={busy}
           choose={choose}
+          signWith={(account) => void onSignWith(account)}
           address={
             <AddressForm
               value={addressDraft}
@@ -502,11 +580,18 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
                 onSignature={(value) => {
                   setSignatureDraft(value);
                   setSignatureProblem(null);
+                  setAccountDeclined(false);
                 }}
               />
             ) : null
           }
-          txHash={stage.at === "waiting" || stage.at === "reverted" ? txHash : null}
+          txHash={
+            stage.at === "waiting" || stage.at === "no_receipt"
+              ? stage.hash
+              : stage.at === "reverted"
+                ? txHash
+                : null
+          }
         />
       )}
 
@@ -522,7 +607,17 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
 
       {button && (
         <StepNav>
-          <Button onClick={() => onButton(button)} loading={reading ? rereading : busy}>
+          {secondButton && (
+            <Button
+              variant="ghost"
+              onClick={() => onButton(secondButton)}
+              loading={secondLoading}
+              disabled={busy || rereading}
+            >
+              {BUTTON_LABELS[secondButton]}
+            </Button>
+          )}
+          <Button onClick={() => onButton(button)} loading={buttonLoading}>
             {BUTTON_LABELS[button]}
           </Button>
         </StepNav>
@@ -531,12 +626,14 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
   );
 }
 
-/** The browser branch: the three cards, the address and the message inside the chosen one, and
- *  where the transaction is. */
+/** The browser branch: the three cards, the address (and, for the agent's own key, the other
+ *  accounts of the browser wallet) inside the chosen one, the message, and where the transaction
+ *  is. */
 function BrowserPanel({
   view,
   busy,
   choose,
+  signWith,
   address,
   message,
   txHash,
@@ -544,6 +641,7 @@ function BrowserPanel({
   view: AgentWalletStepView;
   busy: boolean;
   choose: (choice: AgentWalletChoice) => void;
+  signWith: (account: Address) => void;
   address: ReactNode;
   message: ReactNode;
   txHash: Hex | null;
@@ -569,6 +667,9 @@ function BrowserPanel({
                 </div>
               )}
               {view.addressField && address}
+              {c.choice === "has_key" && view.otherAccounts && (
+                <OtherAccounts other={view.otherAccounts} disabled={busy} signWith={signWith} />
+              )}
             </ChoiceCard>
           ))}
         </div>
@@ -631,6 +732,45 @@ function AddressForm({
         />
       </Field>
     </form>
+  );
+}
+
+/** The one-click way: a button per other account of the browser wallet, or how to connect one;
+ *  and the wallet's no, said, the paste field kept below. */
+function OtherAccounts({
+  other,
+  disabled,
+  signWith,
+}: {
+  other: NonNullable<AgentWalletStepView["otherAccounts"]>;
+  disabled: boolean;
+  signWith: (account: Address) => void;
+}) {
+  return (
+    <div className="mt-5 border-t hairline pt-5">
+      <div className="text-[13px] font-medium text-ink">{other.title}</div>
+      {other.how && <p className="mt-1 text-[12.5px] leading-[1.6] text-muted">{other.how}</p>}
+      {other.accounts.length > 0 && (
+        <div className="mt-3 flex flex-col items-start gap-2">
+          {other.accounts.map((a) => (
+            <Button
+              key={a.account}
+              variant="ghost"
+              disabled={disabled}
+              onClick={() => signWith(a.account)}
+              className="max-w-full break-all font-mono text-[12px]"
+            >
+              {a.label}
+            </Button>
+          ))}
+        </div>
+      )}
+      {other.declined && (
+        <Callout tone="warn" className="mt-3">
+          {other.declined}
+        </Callout>
+      )}
+    </div>
   );
 }
 

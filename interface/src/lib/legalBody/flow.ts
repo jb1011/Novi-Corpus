@@ -373,15 +373,23 @@ function doneOrPayment(input: LegalBodyFlowInput, notice?: LegalBodyNotice): Leg
   return { phase: unpaid ? "payment" : "done" };
 }
 
+const WALLET_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_WALLET = /^0x0{40}$/;
+
 /**
  * The agent's wallet step a draft still needs before its link, or null when the registry names a
  * wallet of the agent's own: any wallet but the guardian's (the signed-in wallet), whatever its
  * letter case. The rule is `agentWalletStanding`'s "own", and the server's at the link.
+ *
+ * The link opens only for `0x` and 40 hex digits that are not the guardian's (ruling R9): the zero
+ * address names no wallet, and any value this page does not recognise reads as unreadable, never
+ * as the link.
  */
 function walletStepOf(read: AgentWalletRead | null, guardian: Address): WalletStep | null {
   if (read === null) return "checking";
-  if (read === "unreadable") return "unreadable";
-  if (read === "none" || sameAddress(read, guardian)) return "needed";
+  if (read === "none") return "needed";
+  if (typeof read !== "string" || !WALLET_ADDRESS.test(read)) return "unreadable";
+  if (ZERO_WALLET.test(read) || sameAddress(read, guardian)) return "needed";
   return null;
 }
 

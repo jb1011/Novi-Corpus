@@ -297,6 +297,28 @@ describe("the agent's wallet step", () => {
     ],
     ["checkAgain", AW.checkAgain, "Check again"],
     ["line", AW.line, "This agent's wallet: {address}"],
+    [
+      "noReceipt",
+      AW.noReceipt,
+      "No receipt came back within {minutes} minutes, so whether the wallet was written is not known yet. Look at the transaction, then check again. If it is not on the chain, prepare a new message.",
+    ],
+    [
+      "ownerChanged",
+      AW.ownerChanged,
+      "The identity's owner changed since the message was prepared. Prepare a new message.",
+    ],
+    ["otherAccountTitle", AW.otherAccountTitle, "Sign with another account of your browser wallet"],
+    [
+      "otherAccountHow",
+      AW.otherAccountHow,
+      "In your wallet, connect the agent's account to this site as well, and keep your own account selected.",
+    ],
+    ["otherAccountSign", AW.otherAccountSign, "Sign with {address}"],
+    [
+      "otherAccountDeclined",
+      AW.otherAccountDeclined,
+      "Your wallet did not sign with that account. You can paste the signature instead.",
+    ],
   ])("%s, word for word", (_key, actual, expected) => {
     expect(actual).toBe(expected);
   });
