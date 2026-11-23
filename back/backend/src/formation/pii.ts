@@ -94,9 +94,10 @@ const SECRET = Symbol("novi.secret");
  * `util.inspect`, and all three of them answer `"[redacted]"` here.
  *
  * `reveal()` is the single deliberate exit, used only at a wire boundary: `buildCompanyInput`
- * (the body doola is about to receive) and the Stripe Identity and OpenSanctions clients' auth
- * headers. A new caller is a review question, which is the point: `grep -rn "\.reveal()"` is the
- * whole audit.
+ * (the body doola is about to receive), the Stripe Identity and OpenSanctions clients' auth
+ * headers, and the Stripe Identity webhook's signature check (the signing secrets, for the HMAC).
+ * A new caller is a review question, which is the point: `grep -rn "\.reveal()"` is the whole
+ * audit.
  */
 export interface Secret {
   readonly [SECRET]: true;

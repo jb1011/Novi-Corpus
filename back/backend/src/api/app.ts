@@ -49,6 +49,10 @@ import { mountProfileRoutes } from "./routes/profile";
 import { mountReputationRoutes } from "./routes/reputation";
 import { mountRunsRoutes } from "./routes/runs";
 import { mountSchemaRoutes } from "./routes/schema";
+import {
+  type StripeIdentityWebhookDeps,
+  mountStripeIdentityWebhookRoutes,
+} from "./routes/stripeIdentityWebhook";
 import { mountTransparencyRoutes } from "./routes/transparency";
 import { mountTreasuryRoutes } from "./routes/treasury";
 import { mountTrustPolicyRoutes } from "./routes/trustPolicy";
@@ -336,6 +340,12 @@ export interface ApiDeps extends EntityViewDeps {
    * record is written by the operator's commands alone.
    */
   identityCheck?: IdentitySessionDeps;
+  /**
+   * The Stripe Identity webhook's signing secrets (`cfg.stripeIdentity`) and this deployment's
+   * environment, which must be the identity check's. The route is mounted only where this and
+   * `identityCheck` are both set; the secrets are revealed only for the HMAC.
+   */
+  stripeIdentity?: StripeIdentityWebhookDeps;
   /**
    * The beta's invite codes (trust-and-access PR 2b), with `required`, the BETA_INVITES_REQUIRED
    * switch. Not wired yet: PR 2b adds the repository and wires the object. Absent, a production
@@ -646,6 +656,13 @@ export function buildApiApp(deps: ApiDeps) {
   // Mounted BEFORE the /entities auth middleware for the same reason every other public route is,
   // and gated on the credentials that make verification possible at all.
   if (deps.doola) mountDoolaWebhookRoutes(app, { ...deps, doola: deps.doola });
+  // PUBLIC for the same reason: Stripe authenticates with an HMAC over the body. Mounted only where
+  // the identity check runs and the webhook's secrets are set.
+  if (deps.identityCheck && deps.stripeIdentity)
+    mountStripeIdentityWebhookRoutes(app, {
+      identityCheck: deps.identityCheck,
+      stripeIdentity: deps.stripeIdentity,
+    });
   mountMetadataRoutes(app, deps);
   // The HCS-11 profile beside the metadata it cross-links, public for the same reason: it is what
   // a Hedera account's `hcs-11:` memo points at, read by agents holding no key of ours (task 11).
