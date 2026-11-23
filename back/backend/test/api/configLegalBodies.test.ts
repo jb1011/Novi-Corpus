@@ -25,8 +25,11 @@ import {
 import type { StatementMessageAnswer } from "../../src/api/routes/customerCompanies";
 import type { LegalBodyAgreementAnswer } from "../../src/api/routes/legalBodyOrders";
 import type { ByAgentAnswer } from "../../src/api/routes/legalBodyStatements";
+import type { StripeIdentityWebhookDeps } from "../../src/api/routes/stripeIdentityWebhook";
+import { loadConfig } from "../../src/config/env";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../../src/formation";
 import type { IdentitySessionDeps } from "../../src/identity/sessions";
+import { identityWiringOf } from "../../src/identity/wiring";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import type { CustomerCompanyDeps } from "../../src/legalBody/customerCompany";
 import type { GasSeedDeps } from "../../src/legalBody/gasSeed";
@@ -186,6 +189,7 @@ interface AppOptions {
   legalBodyStatements?: LegalBodyStatementDeps;
   legalBodyGasSeed?: GasSeedDeps;
   identityCheck?: IdentitySessionDeps;
+  stripeIdentity?: StripeIdentityWebhookDeps;
   now?: () => number;
 }
 
@@ -209,6 +213,7 @@ function makeApp(o: AppOptions = {}) {
     legalBodyGasSeed: o.legalBodyGasSeed,
     legalBodyStatements: o.legalBodyStatements,
     identityCheck: o.identityCheck,
+    stripeIdentity: o.stripeIdentity,
     apiKeys: new SqliteApiKeyStore(s.db),
     passkeys: new SqlitePasskeyStore(s.db),
     jobs: new SqliteJobRepository(s.db),
@@ -283,6 +288,35 @@ describe("/config.legalBodies", () => {
     // Without the order doors there is no legal-body answer to carry it.
     expect((await configOf({ identityCheck: identityCheck() })).body.legalBodies).toEqual({
       available: false,
+    });
+  });
+
+  test("the identity check main.ts wires from a sandbox config with the Stripe block: automatic, and not required", async () => {
+    // A sandbox deployment (ARC_NETWORK unset) with the PII key and the Stripe block in test
+    // mode, that boots. Every key is an obvious placeholder.
+    const cfg = loadConfig({
+      PLATFORM_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+      CUSTOMER_PRIVATE_KEY: `0x${"2".repeat(64)}`,
+      AUTH_JWT_SECRET: "s".repeat(16),
+      ARC_TESTNET_RPC_URL: "http://localhost:8545",
+      FORMATION_PII_KEY: Buffer.alloc(32, 7).toString("base64"),
+      IDENTITY_NAME_HMAC_KEY: Buffer.alloc(32, 5).toString("hex"),
+      STRIPE_IDENTITY_KEY: `rk_test_${"x".repeat(24)}`,
+      STRIPE_IDENTITY_FLOW_ID: `vf_${"x".repeat(24)}`,
+      STRIPE_IDENTITY_WEBHOOK_SECRET: `whsec_${"x".repeat(32)}`,
+      WEB_ORIGIN: "https://testnet.example.com",
+    });
+    const wired = identityWiringOf(cfg, s.db, undefined, new TaskTracker("identity_webhook_task"));
+    // The webhook's block too, so the app's build checks the two name one environment.
+    const { body } = await configOf({
+      legalBodyOrders: orderDeps(),
+      identityCheck: wired.identityCheck,
+      stripeIdentity: wired.stripeIdentity,
+    });
+    expect(body.legalBodies).toMatchObject({
+      environment: "sandbox",
+      identityCheckAutomatic: true,
+      identityRequired: false,
     });
   });
 

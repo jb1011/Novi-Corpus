@@ -59,7 +59,7 @@ import { newChainHeadCache } from "../formation/payment";
 import { formationSummary } from "../formation/status";
 import { foundingFromEnv, foundingLimiter } from "../founding/config";
 import { HederaMirror } from "../hedera/mirror";
-import type { IdentityDeps } from "../identity/state";
+import { identityCheckBootLine, identityWiringOf } from "../identity/wiring";
 import { buildJobDeps } from "../jobs/composition";
 import { expireStaleCustomerCompanies } from "../legalBody/customerCompany";
 import { expireEvidenceBytes } from "../legalBody/evidence";
@@ -106,7 +106,6 @@ import { SqliteEntityRepository } from "../persistence/entityRepository";
 import { SqliteFormationPartyRepository } from "../persistence/formationPartyRepository";
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
-import { SqliteIdentityRepository } from "../persistence/identityRepository";
 import { SqliteLegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
@@ -132,7 +131,7 @@ import { buildScheduledJobs } from "../scheduler/jobs";
 import { Scheduler } from "../scheduler/scheduler";
 import { externalRecordDeps } from "../trackRecord/sources";
 import type { Address } from "../types";
-import { TaskTracker } from "../util/taskTracker";
+import { TaskTracker, settledAll } from "../util/taskTracker";
 import { reconcileAgentBook } from "../workflow/agentBookReconcile";
 import { processDoolaEvent } from "../workflow/formationProcessor";
 import { FormationSweeper } from "../workflow/formationSweeper";
@@ -509,18 +508,23 @@ async function main() {
       `⚠ Identity attestation step-up ENABLED (action ${worldId.cfg.attestAction}, min age ${worldId.attestMinAge})`,
     );
   // The guardian identity record: World ID proves one real person; the identity check says who.
-  // Built wherever the PII key is set, since the names of record are encrypted under it. The
-  // testnet box has no PII key, because its doola block is in sandbox and a sandbox block refuses
-  // one (`config/env.ts`): it has no identity record, its `/world-id/me` answers the block with
-  // state `none`, and its doors are sandbox, where the check is skipped.
-  const identity: IdentityDeps | undefined = cfg.pii
-    ? {
-        repo: new SqliteIdentityRepository(db),
-        pii: cfg.pii,
-        reverifyYears: cfg.identity.reverifyYears,
-        blockedCountries: cfg.identity.blockedCountries,
-      }
-    : undefined;
+  // Built wherever the PII key is set, since the names of record are encrypted under it. A box
+  // whose doola block is in sandbox may hold the key only with the Stripe Identity block
+  // (`config/env.ts`); the testnet box has neither today, so it has no record, its `/world-id/me`
+  // answers the block with state `none`, and its sandbox doors skip the check.
+  //
+  // With the Stripe block, the automatic identity check and its webhook are built with the record
+  // (`identity/wiring.ts`): offered on a sandbox, where the gate stays skipped; required on
+  // production. The webhook's reads run on their own tracker, drained on SIGTERM with doola's.
+  const identityTasks = new TaskTracker("identity_webhook_task");
+  const { identity, identityCheck, stripeIdentity } = identityWiringOf(
+    cfg,
+    db,
+    worldId,
+    identityTasks,
+  );
+  const identityLine = identityCheckBootLine(cfg);
+  if (identityLine) console.warn(identityLine);
   // A customer company door needs a verified human behind the guardian. On testnet nothing else
   // stops the doors being mounted with no World block, and then every one of them refuses.
   if (cfg.legalBodyFactory && !cfg.world && legalBodyEnvironment(cfg) === "sandbox")
@@ -1016,11 +1020,13 @@ async function main() {
 
   /**
    * THE IN-PROCESS SCHEDULER (src/scheduler): named periodic jobs, run inside this process so the
-   * box needs no cron line. Built only when the deployment registers at least one job; the
-   * identity sweep is registered only where the PII key is set, so the testnet box, which cannot
-   * hold the key, starts none.
+   * box needs no cron line. Built only when the deployment registers at least one job: the
+   * identity sweep where the PII key is set, and the identity check's session sync where the
+   * Stripe block is set, with the session service built above. A box with neither, as the testnet
+   * box today, starts none; once its environment gains the Stripe block (and so the PII key), it
+   * starts both.
    */
-  const scheduledJobs = buildScheduledJobs(db, cfg);
+  const scheduledJobs = buildScheduledJobs(db, cfg, { identitySessions: identityCheck });
   const scheduler = scheduledJobs.length > 0 ? new Scheduler({}) : undefined;
   for (const job of scheduledJobs) scheduler?.register(job);
 
@@ -1386,6 +1392,10 @@ async function main() {
     ens,
     worldId,
     identity,
+    // The automatic identity check and its webhook, where the Stripe block is set: the check's
+    // record is `identity` above, and the two name one environment (the app's build refuses two).
+    identityCheck,
+    stripeIdentity,
     agentBook,
     /**
      * The public legal-body lookup, `GET /legal-bodies/:address` (design 2026-09-10 D3).
@@ -1512,7 +1522,8 @@ async function main() {
         ...(legalBodySweeper ? [legalBodySweeper] : []),
         ...(scheduler ? [scheduler] : []),
       ],
-      tasks: doolaTasks,
+      // Both receivers' acked work: doola's and the identity check's, under one bound.
+      tasks: settledAll([doolaTasks, identityTasks]),
       server,
       flush: statementReadLines ? [statementReadLines] : [],
     });

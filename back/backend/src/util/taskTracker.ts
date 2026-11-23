@@ -132,3 +132,18 @@ export class TaskTracker {
     });
   }
 }
+
+/**
+ * Several trackers drained as one, under one bound: what SIGTERM awaits when the process holds
+ * more than one (the doola receiver's and the identity check's). Each keeps its own label, so a
+ * failure line names the work it came from. The waits run side by side, so the deploy waits for
+ * the slowest, never for the sum; drained only when every one is.
+ */
+export function settledAll(trackers: readonly TaskTracker[]): {
+  settled(timeoutMs?: number): Promise<boolean>;
+} {
+  return {
+    settled: async (timeoutMs?: number) =>
+      (await Promise.all(trackers.map((t) => t.settled(timeoutMs)))).every(Boolean),
+  };
+}

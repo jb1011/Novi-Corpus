@@ -314,5 +314,9 @@ test("the composition root hands the statement the identity record", () => {
   expect(at, "the statement deps were not found").toBeGreaterThan(0);
   const statements = main.slice(at, main.indexOf(": undefined;", at));
   expect(statements).toMatch(/^ {10}identity,$/m);
-  expect(main.indexOf("const identity: IdentityDeps | undefined = cfg.pii")).toBeLessThan(at);
+  const builtAt = main.indexOf(
+    "const { identity, identityCheck, stripeIdentity } = identityWiringOf(",
+  );
+  expect(builtAt, "the identity record was not found").toBeGreaterThan(0);
+  expect(builtAt).toBeLessThan(at);
 });
