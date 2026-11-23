@@ -74,6 +74,30 @@ address's own 15-second memo of `legalBody: false` has passed.
 curl -s https://api.novicorpus.com/legal-bodies/by-agent/<agentId> | jq '.legalBody, .standing, .statement.message.bindingState'
 ```
 
+## The agent's own wallet at the link
+
+A legal body is created only for an agent whose identity names a wallet of its own: the wallet the identity
+registry answers for `getAgentWallet` must be set, and it must not be the guardian's wallet. A guardian who registered
+the identity from their own wallet leaves that wallet named as the agent's, so the link waits until the identity's
+owner sets the agent's wallet with `setAgentWallet` and that wallet's signature.
+
+The refusal code is `agent_wallet_required`. The link message door (`POST /legal-body-orders/:id/link-message`)
+answers it as a 409, and the MCP tool `get_link_message` passes the same code and sentence through; the submit
+(`POST /legal-body-orders/:id/link`, and `submit_link`) answers `status: "refused"` with that code and a `detail`
+naming the identity's owner and the wallet it read. Nothing is written either way: the order stays a draft. What an
+operator answers: the guardian sets the agent's wallet from the website's step "Your agent's wallet", which shows
+before the link; for a legal body that already exists, from its done page, the card "Set your agent's wallet". The
+rule is at the link only: it does not touch a legal body created before it.
+
+To read the wallet an identity names (here on Arc testnet, with the public RPC):
+
+```bash
+cast call 0x8004A818BFB912233c491871b3d84c89A494BD9e "getAgentWallet(uint256)(address)" <agentId> \
+  --rpc-url https://rpc.testnet.arc.io
+# the zero address, or the guardian's own address: the link answers agent_wallet_required
+# any other address: the agent has a wallet of its own
+```
+
 ## The seller policy
 
 `X402_TRUST_POLICY=legal-bodies-only` (third value, `config/env.ts`) applies to the deployment's configured wall at

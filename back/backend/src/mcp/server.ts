@@ -466,6 +466,7 @@ const GET_LINK_MESSAGE_DESCRIPTION = [
   "orderId is an order your tenant placed in the browser: no tool places an order.",
   "Before the link, the order's guardian adopts its agreement in the web app: until then this answers agreement_not_adopted.",
   "agentId is the identity's id, as a decimal string.",
+  "The identity must name a wallet of the agent's own, not the guardian's wallet: the identity's owner sets it in the registry with setAgentWallet and the new wallet's signature, and until then this answers agent_wallet_required.",
   `ttlSeconds, if given, is how long the message stays signable: a whole number of seconds from ${MIN_SERVED_LINK_TTL_SECONDS} to ${MAX_SERVED_LINK_TTL_SECONDS} (${DEFAULT_LINK_TTL_SECONDS} if omitted).`,
   "Where the order's agreement states a grant with an end, a deadline on or after the first second of the grant's last day answers link_outlasts_grant: ask again with a smaller ttlSeconds, or, when the shortest lifetime is still too long, have the guardian place a new order in the web app.",
   "The answer is typedData, the EIP-712 typed data to sign (the three uint256 fields of its message are decimal strings); identityOwner, the address that must sign it, which the identity registry names as the owner now; and deadline, in unix seconds of chain time.",

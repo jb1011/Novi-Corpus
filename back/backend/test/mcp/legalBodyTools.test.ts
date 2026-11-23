@@ -738,6 +738,9 @@ describe("what an answer may carry", () => {
     expect(description).toContain(
       "answers link_outlasts_grant: ask again with a smaller ttlSeconds, or, when the shortest lifetime is still too long, have the guardian place a new order in the web app.",
     );
+    expect(description).toContain(
+      "the identity's owner sets it in the registry with setAgentWallet and the new wallet's signature, and until then this answers agent_wallet_required.",
+    );
     const inputs = (name: string) =>
       Object.keys(byName.get(name)?.inputSchema.properties ?? {}).sort();
     expect(inputs("get_link_message")).toEqual(["agentId", "orderId", "ttlSeconds"]);
