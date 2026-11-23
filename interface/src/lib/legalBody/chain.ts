@@ -164,6 +164,8 @@ const MAX_WALLET_SET_DELAY_SECONDS = 300;
 /** The longest signature the allowlist forwards, far above a key's 65 bytes or a contract
  *  wallet's usual few hundred. */
 const MAX_SIGNATURE_BYTES = 2048;
+/** The largest uint256, 2^256 - 1: 78 decimal digits can write more, and the encoder throws on it. */
+const MAX_UINT256 = BigInt(`0x${"f".repeat(64)}`);
 
 /** `abi.encode(uint8 1, uint256 chainId, address body)`: exactly 96 bytes. The body's casing
  *  does not matter: addresses are compared in lower case everywhere in this flow. */
@@ -220,7 +222,8 @@ export type CallContext = {
   /** The selected order; required for the pointer. */
   order: LegalBodyOrderView | null;
   /** The selected identity (its id in decimal), the guardian, and the caller's reading of the
-   *  chain's time in seconds; required for the agent's wallet, which needs no order. */
+   *  chain's time in seconds (finite, 0 or more); required for the agent's wallet, which needs no
+   *  order. */
   wallet?: { agentId: string; guardian: Address; nowSeconds: number };
 };
 
@@ -349,7 +352,20 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
 
   if (req.functionName === "setAgentWallet") {
     const wallet = ctx.wallet;
-    if (!wallet) return refuse("no_wallet_context");
+    // The type is not proof, and an incomplete context is no context: a guardian that is not an
+    // address would let its rule pass unread, and an id that is not a string or a time that is not
+    // a finite number at or above 0 cannot be compared with anything.
+    if (
+      !wallet ||
+      typeof wallet.guardian !== "string" ||
+      !ADDRESS.test(wallet.guardian) ||
+      typeof wallet.agentId !== "string" ||
+      !Number.isFinite(wallet.nowSeconds) ||
+      wallet.nowSeconds < 0
+    )
+      return refuse("no_wallet_context");
+    const contextId = wallet.agentId;
+    const now = wallet.nowSeconds;
     if (args === null || args.length !== 4) return refuse("set_agent_wallet_args");
     const [agentId, newWallet, deadline, signature] = args;
     if (
@@ -361,16 +377,19 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
     )
       return refuse("set_agent_wallet_args");
     // An id in the context that is not a canonical decimal matches no identity: never read by
-    // `BigInt`, which takes hex and throws on the rest.
-    if (!CANONICAL_DECIMAL.test(wallet.agentId) || agentId !== BigInt(wallet.agentId))
+    // `BigInt`, which takes hex and throws on the rest. Nor does one past any uint256.
+    if (
+      !CANONICAL_DECIMAL.test(contextId) ||
+      agentId !== BigInt(contextId) ||
+      agentId > MAX_UINT256
+    )
       return refuse("other_identity");
     if (ZERO_ADDRESS.test(newWallet)) return refuse("wallet_is_zero");
     if (sameAddress(newWallet, wallet.guardian)) return refuse("wallet_is_guardian");
-    // A bigint compares with a number exactly, a fraction of a second included. Written so that a
-    // time that is not a number (NaN) is outside the window.
-    const now = wallet.nowSeconds;
+    // A bigint compares with a number exactly, a fraction of a second included. A huge but finite
+    // time puts its whole window past any uint256: refused too, never handed to the encoder.
     const inWindow =
-      typeof now === "number" && deadline >= now && deadline <= now + MAX_WALLET_SET_DELAY_SECONDS;
+      deadline >= now && deadline <= now + MAX_WALLET_SET_DELAY_SECONDS && deadline <= MAX_UINT256;
     if (!inWindow) return refuse("deadline_out_of_window");
     if (signature.length > 2 + 2 * MAX_SIGNATURE_BYTES || !WHOLE_BYTES.test(signature))
       return refuse("signature_shape");
@@ -397,9 +416,12 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
  * `checkCall`, which holds the rules, so there is one allowlist: exactly four calls on the registry
  * of `/config`'s chain. `register()` and `register(string)`; `setMetadata(agentId, "legalBody",
  * pointer)` for the selected order's own identity and body; and `setAgentWallet(agentId, newWallet,
- * deadline, signature)` for the selected identity, with no order needed: never the zero address or
- * the guardian's own wallet, a deadline from the chain's time to 300 seconds after it, a signature
- * of 1 to 2,048 whole bytes. Refuses with the first rule broken, in the order they are written.
+ * deadline, signature)` for the selected identity, with no order needed. Its rules, in order: a
+ * complete context (an id that is a string, the guardian's address, a finite chain time of 0 or
+ * more); four arguments of the right types; the context's identity, no larger than a uint256;
+ * never the zero address; never the guardian's own wallet; a deadline from the chain's time to 300
+ * seconds after it, no larger than a uint256; a signature of 1 to 2,048 whole bytes. Refuses with
+ * the first rule broken, in the order they are written, and never throws on what it is handed.
  * Returns the calldata it checked, encoded over the pinned ABI.
  */
 export function allowedCall(

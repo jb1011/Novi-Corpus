@@ -401,6 +401,16 @@ describe("allowedCall accepts", () => {
   test("setAgentWallet with a chain time that has a fraction of a second", () => {
     expect(allowedCall(goodWallet(), walletCtx({ nowSeconds: NOW + 0.5 })).ok).toBe(true);
     expect(allowedCall(walletWith(2, BigInt(NOW + 1)), walletCtx({ nowSeconds: NOW + 0.5 })).ok).toBe(true);
+    expect(allowedCall(walletWith(2, BigInt(NOW + 300)), walletCtx({ nowSeconds: NOW + 0.5 })).ok).toBe(true);
+  });
+
+  test("setAgentWallet with a chain time of 0, the lowest a context may carry", () => {
+    expect(allowedCall(walletWith(2, BigInt(0)), walletCtx({ nowSeconds: 0 })).ok).toBe(true);
+  });
+
+  test("setAgentWallet for the highest identity a uint256 holds", () => {
+    const highest = BigInt(2) ** BigInt(256) - BigInt(1);
+    expect(allowedCall(walletWith(0, highest), walletCtx({ agentId: highest.toString() })).ok).toBe(true);
   });
 
   test("setAgentWallet with a signature of 2,048 bytes, and with one of a single byte", () => {
@@ -533,6 +543,47 @@ describe("allowedCall refuses", () => {
     ],
     ["setAgentWallet with no wallet context", wallet, { config, order: null }, "no_wallet_context"],
     ["setAgentWallet with an order but no wallet context", wallet, ctx, "no_wallet_context"],
+    [
+      "setAgentWallet with a context that names no guardian",
+      wallet,
+      walletCtx({ guardian: undefined as unknown as Address }),
+      "no_wallet_context",
+    ],
+    ["setAgentWallet with a null guardian", wallet, walletCtx({ guardian: null as unknown as Address }), "no_wallet_context"],
+    ["setAgentWallet with an empty guardian", wallet, walletCtx({ guardian: "" as Address }), "no_wallet_context"],
+    [
+      "setAgentWallet with a guardian that is not an address",
+      wallet,
+      walletCtx({ guardian: "0x1234" as Address }),
+      "no_wallet_context",
+    ],
+    [
+      "setAgentWallet with a context that names no identity",
+      wallet,
+      walletCtx({ agentId: undefined as unknown as string }),
+      "no_wallet_context",
+    ],
+    [
+      "setAgentWallet with a context identity as a number",
+      wallet,
+      walletCtx({ agentId: Number(LIVE_AGENT) as unknown as string }),
+      "no_wallet_context",
+    ],
+    [
+      "setAgentWallet with a context that has no chain time",
+      wallet,
+      walletCtx({ nowSeconds: undefined as unknown as number }),
+      "no_wallet_context",
+    ],
+    ["a chain time that could not be read", wallet, walletCtx({ nowSeconds: Number.NaN }), "no_wallet_context"],
+    ["an infinite chain time", wallet, walletCtx({ nowSeconds: Number.POSITIVE_INFINITY }), "no_wallet_context"],
+    ["a chain time below 0", wallet, walletCtx({ nowSeconds: -1 }), "no_wallet_context"],
+    [
+      "a chain time as a string",
+      wallet,
+      walletCtx({ nowSeconds: String(NOW) as unknown as number }),
+      "no_wallet_context",
+    ],
     ["setAgentWallet with three arguments", { ...wallet, args: wallet.args.slice(0, 3) }, walletCtx(), "set_agent_wallet_args"],
     ["setAgentWallet with five arguments", { ...wallet, args: [...wallet.args, "0x"] }, walletCtx(), "set_agent_wallet_args"],
     [
@@ -575,7 +626,18 @@ describe("allowedCall refuses", () => {
       walletCtx(),
       "deadline_out_of_window",
     ],
-    ["a chain time that could not be read", wallet, walletCtx({ nowSeconds: Number.NaN }), "deadline_out_of_window"],
+    [
+      "a deadline at the chain's whole second, when the time is half a second past it",
+      walletWith(2, BigInt(NOW)),
+      walletCtx({ nowSeconds: NOW + 0.5 }),
+      "deadline_out_of_window",
+    ],
+    [
+      "a deadline 301 seconds after the chain's whole second, when the time is half a second past it",
+      walletWith(2, BigInt(NOW + 301)),
+      walletCtx({ nowSeconds: NOW + 0.5 }),
+      "deadline_out_of_window",
+    ],
     ["an empty signature", walletWith(3, "0x"), walletCtx(), "signature_shape"],
     ["a signature with an odd digit", walletWith(3, `${SIGNATURE}5`), walletCtx(), "signature_shape"],
     ["a signature that is not hex", walletWith(3, `0x${"zz".repeat(65)}`), walletCtx(), "signature_shape"],
@@ -678,14 +740,36 @@ describe("allowedCall refuses", () => {
       [{ ...everything, value: undefined, chainId: CHAIN }, noWallet, "not_the_registry"],
       [{ ...everything, value: undefined, chainId: CHAIN, address: REGISTRY }, noWallet, "not_the_pinned_abi"],
       [{ ...wallet, args: [LIVE_AGENT] }, noWallet, "no_wallet_context"],
+      [
+        { ...wallet, args: [LIVE_AGENT] },
+        walletCtx({ guardian: undefined as unknown as Address }),
+        "no_wallet_context",
+      ],
       [{ ...wallet, args: [LIVE_AGENT] }, walletCtx(), "set_agent_wallet_args"],
       [{ ...wallet, args: [BigInt(1), ZERO, early, "0x"] }, walletCtx(), "other_identity"],
       [{ ...wallet, args: [agent, ZERO, early, "0x"] }, walletCtx(), "wallet_is_zero"],
+      // A zero guardian makes the zero address both: the zero rule comes first.
+      [{ ...wallet, args: [agent, ZERO, early, "0x"] }, walletCtx({ guardian: ZERO }), "wallet_is_zero"],
       [{ ...wallet, args: [agent, GUARDIAN, early, "0x"] }, walletCtx(), "wallet_is_guardian"],
       [{ ...wallet, args: [agent, OTHER_WALLET, early, "0x"] }, walletCtx(), "deadline_out_of_window"],
       [{ ...wallet, args: [agent, OTHER_WALLET, DEADLINE, "0x"] }, walletCtx(), "signature_shape"],
     ];
     for (const [req, c, problem] of steps) expect(allowedCall(req, c)).toEqual({ ok: false, problem });
+  });
+
+  test("setAgentWallet never throws on a number past a uint256: it refuses", () => {
+    const limit = BigInt(2) ** BigInt(256);
+    // A 78-digit context id at 2^256, repeated by the request: it passes the decimal pattern.
+    expect(limit.toString()).toHaveLength(78);
+    const high = walletWith(0, limit);
+    const highCtx = walletCtx({ agentId: limit.toString() });
+    expect(() => allowedCall(high, highCtx)).not.toThrow();
+    expect(allowedCall(high, highCtx)).toEqual({ ok: false, problem: "other_identity" });
+    // A huge but finite chain time: any deadline in its window is past a uint256.
+    const far = walletWith(2, BigInt(1e80));
+    const farCtx = walletCtx({ nowSeconds: 1e80 });
+    expect(() => allowedCall(far, farCtx)).not.toThrow();
+    expect(allowedCall(far, farCtx)).toEqual({ ok: false, problem: "deadline_out_of_window" });
   });
 });
 
