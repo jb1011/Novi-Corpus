@@ -35,7 +35,7 @@ import {
 } from "./agentWallet";
 import { walletKindOf } from "./chain";
 import { LEGAL_BODY_COPY, fillCopy } from "./copy";
-import { sameAddress, type OwnerBranch, type WalletStep } from "./flow";
+import { sameAddress, type LegalBodyNotice, type OwnerBranch, type WalletStep } from "./flow";
 import {
   REGISTER_RECEIPT_TIMEOUT_MS,
   isRevert,
@@ -81,7 +81,8 @@ export const SET_AGENT_WALLET_FUNCTION = "setAgentWallet(uint256,address,uint256
 // The chain's time
 // ---------------------------------------------------------------------------------------------
 
-/** The head's timestamp, in seconds, and this browser's clock when it was read, in ms. */
+/** The head's timestamp, in seconds, and a monotonic clock's reading when it was read, in ms (the
+ *  step's `performance.now()`). */
 export type ChainClock = { headSeconds: number; readAtMs: number };
 
 export function chainClockAt(headTimestamp: bigint, readAtMs: number): ChainClock {
@@ -92,8 +93,10 @@ export function chainClockAt(headTimestamp: bigint, readAtMs: number): ChainCloc
  * The chain's time now, as the step estimates it: the head's timestamp read when the message was
  * prepared, plus the local seconds elapsed since that read. Never the bare wall clock: the deadline
  * counts from the chain's clock, and a computer clock some seconds off would otherwise block every
- * send. A local clock set back never takes the estimate before the head; a clock that cannot be
- * read (NaN) gives NaN, which leaves no time to send.
+ * send. `localNowMs` and `clock.readAtMs` are milliseconds of one monotonic clock (the step's
+ * `performance.now()`), so a wall clock set back or forward meanwhile changes nothing. A time
+ * before the read never takes the estimate before the head; a time that cannot be read (NaN) gives
+ * NaN, which leaves no time to send.
  */
 export function chainNowSeconds(clock: ChainClock, localNowMs: number): number {
   const elapsedMs = localNowMs - clock.readAtMs;
@@ -498,8 +501,9 @@ export function agentWalletStepView(p: {
   }
 }
 
-/** The whole seconds the prepared message has left, from the step's clock; null when no message
- *  is prepared or the clock is not set. */
+/** The whole seconds the prepared message has left, from the step's clock (`localNowMs` of the
+ *  same monotonic clock as `chainNowSeconds`); null when no message is prepared or the clock is
+ *  not set. */
 export function stageSecondsLeft(
   stage: AgentWalletStage,
   clock: ChainClock | null,
@@ -524,15 +528,19 @@ export type DoneWalletCard = "guardian" | "none";
 
 /**
  * The card on the done page of a legal body made before the rule, from its public record (the
- * signed statement's message, `publicRecordOf`) and the order's guardian: "guardian" when the
- * record's `agentWallet` is the guardian's own wallet, in any letter case; "none" when it is the
- * zero address; otherwise no card (the agent's own wallet, no record read, or a field that is not
- * an address). The page shows it for a linked, not revoked order only.
+ * signed statement's message, `publicRecordOf`), the order's guardian and the done derivation's
+ * notice: "guardian" when the record's `agentWallet` is the guardian's own wallet, in any letter
+ * case; "none" when it is the zero address; otherwise no card (the agent's own wallet, no record
+ * read, or a field that is not an address). Never beside a notice (a revocation, a wind-down, a
+ * dissolution, a break with no reason): the wallet step there would be noise (ruling R18). The page
+ * shows it for a linked, not revoked order only.
  */
 export function doneWalletCard(
   record: LegalBodyStatementJson | null,
   guardian: Address,
+  notice: LegalBodyNotice | undefined,
 ): DoneWalletCard | null {
+  if (notice) return null;
   if (record === null || !agentWalletOwed(record.agentWallet, guardian)) return null;
   return sameAddress(record.agentWallet, guardian) ? "guardian" : "none";
 }

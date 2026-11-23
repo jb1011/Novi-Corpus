@@ -7,9 +7,10 @@
  * paste branch the panel says what the owning key must do and offers "Check again" only; the
  * registry is read again every 30 seconds for two minutes, never at once. Opened from the done page
  * of a legal body that already exists ("linked"), the step reads the registry itself, once, as it
- * opens. The source pins the rest: the one way to the wallet is the allowlist, the one signature is
- * the step's own call naming the account, the five-minute window is checked before the wallet,
- * nothing typed reaches a browser store, and the page never makes a key.
+ * opens. The source pins the rest, the step's and its panels' (`AgentWalletPanels.tsx`, which draw
+ * only): the one way to the wallet is the allowlist, the one signature is the step's own call
+ * naming the account, the five-minute window is checked before the wallet, nothing typed reaches a
+ * browser store, and the page never makes a key.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -293,24 +294,41 @@ describe("while the registry is read, or could not be", () => {
 });
 
 describe("the step's source", () => {
-  const code = readFileSync(
-    fileURLToPath(new URL("../src/components/legalBody/AgentWalletStep.tsx", import.meta.url)),
-    "utf8",
-  );
+  const source = (name: string) =>
+    readFileSync(fileURLToPath(new URL(`../src/components/legalBody/${name}`, import.meta.url)), "utf8");
+  const code = source("AgentWalletStep.tsx");
+  /** The panels the step draws, lifted out of its file: every fence on the step holds on them too. */
+  const panels = source("AgentWalletPanels.tsx");
+  const files = [
+    ["AgentWalletStep.tsx", code],
+    ["AgentWalletPanels.tsx", panels],
+  ] as const;
 
   test("the one way to the wallet is the allowlist: no other write, no key", () => {
     expect(code).toContain("useAllowedWrite()");
-    for (const reach of [
-      "useWriteContract",
-      "writeContract",
-      "useSendTransaction",
-      "sendTransaction",
-      "sendAllowedCall",
-      "signMessage",
-      "apiKey",
-      "x-api-key",
-    ])
-      expect(code).not.toContain(reach);
+    for (const [name, file] of files)
+      for (const reach of [
+        "useWriteContract",
+        "writeContract",
+        "useSendTransaction",
+        "sendTransaction",
+        "sendAllowedCall",
+        "signMessage",
+        "apiKey",
+        "x-api-key",
+      ])
+        expect(file, `${name}: ${reach}`).not.toContain(reach);
+  });
+
+  test("the panels draw only: no wallet, no chain, no write, no signature", () => {
+    expect(panels).not.toContain('from "wagmi"');
+    expect(panels).not.toContain("useAllowedWrite");
+    expect(panels).not.toContain("usePublicClient");
+    expect(panels).not.toMatch(/signTypedData/i);
+    // The step uses them, by name, from that file.
+    expect(code).toContain(
+      'import { AddressForm, BrowserPanel, ElsewherePanel, MessagePanel } from "./AgentWalletPanels";',
+    );
   });
 
   test("the one signature asked of the browser wallet: the step's own message, from the agent's account named", () => {
@@ -322,32 +340,46 @@ describe("the step's source", () => {
     expect(code.match(/useSignTypedData\b/g)).toHaveLength(2);
     expect(code).toMatch(/import \{[^}]*\buseSignTypedData\b[^}]*\} from "wagmi";/);
     expect(code).toContain("const { signTypedDataAsync } = useSignTypedData();");
-    // No other way to a signature or a wallet: not wagmi's mutation, not a wallet client, not the
-    // raw request.
-    for (const other of ["mutateAsync", "useWalletClient", "eth_signTypedData"]) expect(code).not.toContain(other);
+    // No other way to a signature or a wallet: not wagmi's mutation, not a wallet or connector
+    // client, not a raw request, in the step or its panels.
+    for (const [name, file] of files)
+      for (const other of [
+        "mutateAsync",
+        "useWalletClient",
+        "useConnectorClient",
+        "getWalletClient",
+        "eth_signTypedData",
+        "eth_sign",
+        "personal_sign",
+      ])
+        expect(file, `${name}: ${other}`).not.toContain(other);
     // One call site, and it names the account: never the guardian's selected account by default.
     expect(code.match(/signTypedDataAsync\(/g)).toHaveLength(1);
     expect(code).toMatch(/signTypedDataAsync\(\{\s*\.\.\.walletSetTypedData\([^)]*\),\s*account\s*\}\)/);
     // The offered accounts never include the guardian or the identity's owner.
     expect(code).toContain("browserAgentAccounts(");
-    // The browser's signature fills the field: the send parses and checks it as a pasted one.
+    // The browser's signature fills the field: the send parses and checks it as a pasted one,
+    // through the field's own reading, where `0x` alone is empty (never the door's reading alone).
     const signAt = code.indexOf("signTypedDataAsync({");
     const sendAt = code.indexOf("await send(");
     expect(signAt).toBeGreaterThan(0);
     expect(code.slice(signAt, signAt + 600)).toContain("setSignatureDraft(");
     expect(code.slice(code.lastIndexOf("async function onSend", sendAt), sendAt)).toContain(
-      "parsePastedSignature(signatureDraft)",
+      "parseAgentWalletSignature(signatureDraft)",
     );
+    expect(code).not.toContain("parsePastedSignature(");
   });
 
   test("the page never makes a key", () => {
-    for (const make of ["generatePrivateKey", "privateKeyToAccount", "mnemonic", "viem/accounts"])
-      expect(code).not.toContain(make);
+    for (const [name, file] of files)
+      for (const make of ["generatePrivateKey", "privateKeyToAccount", "mnemonic", "viem/accounts"])
+        expect(file, `${name}: ${make}`).not.toContain(make);
   });
 
   test("nothing typed reaches a browser store", () => {
-    for (const store of ["writeLegalBodyMemory", "localStorage", "sessionStorage", "remember("])
-      expect(code).not.toContain(store);
+    for (const [name, file] of files)
+      for (const store of ["writeLegalBodyMemory", "localStorage", "sessionStorage", "remember("])
+        expect(file, `${name}: ${store}`).not.toContain(store);
   });
 
   test("before the wallet: the time and the owner, then the simulation; every timer is a lifetime's", () => {
@@ -360,13 +392,29 @@ describe("the step's source", () => {
     // The owner the message was prepared for is part of that check (ruling R13).
     expect(code.slice(preflight, simulate)).toContain("preparedFor: message.owner");
     expect(code.slice(simulate, send)).toContain("walletSetSendable(");
-    expect(code).not.toContain("setTimeout");
-    expect(code).not.toContain("setInterval");
+    // The paste branch's timer moved to the panels with its panel: a lifetime's there too.
+    expect(panels).toContain("stepLifetime()");
+    for (const [name, file] of files) {
+      expect(file, name).not.toContain("setTimeout");
+      expect(file, name).not.toContain("setInterval");
+    }
   });
 
   test("the chain's time is the step's estimate, never the bare wall clock", () => {
     expect(code).toContain("chainNowSeconds(");
-    expect(code).not.toMatch(/Date\.now\(\)\s*\/\s*1000/);
+    for (const [name, file] of files) expect(file, name).not.toMatch(/Date\.now\(\)\s*\/\s*1000/);
+  });
+
+  test("the time elapsed since the head was read is a monotonic clock's: a wall clock set back never holds the countdown still", () => {
+    // The head's timestamp is the chain's; everything the step measures from it is
+    // `performance.now()`, the read, the tick, the send. The step reads no wall clock at all.
+    expect(code).not.toContain("Date.now()");
+    expect(code).toContain("const readAtMs = performance.now();");
+    expect(code).toContain("setClock(chainClockAt(head.timestamp, readAtMs));");
+    expect(code).toContain("setTickMs(performance.now());");
+    expect(code).toContain("const startMs = performance.now();");
+    expect(code).toContain("const sendMs = performance.now();");
+    expect(code).toContain("nowSeconds: chainNowSeconds(clock, performance.now()),");
   });
 
   test("in both modes the allowlist is told the signed-in wallet is the guardian", () => {

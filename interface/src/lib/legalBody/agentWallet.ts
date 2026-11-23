@@ -13,8 +13,9 @@
  * wallet (`agentWalletOwed`); the address a person types (`parseAgentWalletAddress`); the
  * deadline and the time left (`walletSetDeadline`, `walletSetSecondsLeft`, `walletSetSendable`);
  * the message in its two forms (`walletSetTypedData` for viem and wagmi, `walletSetText` for the
- * copy box) over the domain the registry answers (`registryDomainOf`); and what a pasted signature
- * is worth before anything is sent (`isErc6492Wrapped`, `walletSignatureVerdict`).
+ * copy box) over the domain the registry answers (`registryDomainOf`); and the signature field and
+ * what a pasted signature is worth before anything is sent (`parseAgentWalletSignature`,
+ * `isErc6492Wrapped`, `walletSignatureVerdict`).
  *
  * Nothing here reads a chain, a clock or a wallet: the answers and the time come in as values.
  */
@@ -22,7 +23,7 @@ import { getAddress } from "viem";
 import { EIP712_DOMAIN_FIELDS, type Address, type Hex } from "@/lib/api/types";
 import type { WalletKind } from "./chain";
 import { sameAddress } from "./flow";
-import type { ChainRead } from "./paste";
+import { parsePastedSignature, type ChainRead, type SignatureProblem } from "./paste";
 
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const ZERO_ADDRESS = /^0x0{40}$/;
@@ -91,9 +92,10 @@ export type WalletAddressProblem = "empty" | "not_address" | "zero" | "guardian"
 
 /**
  * The agent's wallet as typed: the spaces and newlines at either end trimmed, then `0x` and 40 hex
- * digits in any letter case, never the zero address, never the guardian's own wallet. Returned
- * checksummed. A mixed-case address whose checksum is off is not refused: the wallet must sign the
- * message, and no signature recovers to a mistyped address.
+ * digits, never the zero address, never the guardian's own wallet. Returned checksummed. All in
+ * lower case or all in upper case carries no checksum and is taken; mixed case is EIP-55's
+ * checksum, and one letter's case off is a typo, refused as not an address here rather than after
+ * a signing round trip that no signature could pass.
  */
 export function parseAgentWalletAddress(
   raw: string,
@@ -102,9 +104,13 @@ export function parseAgentWalletAddress(
   const value = raw.trim();
   if (value === "") return { problem: "empty" };
   if (!ADDRESS.test(value)) return { problem: "not_address" };
+  const checksummed = getAddress(value.toLowerCase());
+  const digits = value.slice(2);
+  const mixedCase = digits !== digits.toLowerCase() && digits !== digits.toUpperCase();
+  if (mixedCase && value !== checksummed) return { problem: "not_address" };
   if (ZERO_ADDRESS.test(value)) return { problem: "zero" };
   if (sameAddress(value, guardian)) return { problem: "guardian" };
-  return getAddress(value.toLowerCase());
+  return checksummed;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -279,6 +285,18 @@ export function registryDomainOf(
 // ---------------------------------------------------------------------------------------------
 // What a pasted signature is worth
 // ---------------------------------------------------------------------------------------------
+
+/**
+ * The signature field of the step, pasted or filled by the browser wallet: read as the link door
+ * reads one (`parsePastedSignature`: trimmed, `0x` added when missing, lower case, whole bytes, at
+ * most 2,048 of them), except that `0x` alone is `empty`. The door lets a bare `0x` through; here
+ * no wallet signs zero bytes, and the chain's verdict would refuse it with a sentence about a
+ * provider's wallet that says nothing of what happened.
+ */
+export function parseAgentWalletSignature(raw: string): Hex | { problem: SignatureProblem } {
+  const signature = parsePastedSignature(raw);
+  return signature === "0x" ? { problem: "empty" } : signature;
+}
 
 /** ERC-6492's marker: `0x6492` repeated to 32 bytes, at the end of a wrapped signature. */
 const ERC6492_MARKER = "6492".repeat(16);

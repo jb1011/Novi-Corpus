@@ -56,6 +56,7 @@ import {
   type AgentWalletStage,
 } from "@/lib/legalBody/agentWalletStep";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
+import type { LegalBodyNotice } from "@/lib/legalBody/flow";
 import { REGISTER_RECEIPT_TIMEOUT_MS } from "@/lib/legalBody/identity";
 
 const AW = LEGAL_BODY_COPY.agentWallet;
@@ -127,7 +128,8 @@ describe("chainNowSeconds: the chain's time, from the head and the local time si
     expect(chainNowSeconds(clock, 10_000 + 270_000)).toBe(Number(HEAD) + 270);
   });
 
-  it("never goes back before the head when the local clock is set back", () => {
+  it("never goes back before the head, given a time before the read", () => {
+    // The step's clock is monotonic (`performance.now()`): this is a guard, not a clock set back.
     expect(chainNowSeconds(clock, 4_000)).toBe(Number(HEAD));
   });
 
@@ -947,30 +949,45 @@ describe("doneWalletCard: the done page's card for a legal body made before the 
   /** The public record, as far as the card reads it. */
   const record = (agentWallet: string) => ({ agentWallet }) as LegalBodyStatementJson;
   const ZERO = "0x0000000000000000000000000000000000000000";
+  /** The done derivation carries no notice. */
+  const NO_NOTICE = undefined;
 
   it("the record names the guardian's own wallet, in any letter case: the guardian's card", () => {
-    expect(doneWalletCard(record(GUARDIAN), GUARDIAN)).toBe("guardian");
-    expect(doneWalletCard(record(lower(GUARDIAN)), GUARDIAN)).toBe("guardian");
-    expect(doneWalletCard(record(GUARDIAN), lower(GUARDIAN))).toBe("guardian");
-    expect(doneWalletCard(record(upper(GUARDIAN)), GUARDIAN)).toBe("guardian");
+    expect(doneWalletCard(record(GUARDIAN), GUARDIAN, NO_NOTICE)).toBe("guardian");
+    expect(doneWalletCard(record(lower(GUARDIAN)), GUARDIAN, NO_NOTICE)).toBe("guardian");
+    expect(doneWalletCard(record(GUARDIAN), lower(GUARDIAN), NO_NOTICE)).toBe("guardian");
+    expect(doneWalletCard(record(upper(GUARDIAN)), GUARDIAN, NO_NOTICE)).toBe("guardian");
   });
 
   it("the record names no wallet (the zero address): the card for none", () => {
-    expect(doneWalletCard(record(ZERO), GUARDIAN)).toBe("none");
+    expect(doneWalletCard(record(ZERO), GUARDIAN, NO_NOTICE)).toBe("none");
   });
 
   it("the record names the agent's own wallet: no card", () => {
-    expect(doneWalletCard(record(AGENT), GUARDIAN)).toBeNull();
-    expect(doneWalletCard(record(OTHER), GUARDIAN)).toBeNull();
+    expect(doneWalletCard(record(AGENT), GUARDIAN, NO_NOTICE)).toBeNull();
+    expect(doneWalletCard(record(OTHER), GUARDIAN, NO_NOTICE)).toBeNull();
   });
 
   it("no record read: no card", () => {
-    expect(doneWalletCard(null, GUARDIAN)).toBeNull();
+    expect(doneWalletCard(null, GUARDIAN, NO_NOTICE)).toBeNull();
   });
 
   it("a wallet field that is not an address: no card, never a guess", () => {
     for (const value of [undefined, 42, "", "0x12", "none"])
-      expect(doneWalletCard({ agentWallet: value } as unknown as LegalBodyStatementJson, GUARDIAN)).toBeNull();
+      expect(
+        doneWalletCard({ agentWallet: value } as unknown as LegalBodyStatementJson, GUARDIAN, NO_NOTICE),
+      ).toBeNull();
+  });
+
+  it.each<LegalBodyNotice>([
+    { kind: "company_revoked" },
+    { kind: "order_revoked" },
+    { kind: "winding_down" },
+    { kind: "dissolved" },
+    { kind: "broken_reason_unknown" },
+  ])("a notice beside the body ($kind): no card, whatever the record names (ruling R18)", (notice) => {
+    for (const wallet of [GUARDIAN, lower(GUARDIAN), ZERO])
+      expect(doneWalletCard(record(wallet), GUARDIAN, notice)).toBeNull();
   });
 
   it("the card's words, word for word", () => {

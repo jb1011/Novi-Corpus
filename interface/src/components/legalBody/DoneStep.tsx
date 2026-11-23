@@ -33,10 +33,10 @@ const CARD_LINES: Record<DoneWalletCard, string> = {
  * transaction through the allowlist on its own click.
  *
  * A body linked before the agent's wallet rule may have an identity that still names the guardian's
- * own wallet, or none. For a linked, not revoked order whose record was read and says so
- * (`doneWalletCard`, against the order's own guardian), a card above the record says it; a click
- * on the card opens the agent's wallet step here, in place, in its "linked" mode, and the step
- * stays open from then on. The record and its standing are left as they are.
+ * own wallet, or none. For a linked, not revoked order with no notice beside it, whose record was
+ * read and says so (`doneWalletCard`, against the order's own guardian), a card above the record
+ * says it; a click on the card opens the agent's wallet step here, in place, in its "linked" mode,
+ * and the step stays open from then on. The record and its standing are left as they are.
  */
 export function DoneStep({ kit }: { kit: LegalBodyStepKit }) {
   const order = kit.order;
@@ -51,7 +51,7 @@ export function DoneStep({ kit }: { kit: LegalBodyStepKit }) {
     order !== null && order.state === "linked" && !order.revoked ? order.agentId : null;
   const walletCard =
     order !== null && walletAgentId !== null
-      ? doneWalletCard(publicRecordOf(byAgent.data), order.guardian)
+      ? doneWalletCard(publicRecordOf(byAgent.data), order.guardian, kit.derivation.notice)
       : null;
 
   return (

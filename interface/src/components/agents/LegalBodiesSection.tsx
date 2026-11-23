@@ -90,7 +90,7 @@ export function LegalBodiesSection({
         <ul className="flex flex-col gap-3">
           {view.rows.map((row) => (
             <li key={row.key}>
-              <LegalBodyRow row={row} guardian={view.guardians?.get(row.key) ?? null} />
+              <LegalBodyRow row={row} guardian={view.guardians.get(row.key) ?? null} />
             </li>
           ))}
         </ul>

@@ -25,6 +25,7 @@ import { renderToString } from "react-dom/server";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   ApiError,
+  type Address,
   type CompanyView,
   type EntityView,
   type LegalBodyByAgent,
@@ -170,6 +171,8 @@ const WHERE = { chainId: CHAIN, factory: FACTORY };
 /** Another guardian's wallet: anvil's third published account. */
 const OTHER_GUARDIAN = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC" as const;
 const OTHER_FACTORY = "0x00000000000000000000000000000000000fac70" as const;
+/** A rows view's guardians when no row's wallet is said. */
+const NO_GUARDIANS: ReadonlyMap<string, Address> = new Map();
 
 const rows = (companies: CompanyView[], orders: LegalBodyOrderView[]) =>
   accountLegalBodyRows({ companies, orders, nowMs: NOW, where: WHERE });
@@ -569,10 +572,11 @@ describe("legalBodiesView: what the section shows", () => {
 
 describe("agentsPageView: the treasury section and the empty card", () => {
   const entity = { id: "ent_1" } as EntityView;
-  const none: LegalBodiesView = { kind: "rows", rows: [] };
+  const none: LegalBodiesView = { kind: "rows", rows: [], guardians: NO_GUARDIANS };
   const some: LegalBodiesView = {
     kind: "rows",
     rows: rows([company("co_a")], [order("ord_1", "co_a")]),
+    guardians: NO_GUARDIANS,
   };
   const entities = (data: EntityView[] | undefined, error: unknown = null) => ({ data, error });
 
@@ -670,7 +674,7 @@ describe("LegalBodiesSection, as the server renders it", () => {
 
   test("no section: nothing at all", () => {
     expect(render({ kind: "hidden" })).toBe("");
-    expect(render({ kind: "rows", rows: [] })).toBe("");
+    expect(render({ kind: "rows", rows: [], guardians: NO_GUARDIANS })).toBe("");
   });
 
   test("an unreadable list: its one line and a retry", () => {
@@ -687,6 +691,7 @@ describe("LegalBodiesSection, as the server renders it", () => {
         [company("co_a"), formed("co_f")],
         [order("ord_1", "co_a", { state: "deployed", agentId: "42" })],
       ),
+      guardians: NO_GUARDIANS,
     });
     expect(html).toContain(A.legalBodies);
     expect(html).toContain('href="/legal-body?order=ord_1"');
@@ -702,7 +707,11 @@ describe("LegalBodiesSection, as the server renders it", () => {
 
   test("a standing row reads the public standing for its identity, and shows it once read", () => {
     byAgent.data = { kind: "could_not_check", reason: "rate_limited" } as PublicRead<LegalBodyByAgent>;
-    const html = render({ kind: "rows", rows: rows([company("co_a")], [linked("ord_1", "co_a", "897126")]) });
+    const html = render({
+      kind: "rows",
+      rows: rows([company("co_a")], [linked("ord_1", "co_a", "897126")]),
+      guardians: NO_GUARDIANS,
+    });
     expect(byAgent.calls).toEqual([{ agentId: "897126", enabled: true }]);
     expect(html).toContain(A.states.linked);
     expect(html).toContain(A.actions.open);
@@ -713,25 +722,29 @@ describe("LegalBodiesSection, as the server renders it", () => {
     byAgent.data = { kind: "could_not_check", reason: "rate_limited" } as PublicRead<LegalBodyByAgent>;
     const linkedRows = rows([company("co_a")], [linked("ord_1", "co_a", "897126")]);
     byAgent.config = legalBodyConfig("sandbox");
-    const sandbox = render({ kind: "rows", rows: linkedRows });
+    const sandbox = render({ kind: "rows", rows: linkedRows, guardians: NO_GUARDIANS });
     expect(sandbox).toMatch(SANDBOX_PILL);
     byAgent.config = legalBodyConfig("production");
-    expect(render({ kind: "rows", rows: linkedRows })).not.toMatch(SANDBOX_PILL);
+    expect(render({ kind: "rows", rows: linkedRows, guardians: NO_GUARDIANS })).not.toMatch(SANDBOX_PILL);
     // Nothing read yet: no standing and no sandbox pill either.
     byAgent.data = undefined;
     byAgent.config = legalBodyConfig("sandbox");
-    expect(render({ kind: "rows", rows: linkedRows })).not.toMatch(SANDBOX_PILL);
+    expect(render({ kind: "rows", rows: linkedRows, guardians: NO_GUARDIANS })).not.toMatch(SANDBOX_PILL);
   });
 
   test("no standing row, no sandbox pill: the pill belongs to the standing", () => {
     byAgent.config = legalBodyConfig("sandbox");
-    const html = render({ kind: "rows", rows: rows([company("co_a")], [order("ord_1", "co_a")]) });
+    const html = render({
+      kind: "rows",
+      rows: rows([company("co_a")], [order("ord_1", "co_a")]),
+      guardians: NO_GUARDIANS,
+    });
     expect(html).not.toMatch(SANDBOX_PILL);
   });
 
   test("a linked row past the five reads asks for nothing", () => {
     const orders = Array.from({ length: 7 }, (_, i) => linked(`ord_${i}`, "co_a", String(100 + i), i + 1));
-    const html = render({ kind: "rows", rows: rows([company("co_a")], orders) });
+    const html = render({ kind: "rows", rows: rows([company("co_a")], orders), guardians: NO_GUARDIANS });
     expect(byAgent.calls.map((c) => c.agentId)).toEqual(["100", "101", "102", "103", "104"]);
     expect(html.split('href="/legal-body?order=').length - 1).toBe(7);
   });
@@ -771,7 +784,7 @@ describe("rowGuardians: what a linked row's record is measured against", () => {
       nowMs: NOW,
     });
     expect(v.kind === "rows" && v.rows).toEqual(rows([company("co_a")], orders));
-    expect(v.kind === "rows" && v.guardians && [...v.guardians.entries()]).toEqual([["order:ord_1", GUARDIAN]]);
+    expect(v.kind === "rows" && [...v.guardians.entries()]).toEqual([["order:ord_1", GUARDIAN]]);
   });
 });
 
@@ -939,15 +952,19 @@ describe("LegalBodiesSection: the agent's wallet on a linked row", () => {
     expect(count(renderOrders(orders))).toBe(STANDING_READS);
   });
 
-  test("a view built without the guardians says nothing of the wallet", () => {
-    byAgent.data = naming(GUARDIAN);
-    const html = renderToString(
-      createElement(LegalBodiesSection, {
-        view: { kind: "rows", rows: rows([company("co_a")], [linked("ord_1", "co_a", "897126")]) },
-        onRetry: () => {},
-        retrying: false,
-      }),
-    );
-    expect(count(html)).toBe(0);
+  test("every rows view carries its guardians: a view without them does not type-check", () => {
+    // `guardians` is required on the rows view, so no view can leave the wallet's words off by
+    // forgetting them: the type check (`tsc --noEmit`) fails on this line if it ever becomes
+    // optional again.
+    // @ts-expect-error The rows view requires `guardians`.
+    const without: LegalBodiesView = { kind: "rows", rows: [] };
+    expect(without.kind).toBe("rows");
+    const view = legalBodiesView({
+      orders: { data: { orders: [linked("ord_1", "co_a", "897126")] }, error: null },
+      companies: { data: { companies: [company("co_a")] }, error: null },
+      config: null,
+      nowMs: NOW,
+    });
+    expect(view.kind === "rows" && view.guardians.get("order:ord_1")).toBe(GUARDIAN);
   });
 });

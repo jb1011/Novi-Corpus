@@ -5,9 +5,10 @@
  * A body linked before the agent's wallet rule has an identity that still names the guardian's own
  * wallet, or none. Its done page shows a card, "Set your agent's wallet", with the sentence for
  * which of the two the public record names; a click on the card opens the agent's wallet step in
- * place. The card shows only for a linked, not revoked order whose record was read, and only for
- * those two cases; it is measured against the order's own guardian. Rendering the page opens
- * nothing: no chain read, no wallet, no transaction.
+ * place, in its linked mode, which reads the registry itself. The card shows only for a linked, not
+ * revoked order with no notice beside it, whose record was read, and only for those two cases; it
+ * is measured against the order's own guardian. Rendering the page opens nothing: no chain read,
+ * no wallet, no transaction.
  */
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -24,8 +25,14 @@ const calls = vi.hoisted(() => ({
   allowedWrites: 0,
   chainReads: 0,
   signatures: 0,
+  /** Each `readContract` asked: its function and its arguments. */
+  contractReads: [] as { functionName: unknown; args: unknown }[],
   byAgent: [] as { agentId: string | null | undefined; enabled: boolean }[],
   data: undefined as unknown,
+  /** The card already clicked: the done page's one state (`walletOpen`) reads true. */
+  walletOpen: false,
+  /** The states asked for since the render began. */
+  states: 0,
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -36,6 +43,13 @@ vi.mock("react", async (importOriginal) => {
     useEffect: (effect: () => void) => {
       effect();
     },
+    // The done page's one state is the render's first, and starts false: with `walletOpen` set it
+    // reads as the card already clicked. Every other state is React's own.
+    useState: ((initial: unknown) => {
+      const state = actual.useState(initial);
+      calls.states += 1;
+      return calls.walletOpen && calls.states === 1 && initial === false ? [true, state[1]] : state;
+    }) as typeof actual.useState,
   };
 });
 
@@ -59,7 +73,10 @@ vi.mock("wagmi", async (importOriginal) => {
   const client = {
     getBlock: read,
     getCode: read,
-    readContract: read,
+    readContract: (p?: { functionName?: unknown; args?: unknown }) => {
+      calls.contractReads.push({ functionName: p?.functionName, args: p?.args });
+      return read();
+    },
     simulateContract: read,
     waitForTransactionReceipt: read,
   };
@@ -242,6 +259,17 @@ const NO_BODY: PublicRead<LegalBodyByAgent> = {
 
 const markup = (k: LegalBodyStepKit) => renderToString(createElement(DoneStep, { kit: k }));
 
+/** The done page as it is once the card was clicked. */
+function openMarkup(k: LegalBodyStepKit): string {
+  calls.walletOpen = true;
+  calls.states = 0;
+  try {
+    return markup(k);
+  } finally {
+    calls.walletOpen = false;
+  }
+}
+
 /** The text a person reads: the markup's tags dropped and its escapes undone. */
 function text(m: string): string {
   return m
@@ -266,8 +294,11 @@ beforeEach(() => {
   calls.allowedWrites = 0;
   calls.chainReads = 0;
   calls.signatures = 0;
+  calls.contractReads = [];
   calls.byAgent = [];
   calls.data = undefined;
+  calls.walletOpen = false;
+  calls.states = 0;
 });
 
 afterEach(() => {
@@ -334,6 +365,22 @@ describe("no card otherwise", () => {
     }
   });
 
+  test.each([
+    "company_revoked",
+    "order_revoked",
+    "winding_down",
+    "dissolved",
+    "broken_reason_unknown",
+  ] as const)("a notice beside the body (%s), the order linked and not revoked: no card (ruling R18)", (kind) => {
+    for (const wallet of [GUARDIAN, ZERO]) {
+      calls.data = naming(wallet);
+      const m = markup(kit(linkedOrder(), { phase: "done", notice: { kind } }));
+      expect(text(m)).not.toContain(AW.doneTitle);
+      // The notice is said, and the record is shown as before.
+      expect(text(m)).toContain(D.standingHeading);
+    }
+  });
+
   test("a body that is not linked, whatever its record names", () => {
     calls.data = naming(GUARDIAN);
     for (const brokenReason of ["winding_down", "dissolved"] as const) {
@@ -367,5 +414,37 @@ describe("rendering the page opens nothing", () => {
     expect(calls.signatures).toBe(0);
     expect(k.refreshAgentWallet).not.toHaveBeenCalled();
     expect(k.remember).not.toHaveBeenCalled();
+  });
+});
+
+describe("the card clicked: the step opens in place, in its linked mode", () => {
+  test("the step reads the registry itself, once, as it opens: getAgentWallet for this identity", () => {
+    calls.data = naming(GUARDIAN);
+    const k = kit(linkedOrder());
+    const m = openMarkup(k);
+    const page = text(m);
+    // The step in the card's place, the record still below it.
+    expect(cardButton(m)).toBeNull();
+    expect(page).toContain(AW.title);
+    expect(page).toContain(AW.checking);
+    expect(page).toContain(D.standingHeading);
+    // The linked mode's own read: a draft's step reads nothing as it opens (the shell reads for a
+    // draft), and the shell reads no wallet for a linked order.
+    expect(calls.contractReads).toEqual([{ functionName: "getAgentWallet", args: [BigInt(AGENT_ID)] }]);
+    expect(calls.chainReads).toBe(1);
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(calls.chainReads).toBe(1);
+    expect(k.refreshAgentWallet).not.toHaveBeenCalled();
+    // Opening it opens no wallet, sends nothing and remembers nothing.
+    expect(calls.allowedWrites).toBe(0);
+    expect(calls.signatures).toBe(0);
+    expect(k.remember).not.toHaveBeenCalled();
+  });
+
+  test("the closed card reads nothing: the read above is the click's", () => {
+    calls.data = naming(GUARDIAN);
+    markup(kit(linkedOrder()));
+    expect(calls.contractReads).toEqual([]);
+    expect(calls.chainReads).toBe(0);
   });
 });

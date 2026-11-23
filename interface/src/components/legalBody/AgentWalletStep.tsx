@@ -1,26 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { hashTypedData, recoverTypedDataAddress } from "viem";
 import { useConnection, usePublicClient, useSignTypedData } from "wagmi";
 import { StepNav } from "@/components/onboarding/OnboardingFlow";
-import {
-  Button,
-  Callout,
-  Card,
-  Field,
-  SectionTitle,
-  Spinner,
-  StepHeader,
-  TextInput,
-  Textarea,
-} from "@/components/onboarding/primitives";
+import { Button, Callout, Spinner, StepHeader } from "@/components/onboarding/primitives";
 import { useAllowedWrite } from "@/lib/api/legalBodyHooks";
 import type { Address, Hex } from "@/lib/api/types";
-import { txUrl } from "@/lib/chain";
 import {
   WALLET_SET_SEND_MARGIN_SECONDS,
   parseAgentWalletAddress,
+  parseAgentWalletSignature,
   readAgentWallet,
   registryDomainOf,
   walletSetSendable,
@@ -31,7 +21,6 @@ import {
   type WalletSetMessage,
 } from "@/lib/legalBody/agentWallet";
 import {
-  SET_AGENT_WALLET_FUNCTION,
   agentWalletPrepare,
   agentWalletSendPreflight,
   agentWalletSignatureCheck,
@@ -50,27 +39,20 @@ import {
   type AgentWalletButton,
   type AgentWalletChoice,
   type AgentWalletStage,
-  type AgentWalletStepView,
   type ChainClock,
 } from "@/lib/legalBody/agentWalletStep";
 import { agentWalletCall, identityRegistryAbi } from "@/lib/legalBody/chain";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import { REGISTER_RECEIPT_TIMEOUT_MS, isRevert, readOwnerOf } from "@/lib/legalBody/identity";
 import { stepLifetime } from "@/lib/legalBody/lifetime";
-import {
-  POINTER_WATCH_MS,
-  parsePastedSignature,
-  pointerWatchInterval,
-  type SignatureProblem,
-} from "@/lib/legalBody/paste";
+import type { SignatureProblem } from "@/lib/legalBody/paste";
 import { pointerTxStage } from "@/lib/legalBody/pointer";
+import { AddressForm, BrowserPanel, ElsewherePanel, MessagePanel } from "./AgentWalletPanels";
 import { IdentityLine } from "./IdentityLine";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
-import { CopyBox, FieldRows } from "./PasteLinkPanel";
 
 const AW = LEGAL_BODY_COPY.agentWallet;
 const P = LEGAL_BODY_COPY.paste;
-const I = LEGAL_BODY_COPY.identity;
 
 /** One tick of the countdown. */
 const TICK_MS = 1_000;
@@ -117,7 +99,9 @@ type Prepared = { message: WalletSetMessage; domain: RegistryDomain };
  *
  * Every read, the browser wallet's signature and the one transaction are a click's, the paste
  * branch's timed reads aside; nothing is sent on mount. The address and the signature are this
- * step's state only, never stored.
+ * step's state only, never stored. The panels it draws live in `AgentWalletPanels.tsx`, the paste
+ * branch's timer among them, which calls this step's read; every read, the signature and the send
+ * are this file's.
  * Timers go through a lifetime that the effect's cleanup ends, and a click's continuation stops
  * after its next await once the step is gone.
  *
@@ -205,7 +189,9 @@ export function AgentWalletStep({
   const [accountDeclined, setAccountDeclined] = useState(false);
   // The sentences of the last click that did not move the step.
   const [lines, setLines] = useState<string[]>([]);
-  // The head's timestamp read at preparation, and this browser's clock then; ticked once a second.
+  // The head's timestamp read at preparation, and this browser's monotonic clock then
+  // (`performance.now()`, as every time below that the estimate is measured with); ticked once a
+  // second. A wall clock set back would hold the countdown still.
   const [clock, setClock] = useState<ChainClock | null>(null);
   const [tickMs, setTickMs] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -221,7 +207,7 @@ export function AgentWalletStep({
     if (!ticking) return;
     const countdown = stepLifetime();
     const tick = () => {
-      setTickMs(Date.now());
+      setTickMs(performance.now());
       countdown.later(tick, TICK_MS);
     };
     countdown.later(tick, TICK_MS);
@@ -303,9 +289,9 @@ export function AgentWalletStep({
       setLines([walletCallRefusalSentence("chain_not_configured", environment)]);
       return null;
     }
-    // This browser's clock is read before the head is asked for, so the time the reads take
-    // counts as time already spent on the message.
-    const readAtMs = Date.now();
+    // This browser's monotonic clock is read before the head is asked for, so the time the reads
+    // take counts as time already spent on the message.
+    const readAtMs = performance.now();
     let reads;
     try {
       reads = await Promise.all([
@@ -347,7 +333,7 @@ export function AgentWalletStep({
       return null;
     }
     setClock(chainClockAt(head.timestamp, readAtMs));
-    setTickMs(Date.now());
+    setTickMs(performance.now());
     setSignatureDraft("");
     setSignatureProblem(null);
     setTxHash(null);
@@ -406,10 +392,10 @@ export function AgentWalletStep({
     const { message, domain } = stage;
     setLines([]);
     // The view says "expired" from the new tick; nothing else happens.
-    const startMs = Date.now();
+    const startMs = performance.now();
     setTickMs(startMs);
     if (!walletSetSendable(message.deadline, chainNowSeconds(clock, startMs))) return;
-    const signature = parsePastedSignature(signatureDraft);
+    const signature = parseAgentWalletSignature(signatureDraft);
     if (typeof signature === "object") {
       setSignatureProblem(signatureFieldSentence(signature.problem));
       return;
@@ -461,12 +447,12 @@ export function AgentWalletStep({
         ownerOf,
         connected,
         deadline: message.deadline,
-        nowSeconds: chainNowSeconds(clock, Date.now()),
+        nowSeconds: chainNowSeconds(clock, performance.now()),
         preparedFor: message.owner,
       });
       // An owner of "none" is always refused here; the second test only tells the type so.
       if (!preflight.ok || ownerOf === "none") {
-        setTickMs(Date.now());
+        setTickMs(performance.now());
         // The signature names the owner it was made for: the message is dropped, a new one offered.
         if (!preflight.ok && preflight.reason === "owner_changed") {
           setStage({ at: "owner_changed" });
@@ -497,7 +483,7 @@ export function AgentWalletStep({
       }
       if (!life.alive()) return;
       // The window once more, right before the wallet opens.
-      const sendMs = Date.now();
+      const sendMs = performance.now();
       const nowSeconds = chainNowSeconds(clock, sendMs);
       if (!walletSetSendable(message.deadline, nowSeconds)) {
         setTickMs(sendMs);
@@ -559,7 +545,7 @@ export function AgentWalletStep({
   /** The wallet did not send: the same message again, while its time lasts. */
   function backToMessage(message: WalletSetMessage, domain: RegistryDomain) {
     setStage({ at: "message", message, domain });
-    setTickMs(Date.now());
+    setTickMs(performance.now());
   }
 
   /** "Check again" and "Try again": the registry read again, a read only. */
@@ -706,318 +692,5 @@ export function AgentWalletStep({
         </StepNav>
       )}
     </div>
-  );
-}
-
-/** The browser branch: the three cards, the address (and, for the agent's own key, the other
- *  accounts of the browser wallet) inside the chosen one, the message, and where the transaction
- *  is. */
-function BrowserPanel({
-  view,
-  busy,
-  choose,
-  signWith,
-  address,
-  message,
-  txHash,
-}: {
-  view: AgentWalletStepView;
-  busy: boolean;
-  choose: (choice: AgentWalletChoice) => void;
-  signWith: (account: Address) => void;
-  address: ReactNode;
-  message: ReactNode;
-  txHash: Hex | null;
-}) {
-  return (
-    <>
-      {view.choices.length > 0 && (
-        <div className="flex flex-col gap-4">
-          {view.choices.map((c) => (
-            <ChoiceCard
-              key={c.choice}
-              title={c.title}
-              body={c.line}
-              chosen={c.chosen}
-              disabled={busy}
-              onChoose={() => choose(c.choice)}
-            >
-              {c.choice === "no_key" && view.noKey && (
-                <div className="mt-5 flex flex-col gap-2 text-[12.5px] leading-[1.6] text-muted">
-                  <p>{view.noKey.ask}</p>
-                  <p>{view.noKey.commandIntro}</p>
-                  <Command text={view.noKey.command} />
-                </div>
-              )}
-              {view.addressField && address}
-              {c.choice === "has_key" && view.otherAccounts && (
-                <OtherAccounts other={view.otherAccounts} disabled={busy} signWith={signWith} />
-              )}
-            </ChoiceCard>
-          ))}
-        </div>
-      )}
-
-      {message}
-
-      {view.status && (
-        <Callout tone={view.status.tone} className="mt-6">
-          <span className="flex flex-col gap-2">
-            <span className="flex items-center gap-2">
-              {view.status.busy && <Spinner className="h-3.5 w-3.5" />}
-              {view.status.text}
-            </span>
-            {txHash && <TxLink hash={txHash} />}
-          </span>
-        </Callout>
-      )}
-
-      <p className="mt-6 text-[12.5px] leading-[1.6] text-muted">
-        {LEGAL_BODY_COPY.wallet.neverApprove}
-      </p>
-    </>
-  );
-}
-
-/** The address of the agent's wallet, typed. Enter prepares the message. */
-function AddressForm({
-  value,
-  problem,
-  disabled,
-  onChange,
-  onSubmit,
-}: {
-  value: string;
-  problem: string | null;
-  disabled: boolean;
-  onChange: (value: string) => void;
-  onSubmit: () => void;
-}) {
-  return (
-    <form
-      className="mt-5"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (!disabled) onSubmit();
-      }}
-    >
-      <Field label={AW.addressLabel} error={problem ?? undefined} htmlFor="legal-body-agent-wallet">
-        <TextInput
-          id="legal-body-agent-wallet"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          invalid={problem !== null}
-          autoComplete="off"
-          autoCapitalize="off"
-          spellCheck={false}
-          disabled={disabled}
-          className="font-mono text-[12.5px]"
-        />
-      </Field>
-    </form>
-  );
-}
-
-/** The one-click way: a button per other account of the browser wallet, or how to connect one;
- *  and the wallet's no, said, the paste field kept below. */
-function OtherAccounts({
-  other,
-  disabled,
-  signWith,
-}: {
-  other: NonNullable<AgentWalletStepView["otherAccounts"]>;
-  disabled: boolean;
-  signWith: (account: Address) => void;
-}) {
-  return (
-    <div className="mt-5 border-t hairline pt-5">
-      <div className="text-[13px] font-medium text-ink">{other.title}</div>
-      {other.how && <p className="mt-1 text-[12.5px] leading-[1.6] text-muted">{other.how}</p>}
-      {other.accounts.length > 0 && (
-        <div className="mt-3 flex flex-col items-start gap-2">
-          {other.accounts.map((a) => (
-            <Button
-              key={a.account}
-              variant="ghost"
-              disabled={disabled}
-              onClick={() => signWith(a.account)}
-              className="max-w-full break-all font-mono text-[12px]"
-            >
-              {a.label}
-            </Button>
-          ))}
-        </div>
-      )}
-      {other.declined && (
-        <Callout tone="warn" className="mt-3">
-          {other.declined}
-        </Callout>
-      )}
-    </div>
-  );
-}
-
-/** The prepared message to copy, the two ways to sign it, the countdown, and the signature. */
-function MessagePanel({
-  view,
-  text,
-  signature,
-  problem,
-  disabled,
-  onSignature,
-}: {
-  view: AgentWalletStepView;
-  text: string;
-  signature: string;
-  problem: string | null;
-  disabled: boolean;
-  onSignature: (value: string) => void;
-}) {
-  if (!view.sign) return null;
-  return (
-    <>
-      <Card className="mt-6 p-6">
-        <p className="mb-4 text-[13.5px] leading-[1.6] text-muted">{view.sign.intro}</p>
-        <CopyBox heading={view.sign.heading} text={text} />
-        <div className="mt-5 flex flex-col gap-2 text-[12.5px] leading-[1.6] text-muted">
-          <p>{view.sign.ask}</p>
-          <p>{view.sign.commandIntro}</p>
-          <Command text={view.sign.command} />
-        </div>
-        {view.countdown && <p className="mt-4 text-[12.5px] text-muted">{view.countdown}</p>}
-      </Card>
-
-      {view.signatureField && (
-        <Card className="mt-6 p-6">
-          <Field
-            label={AW.signatureLabel}
-            hint={P.signatureHint}
-            error={problem ?? undefined}
-            htmlFor="legal-body-agent-wallet-signature"
-          >
-            <Textarea
-              id="legal-body-agent-wallet-signature"
-              rows={3}
-              value={signature}
-              invalid={problem !== null}
-              spellCheck={false}
-              autoComplete="off"
-              autoCapitalize="off"
-              disabled={disabled}
-              className="break-all font-mono text-[12px]"
-              onChange={(e) => onSignature(e.target.value)}
-            />
-          </Field>
-        </Card>
-      )}
-    </>
-  );
-}
-
-/**
- * The paste branch: what the owning key must call, and the registry read again every 30 seconds
- * for two minutes from when the panel is shown. Reads only: no field, no wallet.
- */
-function ElsewherePanel({
-  view,
-  registry,
-  agentId,
-  refresh,
-}: {
-  view: AgentWalletStepView;
-  registry: Address;
-  agentId: string;
-  refresh: () => Promise<void>;
-}) {
-  // The shell's read as it is now: a new function on each render of the shell, read when due.
-  const latest = useRef(refresh);
-  useEffect(() => {
-    latest.current = refresh;
-  });
-  useEffect(() => {
-    const watch = stepLifetime();
-    const startedAtMs = Date.now();
-    const read = () => {
-      void latest.current();
-      const next = pointerWatchInterval({ startedAtMs, nowMs: Date.now(), sent: false, seen: false });
-      if (next !== false) watch.later(read, next);
-    };
-    watch.later(read, POINTER_WATCH_MS);
-    return () => watch.end();
-  }, []);
-
-  const rows = [
-    { label: P.rows.to, value: registry, note: P.notes.to },
-    { label: P.rows.function, value: SET_AGENT_WALLET_FUNCTION, note: null },
-    { label: P.rows.agentId, value: agentId, note: null },
-  ];
-  return (
-    <>
-      {view.status && <Callout tone={view.status.tone}>{view.status.text}</Callout>}
-      <Card className="mt-6 p-6">
-        <SectionTitle>{P.sendFromOwner}</SectionTitle>
-        <FieldRows rows={rows} />
-      </Card>
-    </>
-  );
-}
-
-/** One of the three cards: its name and what it means; once chosen, what it needs. */
-function ChoiceCard({
-  title,
-  body,
-  chosen,
-  disabled,
-  onChoose,
-  children,
-}: {
-  title: string;
-  body: string;
-  chosen: boolean;
-  disabled: boolean;
-  onChoose: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <Card className={chosen ? "p-6 ring-1 ring-accent/40" : "p-6"}>
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div className="min-w-0 flex-1">
-          <div className="text-[14px] font-medium text-ink">{title}</div>
-          <p className="mt-1 text-[12.5px] leading-[1.6] text-muted">{body}</p>
-        </div>
-        {chosen ? (
-          <span className="rounded-full border hairline-strong px-2.5 py-0.5 font-mono text-[11px] text-muted">
-            {I.chosen}
-          </span>
-        ) : (
-          <Button variant="subtle" onClick={onChoose} disabled={disabled} aria-label={`${I.choose}: ${title}`}>
-            {I.choose}
-          </Button>
-        )}
-      </div>
-      {chosen && children}
-    </Card>
-  );
-}
-
-/** A command to run where the agent runs, shown whole and selectable. */
-function Command({ text }: { text: string }) {
-  return (
-    <code className="block select-all break-all rounded-lg border hairline bg-paper-2/60 px-3 py-2 font-mono text-[11.5px] text-ink">
-      {text}
-    </code>
-  );
-}
-
-function TxLink({ hash }: { hash: Hex }) {
-  return (
-    <a
-      href={txUrl(hash)}
-      target="_blank"
-      rel="noreferrer"
-      className="break-all font-mono text-[11.5px] underline underline-offset-2"
-    >
-      {I.viewTransaction}: {hash}
-    </a>
   );
 }

@@ -22,13 +22,14 @@ import {
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import type { Address } from "@/lib/api/types";
 import { walletKindOf, type WalletKind } from "@/lib/legalBody/chain";
-import type { ChainRead } from "@/lib/legalBody/paste";
+import { parsePastedSignature, type ChainRead } from "@/lib/legalBody/paste";
 import {
   agentWalletOwed,
   agentWalletReadOf,
   agentWalletStanding,
   isErc6492Wrapped,
   parseAgentWalletAddress,
+  parseAgentWalletSignature,
   readAgentWallet,
   registryDomainOf,
   WALLET_SET_SEND_MARGIN_SECONDS,
@@ -197,6 +198,32 @@ describe("parseAgentWalletAddress", () => {
     expect(parseAgentWalletAddress(`  ${lower(AGENT)}\n`, GUARDIAN)).toBe(AGENT);
     expect(parseAgentWalletAddress(`0x${AGENT.slice(2).toUpperCase()}`, GUARDIAN)).toBe(AGENT);
   });
+
+  describe("a mixed-case address carries its checksum (EIP-55)", () => {
+    /** `AGENT` with the case of its first hex letter flipped: one letter mistyped. */
+    const flipped = (() => {
+      const at = AGENT.slice(2).search(/[a-fA-F]/) + 2;
+      const c = AGENT[at];
+      return `${AGENT.slice(0, at)}${c === c.toLowerCase() ? c.toUpperCase() : c.toLowerCase()}${AGENT.slice(at + 1)}`;
+    })();
+
+    it("its checksum right: taken", () => {
+      expect(parseAgentWalletAddress(AGENT, GUARDIAN)).toBe(AGENT);
+      expect(parseAgentWalletAddress(` ${AGENT}\n`, GUARDIAN)).toBe(AGENT);
+    });
+
+    it("the same in lower case, or in upper case, carries no checksum: taken", () => {
+      expect(parseAgentWalletAddress(lower(AGENT), GUARDIAN)).toBe(AGENT);
+      expect(parseAgentWalletAddress(`0x${AGENT.slice(2).toUpperCase()}`, GUARDIAN)).toBe(AGENT);
+    });
+
+    it("one letter's case flipped: not an address, before any signing round trip", () => {
+      expect(flipped).not.toBe(AGENT);
+      expect(flipped.toLowerCase()).toBe(lower(AGENT));
+      expect(parseAgentWalletAddress(flipped, GUARDIAN)).toEqual({ problem: "not_address" });
+      expect(parseAgentWalletAddress(` ${flipped}\n`, GUARDIAN)).toEqual({ problem: "not_address" });
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -353,6 +380,38 @@ describe("registryDomainOf", () => {
 // ---------------------------------------------------------------------------------------------
 // What a pasted signature is worth
 // ---------------------------------------------------------------------------------------------
+
+describe("parseAgentWalletSignature: the step's signature field", () => {
+  it.each([
+    ["an empty field", ""],
+    ["spaces and newlines only", "  \n\t "],
+    ["0x alone", "0x"],
+    ["0x alone, with spaces and newlines around it", "  0x\n"],
+    ["0X alone, in upper case", "0X"],
+  ])("%s is empty, said before any chain is asked", (_name, raw) => {
+    expect(parseAgentWalletSignature(raw)).toEqual({ problem: "empty" });
+  });
+
+  it("the link door's reading lets 0x alone through; this field does not", () => {
+    expect(parsePastedSignature("0x")).toBe("0x");
+    expect(parseAgentWalletSignature("0x")).toEqual({ problem: "empty" });
+  });
+
+  it.each([
+    ["a 65-byte signature, with spaces around it and in upper case", `  0x${"AB".repeat(65)}\n`],
+    ["one without 0x", "ab".repeat(65)],
+    ["one byte", "0x00"],
+    ["a letter that is not hex", "0xzz"],
+    ["an odd number of digits", "0xabc"],
+    ["more than 2,048 bytes", `0x${"ab".repeat(2_049)}`],
+  ])("otherwise the link door's reading: %s", (_name, raw) => {
+    expect(parseAgentWalletSignature(raw)).toEqual(parsePastedSignature(raw));
+  });
+
+  it("a signature comes back normalised", () => {
+    expect(parseAgentWalletSignature(`  0x${"AB".repeat(65)}\n`)).toBe(bytes(65));
+  });
+});
 
 describe("isErc6492Wrapped", () => {
   it.each<[string, Hex, boolean]>([
