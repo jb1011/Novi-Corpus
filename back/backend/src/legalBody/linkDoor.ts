@@ -14,6 +14,7 @@ import {
   type ReserveOutcome,
   isDraftExpired,
 } from "../persistence/legalBodyRepository";
+import { ownAgentWallet } from "./agentWalletRule";
 import { readVerifiedAgreement } from "./agreement";
 import { type LinkCheck, type LinkRefusalCode, checkLink } from "./checkLink";
 import { CreateCapError, submitCreateFor } from "./create";
@@ -200,7 +201,9 @@ function servable(environment: LegalBodyOrderDeps["environment"], text: LegalTex
  *  1. the order's rule 1 (`assertLinkableDraft`), after the uniform 404;
  *  2. `agentId` is a uint256 in canonical decimal; `ttlSeconds`, if given, a whole number of
  *     seconds from `MIN_SERVED_LINK_TTL_SECONDS` to `MAX_SERVED_LINK_TTL_SECONDS`;
- *  3. the head, then the identity's owner at that head: none is a 422 `identity_not_found`;
+ *  3. the head, then the identity's owner at that head: none is a 422 `identity_not_found`; then
+ *     the wallet the identity names at that head: none, or the guardian's own, is a 409
+ *     `agent_wallet_required` (`ownAgentWallet`), as `checkLink` refuses it at the submit;
  *  4. the link: this agent, the tenant as guardian, the order's delay and agreement, and a
  *     deadline counted from the CHAIN's time; a deadline from the first second of the grant's last
  *     day on is a 409 `link_outlasts_grant` (`assertLinkWithinGrant`).
@@ -235,6 +238,10 @@ export async function linkMessage(
     deps.chain.identityOwner(agentId, head.number),
   );
   if (identityOwner === undefined) throw refusal("identity_not_found", 422);
+  const agentWallet = await chainCall(orderId, "agent_wallet", () =>
+    deps.chain.agentWallet(agentId, head.number),
+  );
+  if (!ownAgentWallet(agentWallet, tenantId)) throw refusal("agent_wallet_required", 409);
 
   // 4.
   const link: LegalBodyLink = {
@@ -444,6 +451,7 @@ export async function submitLink(
 function detailOf(check: Extract<LinkCheck, { ok: false }>): Record<string, string> {
   const detail: Record<string, string> = {};
   if (check.identityOwner !== undefined) detail.identityOwner = check.identityOwner;
+  if (check.agentWallet !== undefined) detail.agentWallet = check.agentWallet;
   if (check.bodyAddress !== undefined) detail.bodyAddress = check.bodyAddress;
   if (check.createdFor !== undefined) detail.createdFor = check.createdFor;
   if (check.gasEstimate !== undefined) detail.gasEstimate = check.gasEstimate.toString();

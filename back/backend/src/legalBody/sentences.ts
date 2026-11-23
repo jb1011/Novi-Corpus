@@ -61,6 +61,10 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   invalid_link_ttl:
     "The ttlSeconds, when given, must be a whole number of seconds from 600 to 85800.",
   identity_not_found: "No ERC-8004 identity with this agentId exists on this chain.",
+  // Both link doors, both link tools, and the link check: the wallet the identity names in the
+  // registry is none, or the guardian's own.
+  agent_wallet_required:
+    "This agent has no wallet of its own yet: its identity must name a wallet that is not the guardian's wallet before a legal body is created.",
   malformed_link:
     "The link message is not the one served: it must have exactly its five fields, each in the form it was served in.",
   malformed_signature:

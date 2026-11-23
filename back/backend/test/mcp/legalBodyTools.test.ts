@@ -373,6 +373,29 @@ describe("each tool answers what its door answers for the same input", () => {
     expect(snapshot(w)).toEqual(before);
   });
 
+  test("get_link_message passes the code agent_wallet_required and its sentence through, as the door answers them, and writes nothing", async () => {
+    const w = world();
+    const row = await ordered(w);
+    // The registry names the guardian's own wallet as the agent's.
+    w.chain.agentWallet.mockResolvedValue(guardian.address);
+    const before = snapshot(w);
+
+    const viaDoor = await answerOf(
+      await call(w.app, "POST", messagePath(row.legalBodyId), await sessionOf(guardian), {
+        agentId: "42",
+      }),
+    );
+    const viaTool = await callTool(w, keyOf(w, guardian.address), "get_link_message", {
+      orderId: row.legalBodyId,
+      agentId: "42",
+    });
+
+    const answer = { code: "agent_wallet_required", message: S.agent_wallet_required };
+    expect(viaDoor).toMatchObject({ status: 409, body: { error: answer } });
+    expect(viaTool).toEqual({ isError: true, text: JSON.stringify(answer), body: answer });
+    expect(snapshot(w)).toEqual(before);
+  });
+
   test("submit_link answers the door's order for the same order from the same state: reserved, or deployed once the create's receipt is read", async () => {
     const reserved = await linkedBothWays();
     expect(reserved.viaDoor.status).toBe(202);
