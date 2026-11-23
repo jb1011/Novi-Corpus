@@ -29,9 +29,10 @@ import { readCappedText } from "../util/readStreamCapped";
  *   date not shaped `YYYY-MM-DD`). The caller waits and retries; an error is never read as clear.
  *
  * Each error writes ONE ops line, `person_screen_error { status }`, with the HTTP status or a
- * short reason word. Never the query, the name, the birth date, the key or the body: an error body
- * can quote what was sent. Nothing of the answer is kept: the verdict is the only thing returned
- * (the `screenings` table is PR 4's).
+ * short reason word: CRITICAL on a 401, a 402 or a 403 (the key refused, or its credits spent: no
+ * screen runs, so no check completes, until a person acts), a warning otherwise. Never the query,
+ * the name, the birth date, the key or the body: an error body can quote what was sent. Nothing of
+ * the answer is kept: the verdict is the only thing returned (the `screenings` table is PR 4's).
  */
 
 export const OPENSANCTIONS_MATCH_URL = "https://api.opensanctions.org/match";
@@ -45,6 +46,9 @@ const LIMIT = "5";
 
 /** Five results with their properties stay well under this; the cap only stops a runaway answer. */
 const MAX_RESPONSE_BYTES = 1024 * 1024;
+
+/** The statuses that refuse the key or its credits: an outage no retry ends. */
+const KEY_REFUSED: readonly number[] = [401, 402, 403];
 
 /** The one query's id in the request and in the answer. */
 const QUERY_ID = "q";
@@ -112,7 +116,9 @@ export class OpenSanctionsPersonScreener implements PersonScreener {
     } catch (e) {
       // Only the status leaves: an exception's message here can quote the body or the query.
       const status: Failure = e instanceof ScreenFailed ? e.status : "unreadable";
-      opsLog("person_screen_error", { status });
+      if (typeof status === "number" && KEY_REFUSED.includes(status))
+        opsLog("person_screen_error", { level: "error", severity: "CRITICAL", status });
+      else opsLog("person_screen_error", { level: "warn", status });
       return "error";
     }
   }

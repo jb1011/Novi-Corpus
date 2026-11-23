@@ -1720,6 +1720,37 @@ describe("sweepSessions", () => {
     expect(s.session().redactDueAt).toBeNull();
   });
 
+  test("a screen pending for more than 24 hours raises one CRITICAL line per sweep, with its hours, until the screen answers", async () => {
+    const s = await started();
+    provider.verify(s.ref);
+    screener.answer = "error";
+    expect(await syncSession(deps(), s.sessionId)).toBe("screen_pending");
+
+    now = T0 + 23 * 3_600_000;
+    await sweepSessions(deps(), now);
+    expect(opsLines("identity_screen_pending_stale")).toEqual([]);
+
+    for (const hours of [25, 26]) {
+      now = T0 + hours * 3_600_000;
+      await sweepSessions(deps(), now);
+    }
+    expect(opsLines("identity_screen_pending_stale")).toEqual([
+      expect.objectContaining({
+        sessionId: s.sessionId,
+        hours: 25,
+        level: "error",
+        severity: "CRITICAL",
+      }),
+      expect.objectContaining({ sessionId: s.sessionId, hours: 26, severity: "CRITICAL" }),
+    ]);
+
+    screener.answer = "clear";
+    now = T0 + 27 * 3_600_000;
+    await sweepSessions(deps(), now);
+    expect(s.session().closedAt).toBe(now);
+    expect(opsLines("identity_screen_pending_stale")).toHaveLength(2);
+  });
+
   test("an error on one session is counted and logged, never thrown, and the others are still swept", async () => {
     const broken = await started(deps(), tenant(1));
     const fine = await started(deps(), tenant(2));

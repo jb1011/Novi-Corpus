@@ -131,14 +131,26 @@ function opsLines(): Record<string, unknown>[] {
     .filter((l) => typeof l.opslog === "string");
 }
 
-/** Exactly one ops line, `person_screen_error`, carrying the status and nothing else. */
+/** The statuses that say the key or its credits are refused: no screen runs until a person acts. */
+const KEY_REFUSED = [401, 402, 403];
+
+/**
+ * Exactly one ops line, `person_screen_error`, carrying the status, its level and nothing else:
+ * CRITICAL on a refused key or exhausted credits (401, 402, 403), a warning otherwise.
+ */
 function expectOneErrorLine(status: number | string) {
   const lines = opsLines();
   expect(lines).toHaveLength(1);
   const line = lines[0]!;
   expect(line.opslog).toBe("person_screen_error");
   expect(line.status).toBe(status);
-  expect(Object.keys(line).sort()).toEqual(["at", "opslog", "status"]);
+  if (typeof status === "number" && KEY_REFUSED.includes(status)) {
+    expect(line).toMatchObject({ level: "error", severity: "CRITICAL" });
+    expect(Object.keys(line).sort()).toEqual(["at", "level", "opslog", "severity", "status"]);
+  } else {
+    expect(line.level).toBe("warn");
+    expect(Object.keys(line).sort()).toEqual(["at", "level", "opslog", "status"]);
+  }
 }
 
 describe("the request, pinned", () => {
@@ -251,6 +263,25 @@ describe("an error is never a verdict", () => {
       expectOneErrorLine(status);
     });
   }
+
+  test("a refused key or exhausted credits (401, 402, 403) is CRITICAL; any other failure is a warning", async () => {
+    for (const status of [401, 402, 403, 500, 429, 400]) {
+      const { s } = screener([{ status, body: {} }]);
+      expect(await s.screenPerson({ name: NAME, birthDate: BIRTH_DATE })).toBe("error");
+    }
+    const { s } = screener([{ status: 200, body: "not json" }]);
+    expect(await s.screenPerson({ name: NAME, birthDate: BIRTH_DATE })).toBe("error");
+
+    expect(opsLines().map((l) => [l.status, l.level, l.severity ?? null])).toEqual([
+      [401, "error", "CRITICAL"],
+      [402, "error", "CRITICAL"],
+      [403, "error", "CRITICAL"],
+      [500, "warn", null],
+      [429, "warn", null],
+      [400, "warn", null],
+      ["unreadable", "warn", null],
+    ]);
+  });
 
   test("a request that does not answer in time is an error, and is aborted", async () => {
     let seen: AbortSignal | undefined;

@@ -162,6 +162,8 @@ const DAILY_WINDOW_MS = DAY_MS;
 /** The sweep reads again an open session nobody read for this long. */
 const REREAD_AFTER_MS = 2 * 60_000;
 const SWEEP_BATCH = 50;
+/** A screen pending longer than this raises a CRITICAL line at each sweep (ruling F5). */
+const SCREEN_PENDING_ALARM_MS = 24 * 3_600_000;
 /** Reviews waiting for a decision are few (an operator decides each); read many at once. */
 const DECISION_BATCH = 500;
 const NAME_MAX_CODE_POINTS = 100;
@@ -1297,7 +1299,8 @@ async function requestRedaction(
  *    provider (redacted, or canceled when redaction does not take them: `endAtProvider`) and
  *    closed as abandoned, or without a row when an operator's row was written over them
  *    (`writtenOver`); else read (`syncSession`; a refused result waiting for an operator is only
- *    looked at).
+ *    looked at), and one still waiting for its screen more than 24 hours on raises a CRITICAL line
+ *    (`screenPendingAlarm`).
  * 2. Closed sessions whose row went to review: once the operator has decided the review (an
  *    acceptance, a refusal, or a name correction that settles it), their redaction falls due.
  * 3. Sessions due for redaction (50 at a time): marked redacted when the provider says so, else
@@ -1341,6 +1344,7 @@ export async function sweepSessions(
       } else {
         await syncAt(deps, session.sessionId, nowMs);
         counts.synced += 1;
+        screenPendingAlarm(deps, session.sessionId, nowMs);
       }
     } catch (e) {
       failed("sync", session.sessionId, e);
@@ -1370,6 +1374,25 @@ export async function sweepSessions(
     }
   }
   return counts;
+}
+
+/**
+ * A session still waiting for its screen more than 24 hours after the screen first gave no
+ * verdict: one CRITICAL line, `identity_screen_pending_stale { sessionId, hours }`, at each sweep
+ * that reads it. The screener is down, or its key refused (`person_screen_error`), and on
+ * production no check completes until a person acts.
+ */
+function screenPendingAlarm(deps: IdentitySessionDeps, sessionId: string, nowMs: number): void {
+  const after = deps.sessions.byId(sessionId);
+  if (after === undefined || after.closedAt !== null || after.screenPendingSince === null) return;
+  const waited = nowMs - after.screenPendingSince;
+  if (waited <= SCREEN_PENDING_ALARM_MS) return;
+  opsLog("identity_screen_pending_stale", {
+    level: "error",
+    severity: "CRITICAL",
+    sessionId,
+    hours: Math.floor(waited / 3_600_000),
+  });
 }
 
 /**
