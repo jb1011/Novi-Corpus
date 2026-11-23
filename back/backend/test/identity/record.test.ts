@@ -329,6 +329,41 @@ describe("planCheck", () => {
     expect(planCheck(deps(), input({ completedAt: COMPLETED + 1 })).renews).toBeDefined();
   });
 
+  test("under a renewal attempt begun on top of the pass, a pass renews the pass that still counts: it names it and must complete after it", () => {
+    const current = passOf(guardian, "FRA", COMPLETED - 30 * DAY);
+    // The automatic check's own `started` row, on top of the pass the renewal rule keeps counting.
+    const begun = appended({
+      ...passedIdentityRow(guardian, { at: COMPLETED - DAY, expiresAt: COMPLETED }),
+      status: "started",
+      completedAt: null,
+      expiresAt: null,
+      names: null,
+      nameHmac: null,
+      documentCountry: null,
+      documentType: null,
+      documentExpired: null,
+      liveness: null,
+      watchlist: null,
+    });
+    expect(repo.latest(guardian)?.checkId).toBe(begun.checkId);
+
+    const plan = planCheck(deps(), input());
+
+    expect(plan.renews?.checkId).toBe(current.checkId);
+    expect(plan.row).toMatchObject({ status: "passed", supersedesCheckId: current.checkId });
+    expect(refusedBy(() => planCheck(deps(), input({ completedAt: COMPLETED - 31 * DAY })))).toBe(
+      `a renewal must complete after the current pass (${new Date(COMPLETED - 30 * DAY).toISOString()})`,
+    );
+  });
+
+  test("a result that is not failed and holds no names is refused: no plan claims a pass without names", () => {
+    for (const result of ["passed", "needs_review"] as const)
+      expect(refusedBy(() => planCheck(deps(), input({ result, names: null })))).toBe(
+        "a passed or needs_review check needs the names of record (--name-first and --name-last)",
+      );
+    expect(planCheck(deps(), input({ result: "failed", names: null })).row.status).toBe("failed");
+  });
+
   test("a review or a failure over a pass renews nothing", () => {
     passOf(guardian, "FRA", COMPLETED - 30 * DAY);
 

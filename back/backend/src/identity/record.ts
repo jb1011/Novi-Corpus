@@ -5,6 +5,7 @@ import type {
   NewGuardianIdentityCheck,
 } from "../persistence/identityRepository";
 import { IDENTITY_AAD, nameOfRecord, nameRuleProblem } from "./names";
+import { currentRecord } from "./state";
 import type {
   DocumentType,
   IdentityProvider,
@@ -178,14 +179,22 @@ export function assertProductionPass(
  * date, its country is blocked, the name breaks the name rule, the guardian's name differs from
  * the document's, or another tenant's current passed check holds the same name and country
  * (`duplicate_identity`, last). A pass over the tenant's pass is a renewal: it names the pass it
- * replaces and must complete after it, so an expiry, counted from the completion, never moves
- * back; and no pass is planned that would already be expired. On production a passed result needs
- * the sanctions search and the face match, and a passed row the name rule too.
+ * replaces (the latest row when it is a pass, else the pass a renewal under way still counts) and
+ * must complete after it, so an expiry, counted from the completion, never moves back; and no pass
+ * is planned that would already be expired. On production a passed result needs the sanctions
+ * search and the face match, and a passed row the name rule too. A result that is not a failure
+ * needs the names of record.
  */
 export function planCheck(deps: CheckDeps, input: CheckInput): CheckPlan {
   const { repo, nowMs, reverifyYears } = deps;
   const { tenantId, result, completedAt, country, liveness, watchlist } = input;
   const failed = result === "failed";
+  // A plan that is not a failure holds the names of record: a pass, or a review, without them
+  // would be refused by the shape check, and on production with the wrong sentence.
+  if (!failed && input.names === null)
+    refused(
+      "a passed or needs_review check needs the names of record (--name-first and --name-last)",
+    );
   if (result === "passed" && addUtcYears(completedAt, reverifyYears) <= nowMs)
     refused("--completed-at is so old that this pass would already be expired");
   // On production a pass rests on the face match and on the sanctions search, both of them run.
@@ -208,9 +217,14 @@ export function planCheck(deps: CheckDeps, input: CheckInput): CheckPlan {
     if (input.nameMismatch) flagged.push("name_mismatch");
   }
   // A pass over a pass is a renewal: it names the pass it replaces, and completes after it, so
-  // the expiry, counted from the completion, never moves back.
+  // the expiry, counted from the completion, never moves back. The pass renewed is the latest row
+  // when it is a pass (in date or not), else the pass a renewal under way still counts
+  // (`currentRecord`, read as the operator's writers read the state): under the automatic check's
+  // own `started` row, or a failed or reviewed attempt, the pass that counts is still the one
+  // renewed.
   const latest = repo.latest(tenantId);
-  const renews = result === "passed" && latest?.status === "passed" ? latest : undefined;
+  const base = latest?.status === "passed" ? latest : currentRecord(repo, tenantId, nowMs);
+  const renews = result === "passed" ? base : undefined;
   // A passed row always says when it completed (the table's CHECK).
   if (renews !== undefined && completedAt <= (renews.completedAt as number))
     refused(
