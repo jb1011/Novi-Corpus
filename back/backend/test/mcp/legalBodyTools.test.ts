@@ -741,6 +741,10 @@ describe("what an answer may carry", () => {
     expect(description).toContain(
       "the identity's owner sets it in the registry with setAgentWallet and the new wallet's signature, and until then this answers agent_wallet_required.",
     );
+    // The same rule on the submit, which the door checks again there.
+    expect(byName.get("submit_link")?.description ?? "").toContain(
+      "The identity must name a wallet of the agent's own, not the guardian's wallet: the identity's owner sets it in the registry with setAgentWallet and the new wallet's signature, and until then this answers status refused with the code agent_wallet_required.",
+    );
     const inputs = (name: string) =>
       Object.keys(byName.get(name)?.inputSchema.properties ?? {}).sort();
     expect(inputs("get_link_message")).toEqual(["agentId", "orderId", "ttlSeconds"]);
