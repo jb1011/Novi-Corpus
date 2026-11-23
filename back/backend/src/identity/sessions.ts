@@ -68,6 +68,8 @@ import type { FailureReasonCode, IdentityState, Watchlist } from "./types";
  * - An operator's row written while a session is open stands: the session's next completion,
  *   failure, abandon or reuse closes it without a row of its own (`writtenOver`), its redaction due
  *   as usual. The adapter never writes over an operator's row.
+ * - A revocation is never undone without an operator: a result for a tenant whose latest pass has
+ *   a revocation after it lands in review (`provider_flag`), never `passed`; the start stays open.
  * - The provider is asked to delete a session `redactAfterDays` after its row, or after the
  *   operator's decision when the row went to review.
  *
@@ -992,8 +994,12 @@ async function completeVerified(
     try {
       row = planCheck(checkDeps(deps, now), {
         ...checkBase(deps, fresh),
-        // A country outside ISO 3166-1 cannot pass (ruling R12): an operator reviews it.
-        result: outcome.country === null ? "needs_review" : "passed",
+        // A country outside ISO 3166-1 cannot pass (ruling R12), nor a result after a revocation
+        // (`revokedSinceLastPass`): an operator reviews it (`provider_flag`).
+        result:
+          outcome.country === null || revokedSinceLastPass(deps, fresh.tenantId)
+            ? "needs_review"
+            : "passed",
         names: { ...names, full: null },
         nameMismatch: !namesAgree(typed, outcome.names),
         country: outcome.country,
@@ -1037,6 +1043,19 @@ async function completeVerified(
     reviewReasons: result.reviewReasons,
   });
   return "completed";
+}
+
+/**
+ * Whether the tenant holds a revocation newer than its last pass (Martin to confirm: the
+ * controller's ruling F3). A revocation, for fraud or a court order, is never undone without an
+ * operator: a result after it lands in review with `provider_flag`, never `passed`, and the start
+ * stays open (the person may try; an operator decides). A pass written after the revocation, an
+ * operator's, lifts it.
+ */
+function revokedSinceLastPass(deps: IdentitySessionDeps, tenantId: string): boolean {
+  const { repo } = deps.identity;
+  const lastPass = repo.latestPassed(tenantId)?.checkId ?? 0;
+  return repo.list(tenantId).some((row) => row.status === "revoked" && row.checkId > lastPass);
 }
 
 /** The sanctions screen on the name of record and the birth date; `not_run` without a screener

@@ -1320,6 +1320,83 @@ describe("syncSession", () => {
     });
   });
 
+  test("a revocation during an open session is not undone: the verified result writes no pass, and the state stays revoked", async () => {
+    const pass = passFor(GUARDIAN, T0 - 1000 * DAY, T0 + 30 * DAY);
+    const s = await started();
+    now = T0 + MINUTE;
+    appended(
+      {
+        ...pass,
+        status: "revoked",
+        supersedesCheckId: pass.checkId,
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+      },
+      "revoked",
+    );
+    provider.verify(s.ref);
+    now = T0 + 2 * MINUTE;
+
+    expect(await syncSession(deps(), s.sessionId)).toBe("closed");
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["passed", "started", "revoked"]);
+    expect(identityState(repo, GUARDIAN, now, "sandbox")).toBe("revoked");
+  });
+
+  test.each(["sandbox", "production"] as const)(
+    "on %s a result after a revocation lands in review with provider_flag, never passed: the start stays open and an operator decides",
+    async (environment) => {
+      const d = environment === "production" ? production() : deps();
+      const pass = appended({
+        ...passedIdentityRow(GUARDIAN, { at: T0 - 1000 * DAY, expiresAt: T0 + 30 * DAY }),
+        environment,
+        synthetic: environment === "sandbox",
+      });
+      appended(
+        {
+          ...pass,
+          status: "revoked",
+          supersedesCheckId: pass.checkId,
+          expiresAt: null,
+          names: null,
+          nameHmac: null,
+        },
+        "revoked",
+      );
+      const s = await started(d);
+      provider.verify(s.ref);
+
+      expect(await syncSession(d, s.sessionId)).toBe("completed");
+      expect(latestRow()).toMatchObject({
+        status: "needs_review",
+        reviewReasons: ["provider_flag"],
+        supersedesCheckId: null,
+      });
+      expect(identityState(repo, GUARDIAN, now, environment)).toBe("needs_review");
+    },
+  );
+
+  test("a pass after the revocation, an operator's, lifts the rule: the next result passes as a renewal", async () => {
+    const pass = passFor(GUARDIAN, T0 - 1000 * DAY, T0 + 30 * DAY);
+    appended(
+      {
+        ...pass,
+        status: "revoked",
+        supersedesCheckId: pass.checkId,
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+      },
+      "revoked",
+    );
+    const again = passFor(GUARDIAN, T0 - DAY, T0 + 30 * DAY);
+    const s = await started();
+    provider.verify(s.ref);
+
+    expect(await syncSession(deps(), s.sessionId)).toBe("completed");
+    expect(latestRow()).toMatchObject({ status: "passed", supersedesCheckId: again.checkId });
+  });
+
   test("a closed session is unchanged, and not read again", async () => {
     const s = await started();
     provider.verify(s.ref);
