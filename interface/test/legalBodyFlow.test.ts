@@ -20,6 +20,7 @@ import {
   type LegalBodyThread,
   type PointerPreflight,
 } from "@/lib/legalBody/flow";
+import { agentWalletStanding, type AgentWalletRead } from "@/lib/legalBody/agentWallet";
 import type {
   Address,
   BindingState,
@@ -39,6 +40,8 @@ const REGISTRY = "0x8004A818BFB912233c491871b3d84c89A494BD9e" as const;
 /** Inventions. */
 const ANOTHER_FACTORY = "0x00000000000000000000000000000000000fac70" as const;
 const BODY = "0x00000000000000000000000000000000000b0d1e" as const;
+/** The wallet the registry names as the agent's own: neither the guardian's nor the zero address. */
+const AGENT_WALLET = "0x00000000000000000000000000000000000a6e47" as const;
 const CHAIN = 5042002;
 const AGENT = "42";
 
@@ -177,10 +180,14 @@ const flow = (over: Partial<LegalBodyFlowInput> = {}): LegalBodyFlowInput => ({
   order: null,
   ownerChoice: null,
   agentId: null,
+  // A wallet of the agent's own, unless a row says otherwise: the rows below that reach the link
+  // are about something else than the agent's wallet.
+  agentWallet: AGENT_WALLET,
   ...over,
 });
 
-/** A draft the person has carried to the link: both local choices made. */
+/** A draft the person has carried to the link: both local choices made, the agent's own wallet
+ *  named on its identity. */
 const drafted = (over: Partial<LegalBodyFlowInput> = {}) =>
   flow({ order: view(), ownerChoice: "this-wallet", agentId: AGENT, ...over });
 
@@ -692,6 +699,116 @@ describe("deriveLegalBodyPhase: one row per state", () => {
 
   test.each(rows)("%s", (_name, given, expected) => {
     expect(deriveLegalBodyPhase(given)).toStrictEqual(expected);
+  });
+});
+
+describe("deriveLegalBodyPhase: the agent's wallet, between the identity and the link", () => {
+  describe.each([
+    ["this-wallet", "browser"],
+    ["elsewhere", "paste"],
+  ] as const)("the owner choice %s: the %s branch", (ownerChoice, branch) => {
+    const needed: LegalBodyDerivation = { phase: "wallet", walletStep: "needed", branch };
+    const rows: [string, AgentWalletRead | null, LegalBodyDerivation][] = [
+      ["the registry not read yet: checking", null, { phase: "wallet", walletStep: "checking", branch }],
+      [
+        "the registry could not be read: unreadable",
+        "unreadable",
+        { phase: "wallet", walletStep: "unreadable", branch },
+      ],
+      ["the registry names no wallet: needed", "none", needed],
+      ["the registry names the guardian's own wallet: needed", GUARDIAN, needed],
+      ["the guardian's wallet in lower case: needed", lower(GUARDIAN), needed],
+      ["the guardian's wallet in upper case: needed", upper(GUARDIAN), needed],
+      ["a wallet of the agent's own: the link", AGENT_WALLET, { phase: "link", branch }],
+      ["another key's wallet, the identity owner's own included: the link", OTHER_KEY, { phase: "link", branch }],
+      ["a wallet of the agent's own in lower case: the link", lower(OTHER_KEY), { phase: "link", branch }],
+    ];
+    test.each(rows)("%s", (_name, agentWallet, expected) => {
+      expect(deriveLegalBodyPhase(drafted({ ownerChoice, agentWallet }))).toStrictEqual(expected);
+    });
+
+    test("the session address in lower case and the registry's checksum are one wallet: needed", () => {
+      expect(
+        deriveLegalBodyPhase(drafted({ ownerChoice, sessionAddress: lower(GUARDIAN), agentWallet: GUARDIAN })),
+      ).toStrictEqual(needed);
+    });
+  });
+
+  const EVERY_READ: (AgentWalletRead | null)[] = [
+    null,
+    "unreadable",
+    "none",
+    GUARDIAN,
+    lower(GUARDIAN),
+    AGENT_WALLET,
+  ];
+
+  test("an identity already taken is said first, whatever the registry names", () => {
+    for (const agentWallet of EVERY_READ)
+      expect(
+        deriveLegalBodyPhase(drafted({ orders: [view({ ...LINKED, id: "ord_0" }), view()], agentWallet })),
+      ).toStrictEqual({ phase: "identity", notice: { kind: "identity_taken", agentId: AGENT } });
+  });
+
+  test("before an identity is picked, the registry's answer counts for nothing", () => {
+    for (const agentWallet of EVERY_READ) {
+      expect(deriveLegalBodyPhase(flow({ order: view(), agentWallet }))).toStrictEqual({ phase: "agreement" });
+      expect(
+        deriveLegalBodyPhase(flow({ order: view(), ownerChoice: "this-wallet", agentWallet })),
+      ).toStrictEqual({ phase: "identity" });
+    }
+  });
+
+  test("the company still wins while the order is a draft", () => {
+    for (const agentWallet of EVERY_READ)
+      expect(
+        deriveLegalBodyPhase(
+          drafted({ company: company({ verification: check("failed", "not_active") }), agentWallet }),
+        ),
+      ).toStrictEqual({
+        phase: "company",
+        companyStep: "failed",
+        notice: { kind: "company_failed", reasonCode: "not_active" },
+      });
+  });
+
+  test("a revoked or expired draft is closed, whatever the registry names", () => {
+    for (const agentWallet of EVERY_READ) {
+      expect(deriveLegalBodyPhase(drafted({ order: view({ revoked: true }), agentWallet }))).toStrictEqual({
+        phase: "closed",
+        notice: { kind: "order_revoked" },
+      });
+      expect(
+        deriveLegalBodyPhase(drafted({ order: view({ createdAt: iso(NOW - 25 * HOUR) }), agentWallet })),
+      ).toStrictEqual({ phase: "closed", notice: { kind: "expired" } });
+    }
+  });
+
+  // Past the draft the wallet is never asked: the server reserved the body already.
+  const PAST_THE_DRAFT: [string, Partial<LegalBodyOrderView>, LegalBodyDerivation][] = [
+    ["reserved", RESERVED, { phase: "link", branch: "browser", notice: { kind: "creating" } }],
+    [
+      "reserved, the identity owned by another key",
+      { ...RESERVED, identityOwner: OTHER_KEY },
+      { phase: "link", branch: "paste", notice: { kind: "creating" } },
+    ],
+    ["deployed", DEPLOYED, { phase: "pointer", branch: "browser" }],
+    ["broken, the pointer cleared", BROKEN("not_linked"), { phase: "pointer", branch: "browser" }],
+    ["linked", LINKED, { phase: "done" }],
+  ];
+  test.each(PAST_THE_DRAFT)("%s: the same phase whatever the registry names", (_name, over, expected) => {
+    for (const agentWallet of EVERY_READ)
+      expect(
+        deriveLegalBodyPhase(flow({ order: view(over), ownerChoice: "this-wallet", agentId: AGENT, agentWallet })),
+      ).toStrictEqual(expected);
+  });
+
+  test("the link is offered exactly where the registry names a wallet of the agent's own", () => {
+    const reads: (Address | "none")[] = ["none", GUARDIAN, lower(GUARDIAN), upper(GUARDIAN), OTHER_KEY, THIRD_KEY, AGENT_WALLET];
+    for (const read of reads) {
+      const { phase } = deriveLegalBodyPhase(drafted({ agentWallet: read }));
+      expect(phase === "link").toBe(agentWalletStanding(read, GUARDIAN) === "own");
+    }
   });
 });
 

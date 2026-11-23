@@ -27,7 +27,7 @@ import {
 import { identityRegistryAbi, type CallContext } from "@/lib/legalBody/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import type { LegalBodyDerivation } from "@/lib/legalBody/flow";
-import { linkOutcomeView, type LinkStepOutcome } from "@/lib/legalBody/link";
+import { linkAnswerOutcome, linkOutcomeView, type LinkStepOutcome } from "@/lib/legalBody/link";
 import {
   MAX_PASTED_SIGNATURE_BYTES,
   POINTER_WATCH_MS,
@@ -397,6 +397,7 @@ describe("pasteErrorOutcome", () => {
     ["order_closed", 409, { kind: "back", to: "agreement", sentence: "the sentence of order_closed" }],
     ["company_not_eligible", 409, { kind: "back", to: "company", sentence: "the sentence of company_not_eligible" }],
     ["identity_not_found", 422, { kind: "back", to: "identity", sentence: "the sentence of identity_not_found" }],
+    ["agent_wallet_required", 409, { kind: "back", to: "wallet", sentence: "the sentence of agent_wallet_required" }],
     ["rate_limited", 429, { kind: "wait", sentence: "the sentence of rate_limited" }],
     ["chain_unavailable", 503, { kind: "retry", sentence: "the sentence of chain_unavailable" }],
     ["link_already_used", 409, { kind: "new_message", sentence: "the sentence of link_already_used" }],
@@ -528,6 +529,52 @@ describe("pasteOutcomeView", () => {
       dropLink: true,
       newOrder: false,
       sendBack: { to: "company", sentence: "s" },
+    });
+  });
+
+  describe("agent_wallet_required: no wallet of the agent's own, back to the agent's wallet step", () => {
+    const SERVED =
+      "This agent has no wallet of its own yet: its identity must name a wallet that is not the guardian's wallet before a legal body is created.";
+    // The flow leaves this step, so the served link goes with it.
+    const BACK = {
+      lines: [SERVED],
+      fieldError: null,
+      dropLink: true,
+      newOrder: false,
+      sendBack: { to: "wallet", sentence: SERVED },
+    };
+
+    test("as the message door's house refusal: the served sentence, carried to the wallet step", () => {
+      const outcome = pasteErrorOutcome(apiError(409, "agent_wallet_required", SERVED), "message");
+      expect(outcome).toEqual({ kind: "back", to: "wallet", sentence: SERVED });
+      expect(pasteOutcomeView(outcome, viewConfig)).toEqual(BACK);
+    });
+
+    test("as the submit door's flat 422 before the reserve: the served sentence, carried to the wallet step", () => {
+      const outcome = linkAnswerOutcome(
+        {
+          status: 422,
+          body: {
+            code: "agent_wallet_required",
+            message: SERVED,
+            detail: { identityOwner: OWNER, agentWallet: GUARDIAN },
+            order: order(),
+          },
+        },
+        "lbo_paste",
+      );
+      expect(outcome).toEqual({ kind: "refused", code: "agent_wallet_required", sentence: SERVED, lapsed: false });
+      expect(pasteOutcomeView(outcome, viewConfig)).toEqual(BACK);
+    });
+
+    test("a lapsed order is closed first, with its way out", () => {
+      expect(pasteOutcomeView(refused("agent_wallet_required", true), viewConfig)).toEqual({
+        lines: ["the sentence of agent_wallet_required"],
+        fieldError: null,
+        dropLink: true,
+        newOrder: true,
+        sendBack: { to: "closed", sentence: "the sentence of agent_wallet_required" },
+      });
     });
   });
 

@@ -152,6 +152,8 @@ function kit(derivation: LegalBodyDerivation = SIGN, o: LegalBodyOrderView | nul
     startAnother: vi.fn(),
     routeSignIn: vi.fn(() => false),
     door: "declare",
+    agentWallet: null,
+    refreshAgentWallet: vi.fn(async () => {}),
   };
 }
 

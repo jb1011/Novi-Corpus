@@ -54,6 +54,7 @@ export const LEGAL_BODY_COPY = {
       company: "Your company",
       agreement: "Agreement",
       identity: "Your agent's identity",
+      wallet: "Agent's wallet",
       link: "Sign the link",
       pointer: "Point your identity",
       payment: "Payment",

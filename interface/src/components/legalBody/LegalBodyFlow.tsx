@@ -10,7 +10,7 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useBytecode } from "wagmi";
+import { useBytecode, useReadContract } from "wagmi";
 import { AuthProvider, useAuth } from "@/components/onboarding/AuthProvider";
 import { StepNav } from "@/components/onboarding/OnboardingFlow";
 import { Button, Callout, Card, Spinner, StepHeader } from "@/components/onboarding/primitives";
@@ -36,6 +36,7 @@ import type {
   LegalBodyOrderView,
 } from "@/lib/api/types";
 import { arcTestnet } from "@/lib/chain";
+import { agentWalletReadOf, type AgentWalletRead } from "@/lib/legalBody/agentWallet";
 import {
   agreementReadAfterJump,
   sentenceOnArrival,
@@ -43,6 +44,7 @@ import {
   withRefusedDraft,
   type CarriedSentence,
 } from "@/lib/legalBody/agreement";
+import { identityRegistryAbi } from "@/lib/legalBody/chain";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
   deriveLegalBodyPhase,
@@ -129,7 +131,9 @@ import { ThreadChooser } from "./ThreadChooser";
  * tenant's companies and orders and this browser's memory pick the thread
  * (`selectLegalBodyThread`), and the thread's company and order decide the phase
  * (`deriveLegalBodyPhase`). Every decision is a pure function in `src/lib/legalBody`; this file
- * reads, calls them, and renders their answers.
+ * reads, calls them, and renders their answers. Among its reads is the registry's answer for a
+ * draft's identity (`getAgentWallet`): no link is offered before the agent has a wallet of its
+ * own.
  *
  * Nothing here writes to the server on its own: every write is a click's. The effects are three:
  * an address that names an order or a company (`?order=`, `?company=`, the agents page's links)
@@ -168,6 +172,11 @@ export type LegalBodyStepKit = {
   routeSignIn: (e: unknown) => boolean;
   /** Which company door this thread is on. */
   door: "declare" | "form";
+  /** The registry's answer for the draft's identity (`getAgentWallet`), as last read: null while
+   *  it is being read, or when there is no identity yet. */
+  agentWallet: AgentWalletRead | null;
+  /** Reads the registry's answer again; the derivation decides from the new one. */
+  refreshAgentWallet: () => Promise<void>;
 };
 
 const T = LEGAL_BODY_COPY.thread;
@@ -332,6 +341,26 @@ function LegalBodySession({
   const company =
     companyQuery.data ?? companies.find((c) => c.companyId === refs?.companyId) ?? null;
   const order = orderQuery.data ?? orders.find((o) => o.id === refs?.orderId) ?? null;
+  // The wallet the registry names for the draft's identity: the agent's own is asked for between
+  // the identity and the link. Read while the order is a draft with an identity, and again only
+  // on a click (`refreshAgentWallet`): never on focus, where a failed read would pull a person off
+  // the link step.
+  const walletReadOn = order?.state === "draft" && choices.agentId !== null;
+  const agentWalletQuery = useReadContract({
+    address: config.identityRegistry,
+    abi: identityRegistryAbi,
+    functionName: "getAgentWallet",
+    // With no identity the read is disabled, so the 0 standing in for it is never read.
+    args: [BigInt(choices.agentId ?? 0)],
+    chainId: config.chainId,
+    query: {
+      enabled: walletReadOn,
+      retry: false,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+    },
+  });
+  const agentWallet = choices.agentId === null ? null : agentWalletReadOf(agentWalletQuery);
   const derivation: LegalBodyDerivation | null =
     thread && thread.kind !== "chooser"
       ? withAgreementRead(
@@ -345,6 +374,7 @@ function LegalBodySession({
             orders,
             order,
             ...choices,
+            agentWallet,
           }),
           { order, readFor: agreementReadFor },
         )
@@ -424,6 +454,13 @@ function LegalBodySession({
     writeLegalBodyMemory(next);
     setMemory(next);
     setCarried(null);
+  }
+
+  /** The registry's answer read again, a click's: the derivation decides from the new one. Never
+   *  outside a draft with an identity, the only time the read is on. */
+  async function refreshAgentWallet() {
+    if (!walletReadOn) return;
+    await agentWalletQuery.refetch();
   }
 
   /** A change to the identity the identity step offers again. Nothing is stored. */
@@ -507,6 +544,12 @@ function LegalBodySession({
         remember({ agentId: null });
         setCarried({ to: "identity", sentence });
         return;
+      case "wallet":
+        // The identity names no wallet of the agent's own: the registry read again decides, and
+        // the door's sentence waits on the wallet step.
+        setCarried({ to: "wallet", sentence });
+        await refreshAgentWallet();
+        return;
       case "closed":
         // The order read again is closed: the sentence goes to the position a closed order maps to.
         setCarried({ to: railPhaseOf({ phase: "closed" }), sentence });
@@ -570,6 +613,8 @@ function LegalBodySession({
       startAnother,
       routeSignIn,
       door,
+      agentWallet,
+      refreshAgentWallet,
     };
     const label = LEGAL_BODY_COPY.rail.labels;
     switch (derivation.phase) {
@@ -653,6 +698,10 @@ function LegalBodySession({
             onIdentity={noteIdentity}
           />
         );
+      case "wallet":
+        // The agent's wallet step has no screen of its own on this page yet: its name, and one
+        // sentence.
+        return <StepPlaceholder kit={kit} />;
       case "link":
         // One step per order: a click's state never carries over to another order. Another key
         // signs on its own panel, which never opens this browser's wallet.

@@ -229,6 +229,8 @@ function kit(
     startAnother: vi.fn(),
     routeSignIn: vi.fn(() => false),
     door: "declare",
+    agentWallet: null,
+    refreshAgentWallet: vi.fn(async () => {}),
   };
 }
 
