@@ -2,12 +2,12 @@
  * The legal-body flow's chain layer: the pinned ABI fragments, the pointer encoder, the one
  * allowlist every wallet write request passes, the door that sends it, and the mint parse.
  *
- * Pin and assert, then send: nothing reaches a wallet unless it is one of the three calls below,
- * built for the selected order, on the chain and registry that `/config` names. Addresses come from
- * the API (`/config.legalBodies`, the order), never from this bundle. Never an approval, a
- * transfer or a value.
+ * Pin and assert, then send: nothing reaches a wallet unless it is one of the four calls below,
+ * built for the selected order or, for the agent's wallet, the selected identity, on the chain and
+ * registry that `/config` names. Addresses come from the API (`/config.legalBodies`, the order),
+ * never from this bundle. Never an approval, a transfer or a value.
  */
-import { encodeAbiParameters, encodeFunctionData, formatUnits } from "viem";
+import { encodeAbiParameters, encodeFunctionData, formatUnits, getAddress } from "viem";
 import type { Address, Hex, LegalBodyConfig, LegalBodyOrderView } from "@/lib/api/types";
 import { sameAddress } from "./flow";
 
@@ -15,8 +15,9 @@ import { sameAddress } from "./flow";
 // Pinned ABI fragments
 // ---------------------------------------------------------------------------------------------
 
-/** The ERC-8004 identity registry: the two `register` overloads, the metadata pair, the reads,
- *  and the ERC-721 `Transfer` a mint emits. The only writes are the three the allowlist names. */
+/** The ERC-8004 identity registry: the two `register` overloads, the metadata pair,
+ *  `setAgentWallet` and the EIP-712 domain its message is signed in, the reads, and the ERC-721
+ *  `Transfer` a mint emits. The only writes are the four the allowlist names. */
 export const identityRegistryAbi = [
   {
     type: "function",
@@ -42,6 +43,35 @@ export const identityRegistryAbi = [
     ],
     outputs: [],
     stateMutability: "nonpayable",
+  },
+  {
+    // Sent by the identity's owner, with the new wallet's signature over `AgentWalletSet`.
+    type: "function",
+    name: "setAgentWallet",
+    inputs: [
+      { name: "agentId", type: "uint256" },
+      { name: "newWallet", type: "address" },
+      { name: "deadline", type: "uint256" },
+      { name: "signature", type: "bytes" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    // ERC-5267: the domain `AgentWalletSet` is signed in, read live.
+    type: "function",
+    name: "eip712Domain",
+    inputs: [],
+    outputs: [
+      { name: "fields", type: "bytes1" },
+      { name: "name", type: "string" },
+      { name: "version", type: "string" },
+      { name: "chainId", type: "uint256" },
+      { name: "verifyingContract", type: "address" },
+      { name: "salt", type: "bytes32" },
+      { name: "extensions", type: "uint256[]" },
+    ],
+    stateMutability: "view",
   },
   {
     type: "function",
@@ -126,6 +156,14 @@ const ZERO_WORD = /^0x0{64}$/;
 const ADDRESS_WORD = /^0x0{24}([0-9a-fA-F]{40})$/;
 /** A uint256 as the API serves it: decimal, no sign, no leading zero, at most 78 digits. */
 const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]{0,77})$/;
+const ZERO_ADDRESS = /^0x0{40}$/;
+/** Bytes as hex: `0x` and whole bytes, at least one. */
+const WHOLE_BYTES = /^0x(?:[0-9a-fA-F]{2})+$/;
+/** The registry's limit: the deadline at most 300 seconds after the chain's time. */
+const MAX_WALLET_SET_DELAY_SECONDS = 300;
+/** The longest signature the allowlist forwards, far above a key's 65 bytes or a contract
+ *  wallet's usual few hundred. */
+const MAX_SIGNATURE_BYTES = 2048;
 
 /** `abi.encode(uint8 1, uint256 chainId, address body)`: exactly 96 bytes. The body's casing
  *  does not matter: addresses are compared in lower case everywhere in this flow. */
@@ -168,7 +206,7 @@ export type WriteRequest = {
   chainId: number;
   address: Address;
   abi: typeof identityRegistryAbi;
-  functionName: "register" | "setMetadata";
+  functionName: "register" | "setMetadata" | "setAgentWallet";
   args: readonly unknown[];
   value?: bigint;
   gas?: bigint;
@@ -181,6 +219,9 @@ export type CallContext = {
   >;
   /** The selected order; required for the pointer. */
   order: LegalBodyOrderView | null;
+  /** The selected identity (its id in decimal), the guardian, and the caller's reading of the
+   *  chain's time in seconds; required for the agent's wallet, which needs no order. */
+  wallet?: { agentId: string; guardian: Address; nowSeconds: number };
 };
 
 export type Refusal = { ok: false; problem: string };
@@ -220,6 +261,21 @@ export function pointerCall(
     abi: identityRegistryAbi,
     functionName: "setMetadata",
     args: [own.agentId, POINTER_KEY, encodePointer(order.chainId, own.body)],
+  };
+}
+
+/** `setAgentWallet(agentId, newWallet, deadline, signature)` on the configured registry, for the
+ *  identity `agentId` names in decimal. Whether it may be sent is `allowedCall`'s to say. */
+export function agentWalletCall(
+  config: CallContext["config"],
+  p: { agentId: string; newWallet: Address; deadline: bigint; signature: Hex },
+): WriteRequest {
+  return {
+    chainId: config.chainId,
+    address: config.identityRegistry,
+    abi: identityRegistryAbi,
+    functionName: "setAgentWallet",
+    args: [BigInt(p.agentId), p.newWallet, p.deadline, p.signature],
   };
 }
 
@@ -291,15 +347,60 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
     };
   }
 
+  if (req.functionName === "setAgentWallet") {
+    const wallet = ctx.wallet;
+    if (!wallet) return refuse("no_wallet_context");
+    if (args === null || args.length !== 4) return refuse("set_agent_wallet_args");
+    const [agentId, newWallet, deadline, signature] = args;
+    if (
+      typeof agentId !== "bigint" ||
+      typeof newWallet !== "string" ||
+      !ADDRESS.test(newWallet) ||
+      typeof deadline !== "bigint" ||
+      typeof signature !== "string"
+    )
+      return refuse("set_agent_wallet_args");
+    // An id in the context that is not a canonical decimal matches no identity: never read by
+    // `BigInt`, which takes hex and throws on the rest.
+    if (!CANONICAL_DECIMAL.test(wallet.agentId) || agentId !== BigInt(wallet.agentId))
+      return refuse("other_identity");
+    if (ZERO_ADDRESS.test(newWallet)) return refuse("wallet_is_zero");
+    if (sameAddress(newWallet, wallet.guardian)) return refuse("wallet_is_guardian");
+    // A bigint compares with a number exactly, a fraction of a second included. Written so that a
+    // time that is not a number (NaN) is outside the window.
+    const now = wallet.nowSeconds;
+    const inWindow =
+      typeof now === "number" && deadline >= now && deadline <= now + MAX_WALLET_SET_DELAY_SECONDS;
+    if (!inWindow) return refuse("deadline_out_of_window");
+    if (signature.length > 2 + 2 * MAX_SIGNATURE_BYTES || !WHOLE_BYTES.test(signature))
+      return refuse("signature_shape");
+    // viem refuses an address whose letter case is not its checksum: the wallet is forwarded
+    // checksummed and the signature in lower case, so the calldata is the same in any case.
+    const to = getAddress(newWallet.toLowerCase());
+    const sig = signature.toLowerCase() as Hex;
+    return {
+      ok: true,
+      data: encodeFunctionData({
+        abi: identityRegistryAbi,
+        functionName: "setAgentWallet",
+        args: [agentId, to, deadline, sig],
+      }),
+      args: [agentId, to, deadline, sig],
+    };
+  }
+
   return refuse("not_allowed");
 }
 
 /**
  * The allowlist's answer, for a screen to show. Both doors, this one and `sendAllowedCall`, pass
- * `checkCall`, which holds the rules, so there is one allowlist: exactly `register()` and
- * `register(string)` on the registry of `/config`'s chain, and `setMetadata(agentId, "legalBody",
- * pointer)` for the selected order's own identity and body. Refuses with the first rule broken, in
- * the order they are written. Returns the calldata it checked, encoded over the pinned ABI.
+ * `checkCall`, which holds the rules, so there is one allowlist: exactly four calls on the registry
+ * of `/config`'s chain. `register()` and `register(string)`; `setMetadata(agentId, "legalBody",
+ * pointer)` for the selected order's own identity and body; and `setAgentWallet(agentId, newWallet,
+ * deadline, signature)` for the selected identity, with no order needed: never the zero address or
+ * the guardian's own wallet, a deadline from the chain's time to 300 seconds after it, a signature
+ * of 1 to 2,048 whole bytes. Refuses with the first rule broken, in the order they are written.
+ * Returns the calldata it checked, encoded over the pinned ABI.
  */
 export function allowedCall(
   req: WriteRequest,
