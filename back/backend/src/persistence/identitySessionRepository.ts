@@ -135,6 +135,12 @@ export interface IdentitySessionRepository {
    * before `nowMs` (a request the provider did not complete is sent again). Earliest due first.
    */
   redactionDue(nowMs: number, limit: number): IdentitySession[];
+  /**
+   * Closed sessions with a completion row and no redaction date, not redacted: the ones whose row
+   * went to review, waiting for the operator's decision before a date is set. Earliest closed
+   * first.
+   */
+  awaitingDecision(limit: number): IdentitySession[];
   /** An IMMEDIATE transaction; every write of this repository inside it joins it. */
   transaction<T>(fn: () => T): T;
 }
@@ -221,8 +227,8 @@ const PROVIDER_REF = /^vs_[A-Za-z0-9_]{1,200}$/;
 const REPORT_ID = /^vr_[A-Za-z0-9_]{1,200}$/;
 /** A code, never the provider's reason text, which may quote the person's data. */
 const ERROR_CODE = /^[a-z][a-z0-9_]{0,99}$/;
-/** The path the person comes back to on our site, as the service takes it. */
-const RETURN_PATH = /^\/[A-Za-z0-9\-_/]{0,200}$/;
+/** The path the person comes back to on our site, as the service takes it (and checks it). */
+export const RETURN_PATH = /^\/[A-Za-z0-9\-_/]{0,200}$/;
 const IV_BYTES = 12;
 const MAX_TEXT_CODE_POINTS = 300;
 /** Control, format, surrogate, private-use and unassigned characters. */
@@ -477,6 +483,13 @@ export class SqliteIdentitySessionRepository implements IdentitySessionRepositor
           ORDER BY redact_due_at, rowid
           LIMIT @limit`,
       ),
+      awaitingDecision: db.prepare(
+        `SELECT * FROM identity_sessions
+          WHERE closed_at IS NOT NULL AND completed_check_id IS NOT NULL
+            AND redact_due_at IS NULL AND redacted_at IS NULL
+          ORDER BY closed_at, rowid
+          LIMIT @limit`,
+      ),
     };
   }
 
@@ -627,6 +640,10 @@ export class SqliteIdentitySessionRepository implements IdentitySessionRepositor
         limit: limitShape(limit),
       }) as Row[]
     ).map(toSession);
+  }
+
+  awaitingDecision(limit: number): IdentitySession[] {
+    return (this.stmts.awaitingDecision.all({ limit: limitShape(limit) }) as Row[]).map(toSession);
   }
 
   transaction<T>(fn: () => T): T {

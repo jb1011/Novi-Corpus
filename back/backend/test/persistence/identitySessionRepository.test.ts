@@ -6,6 +6,7 @@ import { migrate, openDatabase } from "../../src/persistence/db";
 import type { EncryptedName } from "../../src/persistence/identityRepository";
 import {
   type NewIdentitySession,
+  type SessionClose,
   SqliteIdentitySessionRepository,
   type TypedNames,
 } from "../../src/persistence/identitySessionRepository";
@@ -470,6 +471,24 @@ describe("SqliteIdentitySessionRepository", () => {
 
     expect(repo.redactionDue(now, 50).map((s) => s.sessionId)).toEqual([sid(7), sid(2), sid(1)]);
     expect(repo.redactionDue(now, 1).map((s) => s.sessionId)).toEqual([sid(7)]);
+  });
+
+  test("awaitingDecision reads the closed sessions with a completion and no redaction date, earliest closed first", () => {
+    const closeWith = (n: number, c: Partial<SessionClose>) => {
+      repo.insert(session(n));
+      repo.close(sid(n), { ...CLOSE, ...c });
+    };
+    closeWith(1, { at: T0 + 2 * DAY, redactDueAt: null }); // a review waiting for the operator
+    closeWith(2, { redactDueAt: T0 + 8 * DAY }); // a pass or a failure: its date is set
+    closeWith(3, { completedCheckId: null, reportId: null, redactDueAt: null }); // no completion
+    closeWith(4, { redactDueAt: null }); // a review, closed earlier
+    closeWith(5, { redactDueAt: null }); // a review, redacted at the provider on its own
+    repo.markRedacted(sid(5), T0 + 3 * DAY);
+    repo.insert(session(6)); // open
+
+    expect(repo.awaitingDecision(50).map((s) => s.sessionId)).toEqual([sid(4), sid(1)]);
+    expect(repo.awaitingDecision(1).map((s) => s.sessionId)).toEqual([sid(4)]);
+    expect(() => repo.awaitingDecision(0)).toThrow("identity session: limit must be");
   });
 
   test("setRedactDue sets the date on a closed session only", () => {
