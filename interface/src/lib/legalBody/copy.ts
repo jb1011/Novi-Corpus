@@ -576,6 +576,13 @@ export const LEGAL_BODY_COPY = {
       "This identity is owned by another key. That key must write the agent's wallet on the registry (setAgentWallet), with a signature of the new wallet that is at most five minutes old. This page checks again by itself.",
     checkAgain: "Check again",
     line: "This agent's wallet: {address}",
+    /** The done page's card, for a legal body made before the rule: its identity still names the
+     *  guardian's own wallet (`doneLine`) or none (`doneLineNone`). A click opens the step here. */
+    doneTitle: "Set your agent's wallet",
+    doneLine:
+      "The registry still names your own wallet as this agent's wallet. A payment made by the agent does not lead to its company yet.",
+    doneLineNone:
+      "The registry names no wallet for this agent. It cannot act under its Charter until it has one.",
     /** The allowlist refused the transaction this page built: ours, so said as ours. */
     callRefused:
       "The transaction was refused before your wallet opened ({problem}), so nothing was sent.",
@@ -898,6 +905,8 @@ export const LEGAL_BODY_COPY = {
     getStarted: "Get started",
     treasuryNone: "No agent with a treasury yet.",
     treasuryUnreadable: "Your agents with a treasury could not be read.",
+    /** Beside a linked row's standing, when its record still names the guardian's wallet or none. */
+    walletOwed: "Agent's wallet not set",
   },
 
   transparency: {

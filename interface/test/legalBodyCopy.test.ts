@@ -319,6 +319,18 @@ describe("the agent's wallet step", () => {
       AW.otherAccountDeclined,
       "Your wallet did not sign with that account. You can paste the signature instead.",
     ],
+    ["doneTitle", AW.doneTitle, "Set your agent's wallet"],
+    [
+      "doneLine",
+      AW.doneLine,
+      "The registry still names your own wallet as this agent's wallet. A payment made by the agent does not lead to its company yet.",
+    ],
+    [
+      "doneLineNone",
+      AW.doneLineNone,
+      "The registry names no wallet for this agent. It cannot act under its Charter until it has one.",
+    ],
+    ["account.walletOwed", LEGAL_BODY_COPY.account.walletOwed, "Agent's wallet not set"],
   ])("%s, word for word", (_key, actual, expected) => {
     expect(actual).toBe(expected);
   });

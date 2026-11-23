@@ -9,7 +9,8 @@
  * a contract wallet's own `isValidSignature`, never an ERC-6492 wrapped one.
  *
  * Here: what the registry names today (`readAgentWallet`, `agentWalletReadOf`) and whose wallet
- * that is (`agentWalletStanding`); the address a person types (`parseAgentWalletAddress`); the
+ * that is (`agentWalletStanding`); whether a legal body's public record still owes the agent's
+ * wallet (`agentWalletOwed`); the address a person types (`parseAgentWalletAddress`); the
  * deadline and the time left (`walletSetDeadline`, `walletSetSecondsLeft`, `walletSetSendable`);
  * the message in its two forms (`walletSetTypedData` for viem and wagmi, `walletSetText` for the
  * copy box) over the domain the registry answers (`registryDomainOf`); and what a pasted signature
@@ -69,6 +70,17 @@ export function agentWalletStanding(
 ): AgentWalletStanding {
   if (read === "none") return "none";
   return sameAddress(read, guardian) ? "guardians" : "own";
+}
+
+/**
+ * Whether a legal body's public record still owes the agent's wallet: its `agentWallet` is the
+ * zero address (no wallet), or the guardian's own wallet, in any letter case. A body linked before
+ * the rule can be in either case. Any other value is false: another wallet is the agent's own, and
+ * a field that is not an address (the record is checked only shallowly on arrival) says nothing.
+ */
+export function agentWalletOwed(recordAgentWallet: Address, guardian: Address): boolean {
+  if (typeof recordAgentWallet !== "string" || !ADDRESS.test(recordAgentWallet)) return false;
+  return ZERO_ADDRESS.test(recordAgentWallet) || sameAddress(recordAgentWallet, guardian);
 }
 
 // ---------------------------------------------------------------------------------------------

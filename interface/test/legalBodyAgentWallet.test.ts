@@ -1,6 +1,7 @@
 /**
  * The agent's wallet step's pure rules (`agentWallet.ts`): what the registry names today and whose
- * wallet that is, the address a person types, the deadline and the time left, the message in its
+ * wallet that is, whether a legal body's public record still owes the agent's wallet, the address
+ * a person types, the deadline and the time left, the message in its
  * two forms over the registry's own domain, and what a pasted signature is worth before anything
  * is sent.
  *
@@ -23,6 +24,7 @@ import type { Address } from "@/lib/api/types";
 import { walletKindOf, type WalletKind } from "@/lib/legalBody/chain";
 import type { ChainRead } from "@/lib/legalBody/paste";
 import {
+  agentWalletOwed,
   agentWalletReadOf,
   agentWalletStanding,
   isErc6492Wrapped,
@@ -132,6 +134,31 @@ describe("agentWalletStanding", () => {
 
   it("no wallet is none", () => {
     expect(agentWalletStanding("none", GUARDIAN)).toBe("none");
+  });
+});
+
+describe("agentWalletOwed: a record whose agent's wallet is still to be set", () => {
+  it("the zero address is owed", () => {
+    expect(agentWalletOwed(ZERO, GUARDIAN)).toBe(true);
+  });
+
+  it("the guardian's own wallet, in any letter case on either side, is owed", () => {
+    expect(agentWalletOwed(GUARDIAN, GUARDIAN)).toBe(true);
+    expect(agentWalletOwed(lower(GUARDIAN), GUARDIAN)).toBe(true);
+    expect(agentWalletOwed(GUARDIAN, lower(GUARDIAN))).toBe(true);
+    expect(agentWalletOwed(`0x${GUARDIAN.slice(2).toUpperCase()}` as Address, GUARDIAN)).toBe(true);
+  });
+
+  it("any other wallet is the agent's own: nothing is owed", () => {
+    expect(agentWalletOwed(AGENT, GUARDIAN)).toBe(false);
+    expect(agentWalletOwed(lower(AGENT), GUARDIAN)).toBe(false);
+  });
+
+  it("a value that is not an address is never said to be owed", () => {
+    // The public record is checked only shallowly on arrival: a field of the wrong shape says
+    // nothing rather than something false.
+    for (const value of [undefined, null, 42, "", "0x00", "none"])
+      expect(agentWalletOwed(value as unknown as Address, GUARDIAN)).toBe(false);
   });
 });
 

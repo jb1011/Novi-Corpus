@@ -5,9 +5,11 @@
  * Before any click the step says why it is there and what the registry names today, and offers the
  * three choices: rendering reads nothing from the chain, opens no wallet and sends nothing. On the
  * paste branch the panel says what the owning key must do and offers "Check again" only; the
- * registry is read again every 30 seconds for two minutes, never at once. The source pins the rest:
- * the one way to the wallet is the allowlist, the five-minute window is checked before it, nothing
- * typed reaches a browser store, and the page never makes a key.
+ * registry is read again every 30 seconds for two minutes, never at once. Opened from the done page
+ * of a legal body that already exists ("linked"), the step reads the registry itself, once, as it
+ * opens. The source pins the rest: the one way to the wallet is the allowlist, the one signature is
+ * the step's own call naming the account, the five-minute window is checked before the wallet,
+ * nothing typed reaches a browser store, and the page never makes a key.
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -15,7 +17,14 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
-const calls = vi.hoisted(() => ({ allowedWrites: 0, chainReads: 0, effects: 0, signatures: 0 }));
+const calls = vi.hoisted(() => ({
+  allowedWrites: 0,
+  chainReads: 0,
+  effects: 0,
+  signatures: 0,
+  /** Each `readContract` asked: its function and its arguments. */
+  contractReads: [] as { functionName: unknown; args: unknown }[],
+}));
 
 vi.mock("react", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react")>();
@@ -45,7 +54,10 @@ vi.mock("wagmi", async (importOriginal) => {
   const client = {
     getBlock: read,
     getCode: read,
-    readContract: read,
+    readContract: (p?: { functionName?: unknown; args?: unknown }) => {
+      calls.contractReads.push({ functionName: p?.functionName, args: p?.args });
+      return read();
+    },
     simulateContract: read,
     waitForTransactionReceipt: read,
   };
@@ -170,6 +182,7 @@ beforeEach(() => {
   calls.chainReads = 0;
   calls.effects = 0;
   calls.signatures = 0;
+  calls.contractReads = [];
 });
 
 afterEach(() => {
@@ -216,6 +229,7 @@ describe("the browser branch, before any click", () => {
     expect(calls.effects).toBeGreaterThan(0);
     expect(calls.allowedWrites).toBe(0);
     expect(calls.chainReads).toBe(0);
+    expect(calls.contractReads).toEqual([]);
     expect(calls.signatures).toBe(0);
     expect(k.refreshAgentWallet).not.toHaveBeenCalled();
     expect(k.remember).not.toHaveBeenCalled();
@@ -301,6 +315,16 @@ describe("the step's source", () => {
 
   test("the one signature asked of the browser wallet: the step's own message, from the agent's account named", () => {
     expect(code).toContain("useSignTypedData()");
+    // Every mention in the source, in any letter case, is one of four: the hook's import, the
+    // hook called, the one function taken from it, and that function's one call. A fifth would be
+    // a second way to a signature.
+    expect(code.match(/signTypedData/gi)).toHaveLength(4);
+    expect(code.match(/useSignTypedData\b/g)).toHaveLength(2);
+    expect(code).toMatch(/import \{[^}]*\buseSignTypedData\b[^}]*\} from "wagmi";/);
+    expect(code).toContain("const { signTypedDataAsync } = useSignTypedData();");
+    // No other way to a signature or a wallet: not wagmi's mutation, not a wallet client, not the
+    // raw request.
+    for (const other of ["mutateAsync", "useWalletClient", "eth_signTypedData"]) expect(code).not.toContain(other);
     // One call site, and it names the account: never the guardian's selected account by default.
     expect(code.match(/signTypedDataAsync\(/g)).toHaveLength(1);
     expect(code).toMatch(/signTypedDataAsync\(\{\s*\.\.\.walletSetTypedData\([^)]*\),\s*account\s*\}\)/);
@@ -343,5 +367,64 @@ describe("the step's source", () => {
   test("the chain's time is the step's estimate, never the bare wall clock", () => {
     expect(code).toContain("chainNowSeconds(");
     expect(code).not.toMatch(/Date\.now\(\)\s*\/\s*1000/);
+  });
+
+  test("in both modes the allowlist is told the signed-in wallet is the guardian", () => {
+    expect(code.match(/await send\(/g)).toHaveLength(1);
+    expect(code).toContain("{ config, order: null, wallet: { agentId, guardian: tenant, nowSeconds } }");
+  });
+});
+
+describe("opened from the done page of a legal body that already exists (\"linked\")", () => {
+  /** A body linked before the rule: its identity owned by the signed-in wallet, unless told. */
+  const linkedOrder = (identityOwner: `0x${string}` = GUARDIAN): LegalBodyOrderView => ({
+    ...order(),
+    id: "lbo_linked",
+    state: "linked",
+    agentId: AGENT_ID,
+    identityOwner,
+    bodyAddress: "0x00000000000000000000000000000000000b0d1e",
+    deployedAt: Math.floor(Date.now() / 1000) - 600,
+    pointerSeenAt: Math.floor(Date.now() / 1000) - 300,
+  });
+
+  /** The kit the done page hands its card: the shell reads no wallet for a linked order. */
+  function linkedKit(identityOwner?: `0x${string}`): LegalBodyStepKit {
+    const o = linkedOrder(identityOwner);
+    return { ...kit({ phase: "done" }, null), orderId: o.id, order: o, orders: [o] };
+  }
+
+  const linkedMarkup = (k: LegalBodyStepKit) =>
+    renderToString(createElement(AgentWalletStep, { kit: k, agentId: AGENT_ID, mode: "linked" }));
+
+  test("the step reads the registry itself, once, as it opens: getAgentWallet for this identity", () => {
+    const k = linkedKit();
+    const page = text(linkedMarkup(k));
+    expect(page).toContain(AW.checking);
+    expect(calls.contractReads).toEqual([{ functionName: "getAgentWallet", args: [BigInt(AGENT_ID)] }]);
+    expect(calls.chainReads).toBe(1);
+    // Never again by itself, and never the shell's read, which a linked order does not run.
+    vi.advanceTimersByTime(10 * 60_000);
+    expect(calls.chainReads).toBe(1);
+    expect(k.refreshAgentWallet).not.toHaveBeenCalled();
+  });
+
+  test("opening it opens no wallet, sends nothing and remembers nothing", () => {
+    for (const owner of [GUARDIAN, "0x70997970C51812dc3A010C7d01b50e0d17dc79C8"] as const) {
+      const k = linkedKit(owner);
+      linkedMarkup(k);
+      expect(calls.allowedWrites).toBe(0);
+      expect(calls.signatures).toBe(0);
+      expect(k.remember).not.toHaveBeenCalled();
+      expect(k.startAnother).not.toHaveBeenCalled();
+    }
+  });
+
+  test("the draft path is the default, and reads nothing as it opens", () => {
+    const k = kit(NEEDED);
+    const drafted = renderToString(createElement(AgentWalletStep, { kit: k, agentId: AGENT_ID, mode: "draft" }));
+    expect(drafted).toBe(markup(k));
+    expect(calls.chainReads).toBe(0);
+    expect(calls.contractReads).toEqual([]);
   });
 });

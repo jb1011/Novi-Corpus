@@ -21,10 +21,12 @@ import { txUrl } from "@/lib/chain";
 import {
   WALLET_SET_SEND_MARGIN_SECONDS,
   parseAgentWalletAddress,
+  readAgentWallet,
   registryDomainOf,
   walletSetSendable,
   walletSetText,
   walletSetTypedData,
+  type AgentWalletRead,
   type RegistryDomain,
   type WalletSetMessage,
 } from "@/lib/legalBody/agentWallet";
@@ -38,6 +40,7 @@ import {
   chainClockAt,
   chainNowSeconds,
   erc1271Abi,
+  linkedWalletState,
   stageSecondsLeft,
   walletAddressSentence,
   walletCallRefusalSentence,
@@ -117,8 +120,25 @@ type Prepared = { message: WalletSetMessage; domain: RegistryDomain };
  * step's state only, never stored.
  * Timers go through a lifetime that the effect's cleanup ends, and a click's continuation stops
  * after its next await once the step is gone.
+ *
+ * `mode` "linked" is the same step for a legal body that already exists, opened in place from its
+ * done page's card: there is no derivation to follow, so the step reads the registry itself
+ * (`getAgentWallet`) through the public client, once as it opens (the person has just clicked the
+ * card) and then again on a click, the paste branch's timed reads and the read after the
+ * transaction. `linkedWalletState` decides from that read, and takes the branch from the order's
+ * identity owner against the signed-in wallet; once the registry names a wallet of the agent's own,
+ * the step says it (`agentWallet.line`). The guardian is still the signed-in wallet everywhere,
+ * the allowlist's context included. "draft", the default, is the step as the flow shows it.
  */
-export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agentId: string }) {
+export function AgentWalletStep({
+  kit,
+  agentId,
+  mode = "draft",
+}: {
+  kit: LegalBodyStepKit;
+  agentId: string;
+  mode?: "draft" | "linked";
+}) {
   const { config, tenant, derivation } = kit;
   const environment = config.environment;
   const publicClient = usePublicClient({ chainId: config.chainId });
@@ -134,6 +154,45 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
     life.begin();
     return () => life.end();
   }, [life]);
+
+  const linked = mode === "linked";
+  // "linked" only: the registry's answer for this identity, as this step last read it; null until
+  // its first read is back. A draft's is the shell's (`kit.agentWallet`).
+  const [linkedRead, setLinkedRead] = useState<AgentWalletRead | null>(null);
+
+  /** "linked" only: `getAgentWallet(agentId)` through the public client. A read that fails, or
+   *  no client, is unreadable, never "no wallet". */
+  async function readLinkedWallet() {
+    const client = publicClient;
+    const read = await readAgentWallet(() => {
+      if (!client) throw new Error("no public client");
+      return client.readContract({
+        address: config.identityRegistry,
+        abi: identityRegistryAbi,
+        functionName: "getAgentWallet",
+        args: [BigInt(agentId)],
+      });
+    });
+    if (life.alive()) setLinkedRead(read);
+  }
+
+  /** The registry read again, a read only: the shell's for a draft, this step's own when linked. */
+  const refresh = linked ? readLinkedWallet : kit.refreshAgentWallet;
+
+  // "linked": the person opened this step by clicking the done page's card, so a first read as the
+  // step opens is that click's read. It runs once (StrictMode's second run included); every later
+  // read is a click's, the paste branch's timed one, or the one after the transaction. A draft
+  // reads nothing here: the shell reads its wallet.
+  const openingRead = useRef(readLinkedWallet);
+  useEffect(() => {
+    openingRead.current = readLinkedWallet;
+  });
+  const opened = useRef(false);
+  useEffect(() => {
+    if (mode !== "linked" || opened.current) return;
+    opened.current = true;
+    void openingRead.current();
+  }, [mode]);
 
   const [stage, setStage] = useState<AgentWalletStage>({ at: "choose" });
   // The card chosen, kept once the stage moves past the address.
@@ -174,11 +233,22 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
   const ownerKnown: Address | "none" = stage.at === "message" ? stage.message.owner : (connected ?? "none");
   const browserAccounts = browserAgentAccounts(addresses, tenant, ownerKnown);
 
+  // "linked": the step's own read decides, as the derivation decides for a draft. Once the wallet
+  // is set the step shows only its line (below), whatever the view would say.
+  const linkedState = linked
+    ? linkedWalletState({
+        read: linkedRead,
+        signedIn: tenant,
+        identityOwner: kit.order?.identityOwner ?? null,
+      })
+    : null;
+  const linkedStep = linkedState?.at === "step" ? linkedState : null;
+
   const view = agentWalletStepView({
-    walletStep: derivation.walletStep ?? "checking",
+    walletStep: linkedStep ? linkedStep.walletStep : (derivation.walletStep ?? "checking"),
     // A branch not given is the one that opens no wallet.
-    branch: derivation.branch ?? "paste",
-    read: kit.agentWallet,
+    branch: linkedStep ? linkedStep.branch : (derivation.branch ?? "paste"),
+    read: linked ? linkedRead : kit.agentWallet,
     guardian: tenant,
     stage,
     secondsLeft,
@@ -477,8 +547,9 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
       }
       // The transaction may still land, or was dropped: Check again, or a new message.
       if (outcome === "no_receipt") setStage({ at: "no_receipt", hash });
-      // The registry decides: once it names the wallet, the derivation moves on to the link.
-      await kit.refreshAgentWallet();
+      // The registry decides: once it names the wallet, the derivation moves on to the link (a
+      // linked body's step says the wallet instead).
+      await refresh();
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -496,7 +567,7 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
     if (rereading) return;
     setRereading(true);
     try {
-      await kit.refreshAgentWallet();
+      await refresh();
     } finally {
       setRereading(false);
     }
@@ -524,6 +595,18 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
   const buttonLoading = button === "retry" || button === "check_again" ? rereading : busy;
   const secondLoading = secondButton === "retry" || secondButton === "check_again" ? rereading : busy;
 
+  // "linked": the registry names a wallet of the agent's own now. Nothing more to do here.
+  if (linkedState?.at === "set")
+    return (
+      <div>
+        <StepHeader eyebrow={LEGAL_BODY_COPY.rail.labels.wallet} title={view.title} />
+        <IdentityLine agentId={agentId} />
+        <Callout tone="info">
+          <span className="break-all font-mono text-[12.5px]">{linkedState.line}</span>
+        </Callout>
+      </div>
+    );
+
   return (
     <div>
       <StepHeader
@@ -550,7 +633,7 @@ export function AgentWalletStep({ kit, agentId }: { kit: LegalBodyStepKit; agent
           view={view}
           registry={config.identityRegistry}
           agentId={agentId}
-          refresh={kit.refreshAgentWallet}
+          refresh={refresh}
         />
       )}
 

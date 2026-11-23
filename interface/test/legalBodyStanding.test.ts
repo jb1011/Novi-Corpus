@@ -30,6 +30,7 @@ import {
   legalBodyRecordView,
   linkableUrl,
   publicReadAllowed,
+  publicRecordOf,
   standingPresentation,
   statementFactsForStranger,
   type StandingPresentation,
@@ -466,6 +467,32 @@ describe("publicReadAllowed: no public link before the order is linked", () => {
   test("nor a linked order with no identity, nor no order at all", () => {
     expect(publicReadAllowed({ state: "linked", agentId: null })).toBe(false);
     expect(publicReadAllowed(null)).toBe(false);
+  });
+});
+
+describe("publicRecordOf: the record itself, when the answer carries a signed statement", () => {
+  test("a signed statement: its message, as served", () => {
+    const body = stated("active", { agentWallet: ANVIL_0 });
+    expect(publicRecordOf(answer(body))).toBe(body.statement.message);
+    expect(publicRecordOf(answer(body))?.agentWallet).toBe(ANVIL_0);
+  });
+
+  test("no answer yet, a read that could not be made, no body, or a body with no statement: none", () => {
+    expect(publicRecordOf(null)).toBeNull();
+    expect(publicRecordOf(undefined)).toBeNull();
+    for (const reason of REASONS) expect(publicRecordOf(failed(reason))).toBeNull();
+    expect(publicRecordOf(answer(NONE))).toBeNull();
+    expect(publicRecordOf(answer(unsigned()))).toBeNull();
+  });
+
+  test("an answer of the wrong shape is none, and never throws", () => {
+    // The answer is checked only shallowly on arrival (`legalBody` is a boolean).
+    const shaped = (statement: unknown) =>
+      answer({ ...stated("active"), statement } as unknown as LegalBodyByAgent);
+    expect(publicRecordOf(shaped(undefined))).toBeNull();
+    expect(publicRecordOf(shaped("a statement"))).toBeNull();
+    expect(publicRecordOf(shaped({ message: null }))).toBeNull();
+    expect(publicRecordOf(shaped({ message: "text" }))).toBeNull();
   });
 });
 

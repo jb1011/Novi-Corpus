@@ -10,14 +10,16 @@
  * is worth once the chain is asked (`agentWalletSignatureCheck`); the check before any wallet prompt
  * (`agentWalletSendPreflight`); the other accounts of the browser wallet that could sign as the
  * agent's wallet (`browserAgentAccounts`); what the screen shows for a derivation and a stage
- * (`agentWalletStepView`); the line on the link screens (`agentWalletLineText`); and the sentence of
- * every refusal.
+ * (`agentWalletStepView`); the line on the link screens (`agentWalletLineText`); for a legal body
+ * that already exists, the done page's card (`doneWalletCard`) and the step's own reading of the
+ * registry (`linkedWalletState`); and the sentence of every refusal.
  *
  * Nothing here holds a chain, a clock or a wallet: the answers and the time come in as values, or as
  * functions the screen hands in, so every decision has a test.
  */
-import type { Address, Hex } from "@/lib/api/types";
+import type { Address, Hex, LegalBodyStatementJson } from "@/lib/api/types";
 import {
+  agentWalletOwed,
   agentWalletStanding,
   parseAgentWalletAddress,
   walletSetDeadline,
@@ -511,6 +513,59 @@ export function stageSecondsLeft(
 export function agentWalletLineText(read: AgentWalletRead | null): string | null {
   if (read === null || !ADDRESS.test(read)) return null;
   return fillCopy(AW.line, { address: read });
+}
+
+// ---------------------------------------------------------------------------------------------
+// A legal body that already exists
+// ---------------------------------------------------------------------------------------------
+
+/** The done page's card: the record names the guardian's own wallet, or none. */
+export type DoneWalletCard = "guardian" | "none";
+
+/**
+ * The card on the done page of a legal body made before the rule, from its public record (the
+ * signed statement's message, `publicRecordOf`) and the order's guardian: "guardian" when the
+ * record's `agentWallet` is the guardian's own wallet, in any letter case; "none" when it is the
+ * zero address; otherwise no card (the agent's own wallet, no record read, or a field that is not
+ * an address). The page shows it for a linked, not revoked order only.
+ */
+export function doneWalletCard(
+  record: LegalBodyStatementJson | null,
+  guardian: Address,
+): DoneWalletCard | null {
+  if (record === null || !agentWalletOwed(record.agentWallet, guardian)) return null;
+  return sameAddress(record.agentWallet, guardian) ? "guardian" : "none";
+}
+
+/** The step opened from the done page: its wallet step and branch, or the wallet already set. */
+export type LinkedWalletState =
+  | { at: "step"; walletStep: WalletStep; branch: OwnerBranch }
+  | { at: "set"; line: string };
+
+/**
+ * The step in "linked" mode, for a legal body that already exists. There is no derivation to ask:
+ * the step reads the registry itself (`read`, null until its first read is back), and decides as
+ * the derivation decides for a draft. No read yet is checking; a read that failed, or an answer
+ * that is not an address, unreadable; no wallet, the zero address or the signed-in wallet's own
+ * (the guardian's), needed; any other wallet is set, and the line names it. The branch is the
+ * order's identity owner against the signed-in wallet: the browser when they are the same, in any
+ * letter case; otherwise (another owner, or none known) the paste branch, which opens no wallet.
+ */
+export function linkedWalletState(p: {
+  read: AgentWalletRead | null;
+  signedIn: Address;
+  identityOwner: Address | null;
+}): LinkedWalletState {
+  const branch: OwnerBranch = sameAddress(p.identityOwner, p.signedIn) ? "browser" : "paste";
+  const step = (walletStep: WalletStep): LinkedWalletState => ({ at: "step", walletStep, branch });
+  const read = p.read;
+  if (read === null) return step("checking");
+  if (read === "none") return step("needed");
+  if (read === "unreadable") return step("unreadable");
+  const line = agentWalletLineText(read);
+  if (line === null) return step("unreadable");
+  if (agentWalletOwed(read, p.signedIn)) return step("needed");
+  return { at: "set", line };
 }
 
 // ---------------------------------------------------------------------------------------------

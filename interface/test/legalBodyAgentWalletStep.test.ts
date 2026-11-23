@@ -2,7 +2,8 @@
  * The agent's wallet step's view model (`agentWalletStep.ts`), each piece pure: the chain's time as
  * the step estimates it, the preparation of the message, what a pasted signature is worth once the
  * chain is asked, the check before any wallet prompt, what the screen shows for a derivation and a
- * stage, and the sentences of every refusal.
+ * stage, the sentences of every refusal, and, for a legal body that already exists, the done
+ * page's card and the step's own reading of the registry.
  *
  * The domain is the live testnet registry's (chain 5042002, its public address); agent ids and
  * wallets are invented. Keys that sign are made at run time and thrown away. Anvil's first two
@@ -18,11 +19,12 @@ import {
   type Hex,
 } from "viem";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import type { Address } from "@/lib/api/types";
+import type { Address, LegalBodyStatementJson } from "@/lib/api/types";
 import {
   WALLET_SET_SEND_MARGIN_SECONDS,
   walletSetDeadline,
   walletSetTypedData,
+  type AgentWalletRead,
   type RegistryDomain,
   type WalletSetMessage,
 } from "@/lib/legalBody/agentWallet";
@@ -42,7 +44,9 @@ import {
   browserAgentAccounts,
   chainClockAt,
   chainNowSeconds,
+  doneWalletCard,
   erc1271Accepts,
+  linkedWalletState,
   walletAddressSentence,
   walletCallRefusalSentence,
   walletNoReceiptLine,
@@ -932,6 +936,95 @@ describe("agentWalletLineText: the line on the link screens", () => {
 
   it.each([null, "none", "unreadable"] as const)("says nothing for %s", (read) => {
     expect(agentWalletLineText(read)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// A legal body that already exists
+// ---------------------------------------------------------------------------------------------
+
+describe("doneWalletCard: the done page's card for a legal body made before the rule", () => {
+  /** The public record, as far as the card reads it. */
+  const record = (agentWallet: string) => ({ agentWallet }) as LegalBodyStatementJson;
+  const ZERO = "0x0000000000000000000000000000000000000000";
+
+  it("the record names the guardian's own wallet, in any letter case: the guardian's card", () => {
+    expect(doneWalletCard(record(GUARDIAN), GUARDIAN)).toBe("guardian");
+    expect(doneWalletCard(record(lower(GUARDIAN)), GUARDIAN)).toBe("guardian");
+    expect(doneWalletCard(record(GUARDIAN), lower(GUARDIAN))).toBe("guardian");
+    expect(doneWalletCard(record(upper(GUARDIAN)), GUARDIAN)).toBe("guardian");
+  });
+
+  it("the record names no wallet (the zero address): the card for none", () => {
+    expect(doneWalletCard(record(ZERO), GUARDIAN)).toBe("none");
+  });
+
+  it("the record names the agent's own wallet: no card", () => {
+    expect(doneWalletCard(record(AGENT), GUARDIAN)).toBeNull();
+    expect(doneWalletCard(record(OTHER), GUARDIAN)).toBeNull();
+  });
+
+  it("no record read: no card", () => {
+    expect(doneWalletCard(null, GUARDIAN)).toBeNull();
+  });
+
+  it("a wallet field that is not an address: no card, never a guess", () => {
+    for (const value of [undefined, 42, "", "0x12", "none"])
+      expect(doneWalletCard({ agentWallet: value } as unknown as LegalBodyStatementJson, GUARDIAN)).toBeNull();
+  });
+
+  it("the card's words, word for word", () => {
+    expect(AW.doneTitle).toBe("Set your agent's wallet");
+    expect(AW.doneLine).toBe(
+      "The registry still names your own wallet as this agent's wallet. A payment made by the agent does not lead to its company yet.",
+    );
+    expect(AW.doneLineNone).toBe(
+      "The registry names no wallet for this agent. It cannot act under its Charter until it has one.",
+    );
+  });
+});
+
+describe("linkedWalletState: the step opened from the done page reads the registry itself", () => {
+  const state = (read: AgentWalletRead | null, identityOwner: Address | null = GUARDIAN) =>
+    linkedWalletState({ read, signedIn: GUARDIAN, identityOwner });
+
+  it("before the first read is back: checking", () => {
+    expect(state(null)).toEqual({ at: "step", walletStep: "checking", branch: "browser" });
+  });
+
+  it("a read that failed: unreadable, with its Try again", () => {
+    expect(state("unreadable")).toEqual({ at: "step", walletStep: "unreadable", branch: "browser" });
+  });
+
+  it("no wallet, or the guardian's own in any letter case: the step is needed", () => {
+    expect(state("none")).toEqual({ at: "step", walletStep: "needed", branch: "browser" });
+    expect(state(GUARDIAN)).toEqual({ at: "step", walletStep: "needed", branch: "browser" });
+    expect(state(lower(GUARDIAN))).toEqual({ at: "step", walletStep: "needed", branch: "browser" });
+    expect(state("0x0000000000000000000000000000000000000000" as Address)).toEqual({
+      at: "step",
+      walletStep: "needed",
+      branch: "browser",
+    });
+  });
+
+  it("a wallet of the agent's own: set, and the line names it", () => {
+    expect(state(AGENT)).toEqual({ at: "set", line: `This agent's wallet: ${AGENT}` });
+    expect(state(AGENT)).toEqual({ at: "set", line: fillCopy(AW.line, { address: AGENT }) });
+  });
+
+  it("a value that is not an address reads as unreadable, never as set", () => {
+    expect(state("0x12" as Address)).toEqual({ at: "step", walletStep: "unreadable", branch: "browser" });
+  });
+
+  it("the branch: the browser when the order's identity owner is the signed-in wallet, in any letter case", () => {
+    for (const owner of [GUARDIAN, lower(GUARDIAN), upper(GUARDIAN)])
+      expect(state("none", owner)).toMatchObject({ branch: "browser" });
+  });
+
+  it("the branch: another owner, or none known, is the paste branch, which opens no wallet", () => {
+    expect(state("none", AGENT)).toMatchObject({ branch: "paste" });
+    expect(state("none", null)).toMatchObject({ branch: "paste" });
+    expect(state(null, OTHER)).toEqual({ at: "step", walletStep: "checking", branch: "paste" });
   });
 });
 

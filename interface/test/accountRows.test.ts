@@ -15,8 +15,10 @@
  * shows one line with a retry. The page shows the treasury section where the person has such
  * agents, where the deployment says it offers the full product, or wherever their list could not
  * be read (one line with a retry), and the empty card only when both lists are known to be empty.
- * On a sandbox deployment a row's standing carries the record's sandbox pill. Every view is built from one fixed `NOW`: nothing here reads a
- * clock.
+ * On a sandbox deployment a row's standing carries the record's sandbox pill. A linked row whose
+ * record was read and still names its order's guardian's own wallet, or none, says "Agent's wallet
+ * not set" beside its standing (a revoked body never does). Every view is built from one fixed
+ * `NOW`: nothing here reads a clock.
  */
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -28,6 +30,7 @@ import {
   type LegalBodyByAgent,
   type LegalBodyConfig,
   type LegalBodyOrderView,
+  type LegalBodyStatementJson,
 } from "@/lib/api/types";
 import type { PublicRead } from "@/lib/api/legalBodyClient";
 
@@ -61,6 +64,7 @@ import {
   accountLegalBodyRows,
   agentsPageView,
   legalBodiesView,
+  rowGuardians,
   type AccountRow,
   type LegalBodiesView,
 } from "@/lib/legalBody/accountRows";
@@ -163,6 +167,8 @@ const linked = (id: string, companyId: string, agentId: string | null, hoursAgo 
 
 /** This deployment: the chain and factory every order above is made under. */
 const WHERE = { chainId: CHAIN, factory: FACTORY };
+/** Another guardian's wallet: anvil's third published account. */
+const OTHER_GUARDIAN = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC" as const;
 const OTHER_FACTORY = "0x00000000000000000000000000000000000fac70" as const;
 
 const rows = (companies: CompanyView[], orders: LegalBodyOrderView[]) =>
@@ -187,6 +193,7 @@ describe("the exact values", () => {
       getStarted: "Get started",
       treasuryNone: "No agent with a treasury yet.",
       treasuryUnreadable: "Your agents with a treasury could not be read.",
+      walletOwed: "Agent's wallet not set",
     });
   });
 });
@@ -727,5 +734,220 @@ describe("LegalBodiesSection, as the server renders it", () => {
     const html = render({ kind: "rows", rows: rows([company("co_a")], orders) });
     expect(byAgent.calls.map((c) => c.agentId)).toEqual(["100", "101", "102", "103", "104"]);
     expect(html.split('href="/legal-body?order=').length - 1).toBe(7);
+  });
+});
+
+describe("rowGuardians: what a linked row's record is measured against", () => {
+  test("each linked order's own guardian, by the key of its row", () => {
+    const orders = [
+      linked("ord_1", "co_a", "897126"),
+      { ...linked("ord_2", "co_a", "897127"), guardian: OTHER_GUARDIAN },
+    ];
+    const g = rowGuardians(orders);
+    expect([...g.entries()]).toEqual([
+      ["order:ord_1", GUARDIAN],
+      ["order:ord_2", OTHER_GUARDIAN],
+    ]);
+    // The keys are the rows' own.
+    for (const row of rows([company("co_a")], orders)) expect(g.get(row.key)).toBeDefined();
+  });
+
+  test("a revoked body, and an order that is not linked, have none", () => {
+    const g = rowGuardians([
+      { ...linked("ord_revoked", "co_a", "897126"), revoked: true },
+      order("ord_draft", "co_a"),
+      order("ord_deployed", "co_a", { state: "deployed", agentId: "42" }),
+      { ...linked("ord_broken", "co_a", "897128"), state: "broken", brokenReason: "dissolved" },
+    ]);
+    expect(g.size).toBe(0);
+  });
+
+  test("the section's view carries them beside its rows, the rows unchanged", () => {
+    const orders = [linked("ord_1", "co_a", "897126"), order("ord_draft", "co_a")];
+    const v = legalBodiesView({
+      orders: { data: { orders }, error: null },
+      companies: { data: { companies: [company("co_a")] }, error: null },
+      config: null,
+      nowMs: NOW,
+    });
+    expect(v.kind === "rows" && v.rows).toEqual(rows([company("co_a")], orders));
+    expect(v.kind === "rows" && v.guardians && [...v.guardians.entries()]).toEqual([["order:ord_1", GUARDIAN]]);
+  });
+});
+
+describe("LegalBodiesSection: the agent's wallet on a linked row", () => {
+  /** The words as a person reads them in the markup. */
+  const OWED = A.walletOwed.replace("'", "&#x27;");
+  const ZERO = "0x0000000000000000000000000000000000000000";
+
+  /** A linked body's public record, all its fields, as the public docs show them. */
+  const RECORD: LegalBodyStatementJson = {
+    chainId: String(CHAIN),
+    identityRegistry: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+    factory: FACTORY,
+    legalBody: BODY,
+    agentId: "897126",
+    agentWallet: GUARDIAN,
+    identityOwnerAtCreation: GUARDIAN,
+    bindingState: "linked",
+    identityOwnerIsContract: false,
+    agentWalletIsContract: false,
+    standing: "active",
+    attestationState: "active",
+    jurisdiction: "WY",
+    entityType: "LLC",
+    legalName: "Example Test Holdings LLC",
+    filingNumber: "TEST-0001",
+    source: "customer",
+    environment: "production",
+    controlVerified: true,
+    existenceCheckedAt: String(NOW_S - 600),
+    filedAt: "2026-03-10",
+    einIssued: false,
+    filingStatus: "not_yet_due",
+    lastFiledPeriod: "0",
+    lastFiledAt: "",
+    lastFiledConfirmedBy: "",
+    nextDue: "2027-03-01",
+    oaManifestHash: `0x${"ab".repeat(32)}`,
+    oaManifestVersion: "1",
+    guardianHumanVerified: true,
+    observedAtBlock: "31415926",
+    issuedAt: String(NOW_S - 60),
+    expiresAt: String(NOW_S + 240),
+  };
+
+  const LINKS = {
+    transparency: "https://example.test/transparency",
+    statement: "https://example.test/legal-bodies/by-agent/897126",
+  };
+
+  /** The public answer of a linked body whose record names `agentWallet` as the agent's wallet. */
+  const naming = (agentWallet: string): PublicRead<LegalBodyByAgent> => ({
+    kind: "answer",
+    body: {
+      agentId: "897126",
+      legalBody: true,
+      standing: "active",
+      publicId: "lb_test",
+      network: "testnet",
+      links: LINKS,
+      checkedAt: "2026-10-12T12:00:00.000Z",
+      statement: {
+        domain: { name: "Novi Corpus Attestation", version: "2", chainId: CHAIN },
+        primaryType: "LegalBodyStatement",
+        message: { ...RECORD, agentWallet: agentWallet as LegalBodyStatementJson["agentWallet"] },
+        attestor: "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+        signature: `0x${"cd".repeat(65)}`,
+      },
+    },
+  });
+
+  /** The section for these orders, as the page builds it: through `legalBodiesView`. */
+  const renderOrders = (orders: LegalBodyOrderView[]) => {
+    const view = legalBodiesView({
+      orders: { data: { orders }, error: null },
+      companies: { data: { companies: [company("co_a")] }, error: null },
+      config: null,
+      nowMs: NOW,
+    });
+    return renderToString(createElement(LegalBodiesSection, { view, onRetry: () => {}, retrying: false }));
+  };
+  const count = (html: string) => html.split(OWED).length - 1;
+
+  test("a record that still names the guardian's own wallet, in any letter case: the words, beside the standing", () => {
+    for (const wallet of [GUARDIAN, GUARDIAN.toLowerCase()]) {
+      byAgent.data = naming(wallet);
+      const html = renderOrders([linked("ord_1", "co_a", "897126")]);
+      expect(count(html)).toBe(1);
+      // After the state word and the standing pill, inside the row's own link.
+      const words = html.indexOf(OWED);
+      expect(html.indexOf(A.states.linked)).toBeLessThan(words);
+      expect(html.indexOf(">active<")).toBeLessThan(words);
+      expect(html.lastIndexOf('href="/legal-body?order=ord_1"', words)).toBeGreaterThan(-1);
+    }
+  });
+
+  test("a record that names no wallet (the zero address): the words", () => {
+    byAgent.data = naming(ZERO);
+    expect(count(renderOrders([linked("ord_1", "co_a", "897126")]))).toBe(1);
+  });
+
+  test("a record that names the agent's own wallet: nothing", () => {
+    byAgent.data = naming("0x70997970C51812dc3A010C7d01b50e0d17dc79C8");
+    const html = renderOrders([linked("ord_1", "co_a", "897126")]);
+    expect(count(html)).toBe(0);
+    expect(html).toContain(">active<");
+  });
+
+  test("measured against the order's own guardian, not anyone else's wallet", () => {
+    const theirs = { ...linked("ord_1", "co_a", "897126"), guardian: OTHER_GUARDIAN };
+    byAgent.data = naming(GUARDIAN);
+    expect(count(renderOrders([theirs]))).toBe(0);
+    byAgent.data = naming(OTHER_GUARDIAN);
+    expect(count(renderOrders([theirs]))).toBe(1);
+  });
+
+  test("a record not read, not read yet, or with no statement: nothing", () => {
+    // A body whose statement could not be made just now: no record, so nothing is said of it.
+    const unsigned: PublicRead<LegalBodyByAgent> = {
+      kind: "answer",
+      body: {
+        agentId: "897126",
+        legalBody: true,
+        standing: "unknown",
+        publicId: null,
+        network: "testnet",
+        links: { transparency: LINKS.transparency },
+        checkedAt: "2026-10-12T12:00:00.000Z",
+        statement: null,
+      },
+    };
+    const noBody: PublicRead<LegalBodyByAgent> = {
+      kind: "answer",
+      body: { agentId: "897126", legalBody: false, standing: null, checkedAt: "2026-10-12T12:00:00.000Z" },
+    };
+    for (const data of [
+      undefined,
+      { kind: "could_not_check", reason: "rate_limited" } as PublicRead<LegalBodyByAgent>,
+      unsigned,
+      noBody,
+    ]) {
+      byAgent.data = data;
+      expect(count(renderOrders([linked("ord_1", "co_a", "897126")]))).toBe(0);
+    }
+  });
+
+  test("a row in progress reads nothing and says nothing", () => {
+    byAgent.data = naming(GUARDIAN);
+    const html = renderOrders([order("ord_1", "co_a", { state: "deployed", agentId: "42" })]);
+    expect(count(html)).toBe(0);
+    expect(byAgent.calls).toEqual([]);
+  });
+
+  test("a revoked body says nothing of its wallet: its done page offers no way to set one", () => {
+    byAgent.data = naming(GUARDIAN);
+    const html = renderOrders([{ ...linked("ord_1", "co_a", "897126"), revoked: true }]);
+    expect(count(html)).toBe(0);
+    // The standing is still read and shown as before.
+    expect(byAgent.calls).toEqual([{ agentId: "897126", enabled: true }]);
+  });
+
+  test("only the five linked rows that read their record say it, as for the standing", () => {
+    byAgent.data = naming(GUARDIAN);
+    const orders = Array.from({ length: 7 }, (_, i) => linked(`ord_${i}`, "co_a", String(100 + i), i + 1));
+    expect(count(renderOrders(orders))).toBe(STANDING_READS);
+  });
+
+  test("a view built without the guardians says nothing of the wallet", () => {
+    byAgent.data = naming(GUARDIAN);
+    const html = renderToString(
+      createElement(LegalBodiesSection, {
+        view: { kind: "rows", rows: rows([company("co_a")], [linked("ord_1", "co_a", "897126")]) },
+        onRetry: () => {},
+        retrying: false,
+      }),
+    );
+    expect(count(html)).toBe(0);
   });
 });

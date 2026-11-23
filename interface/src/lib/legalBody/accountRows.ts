@@ -150,13 +150,29 @@ export function accountLegalBodyRows(p: {
   });
 }
 
+/**
+ * The guardian of each linked, not revoked order, by the key of its row (`order:{id}`, as
+ * `accountLegalBodyRows` keys it): the order's own `guardian`, which the row's public record is
+ * measured against for "Agent's wallet not set" (`agentWalletOwed`). Kept beside the rows rather
+ * than on them, since the rows are built with no record to read. A revoked body has none: its done
+ * page offers no way to set the wallet, so its row says nothing of it.
+ */
+export function rowGuardians(orders: LegalBodyOrderView[]): ReadonlyMap<string, Address> {
+  const out = new Map<string, Address>();
+  for (const order of orders)
+    if (order.state === "linked" && !order.revoked) out.set(`order:${order.id}`, order.guardian);
+  return out;
+}
+
 /** What the legal-body section shows: nothing, a loading line, one unreadable line with its
- *  retry, or the rows (none at all is no section either). */
+ *  retry, or the rows (none at all is no section either), with the guardian of each linked row
+ *  whose wallet may be said (`rowGuardians`; a row with none, or a view without them, says nothing
+ *  of the wallet). */
 export type LegalBodiesView =
   | { kind: "loading" }
   | { kind: "hidden" }
   | { kind: "unreadable" }
-  | { kind: "rows"; rows: AccountRow[] };
+  | { kind: "rows"; rows: AccountRow[]; guardians?: ReadonlyMap<string, Address> };
 
 /** A list query as the section reads it. */
 type ListRead<T> = { data: T | undefined; error: unknown };
@@ -189,6 +205,7 @@ export function legalBodiesView(p: {
         nowMs: p.nowMs,
         where: config && { chainId: config.chainId, factory: config.factory },
       }),
+      guardians: rowGuardians(p.orders.data.orders),
     };
   }
   if (p.orders.error || p.companies.error) return { kind: "unreadable" };
