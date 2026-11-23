@@ -149,11 +149,11 @@ describe("the requests, pinned", () => {
     expect(new URLSearchParams(call.body).get("return_url")).toBe(RETURN_URL);
   });
 
-  test("a read with the birth date expands the birth date and the report", async () => {
+  test("a read with the birth date expands the verified outputs, the birth date and the report", async () => {
     const { c, calls } = client([{ status: 200, body: VERIFIED }]);
     const s = await c.retrieveSession(VS, { withDob: true });
     expect(calls[0]!.url).toBe(
-      `${SESSION_URL}?expand[]=verified_outputs.dob&expand[]=last_verification_report`,
+      `${SESSION_URL}?expand[]=verified_outputs&expand[]=verified_outputs.dob&expand[]=last_verification_report`,
     );
     expect(calls[0]!.method).toBe("GET");
     expect(calls[0]!.headers).toEqual({ Authorization: `Bearer ${KEY_TEXT}` });
@@ -164,11 +164,15 @@ describe("the requests, pinned", () => {
     expect(s.report?.id).toBe("vr_1FixtureReport");
   });
 
-  test("a read without the birth date expands the report only (ruling R3)", async () => {
+  test("a read without the birth date expands the verified outputs and the report, never the birth date (rulings R3, R19)", async () => {
     const noDob = { ...VERIFIED, verified_outputs: { first_name: "Jenny", last_name: "Rosen" } };
     const { c, calls } = client([{ status: 200, body: noDob }]);
     const s = await c.retrieveSession(VS, { withDob: false });
-    expect(calls[0]!.url).toBe(`${SESSION_URL}?expand[]=last_verification_report`);
+    expect(calls[0]!.url).toBe(
+      `${SESSION_URL}?expand[]=verified_outputs&expand[]=last_verification_report`,
+    );
+    // The names come with it: a verified session read this way can still be recorded.
+    expect(s.outputs).toMatchObject({ firstName: "Jenny", lastName: "Rosen" });
     expect(s.outputs?.dob).toBeNull();
   });
 

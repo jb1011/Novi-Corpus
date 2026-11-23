@@ -20,7 +20,8 @@ import {
  * - A create sends `verification_flow`, `client_reference_id` and `return_url` and nothing else:
  *   the flow carries every setting (document types, selfie), so no `type`, `options`, `metadata`
  *   or `provided_details` can disagree with it. Its `Idempotency-Key` is the caller's.
- * - A read expands the last verification report, and the birth date when asked (ruling R3: Stripe
+ * - A read expands the verified outputs (which Stripe includes only through an expand, ruling
+ *   R19) and the last verification report, and the birth date when asked (ruling R3: Stripe
  *   serves the birth date only under the "recent detailed verification results" permission and
  *   within 48 hours of processing, so the caller retries once without it when Stripe refuses).
  *   Nothing else is expanded: the document number, the address and the images are never asked
@@ -53,8 +54,11 @@ export const STRIPE_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
 const FORM = "application/x-www-form-urlencoded";
-const EXPAND_WITH_DOB = "?expand[]=verified_outputs.dob&expand[]=last_verification_report";
-const EXPAND_WITHOUT_DOB = "?expand[]=last_verification_report";
+// `verified_outputs` is includable only through an expand (ruling R19): both reads ask for it, or
+// a verified session read without the birth date would carry no names and never complete.
+const EXPAND_WITH_DOB =
+  "?expand[]=verified_outputs&expand[]=verified_outputs.dob&expand[]=last_verification_report";
+const EXPAND_WITHOUT_DOB = "?expand[]=verified_outputs&expand[]=last_verification_report";
 
 /** Stripe's machine codes are snake_case; anything else in that slot is not kept. */
 const STRIPE_CODE = /^[a-z][a-z0-9_]{0,99}$/;
@@ -68,8 +72,9 @@ export interface IdentityProviderClient {
     returnUrl: string;
     idempotencyKey: string;
   }): Promise<{ providerRef: string; url: string; livemode: boolean }>;
-  /** `withDob: true` expands `verified_outputs.dob` and `last_verification_report`;
-   *  `withDob: false` expands the report only (ruling R3). */
+  /** `withDob: true` expands `verified_outputs`, `verified_outputs.dob` and
+   *  `last_verification_report`; `withDob: false` expands `verified_outputs` and the report, never
+   *  the birth date (rulings R3, R19). */
   retrieveSession(providerRef: string, opts: { withDob: boolean }): Promise<ProviderSession>;
   cancelSession(providerRef: string): Promise<void>;
   redactSession(providerRef: string): Promise<void>;

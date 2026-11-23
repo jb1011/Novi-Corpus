@@ -15,6 +15,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   type IdentityProviderClient,
   StripeError,
+  StripeIdentityClient,
   StripeKeyRejected,
   StripeNotFound,
   StripeUnavailable,
@@ -22,7 +23,7 @@ import {
 import type { ProviderSession } from "../../src/adapters/stripe/mapSession";
 import type { WorldIdDeps } from "../../src/api/routes/worldId";
 import { ApiError } from "../../src/errors";
-import { decryptText, encryptText } from "../../src/formation/pii";
+import { decryptText, encryptText, toSecret } from "../../src/formation/pii";
 import { IDENTITY_AAD } from "../../src/identity/names";
 import {
   IDENTITY_SESSION_AAD,
@@ -830,6 +831,65 @@ describe("syncSession", () => {
       expect(opsLines("identity_provider_key_rejected")).toEqual([]);
     },
   );
+
+  test("through the provider's client, the read without the birth date still carries the names (ruling R19): the session completes, the birth date unread", async () => {
+    // Stripe as its documentation describes it: the names only when `verified_outputs` is
+    // expanded, and here the birth date's expand refused (no recent-results permission).
+    let reference: string | null = null;
+    const stripe = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      const expands = url.searchParams.getAll("expand[]");
+      const json = (status: number, body: unknown) =>
+        new Response(JSON.stringify(body), { status });
+      const base = {
+        id: "vs_test1",
+        object: "identity.verification_session",
+        livemode: false,
+        client_reference_id: reference,
+        last_error: null,
+        redaction: null,
+      };
+      if (init?.method === "POST") {
+        reference = new URLSearchParams(String(init.body)).get("client_reference_id");
+        return json(200, {
+          ...base,
+          client_reference_id: reference,
+          status: "requires_input",
+          url: "https://verify.stripe.com/start/test_fixture",
+          verified_outputs: null,
+          last_verification_report: null,
+        });
+      }
+      if (expands.includes("verified_outputs.dob"))
+        return json(403, { error: { type: "invalid_request_error", code: "permission_denied" } });
+      return json(200, {
+        ...base,
+        status: "verified",
+        url: null,
+        verified_outputs: expands.includes("verified_outputs")
+          ? { first_name: ON_DOCUMENT.firstName, last_name: ON_DOCUMENT.lastName }
+          : null,
+        last_verification_report: {
+          id: "vr_test1done",
+          object: "identity.verification_report",
+          created: Math.floor((T0 + MINUTE) / 1000),
+          document: { status: "verified", type: "passport", issuing_country: "FR" },
+          selfie: { status: "verified" },
+        },
+      });
+    }) as typeof fetch;
+    const d = deps({
+      provider: new StripeIdentityClient({ key: toSecret("rk_test_fixture"), fetch: stripe }),
+    });
+    const s = await started(d);
+
+    expect(await syncSession(d, s.sessionId)).toBe("completed");
+    expect(latestRow()).toMatchObject({ status: "passed", reviewReasons: [] });
+    expect(namesOf(latestRow())).toMatchObject({ first: "Ottilie", last: "Brandwick" });
+    expect(screener.queries).toEqual([{ name: "Ottilie Brandwick", birthDate: null }]);
+    expect(s.session().dobUnavailable).toBe(true);
+    expect(opsLines("identity_provider_key_rejected")).toEqual([]);
+  });
 
   test("a key refused on the read without the birth date too raises the CRITICAL key line and answers 503; nothing written", async () => {
     const s = await started();
