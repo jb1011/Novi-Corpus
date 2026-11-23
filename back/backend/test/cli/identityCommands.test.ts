@@ -1585,6 +1585,7 @@ describe("a name that differs from the document's", () => {
       yes: true,
       nameFirst: FIRST,
       nameLast: "DUPONT-EXAMPLE",
+      watchlist: "clear",
     });
 
     expect(latestOf(guardian)).toMatchObject({
@@ -1677,6 +1678,98 @@ describe("a name that differs from the document's", () => {
       }),
     );
     expect(kept.output).toMatchObject({ status: "needs_review", reviewReasons: ["watchlist_hit"] });
+  });
+
+  test("on production identity:correct-name needs the sanctions search on the corrected name, --watchlist clear or hit; without it nothing is written", () => {
+    human(guardian, "1001");
+    const cfg = config({ arcNetwork: "mainnet" });
+    recordIdentity(db, cfg, guardian, recordOpts({ nameMismatch: true }));
+    const review = latestOf(guardian);
+    const correction = (over: Record<string, unknown>) => ({
+      operator: OPERATOR,
+      expectLatest: String(review.checkId),
+      reasonCode: "other",
+      reason: REASON,
+      yes: true,
+      nameFirst: FIRST,
+      nameLast: "DUPONT-EXAMPLE",
+      ...over,
+    });
+
+    expect(thrownBy(() => correctIdentityName(db, cfg, guardian, correction({})))).toBe(
+      "refusing: on production identity:correct-name needs the sanctions search on the corrected name: --watchlist clear or hit",
+    );
+    expect(
+      thrownBy(() => correctIdentityName(db, cfg, guardian, correction({ watchlist: "not_run" }))),
+    ).toBe("refusing: --watchlist must be one of clear, hit");
+    expect(repo.list(guardian)).toHaveLength(1);
+
+    correctIdentityName(db, cfg, guardian, correction({ watchlist: "clear" }));
+    expect(latestOf(guardian)).toMatchObject({
+      status: "passed",
+      watchlist: "clear",
+      reviewReasons: [],
+    });
+  });
+
+  test("a hit on the corrected name lands the correction in review with watchlist_hit, the search written", () => {
+    human(guardian, "1001");
+    const cfg = config({ arcNetwork: "mainnet" });
+    recordIdentity(db, cfg, guardian, recordOpts({ nameMismatch: true, result: "needs_review" }));
+    const review = latestOf(guardian);
+    expect(review).toMatchObject({ reviewReasons: ["provider_flag", "name_mismatch"] });
+
+    correctIdentityName(db, cfg, guardian, {
+      operator: OPERATOR,
+      expectLatest: String(review.checkId),
+      reasonCode: "other",
+      reason: REASON,
+      yes: true,
+      nameFirst: FIRST,
+      nameLast: "DUPONT-EXAMPLE",
+      watchlist: "hit",
+    });
+    expect(latestOf(guardian)).toMatchObject({
+      status: "needs_review",
+      watchlist: "hit",
+      reviewReasons: ["provider_flag", "watchlist_hit"],
+    });
+  });
+
+  test("on a sandbox --watchlist is optional: without it the check's search is carried over, with it the search is written", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const carried = await recorded(guardian, { "--watchlist": "not_run" });
+    const settled = await run<Recorded>(
+      decisionLine("identity:correct-name", guardian, carried.checkId, "transliteration", {
+        "--name-first": FIRST,
+        "--name-last": "Dupont-Example",
+      }),
+    );
+    expect(latestOf(guardian)).toMatchObject({ status: "passed", watchlist: "not_run" });
+    expect(settled.output.status).toBe("passed");
+
+    const passed = await recorded(second, { "--name-first": "Ana" });
+    await run(
+      decisionLine("identity:correct-name", second, passed.checkId, "transliteration", {
+        "--name-first": "Ana",
+        "--name-last": "Dupont-Example",
+        "--watchlist": "hit",
+      }),
+    );
+    expect(latestOf(second)).toMatchObject({
+      status: "needs_review",
+      watchlist: "hit",
+      reviewReasons: ["watchlist_hit"],
+    });
+  });
+
+  test("identity:correct-name's --watchlist says it is the search on the corrected name, required on production", () => {
+    const program = buildCli(noChain);
+    const options = program.commands.find((c) => c.name() === "identity:correct-name")?.options;
+    const help = options?.find((o) => o.long === "--watchlist")?.description ?? "";
+    expect(help).toContain("the sanctions search on the corrected name");
+    expect(help).toContain("required on production");
   });
 
   test("the name flags say the name is the guardian's, confirmed against the document", () => {
@@ -1946,6 +2039,7 @@ describe("on production a passed row needs the face match, the sanctions search 
       ...decided(review.checkId, "other_script"),
       nameFirst: "Wei",
       nameLast: "WANG",
+      watchlist: "clear",
     });
     const corrected = latestOf(guardian);
     expect(corrected).toMatchObject({ status: "needs_review", reviewReasons: ["watchlist_hit"] });
@@ -1992,6 +2086,7 @@ describe("on production a passed row needs the face match, the sanctions search 
           ...decided(review.checkId, "other_script"),
           nameFirst: "Wei",
           nameLast: "Wang",
+          watchlist: "clear",
         }),
       ),
     ).toBe(NO_FACE_MATCH);

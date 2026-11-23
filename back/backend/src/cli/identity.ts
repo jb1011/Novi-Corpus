@@ -542,7 +542,13 @@ export interface CorrectNameOptions extends DecisionOptions {
   nameLast?: string;
   nameFull?: string;
   namesPrompt?: boolean;
+  /** The operator's sanctions search on the corrected name, `clear` or `hit`: required on
+   *  production; on a sandbox, absent carries the check's search over. */
+  watchlist?: string;
 }
+
+/** What the search on a corrected name can find: a corrected name is searched, never `not_run`. */
+const CORRECTED_WATCHLIST = ["clear", "hit"] as const satisfies readonly Watchlist[];
 
 /** What a decision row carries over from the row it decides: everything but the status, the
  *  expiry, the names and the review reasons. */
@@ -803,7 +809,11 @@ export function revokeIdentity(
  * only when the check had the face match and the sanctions search: `assertProductionPass`; and
  * never once the check's expiry has come, when the pass would already be expired); since the name
  * changed, another tenant's current passed check holding the new name and country adds
- * `duplicate_identity`, as `identity:record` would.
+ * `duplicate_identity`, as `identity:record` would. The search made on the old name says nothing
+ * of the new one: on production `--watchlist clear|hit` is required, the operator's search on the
+ * corrected name, and written on the row (a hit adds `watchlist_hit`, and the row waits for
+ * review); on a sandbox it is optional, and absent carries the check's search over. A hit still
+ * unresolved on the row keeps its search `hit`.
  */
 export function correctIdentityName(
   db: Database.Database,
@@ -820,6 +830,11 @@ export function correctIdentityName(
   const last = nameOfRecord(opts.nameLast);
   const problem = nameRuleProblem(first, last);
   if (problem !== null) refuse(`the corrected name breaks the name rule: ${problem}`);
+  const searched = optionalOneOf("--watchlist", opts.watchlist, CORRECTED_WATCHLIST);
+  if (searched === null && legalBodyEnvironment(cfg) === "production")
+    refuse(
+      "on production identity:correct-name needs the sanctions search on the corrected name: --watchlist clear or hit",
+    );
   return decide(db, tenantId, opts, {
     kind: "name_corrected",
     opsEvent: "identity_name_corrected",
@@ -835,9 +850,18 @@ export function correctIdentityName(
       };
       const hmac = nameHmac(fingerprintKey, first, last);
       // The corrected name resolves the name's own reasons, and only those.
-      const remaining = latest.reviewReasons.filter(
+      const kept = latest.reviewReasons.filter(
         (code) => code !== "name_rule_failed" && code !== "name_mismatch",
       );
+      // A hit on the corrected name is a review, in the record's order (after `provider_flag`).
+      const remaining: ReviewReasonCode[] =
+        searched === "hit" && !kept.includes("watchlist_hit")
+          ? [
+              ...kept.filter((code) => code === "provider_flag"),
+              "watchlist_hit",
+              ...kept.filter((code) => code !== "provider_flag"),
+            ]
+          : kept;
       const duplicate =
         latest.documentCountry !== null &&
         !remaining.includes("duplicate_identity") &&
@@ -853,6 +877,10 @@ export function correctIdentityName(
           expiresAt: latest.expiresAt,
           names: sealNames(pii, tenantId, names),
           nameHmac: hmac,
+          // The search on the corrected name; a hit not yet resolved stays one.
+          watchlist: reviewReasons.includes("watchlist_hit")
+            ? "hit"
+            : (searched ?? carried.watchlist),
           reviewReasons,
         },
         names,
@@ -1173,6 +1201,10 @@ export function registerIdentityCommands(program: Command): void {
     .option(
       "--names-prompt",
       "type the names at a prompt (or pipe them in, one per line: first, last, optional full) instead of the three name flags",
+    )
+    .option(
+      "--watchlist <clear|hit>",
+      "the sanctions search on the corrected name, made by you: clear, or hit (the correction then waits for review); required on production, and on a sandbox absent carries the check's search over",
     )
     .action(async (tenantId: string, opts: CorrectNameOptions) => {
       // A configuration that refuses is refused before anything is read at the prompt.
