@@ -588,10 +588,17 @@ interface Decision {
   codes: readonly string[];
   /** The statuses the latest row may have, and the refusal of any other. */
   from: readonly IdentityRowStatus[];
-  onlyFrom: string;
-  /** The row appended over the latest, inside the transaction. May refuse. */
-  build: (
+  /** The row decided when the latest row's status is not among `from`: a row under the latest,
+   *  or undefined for the refusal. Absent, only the latest row is decided. */
+  under?: (
     latest: GuardianIdentityCheck,
+    repo: SqliteIdentityRepository,
+    nowMs: number,
+  ) => GuardianIdentityCheck | undefined;
+  onlyFrom: string;
+  /** The row appended over the decided row, inside the transaction. May refuse. */
+  build: (
+    decided: GuardianIdentityCheck,
     carried: Carried,
     repo: SqliteIdentityRepository,
     nowMs: number,
@@ -600,9 +607,9 @@ interface Decision {
 
 /**
  * The shared body of the four decisions: in ONE immediate transaction, the latest row against
- * `--expect-latest`, its status against the decision's, the new row (a passed one held to the
- * production pass), and (with `--yes`) its append with the decision's event. Then one ops line and
- * the output.
+ * `--expect-latest`, its status against the decision's (or the row under it the decision reaches,
+ * `under`), the new row superseding the row decided (a passed one held to the production pass),
+ * and (with `--yes`) its append with the decision's event. Then one ops line and the output.
  */
 function decide(
   db: Database.Database,
@@ -621,14 +628,20 @@ function decide(
   const found = repo.transaction(() => {
     const latest = repo.latest(tenantId);
     assertExpectedLatest(tenantId, latest, expected);
-    if (latest === undefined || !d.from.includes(latest.status))
+    const decided =
+      latest === undefined
+        ? undefined
+        : d.from.includes(latest.status)
+          ? latest
+          : d.under?.(latest, repo, nowMs);
+    if (latest === undefined || decided === undefined)
       refuse(
         `the latest identity check of ${tenantId} is ${latest?.status ?? "none"}: ${d.onlyFrom}`,
       );
-    const built = d.build(latest, carriedFrom(latest, operator, operatorOsUser), repo, nowMs);
+    const built = d.build(decided, carriedFrom(decided, operator, operatorOsUser), repo, nowMs);
     const row = shapeChecked(built.row);
     asRefusal(() => assertProductionPass(row, built.names));
-    if (opts.yes !== true) return { latest, row, check: undefined };
+    if (opts.yes !== true) return { latest, decided, row, check: undefined };
     const check = repo.append(row, {
       kind: d.kind,
       at: nowMs,
@@ -637,7 +650,7 @@ function decide(
       reasonCode,
       reason,
     });
-    return { latest, row, check };
+    return { latest, decided, row, check };
   });
 
   if (found.check === undefined)
@@ -650,7 +663,7 @@ function decide(
     };
   opsLog(d.opsEvent, {
     checkId: found.check.checkId,
-    supersedes: found.latest.checkId,
+    supersedes: found.decided.checkId,
     tenant: tenantId.slice(0, 10),
     status: found.check.status,
     reasonCode,
@@ -742,8 +755,11 @@ export function reviewIdentity(
 }
 
 /**
- * Revokes a passed check: a revoked row without names. The identity side only: a live company
- * stays the company's to revoke (`company:revoke`).
+ * Revokes a passed check: a revoked row without names, superseding it. The latest passed check,
+ * or, at any time during a renewal under way (the latest row a renewal attempt begun, failed, or
+ * under a review without a sanctions hit or a blocked country), the pass the renewal rule still
+ * counts (`currentRecord`, read as the operator's writers read the state). The identity side only:
+ * a live company stays the company's to revoke (`company:revoke`).
  */
 export function revokeIdentity(
   db: Database.Database,
@@ -751,13 +767,17 @@ export function revokeIdentity(
   tenantArg: string,
   opts: DecisionOptions,
 ): Record<string, unknown> {
-  return decide(db, parseTenant(tenantArg), opts, {
+  const tenantId = parseTenant(tenantArg);
+  return decide(db, tenantId, opts, {
     kind: "revoked",
     opsEvent: "identity_revoked",
     codes: REVOKE_REASON_CODES,
     from: ["passed"],
-    onlyFrom: "only a passed check is revoked",
-    build: (_latest, carried) => ({
+    // Under a latest row that is not a pass, `currentRecord` is the pass a renewal under way still
+    // counts, or nothing: never the latest row itself.
+    under: (_latest, repo, nowMs) => currentRecord(repo, tenantId, nowMs),
+    onlyFrom: "only a passed check, or the pass a renewal under way still counts, is revoked",
+    build: (_decided, carried) => ({
       row: {
         ...carried,
         status: "revoked",
@@ -863,10 +883,11 @@ function shownNames(
 /**
  * What `identity:show` prints; it writes nothing, and no ops line:
  *  - `state`, read as this deployment's doors read it (on production a test record reads `none`);
- *  - `countsAtTheDoors`, whether the latest row is the person of the account's current World ID
- *    row (`agreesWithWorld`; a row without a nullifier always is): false once another person has
- *    verified World ID on the account since the record was written, for a row with a nullifier
- *    where World ID is not configured, and when there is no row;
+ *  - `countsAtTheDoors`, whether the record the gate reads (`currentRecord`, read as `state` is:
+ *    the latest row, or the pass a renewal under way renews) is the person of the account's
+ *    current World ID row (`agreesWithWorld`; a row without a nullifier always is): false when no
+ *    record counts, once another person has verified World ID on the account since the record was
+ *    written, and for a row with a nullifier where World ID is not configured;
  *  - the latest row with the names of record decrypted (the only output that holds a name;
  *    `names: null` with the key id and a note when the row's key is missing);
  *  - every row with its events.
@@ -882,10 +903,13 @@ export function showIdentity(
   const world = cfg.world ? buildWorldIdDeps(cfg.world, new SqliteWorldStore(db)) : undefined;
   const rows = repo.list(tenantId);
   const latest = rows.at(-1);
+  const nowMs = Date.now();
+  const environment = legalBodyEnvironment(cfg);
+  const record = currentRecord(repo, tenantId, nowMs, environment);
   return {
     tenantId,
-    state: identityState(repo, tenantId, Date.now(), legalBodyEnvironment(cfg)),
-    countsAtTheDoors: latest !== undefined && agreesWithWorld(latest, world, tenantId),
+    state: identityState(repo, tenantId, nowMs, environment),
+    countsAtTheDoors: record !== undefined && agreesWithWorld(record, world, tenantId),
     latestCheckId: latest?.checkId ?? null,
     /** What the next writing command takes as `--expect-latest`. */
     expectLatest: latest === undefined ? "none" : String(latest.checkId),
@@ -1052,7 +1076,7 @@ export function registerIdentityCommands(program: Command): void {
 
   decision(
     "identity:revoke",
-    "revoke a passed check: a revoked row without names. The identity side only: a live company is revoked with company:revoke",
+    "revoke a passed check, or the pass a renewal under way still counts: a revoked row without names. The identity side only: a live company is revoked with company:revoke",
     REVOKE_REASON_CODES,
     "record the revocation",
   ).action((tenantId: string, opts: DecisionOptions) =>

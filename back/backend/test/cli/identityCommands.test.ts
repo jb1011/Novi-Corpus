@@ -30,6 +30,7 @@ import { sweepIdentityNames } from "../../src/identity/sweep";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
   type GuardianIdentityCheck,
+  type NewGuardianIdentityCheck,
   SqliteIdentityRepository,
 } from "../../src/persistence/identityRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
@@ -285,6 +286,50 @@ function latestOf(tenantId: string): GuardianIdentityCheck {
 /** A recorded check, through the command; returns its check id. */
 async function recorded(tenantId: string, over: Options = {}): Promise<Recorded> {
   return (await run<Recorded>(recordLine(tenantId, over))).output;
+}
+
+/** The automatic check's renewal attempt, begun as it writes one when a session opens: no names
+ *  and no result yet. `over` replaces any field, the status among them. */
+function renewalBegun(
+  tenantId: `0x${string}`,
+  nullifier: string,
+  over: Partial<NewGuardianIdentityCheck> = {},
+): GuardianIdentityCheck {
+  return repo.append(
+    {
+      nullifier,
+      tenantId,
+      provider: "stripe",
+      providerRef: "vs_test_0002",
+      subject: "session-example",
+      status: "started",
+      supersedesCheckId: null,
+      startedAt: Date.now(),
+      completedAt: null,
+      expiresAt: null,
+      names: null,
+      nameHmac: null,
+      documentCountry: null,
+      documentType: null,
+      documentExpired: null,
+      liveness: null,
+      watchlist: null,
+      reviewReasons: [],
+      environment: "sandbox",
+      synthetic: true,
+      operator: null,
+      operatorOsUser: null,
+      ...over,
+    },
+    {
+      kind: "recorded",
+      at: Date.now(),
+      actor: "system",
+      actorOsUser: null,
+      reasonCode: "session_started",
+      reason: null,
+    },
+  );
 }
 
 // ── identity:record ───────────────────────────────────────────────────────────────────────────
@@ -689,41 +734,7 @@ describe("identity:record", () => {
     vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2026, 10, 10, 13) });
     human(guardian, "1001");
     await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
-    // The automatic check's renewal attempt, begun: no names and no result yet.
-    const begun = repo.append(
-      {
-        nullifier: "1001",
-        tenantId: guardian,
-        provider: "stripe",
-        providerRef: "vs_test_0002",
-        subject: "session-example",
-        status: "started",
-        supersedesCheckId: null,
-        startedAt: Date.now(),
-        completedAt: null,
-        expiresAt: null,
-        names: null,
-        nameHmac: null,
-        documentCountry: null,
-        documentType: null,
-        documentExpired: null,
-        liveness: null,
-        watchlist: null,
-        reviewReasons: [],
-        environment: "sandbox",
-        synthetic: true,
-        operator: null,
-        operatorOsUser: null,
-      },
-      {
-        kind: "recorded",
-        at: Date.now(),
-        actor: "system",
-        actorOsUser: null,
-        reasonCode: "session_started",
-        reason: null,
-      },
-    );
+    const begun = renewalBegun(guardian, "1001");
 
     expect(
       await refusal(
@@ -1155,8 +1166,73 @@ describe("the decisions", () => {
     expect(
       await refusal(decisionLine("identity:revoke", guardian, passed.checkId + 1, "fraud")),
     ).toBe(
-      `refusing: the latest identity check of ${guardian} is revoked: only a passed check is revoked`,
+      `refusing: the latest identity check of ${guardian} is revoked: only a passed check, or the pass a renewal under way still counts, is revoked`,
     );
+  });
+
+  test("revoke during a renewal under way revokes the pass the renewal rule still counts: the state reads revoked", async () => {
+    human(guardian, "1001");
+    const passed = await recorded(guardian);
+    const begun = renewalBegun(guardian, "1001");
+    expect((await run<Shown>(["identity:show", guardian])).output.state).toBe("verified");
+
+    // --expect-latest still names the latest row, the attempt: the pass's id is a stale view.
+    expect(
+      await refusal(decisionLine("identity:revoke", guardian, passed.checkId, "fraud")),
+    ).toMatch(/^refusing: the latest identity check of .* is \d+, not \d+/);
+    const { output, ops } = await run<Recorded>(
+      decisionLine("identity:revoke", guardian, begun.checkId, "fraud"),
+    );
+
+    expect(output).toMatchObject({ status: "revoked", supersedesCheckId: passed.checkId });
+    expect(latestOf(guardian)).toMatchObject({
+      status: "revoked",
+      supersedesCheckId: passed.checkId,
+      providerRef: "vs_test_0001",
+      names: null,
+    });
+    expect(ops).toEqual([
+      expect.objectContaining({
+        opslog: "identity_revoked",
+        supersedes: passed.checkId,
+        reasonCode: "fraud",
+      }),
+    ]);
+    expect((await run<Shown>(["identity:show", guardian])).output.state).toBe("revoked");
+  });
+
+  test("revoke during a renewal refuses when no pass counts: the pass expired, or the review found a sanctions hit", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2026, 10, 10, 13) });
+    human(guardian, "1001");
+    human(second, "1002");
+    await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
+    await recorded(second, {
+      "--name-first": "Ana",
+      "--name-last": "Example",
+      "--completed-at": "2026-11-10T12:00Z",
+    });
+    // The second guardian's renewal went to review for a sanctions hit: it decides.
+    const hit = renewalBegun(second, "1002", {
+      status: "needs_review",
+      completedAt: Date.now(),
+      watchlist: "hit",
+      reviewReasons: ["watchlist_hit"],
+    });
+    expect(
+      await refusal(decisionLine("identity:revoke", second, hit.checkId, "watchlist_confirmed")),
+    ).toBe(
+      `refusing: the latest identity check of ${second} is needs_review: only a passed check, or the pass a renewal under way still counts, is revoked`,
+    );
+
+    // The first guardian's pass expires while an attempt is open.
+    vi.setSystemTime(Date.UTC(2029, 10, 10, 13));
+    const begun = renewalBegun(guardian, "1001");
+    expect((await run<Shown>(["identity:show", guardian])).output.state).toBe("pending");
+    expect(await refusal(decisionLine("identity:revoke", guardian, begun.checkId, "fraud"))).toBe(
+      `refusing: the latest identity check of ${guardian} is started: only a passed check, or the pass a renewal under way still counts, is revoked`,
+    );
+    expect(repo.list(guardian)).toHaveLength(2);
+    expect(repo.list(second)).toHaveLength(2);
   });
 
   test("a decision without --yes writes nothing", async () => {
@@ -1945,6 +2021,31 @@ test("identity:show says whether the record counts at the doors: after a second 
 
   expect(output).toMatchObject({ state: "verified", countsAtTheDoors: false });
   expect(ops).toEqual([]);
+});
+
+test("identity:show reads the record the doors read: a pass under a renewal begun counts at the doors, a review that found a sanctions hit does not", async () => {
+  human(guardian, "1001");
+  const passed = await recorded(guardian);
+  const begun = renewalBegun(guardian, "1001");
+  expect((await run<Shown>(["identity:show", guardian])).output).toMatchObject({
+    state: "verified",
+    countsAtTheDoors: true,
+    latestCheckId: begun.checkId,
+    latest: { checkId: begun.checkId, status: "started" },
+  });
+  expect(passed.checkId).toBeLessThan(begun.checkId);
+
+  // The renewal's review found a sanctions hit: nothing counts at the doors.
+  renewalBegun(guardian, "1001", {
+    status: "needs_review",
+    completedAt: Date.now(),
+    watchlist: "hit",
+    reviewReasons: ["watchlist_hit"],
+  });
+  expect((await run<Shown>(["identity:show", guardian])).output).toMatchObject({
+    state: "needs_review",
+    countsAtTheDoors: false,
+  });
 });
 
 test("identity:show reads the state as the deployment does: on production a record written on a sandbox reads none", async () => {
