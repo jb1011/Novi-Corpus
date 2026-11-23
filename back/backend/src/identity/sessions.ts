@@ -555,8 +555,9 @@ async function reuseOpen(
 ): Promise<StartedSession | undefined> {
   const { sessionId } = open;
   if (now - open.createdAt >= days(deps.limits.sessionDays)) {
-    await cancelAtProvider(deps, open);
+    const redactionRequested = await endAtProvider(deps, open);
     closeAbandoned(deps, open, now, "expired");
+    if (redactionRequested) deps.sessions.markRedactionRequested(sessionId, now);
     return undefined;
   }
   // The read that finds the session waiting needs no birth date.
@@ -638,8 +639,61 @@ async function syncAt(
 ): Promise<SyncOutcome> {
   const session = deps.sessions.byId(sessionId);
   if (session === undefined || session.closedAt !== null) return "unchanged";
+  if (waitsForOperator(session) && !rowWrittenSince(deps, session, session.lastReadAt as number))
+    return lookedAt(deps, session, now);
   const { read, dobRefused } = await readWithDob(deps, session);
   return applyRead(deps, session, read, dobRefused, now);
+}
+
+/**
+ * A verified result the record's rules refused (or one without typed names) waits for an
+ * operator: open, its last read verified, no screen pending. A verified session is final at the
+ * provider, so nothing there can change the plan; only an operator's row can (`rowWrittenSince`).
+ */
+function waitsForOperator(session: IdentitySession): boolean {
+  return (
+    session.lastStatus === "verified" &&
+    session.screenPendingSince === null &&
+    session.lastReadAt !== null
+  );
+}
+
+/**
+ * Whether a row of the tenant was written after the session's `started` row, with an event since
+ * `sinceMs`: the system writes no other row for a tenant while its session is open, so this is an
+ * operator's.
+ */
+function rowWrittenSince(
+  deps: IdentitySessionDeps,
+  session: IdentitySession,
+  sinceMs: number,
+): boolean {
+  const { repo } = deps.identity;
+  return repo
+    .list(session.tenantId)
+    .some(
+      (row) =>
+        row.checkId > session.startedCheckId &&
+        repo.events(row.checkId).some((e) => e.at > sinceMs),
+    );
+}
+
+/**
+ * A session waiting for an operator, looked at and not read: no provider read, no birth date, no
+ * screen, no ops line. Its read time moves to now, so the sweep's queue (least recently read
+ * first) moves past it, and an operator's row written after this look is the next look's signal.
+ */
+function lookedAt(deps: IdentitySessionDeps, session: IdentitySession, now: number): SyncOutcome {
+  onOpenSession(deps, session.sessionId, (fresh) => {
+    deps.sessions.recordRead(fresh.sessionId, {
+      at: now,
+      status: fresh.lastStatus ?? "verified",
+      lastErrorCode: fresh.lastErrorCode,
+      failedAttempts: fresh.failedAttempts,
+      reportId: fresh.reportId,
+    });
+  });
+  return "unchanged";
 }
 
 /** One read at the provider; its failure is the provider's (`providerFailed`). */
@@ -1034,21 +1088,86 @@ function logClosed(session: IdentitySession, reasonCode: FailureReasonCode): voi
 }
 
 /**
- * Cancels a session at the provider before it is abandoned. One the provider no longer has, or can
- * no longer cancel (verified, processing or canceled there: a 400), closes all the same; a session
- * already redacted is not asked.
+ * A refusal about this session that asking again will not change: 404, or a 4xx other than 429.
+ * A refused key (401, 403) is the deployment's, not the session's: it stays an error, CRITICAL.
  */
-async function cancelAtProvider(
+function refusedForGood(e: unknown): e is StripeError {
+  if (!(e instanceof StripeError) || e instanceof StripeKeyRejected) return false;
+  if (e instanceof StripeUnavailable || e.status === null) return false;
+  return e.status >= 400 && e.status < 500 && e.status !== 429;
+}
+
+function redactionRefused(op: "retrieve" | "redact", e: StripeError, sessionId: string): void {
+  opsLog("identity_redaction_refused", {
+    level: "warn",
+    sessionId,
+    op,
+    status: e.status,
+    code: e.code,
+  });
+}
+
+/**
+ * Ends a session at the provider before it is abandoned; true when its redaction was requested.
+ * A session the provider redacts (waiting for the person, `requires_input`, which a session never
+ * read still is; or verified) is redacted, which cancels a waiting one too. Any other, or one whose
+ * redaction is refused (its status moved since the last read), is canceled. One the provider no
+ * longer has, or can no longer cancel (a 400), closes all the same; one already redacted is not
+ * asked.
+ */
+async function endAtProvider(
   deps: IdentitySessionDeps,
   session: IdentitySession,
-): Promise<void> {
-  if (session.redactedAt !== null) return;
+): Promise<boolean> {
+  if (session.redactedAt !== null) return false;
+  const ids = { sessionId: session.sessionId };
+  const { lastStatus } = session;
+  if (lastStatus === null || lastStatus === "requires_input" || lastStatus === "verified") {
+    try {
+      await deps.provider.redactSession(session.providerRef);
+      return true;
+    } catch (e) {
+      if (!refusedForGood(e)) providerFailed("redact", e, ids);
+      redactionRefused("redact", e, session.sessionId);
+    }
+  }
   try {
     await deps.provider.cancelSession(session.providerRef);
   } catch (e) {
-    if (e instanceof StripeNotFound || (e instanceof StripeError && e.status === 400)) return;
-    providerFailed("cancel", e, { sessionId: session.sessionId });
+    if (e instanceof StripeNotFound || (e instanceof StripeError && e.status === 400)) return false;
+    providerFailed("cancel", e, ids);
   }
+  return false;
+}
+
+/**
+ * One redaction due: `redacted` when the provider says so; else the provider is asked,
+ * `requested`. A refusal for good (`refusedForGood`) at the read or at the request is `refused`,
+ * with one ops line: the caller marks it requested all the same, so it is asked again only a week
+ * later and never holds the batch. Any other failure throws (`providerFailed`).
+ */
+async function requestRedaction(
+  deps: IdentitySessionDeps,
+  session: IdentitySession,
+): Promise<"redacted" | "requested" | "refused"> {
+  const ids = { sessionId: session.sessionId };
+  let read: ProviderSession;
+  try {
+    read = await deps.provider.retrieveSession(session.providerRef, { withDob: false });
+  } catch (e) {
+    if (!refusedForGood(e)) providerFailed("retrieve", e, ids);
+    redactionRefused("retrieve", e, session.sessionId);
+    return "refused";
+  }
+  if (read.redaction === "redacted") return "redacted";
+  try {
+    await deps.provider.redactSession(session.providerRef);
+  } catch (e) {
+    if (!refusedForGood(e)) providerFailed("redact", e, ids);
+    redactionRefused("redact", e, session.sessionId);
+    return "refused";
+  }
+  return "requested";
 }
 
 // ── sweep ───────────────────────────────────────────────────────────────────────────────────
@@ -1056,12 +1175,15 @@ async function cancelAtProvider(
 /**
  * The scheduler's pass over the sessions, at `nowMs`:
  *
- * 1. Open sessions nobody read for two minutes (50 at a time): past their days, canceled at the
- *    provider and closed as abandoned; else read (`syncSession`).
+ * 1. Open sessions nobody read for two minutes (50 at a time): past their days, ended at the
+ *    provider (redacted, or canceled when redaction does not take them: `endAtProvider`) and
+ *    closed as abandoned; else read (`syncSession`; a refused result waiting for an operator is
+ *    only looked at).
  * 2. Closed sessions whose row went to review: once the operator has decided the review (an
  *    acceptance, a refusal, or a name correction that settles it), their redaction falls due.
  * 3. Sessions due for redaction (50 at a time): marked redacted when the provider says so, else
- *    the provider is asked (again, a week after a request it did not complete).
+ *    the provider is asked (again, a week after a request it did not complete). A refusal for good
+ *    counts as a request made: it is asked again a week later, and the batch moves on.
  *
  * Returns the counts. An error on one session is counted and logged, never thrown: the job's own
  * failure line is for a broken dependency, not one session.
@@ -1091,8 +1213,12 @@ export async function sweepSessions(
   for (const session of deps.sessions.openOlderThan(nowMs - REREAD_AFTER_MS, SWEEP_BATCH)) {
     try {
       if (nowMs - session.createdAt >= days(deps.limits.sessionDays)) {
-        await cancelAtProvider(deps, session);
+        const redactionRequested = await endAtProvider(deps, session);
         if (closeAbandoned(deps, session, nowMs, "expired") === "closed") counts.abandoned += 1;
+        if (redactionRequested) {
+          deps.sessions.markRedactionRequested(session.sessionId, nowMs);
+          counts.redactRequested += 1;
+        }
       } else {
         await syncAt(deps, session.sessionId, nowMs);
         counts.synced += 1;
@@ -1113,16 +1239,10 @@ export async function sweepSessions(
 
   for (const session of deps.sessions.redactionDue(nowMs, SWEEP_BATCH)) {
     try {
-      const read = await retrieved(deps, session, { withDob: false });
-      if (read.redaction === "redacted") {
+      if ((await requestRedaction(deps, session)) === "redacted") {
         deps.sessions.markRedacted(session.sessionId, nowMs);
         counts.redacted += 1;
         continue;
-      }
-      try {
-        await deps.provider.redactSession(session.providerRef);
-      } catch (e) {
-        providerFailed("redact", e, { sessionId: session.sessionId });
       }
       deps.sessions.markRedactionRequested(session.sessionId, nowMs);
       counts.redactRequested += 1;

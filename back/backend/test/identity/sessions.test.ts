@@ -143,6 +143,9 @@ class FakeProvider implements IdentityProviderClient {
     if (err) throw err;
     const s = this.sessions.get(ref);
     if (s === undefined) throw new StripeNotFound(404, "Stripe Identity cancel: HTTP 404");
+    // Stripe cancels a session only while it waits for the person.
+    if (s.status !== "requires_input")
+      throw new StripeError(400, "Stripe Identity cancel: HTTP 400");
     this.sessions.set(ref, { ...s, status: "canceled" });
   }
 
@@ -152,7 +155,14 @@ class FakeProvider implements IdentityProviderClient {
     if (err) throw err;
     const s = this.sessions.get(ref);
     if (s === undefined) throw new StripeNotFound(404, "Stripe Identity redact: HTTP 404");
-    this.sessions.set(ref, { ...s, redaction: "processing" });
+    // Stripe redacts a session waiting for the person (canceling it too) or a verified one.
+    if (s.status !== "requires_input" && s.status !== "verified")
+      throw new StripeError(400, "Stripe Identity redact: HTTP 400");
+    this.sessions.set(ref, {
+      ...s,
+      status: s.status === "requires_input" ? "canceled" : s.status,
+      redaction: "processing",
+    });
   }
 
   #freshUrl(): string {
@@ -466,8 +476,14 @@ describe("startSession", () => {
     now = T0 + 14 * DAY;
     const fresh = await startSession(deps(), tenant(2), TYPED);
     expect(fresh.sessionId).not.toBe(old.sessionId);
-    expect(old.session()).toMatchObject({ closedAt: now, redactDueAt: now + 7 * DAY });
-    expect(provider.canceled).toEqual([old.ref]);
+    // Waiting for the person, it is redacted (which cancels it too), the request marked.
+    expect(old.session()).toMatchObject({
+      closedAt: now,
+      redactDueAt: now + 7 * DAY,
+      redactionRequestedAt: now,
+    });
+    expect(provider.redacted).toEqual([old.ref]);
+    expect(provider.canceled).toEqual([]);
 
     for (const t of [tenant(1), tenant(2)]) {
       const rows = repo.list(t);
@@ -1087,6 +1103,57 @@ describe("syncSession", () => {
     expect(output.join("\n")).not.toContain("--liveness");
   });
 
+  test("a refused result is screened once: later sweeps neither read it at the provider nor screen it again, until an operator writes a row; the 14-day abandon still applies", async () => {
+    const d = production();
+    const s = await started(d);
+    provider.verify(s.ref, { selfie: "unverified" });
+    now = T0 + MINUTE;
+    expect(await syncSession(d, s.sessionId)).toBe("unchanged");
+    const reads = provider.reads.length;
+
+    for (const at of [10, 20, 30]) {
+      now = T0 + at * MINUTE;
+      expect(await sweepSessions(d, now)).toMatchObject({ synced: 1, errors: 0 });
+    }
+    expect(screener.queries).toHaveLength(1);
+    expect(provider.reads).toHaveLength(reads);
+    expect(opsLines("identity_session_refused")).toHaveLength(1);
+    // Looked at, so the sweep's queue moves past it.
+    expect(s.session()).toMatchObject({ lastReadAt: T0 + 30 * MINUTE, closedAt: null });
+
+    // An operator's row: the result is planned once more, and refused again.
+    now = T0 + 40 * MINUTE;
+    repo.append(
+      {
+        ...latestRow(),
+        status: "failed",
+        supersedesCheckId: latestRow().checkId,
+        completedAt: now,
+        operator: "ops.example",
+        operatorOsUser: "ops",
+      },
+      {
+        kind: "refused",
+        at: now,
+        actor: "ops.example",
+        actorOsUser: "ops",
+        reasonCode: "other",
+        reason: null,
+      },
+    );
+    now = T0 + 50 * MINUTE;
+    await sweepSessions(d, now);
+    now = T0 + 60 * MINUTE;
+    await sweepSessions(d, now);
+    expect(screener.queries).toHaveLength(2);
+    expect(opsLines("identity_session_refused")).toHaveLength(2);
+
+    now = T0 + 15 * DAY;
+    expect(await sweepSessions(d, now)).toMatchObject({ abandoned: 1 });
+    expect(s.session().closedAt).toBe(now);
+    expect(screener.queries).toHaveLength(2);
+  });
+
   test("a closed session is unchanged, and not read again", async () => {
     const s = await started();
     provider.verify(s.ref);
@@ -1177,12 +1244,18 @@ describe("sessionView", () => {
 describe("sweepSessions", () => {
   const zero = { synced: 0, abandoned: 0, redactRequested: 0, redacted: 0, errors: 0 };
 
-  test("an open session of 15 days is canceled at the provider and closed as abandoned", async () => {
+  test("an open session of 15 days waiting for the person is redacted at the provider, which cancels it, and closed as abandoned", async () => {
     const s = await started();
     now = T0 + 15 * DAY;
 
-    expect(await sweepSessions(deps(), now)).toEqual({ ...zero, abandoned: 1 });
-    expect(provider.canceled).toEqual([s.ref]);
+    expect(await sweepSessions(deps(), now)).toEqual({ ...zero, abandoned: 1, redactRequested: 1 });
+    expect(provider.redacted).toEqual([s.ref]);
+    expect(provider.canceled).toEqual([]);
+    expect(provider.sessions.get(s.ref)).toMatchObject({
+      status: "canceled",
+      redaction: "processing",
+    });
+    expect(s.session().redactionRequestedAt).toBe(now);
     expect(latestRow().status).toBe("failed");
     expect(repo.events(latestRow().checkId)[0]).toMatchObject({
       actor: "system",
@@ -1192,18 +1265,77 @@ describe("sweepSessions", () => {
     expect(s.session()).toMatchObject({ closedAt: now, redactDueAt: now + 7 * DAY });
   });
 
-  test("an old session the provider no longer has, or can no longer cancel, is closed as abandoned all the same", async () => {
-    const gone = await started(deps(), tenant(1));
-    const done = await started(deps(), tenant(2));
-    provider.failNext.cancel.push(
-      new StripeNotFound(404, "Stripe Identity cancel: HTTP 404"),
-      new StripeError(400, "Stripe Identity cancel: HTTP 400"),
-    );
+  test("an old session redaction does not take is canceled instead; one the provider no longer has, or can no longer cancel, is closed as abandoned all the same", async () => {
+    // Read last while its result was being processed: neither redaction nor cancel takes it.
+    const processing = await started(deps(), tenant(1));
+    provider.update(processing.ref, { status: "processing" });
+    await syncSession(deps(), processing.sessionId);
+    // Gone at the provider.
+    const gone = await started(deps(), tenant(2));
+    provider.update(gone.ref, { status: "processing" });
+    await syncSession(deps(), gone.sessionId);
+    provider.sessions.delete(gone.ref);
+    // Last read waiting, but processing at the provider since: the redaction is refused, and the
+    // cancel too.
+    const moved = await started(deps(), tenant(3));
+    await syncSession(deps(), moved.sessionId);
+    provider.update(moved.ref, { status: "processing" });
     now = T0 + 15 * DAY;
 
-    expect(await sweepSessions(deps(), now)).toEqual({ ...zero, abandoned: 2 });
-    expect(gone.session().closedAt).toBe(now);
-    expect(done.session().closedAt).toBe(now);
+    expect(await sweepSessions(deps(), now)).toEqual({ ...zero, abandoned: 3 });
+    for (const s of [processing, gone, moved])
+      expect(s.session()).toMatchObject({ closedAt: now, redactionRequestedAt: null });
+    expect(provider.redacted).toEqual([moved.ref]);
+    expect(provider.canceled).toEqual([processing.ref, gone.ref, moved.ref]);
+    expect(opsLines("identity_redaction_refused")).toMatchObject([
+      { sessionId: moved.sessionId, op: "redact", status: 400 },
+    ]);
+  });
+
+  test("a provider refusing a redaction for good (404, 400) is asked again only a week later, and the sweep moves on to redact the others", async () => {
+    const all = [] as Awaited<ReturnType<typeof started>>[];
+    // Three countries: one name under one country on two accounts would be a duplicate review.
+    for (const [n, country] of [
+      [1, "FR"],
+      [2, "DE"],
+      [3, "IT"],
+    ] as const) {
+      const s = await started(deps(), tenant(n));
+      provider.verify(s.ref, { country });
+      await syncSession(deps(), s.sessionId);
+      all.push(s);
+    }
+    const [gone, refusing, fine] = all as [(typeof all)[0], (typeof all)[0], (typeof all)[0]];
+    provider.sessions.delete(gone.ref); // deleted test data: 404 at the read
+    provider.update(refusing.ref, { status: "canceled" }); // 400 at the redaction
+    now = T0 + 7 * DAY;
+
+    expect(await sweepSessions(deps(), now)).toEqual({ ...zero, redactRequested: 3 });
+    for (const s of all) expect(s.session().redactionRequestedAt).toBe(now);
+    expect(provider.redacted).toEqual([refusing.ref, fine.ref]);
+    expect(provider.sessions.get(fine.ref)?.redaction).toBe("processing");
+    expect(opsLines("identity_redaction_refused")).toMatchObject([
+      { sessionId: gone.sessionId, op: "retrieve", status: 404 },
+      { sessionId: refusing.sessionId, op: "redact", status: 400 },
+    ]);
+    expect(opsLines("identity_sessions_sweep_error")).toEqual([]);
+
+    // Not asked again within the week; a refused key stays an error and is not marked.
+    expect(await sweepSessions(deps(), now + DAY)).toEqual(zero);
+    expect(opsLines("identity_redaction_refused")).toHaveLength(2);
+  });
+
+  test("a refused key during the redaction stays an error, the request not marked", async () => {
+    const s = await started();
+    provider.verify(s.ref);
+    await syncSession(deps(), s.sessionId);
+    provider.failNext.redact.push(new StripeKeyRejected(403, "Stripe Identity redact: HTTP 403"));
+    now = T0 + 7 * DAY;
+
+    expect(await sweepSessions(deps(), now)).toEqual({ ...zero, errors: 1 });
+    expect(s.session().redactionRequestedAt).toBeNull();
+    expect(opsLines("identity_provider_key_rejected")).toMatchObject([{ severity: "CRITICAL" }]);
+    expect(opsLines("identity_redaction_refused")).toEqual([]);
   });
 
   test("open sessions not read in the last two minutes are synced; one read just now waits", async () => {
