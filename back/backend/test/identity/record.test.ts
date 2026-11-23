@@ -300,6 +300,30 @@ describe("planCheck", () => {
     expect(planCheck(deps(), input()).duplicateOf).toEqual([]);
   });
 
+  test("the provider's test mode on a synthetic sandbox row skips the duplicate rule; anywhere else it is refused", () => {
+    passOf(other, "FRA");
+
+    const plan = planCheck(deps(), input({ providerTestMode: true }));
+    expect(plan.duplicateOf).toEqual([]);
+    expect(plan.row).toMatchObject({ status: "passed", reviewReasons: [] });
+    // The rest of the rules still hold: a sanctions hit is still a review.
+    expect(
+      planCheck(deps(), input({ providerTestMode: true, watchlist: "hit" })).row,
+    ).toMatchObject({ status: "needs_review", reviewReasons: ["watchlist_hit"] });
+
+    for (const over of [
+      { environment: "production" as const, synthetic: false },
+      { environment: "sandbox" as const, synthetic: false },
+      { environment: "production" as const, synthetic: true },
+    ])
+      expect(
+        () => planCheck(deps(), input({ ...over, providerTestMode: true })),
+        JSON.stringify(over),
+      ).toThrow(
+        "identity check: the provider's test mode is taken on a synthetic sandbox row only",
+      );
+  });
+
   // ── the renewal ─────────────────────────────────────────────────────────────────────────────
 
   test("a pass over the tenant's pass is a renewal: it names the pass, and its expiry runs from its own completion", () => {

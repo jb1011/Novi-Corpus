@@ -75,6 +75,12 @@ export interface CheckInput {
   /** Null when the adapter writes the row. */
   operator: string | null;
   operatorOsUser: string | null;
+  /**
+   * The provider's test mode, behind a sandbox's automatic check (ruling F4): it returns one
+   * sample person for everyone, so the duplicate rule is not run. Taken on a synthetic sandbox row
+   * only; anywhere else the plan throws. Absent, the rule runs.
+   */
+  providerTestMode?: boolean;
 }
 
 /** The row to append, the other tenants' passes it duplicates (check ids, never a name), and the
@@ -178,7 +184,8 @@ export function assertProductionPass(
  * provider asked for a review (`provider_flag`), the sanctions search hit, the document was out of
  * date, its country is blocked, the name breaks the name rule, the guardian's name differs from
  * the document's, or another tenant's current passed check holds the same name and country
- * (`duplicate_identity`, last). A pass over the tenant's pass is a renewal: it names the pass it
+ * (`duplicate_identity`, last; not run behind the provider's test mode, `providerTestMode`). A
+ * pass over the tenant's pass is a renewal: it names the pass it
  * replaces (the latest row when it is a pass, else the pass a renewal under way still counts) and
  * must complete after it, so an expiry, counted from the completion, never moves back; and no pass
  * is planned that would already be expired. On production a passed result needs the sanctions
@@ -230,8 +237,17 @@ export function planCheck(deps: CheckDeps, input: CheckInput): CheckPlan {
     refused(
       `a renewal must complete after the current pass (${new Date(renews.completedAt as number).toISOString()})`,
     );
+  // The provider's test mode names one sample person for everyone: two accounts verified there
+  // are the same "person" by construction, and no duplicate of anyone.
+  const testMode = input.providerTestMode === true;
+  if (testMode && (input.environment !== "sandbox" || !input.synthetic))
+    throw new Error(
+      "identity check: the provider's test mode is taken on a synthetic sandbox row only",
+    );
   const duplicateOf =
-    hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId, nowMs) : [];
+    hmac !== null && country !== null && !testMode
+      ? repo.passedElsewhere(hmac, country, tenantId, nowMs)
+      : [];
   const reviewReasons: ReviewReasonCode[] =
     duplicateOf.length > 0 ? [...flagged, "duplicate_identity"] : flagged;
   const row: NewGuardianIdentityCheck = {

@@ -55,7 +55,9 @@ import type { FailureReasonCode, IdentityState, Watchlist } from "./types";
  * - The name of record is the guardian's own: typed at the start, sealed in the session row
  *   (under the PII keyring, bound to the session and the field), compared with the document's at
  *   the completion (`namesAgree`; a difference is `name_mismatch`), and recorded as typed. The
- *   provider's extracted names are compared and dropped.
+ *   provider's extracted names are compared and dropped. On a sandbox, whose provider's test mode
+ *   returns one sample person for everyone, neither the names are compared nor the duplicate rule
+ *   run (ruling F4).
  * - The sanctions screen runs on the typed name and the birth date, which is read once, handed to
  *   the screen, and never stored or logged. A screen that errors is not a result: the session
  *   waits and the sweep reads it again.
@@ -990,6 +992,10 @@ async function completeVerified(
       screenPendingSince: null,
       dobUnavailable: dobNotRead,
     });
+    // A sandbox runs on the provider's test mode, which returns one sample person for everyone
+    // (ruling F4): the typed name is recorded without comparing it with the sample's, and the
+    // duplicate rule does not run. Production compares and runs both.
+    const testMode = deps.environment === "sandbox";
     let row: NewGuardianIdentityCheck;
     try {
       row = planCheck(checkDeps(deps, now), {
@@ -1001,13 +1007,14 @@ async function completeVerified(
             ? "needs_review"
             : "passed",
         names: { ...names, full: null },
-        nameMismatch: !namesAgree(typed, outcome.names),
+        nameMismatch: !testMode && !namesAgree(typed, outcome.names),
         country: outcome.country,
         documentType: outcome.documentType,
         documentExpired: false,
         liveness: outcome.liveness,
         watchlist,
         completedAt: outcome.completedAt,
+        ...(testMode ? { providerTestMode: true } : {}),
       }).row;
     } catch (e) {
       // The rules' sentences name the operator's flags: they stay out of every answer and line.

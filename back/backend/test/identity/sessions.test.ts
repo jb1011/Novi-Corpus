@@ -71,8 +71,12 @@ const ON_DOCUMENT = { firstName: "OTTILIE", lastName: "BRANDWICK" } as const;
 /** A made-up birth date, as the provider gives it and as the screen takes it. */
 const DOB = { year: 1987, month: 3, day: 14 } as const;
 const DOB_TEXT = "1987-03-14";
+/** The one sample person Stripe's test mode returns for everyone, made up here, and the name a
+ *  tester types to match it. */
+const SAMPLE_PERSON = { firstName: "SAMPLA", lastName: "TESTWORTH" } as const;
+const SAMPLE_TYPED = { firstName: "Sampla", lastName: "Testworth" } as const;
 /** What no console line may hold. */
-const NEVER_LOGGED = ["ottilie", "brandwick", DOB_TEXT, "19870314"];
+const NEVER_LOGGED = ["ottilie", "brandwick", "sampla", "testworth", DOB_TEXT, "19870314"];
 
 /** A tenant id as the session spells it: EIP-55 checksummed, with letters for the checksum. */
 const tenant = (n: number): Address =>
@@ -734,11 +738,12 @@ describe("syncSession", () => {
     ]);
   });
 
-  test("the typed name and the document's disagree: the row lands in review with name_mismatch under the typed names, and the session waits for the decision before its redaction date", async () => {
-    const s = await started();
+  test("on production the typed name and the document's disagree: the row lands in review with name_mismatch under the typed names, and the session waits for the decision before its redaction date", async () => {
+    const d = production();
+    const s = await started(d);
     provider.verify(s.ref, { names: { firstName: "Ottilie-Rose", lastName: "BRANDWICK" } });
 
-    expect(await syncSession(deps(), s.sessionId)).toBe("completed");
+    expect(await syncSession(d, s.sessionId)).toBe("completed");
 
     const row = latestRow();
     expect(row).toMatchObject({ status: "needs_review", reviewReasons: ["name_mismatch"] });
@@ -763,19 +768,56 @@ describe("syncSession", () => {
   });
 
   test("a renewal that lands in review keeps the earlier pass counting through the review", async () => {
-    const pass = passFor(GUARDIAN, T0 - 1000 * DAY, T0 + 30 * DAY);
-    const s = await started();
+    // On production, where the names are compared: a production pass, a production session.
+    const pass = appended(
+      passedIdentityRow(GUARDIAN, { at: T0 - 1000 * DAY, expiresAt: T0 + 30 * DAY }),
+    );
+    const d = production();
+    const s = await started(d);
     provider.verify(s.ref, { names: { firstName: "Ottilie-Rose", lastName: "BRANDWICK" } });
 
-    expect(await syncSession(deps(), s.sessionId)).toBe("completed");
+    expect(await syncSession(d, s.sessionId)).toBe("completed");
 
     expect(latestRow()).toMatchObject({
       status: "needs_review",
       reviewReasons: ["name_mismatch"],
       supersedesCheckId: pass.checkId,
     });
-    expect(identityState(repo, GUARDIAN, now, "sandbox")).toBe("verified");
-    expect(currentRecord(repo, GUARDIAN, now, "sandbox")?.checkId).toBe(pass.checkId);
+    expect(identityState(repo, GUARDIAN, now, "production")).toBe("verified");
+    expect(currentRecord(repo, GUARDIAN, now, "production")?.checkId).toBe(pass.checkId);
+  });
+
+  test("on a sandbox the names are not compared: test mode returns one sample person, and a typed name that differs from it passes, recorded as typed", async () => {
+    const s = await started();
+    provider.verify(s.ref, { names: SAMPLE_PERSON });
+
+    expect(await syncSession(deps(), s.sessionId)).toBe("completed");
+    const row = latestRow();
+    expect(row).toMatchObject({ status: "passed", reviewReasons: [], synthetic: true });
+    expect(namesOf(row)).toMatchObject({ first: "Ottilie", last: "Brandwick" });
+  });
+
+  test("on a sandbox the duplicate rule does not run: a second account verified with the same sample person passes", async () => {
+    for (const t of [tenant(1), tenant(2)]) {
+      const s = await started(deps(), t, SAMPLE_TYPED);
+      provider.verify(s.ref, { names: SAMPLE_PERSON });
+      expect(await syncSession(deps(), s.sessionId)).toBe("completed");
+      expect(latestRow(t)).toMatchObject({ status: "passed", reviewReasons: [] });
+    }
+  });
+
+  test("on production a second account with the same name and document country lands in review with duplicate_identity", async () => {
+    const d = production();
+    for (const t of [tenant(1), tenant(2)]) {
+      const s = await started(d, t);
+      provider.verify(s.ref);
+      expect(await syncSession(d, s.sessionId)).toBe("completed");
+    }
+    expect(latestRow(tenant(1))).toMatchObject({ status: "passed" });
+    expect(latestRow(tenant(2))).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["duplicate_identity"],
+    });
   });
 
   test("a screen that errors leaves the session waiting with no row, the time it began kept; a later sync completes it once the screen answers", async () => {
@@ -1619,9 +1661,11 @@ describe("sweepSessions", () => {
     const accepted = await started(deps(), tenant(1));
     provider.verify(accepted.ref, { country: "XK" });
     await syncSession(deps(), accepted.sessionId);
-    const corrected = await started(deps(), tenant(2));
+    // A name_mismatch review: on production, where the names are compared.
+    const corrected = await started(production(), tenant(2));
     provider.verify(corrected.ref, { names: { firstName: "Ottilie-Rose", lastName: "BRANDWICK" } });
-    await syncSession(deps(), corrected.sessionId);
+    await syncSession(production(), corrected.sessionId);
+    expect(latestRow(tenant(2)).reviewReasons).toEqual(["name_mismatch"]);
 
     now = T0 + DAY;
     expect(await sweepSessions(deps(), now)).toEqual(zero);
