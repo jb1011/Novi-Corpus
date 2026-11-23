@@ -61,11 +61,15 @@ How one check runs:
    `country_not_supported`), a `failed` row. A session nobody finishes closes as `abandoned` after
    `IDENTITY_SESSION_DAYS` (14). The close erases the typed names.
 5. `IDENTITY_REDACT_AFTER_DAYS` (seven) days after the row, or after the operator's decision when
-   the row went to review, the job asks Stripe to redact the session.
+   the row went to review (or once anything is written over the review), the job asks Stripe to
+   redact the session.
 
 The rows carry `operator: null` and their events the actor `system`. The name of record is the
 guardian's typed name, confirmed against the document's; Stripe's extracted names are compared and
-dropped.
+dropped (the testnet does not compare them, 0.2).
+
+An operator's row written while a session is open stands: the session then closes without a row
+of its own, and the job never writes over it (0.4).
 
 ### 0.1 Setting it up, per box
 
@@ -159,6 +163,11 @@ asked for its own Identity application, and its account-holder verification step
 - The test page lets the person choose the outcome (a success, an expired document, and others): no
   document, no real person. Every row a sandbox writes is `synthetic`, and no production door ever
   counts one.
+- Test mode returns one sample person for everyone, whatever name is typed. So the testnet does not
+  compare the names: the typed name is recorded as typed, and no `name_mismatch` review comes. Nor
+  does it run the duplicate check: a second account verified with the sample passes too. Production
+  compares the names and runs the duplicate check. The operator's commands keep both rules
+  everywhere.
 
 ### 0.3 Rotating the webhook secret
 
@@ -205,10 +214,11 @@ says which session it is: `open`, `newest_closed`, or `none`.
 **The job.** `identity_sessions_sync` runs inside the API process, 30 seconds after boot and then
 every `IDENTITY_SYNC_EVERY_MS` (ten minutes). Each pass reads the open sessions nobody read for two
 minutes (50 at a time); closes those past `IDENTITY_SESSION_DAYS` as abandoned, after redacting or
-canceling them at Stripe; gives a review's session its redaction date once the review is decided;
-and asks Stripe to redact the sessions due (again a week later, if a request did not complete). Each
-pass writes `job_ran { name: "identity_sessions_sync", synced, abandoned, redactRequested, redacted,
-errors, ms }`, or `job_failed` (CRITICAL from the third failure in a row). It needs the API's
+canceling them at Stripe; gives a review's session its redaction date once the review is decided or
+written over; and asks Stripe to redact the sessions due (again a week later, if a request did not
+complete). Each pass writes `job_ran { name: "identity_sessions_sync", synced, abandoned,
+redactRequested, redacted, errors, ms }`, or `job_failed` (CRITICAL from the third failure in a
+row). It needs the API's
 Stripe client and screener, so `scheduler:run identity_sessions_sync` is refused from the shell:
 no command reads a session on demand. A session is read again by the next webhook, the guardian's
 next return, or the job's next pass.
@@ -228,8 +238,10 @@ journalctl -u legalbody-api --since '7 days ago' | grep <sessionId>
 | `identity_webhook_received { environment, eventId, type, sessionId }` | Stripe woke us about one of our sessions; the read follows. |
 | `identity_session_completed { tenant, sessionId, status, reviewReasons }` | A verified session became a row: `passed`, or `needs_review` with its reasons (0.5). The session is closed. |
 | `identity_session_closed { tenant, sessionId, reasonCode }` | The session closed with a `failed` row: the last attempt failed, a code no retry changes, a cancellation or redaction at Stripe, or its days ran out (`abandoned`). `reasonCode` is the row's (section 1, step 5). |
+| `identity_session_superseded { sessionId }` | An operator's row was written for the guardian while the session was open: the session closed without a row of its own, its redaction due as after a row. Your row stands. |
 | `identity_screen_pending { sessionId }` | The search gave no verdict: no row yet, the job tries again each pass. See below. |
-| `person_screen_error { status }` | Why the search gave none: OpenSanctions' HTTP status, or `timeout`, `unreachable`, `unreadable`, `invalid_query`, `query_<status>`. A 401 or 403 is the OpenSanctions key. |
+| `identity_screen_pending_stale { sessionId, hours }` (CRITICAL) | The session has waited for its search more than 24 hours; written at each pass of the job until the search answers. Read `person_screen_error`, then see below. |
+| `person_screen_error { status }` (CRITICAL on 401, 402, 403; warn otherwise) | Why the search gave none: OpenSanctions' HTTP status, or `timeout`, `unreachable`, `unreadable`, `invalid_query`, `query_<status>`. A 401 or 403 is the OpenSanctions key, a 402 its credits spent: no check completes on production until it is fixed. |
 | `identity_dob_not_read { sessionId }` | Stripe served no birth date for this session (a key without "Recent detailed verification results", or more than 48 hours after the document was processed): the search runs on the name alone. Said once per session. Repeated across sessions, check the key. |
 | `identity_session_refused { sessionId, reason }` | The session waits for an operator. See "A result the rules refuse" below. |
 | `identity_session_dropped { sessionId, reason }` | A read came back in the other mode (`mode`) or naming another session (`reference`): nothing written. `mode`: the key and the box disagree. |
@@ -240,7 +252,8 @@ journalctl -u legalbody-api --since '7 days ago' | grep <sessionId>
 | `identity_provider_error { op, status, code, requestId }` (error) | Stripe refused the call (another 4xx), with its machine code; `requestId` finds the request in Stripe's logs. |
 | `identity_provider_key_rejected { op, status, code, requestId }` (CRITICAL) | Stripe refused the key (401, 403): wrong, revoked, or missing a permission. No check moves until the key is fixed (0.1). |
 | `identity_provider_mode_mismatch { tenant, sessionId, livemode, environment }` (CRITICAL) | Stripe made a session in the other mode than the box's; nothing written. Check the key's prefix against `ARC_NETWORK`. |
-| `identity_redaction_refused { sessionId, op, status, code }` (warn) | Stripe refused a redaction for good; it is asked again a week later. A session Stripe canceled cannot be redacted, and its line comes back each week. |
+| `identity_redaction_refused { sessionId, op, status, code }` (warn) | Stripe refused a redaction for good; it is asked again a week later. A session Stripe canceled on its own cannot be redacted, and its line comes back each week: delete that session in the dashboard. |
+| `identity_review_waiting { sessionId, days }` (warn) | A review of the automatic check has waited more than 7 days for your decision; written at each pass until it is decided. Its session stays at Stripe until then (0.5, "The queue"). |
 | `identity_sessions_sweep_error { step, sessionId, failure }` (warn) | One session failed in the job's pass (`sync`, `decision` or `redact`), with a refusal's code or an error's class; the others went on. The lines before it say why. |
 | `identity_webhook_unauthorized { environment }` (warn) | A delivery failed the signature check: 401. Repeated, the box's secret is not the endpoint's (0.3). |
 | `identity_webhook_oversize { environment }` (warn) | A body over 256 KiB: 413. Not Stripe's. |
@@ -255,33 +268,45 @@ The operator's own commands write theirs (`identity_recorded`, `identity_accepte
 `identity_refused`, `identity_revoked`, `identity_name_corrected`), as on the operator path.
 
 **A search that gives no verdict** (`identity_screen_pending`). The session is verified at Stripe,
-the search gave no verdict, and no row is written yet; the job tries again each pass. No line raises
-an alarm by itself: treat a `screenPendingSince` more than a day old as CRITICAL. Read
-`person_screen_error` first. Stripe serves the birth date for 48 hours after the document is
+the search gave no verdict, and no row is written yet; the job tries again each pass. After 24
+hours the job writes `identity_screen_pending_stale` (CRITICAL) at each pass. Read
+`person_screen_error` first: a 401, 402 or 403 there (CRITICAL) is the key or its credits, and no
+search runs until it is fixed. Stripe serves the birth date for 48 hours after the document is
 processed: a search retried later runs on the name alone (`identity_dob_not_read`).
 
 To finish by hand: search the name on OpenSanctions (section 1, step 4) with the birth date the
 session shows in the dashboard, then record the check with `identity:record` (section 1, step 5),
-`--expect-latest` the session's `started` row. That closes nothing in `identity_sessions`: the job
-keeps the session and closes it as abandoned after `IDENTITY_SESSION_DAYS`, and that failed row
-leaves your pass counting (the renewal rule, below). Should the search answer first, the job plans
-its result over your pass as a renewal, under the record's rules. Check with `identity:session` and
-`identity:show`.
+`--expect-latest` the session's `started` row. Your row closes the session: at its next read by the
+job, at its abandon, or at the guardian's next start, it closes without a row of its own
+(`identity_session_superseded`), its redaction due as after a row. The job never writes over your
+row, even should the search answer later. Check with `identity:session` and `identity:show`.
 
 **A result the rules refuse** (`identity_session_refused`). With `plan_refused`, the record's rules
 refused a verified result. On production that is a session without the face match: the flow lacks
 the selfie (0.1), so fix the flow. The session stays open, waiting for an operator: it is not read
 or searched again until an operator writes a row for that guardian. Until it closes, the guardian's
-start answers 409 `identity_under_review`, and no command closes it sooner than the job, which
-closes it as abandoned after `IDENTITY_SESSION_DAYS`. With `no_typed_names`, the session holds no
-typed name: that should never happen, so report it.
+start answers 409 `identity_under_review`. An operator's row closes it: record what you read
+(`identity:record`), or refuse the attempt (`identity:refuse`, `--expect-latest` the session's
+`started` row; during a renewal a refusal ends the earlier pass, "A renewal" below), and the job's
+next pass closes the session without a row of its own
+(`identity_session_superseded`). Left alone, the job closes it as abandoned after
+`IDENTITY_SESSION_DAYS`. With `no_typed_names`, the session holds no typed name: that should never
+happen, so report it.
 
 **A renewal.** A verified guardian may start the check again from 90 days before the pass expires
 (`expiresAt`); earlier, the start answers 409 `identity_already_verified`. While the renewal runs,
-the earlier pass keeps counting: a `started` row, a failed attempt or a review on top of it leave
-the guardian `verified`, unless a revocation, or a review with `watchlist_hit` or
-`country_blocked`, is written after the pass. The new pass supersedes the earlier one, and its
-expiry counts from its own completion.
+the earlier pass keeps counting, under new attempts only: a `started` row, a failed attempt or a
+review on top of it, written by the automatic check or recorded with `identity:record`, leave the
+guardian `verified`. Written after the pass, a revocation, a review with `watchlist_hit` or
+`country_blocked`, or any decision of yours (`identity:refuse`, `identity:accept` or
+`identity:correct-name` on the renewal's rows, `identity:correct-name` on the pass itself) ends it:
+the guardian then reads the state of the latest row. The new pass supersedes the earlier one, and
+its expiry counts from its own completion. While a review is the latest row, the start answers 409
+`identity_under_review`, even when the pass under it still counts.
+
+**After a revocation.** A revocation is never undone without you. A session open when you revoke
+closes without a row (your revocation is written over it). A check the guardian starts after the
+revocation lands in review with `provider_flag`, never `passed`, whatever Stripe found (0.5).
 
 ### 0.5 A review from the adapter
 
@@ -290,26 +315,31 @@ session. `identity_session_completed` names them (`reviewReasons`), and so does 
 
 | Reason | From the automatic check | Settle it with |
 | ------ | ------------------------ | -------------- |
-| `name_mismatch` | **New**: the typed name and the document's differ beyond case and spacing. | Compare in the dashboard and ask the guardian, then `identity:correct-name` to the name the document prints (section 4), or `identity:refuse`. `identity:accept` refuses this reason. |
+| `name_mismatch` | **New**: the typed name and the document's differ beyond case and spacing. Production only: the testnet does not compare (0.2). | Compare in the dashboard and ask the guardian, then `identity:correct-name` to the name the document prints, with your search on that name (section 4), or `identity:refuse`. `identity:accept` refuses this reason. |
 | `watchlist_hit` | The sanctions and PEP search found a possible match. | Search OpenSanctions by hand with the name and the birth date the session shows: `identity:accept --reason-code watchlist_false_positive`, or `identity:refuse --reason-code watchlist_confirmed`. |
 | `country_blocked` | The document's country is in `SCREENING_BLOCKED_COUNTRIES`. | `identity:refuse --reason-code country_blocked`. |
 | `name_rule_failed` | The typed name breaks the name rule. | `identity:correct-name` when the document shows a usable name; else section 2's note. |
-| `duplicate_identity` | Another account holds a current pass with the same name and document country. | Section 2 finds the other account; then decide (section 3). |
-| `provider_flag` | The document's country has no ISO 3166-1 code (Kosovo's `XK`). A pass needs a document country, so `identity:accept` is refused. | `identity:refuse --reason-code other` (the reason: the document's country is outside ISO 3166-1); the guardian verifies again with another document. |
+| `duplicate_identity` | Another account holds a current pass with the same name and document country, a pass under a renewal under way included. Production only (0.2). | Section 2 finds the other account; then decide (section 3). |
+| `provider_flag` | The document's country has no ISO 3166-1 code (Kosovo's `XK`); `documentCountry` is then empty. A pass needs a document country, so `identity:accept` is refused. | `identity:refuse --reason-code other` (the reason: the document's country is outside ISO 3166-1); the guardian verifies again with another document. |
+| `provider_flag`, after a revocation | The guardian's record holds a revocation after its last pass (0.4, "After a revocation"): `identity:show` lists a `revoked` row after the last `passed` one. | Read why the pass was revoked (`identity:show`, the revocation's reason code). `identity:accept --reason-code provider_flag_cleared` once that cause no longer holds, or `identity:refuse`. |
 
 Each decision also takes `--operator`, `--expect-latest <the review's check id>`, a `--reason` and
 `--yes`, as section 3 says.
 
 **Comparing in the dashboard.** Find the session by its `vs_` id (`providerRef` in
 `identity:session`). A review's session is not redacted until a decision row supersedes the review,
-so it still shows the document, the selfie and the extracted data. Do not redact it by hand: the job
-redacts it `IDENTITY_REDACT_AFTER_DAYS` after it sees the decision.
+or a row is written over it, so it still shows the document, the selfie and the extracted data. Do
+not redact it by hand: the job redacts it `IDENTITY_REDACT_AFTER_DAYS` after it sees the decision.
 
 **The queue.** The decisions that count are `identity:accept`, `identity:refuse` and
 `identity:correct-name` (a correction that leaves the check in review counts once the next decision
-settles it). A new check recorded over the review with `identity:record` is not a decision. A review
-nobody decides is never redacted at Stripe: it is the operator's queue. To list the reviews of the
-automatic check that wait:
+settles it). A new check recorded over the review with `identity:record` is not a decision, but the
+review is then no longer the guardian's standing row: the job gives its session its redaction date
+all the same. While a review is the latest row, the guardian's start answers 409
+`identity_under_review`, so no new session is opened over it. A review nobody decides is never
+redacted at Stripe: it is the operator's queue, and after 7 days the job says so at each pass
+(`identity_review_waiting { sessionId, days }`, warn). To list the reviews of the automatic check
+that wait:
 
 ```bash
 sqlite3 -readonly -cmd ".timeout 5000" "$DATA_DIR/legalbody.db" \
@@ -324,24 +354,18 @@ journalctl -u legalbody-api --since '30 days ago' | grep identity_session_comple
 then `identity:show <tenant_id>` for each. A review decided since the job's last pass stays on the
 list until its next one.
 
-**A confirmed sanctions match during a renewal.** A refusal does not by itself end an earlier pass
-that still counts: the failed row `identity:refuse` writes leaves it counting, unless the review was
-a `watchlist_hit` or a `country_blocked` one. So refuse, read `identity:show`, and while it reads
-`verified`, revoke the pass (`identity:revoke` takes the pass a renewal under way still counts):
+**A confirmed sanctions match during a renewal.** A refusal ends an earlier pass that still counts:
+it is your decision on the renewal, and after it `identity:show` reads `failed`, whatever the
+review's reasons. No revocation is needed, and `identity:revoke` is refused, since no pass counts:
 
 ```bash
 npm run cli -- identity:refuse <tenantId> --reason-code watchlist_confirmed \
   --reason '<ids and facts, no name>' --operator <your operator name> \
   --expect-latest <the review's check id> --yes
 npm run cli -- identity:show <tenantId>
-npm run cli -- identity:revoke <tenantId> --reason-code watchlist_confirmed \
-  --reason '<ids and facts, no name>' --operator <your operator name> \
-  --expect-latest <the refusal's check id> --yes
 ```
 
-A `watchlist_hit` review has ended the earlier pass already: after the refusal `identity:show`
-reads `failed`, and `identity:revoke` is refused, since no pass counts. A live company is its own
-decision (`company:revoke`, section 3).
+A live company is its own decision (`company:revoke`, section 3).
 
 ### 0.6 What is never there
 
@@ -550,6 +574,9 @@ deleted.
 - `identity:refuse <tenantId>`: it was not. A failed row without names. Also for an attempt that
   never completed.
 
+A decision written while a renewal is under way ends the earlier pass (0.4, "A renewal"): after it
+the guardian reads the state of the row you wrote, not the old pass.
+
 On production a passed row needs the face match, the sanctions search and a name that passes the
 name rule, however it is written: `identity:accept` refuses a review recorded with `--liveness`
 other than `passed` or with `--watchlist not_run` (refuse it and record a new check), and a review
@@ -580,7 +607,7 @@ company is revoked with `company:revoke`, by its own decision.
 ## 4. When a name looks wrong
 
 ```bash
-npm run cli -- identity:correct-name <tenantId> --names-prompt \
+npm run cli -- identity:correct-name <tenantId> --names-prompt --watchlist clear \
   --reason-code <code> --reason '<why, without a name>' \
   --operator <your operator name> --expect-latest <the check's id> --yes
 ```
@@ -596,8 +623,15 @@ For a `name_mismatch`, ask the guardian first, then record the name the document
 guardian having confirmed it. Never settle a difference without the guardian's answer.
 
 Before correcting, search the corrected name on OpenSanctions, as for a new check: the search was
-made on the old name. On a hit, do not correct: refuse the review (`watchlist_confirmed` once you
-have confirmed it), or revoke a passed check.
+made on the old name. Pass what you found: `--watchlist clear`, or `--watchlist hit` for a possible
+match, which writes the search on the row and leaves the correction in review with
+`watchlist_hit`; decide it then as section 3 says (`watchlist_false_positive` or
+`watchlist_confirmed`). On production `--watchlist` is required, and the command refuses without it;
+on a sandbox, without it the check's search is carried over.
+
+A correction of a passed check ends that pass: when the correction lands in review (another
+account's pass holds the new name, or the search hit), the guardian reads `needs_review` until you
+decide it.
 
 Then compare:
 
@@ -682,11 +716,17 @@ document's country and type, and the names of record, encrypted.
 A one-off run on a builder's machine, before the testnet box gets the block. It needs the
 test-mode restricted key and flow (0.1, 0.2), the Stripe CLI signed in to the account
 (`stripe login`; `stripe listen` stays in test mode unless told otherwise), and a test wallet. It
-confirms three facts the tests cannot:
+confirms seven facts the tests cannot:
 
 1. Stripe accepts both `verified_outputs` and `verified_outputs.dob` as expands in one read.
 2. A redaction cancels a session still waiting for the person.
 3. Stripe's ids are `vs_` (a session) and `vr_` (a report) followed by letters and digits only.
+4. Stripe makes a new VerificationReport (`vr_`) for every failed attempt, in test mode too: the
+   count of attempts rests on it.
+5. A read after a failed attempt returns a fresh `url` that opens Stripe's page again.
+6. Stripe takes `return_url` beside `verification_flow` when it creates a session.
+7. Test mode returns one sample person for everyone (0.2): the same names for every verified
+   session, whatever was typed. The testnet does not compare names.
 
 **1. Forward Stripe's events to the local API** (port 8789, the `PORT` default), in a terminal of
 its own, for the whole run:
@@ -763,7 +803,8 @@ stripe get /v1/identity/verification_sessions/<vs_…>
 ```
 
 The start answers 201 with `sessionId`, `url` and `expiresAt` (`lastStatus` is null until the first
-read). Fact 2 holds when the read shows `"status": "canceled"` beside its `redaction`. The
+read). Fact 6 holds when it does: the session was created with the flow and the return URL. Fact 2
+holds when the read shows `"status": "canceled"` beside its `redaction`. The
 `.redacted` event arrives (`identity_webhook_received` with `type`
 `identity.verification_session.redacted`); its read writes no row, and `identity:session` shows
 `redactedAt` once Stripe says `redacted`.
@@ -780,7 +821,10 @@ curl -s -X POST "$API/identity-check/sync" -H "Authorization: Bearer $TOKEN"
 ```
 
 Start again (the same `sessionId` with a fresh `url`, `identity_session_reused`) and fail twice
-more. The third failure closes the session: `identity_session_closed` with `reasonCode`
+more. Fact 5 holds when each fresh `url` opens Stripe's page again; fact 4 when `failedAttempts`
+moves by one at each failure, never more and never less (each failure its own `vr_` report, which
+`stripe get /v1/identity/verification_sessions/<vs_…>` shows as `last_verification_report`). The
+third failure closes the session: `identity_session_closed` with `reasonCode`
 `document_expired`. `identity:session` then shows `newest_closed`, `failedAttempts` 3, a
 `completedCheckId` and a `redactDueAt`, and `/world-id/me` reads `"state": "failed"` in its
 `identity` block:
@@ -789,17 +833,16 @@ more. The third failure closes the session: `identity_session_closed` with `reas
 curl -s "$API/world-id/me" -H "Authorization: Bearer $TOKEN"
 ```
 
-**7. "Verification success" (facts 1 and 3).** Start again, typing the names of test mode's sample
-person if you know them (the dashboard shows a verified test session's outputs), and choose
+**7. "Verification success" (facts 1, 3 and 7).** Start again, with any test name, and choose
 "Verification success". The `processing` and `verified` events arrive, then
-`identity_session_completed` with `status` `passed`. A typed name that differs from the sample's
-lands the check in `needs_review` with `name_mismatch`, which is worth seeing too: settle it as 0.5
-says, with `identity:correct-name`, and the job gives the session its redaction date at its next
-pass. Then:
+`identity_session_completed` with `status` `passed`: the testnet does not compare the typed name
+with the sample's (0.2), so a name that differs from it passes too, recorded as typed. Fact 7 holds
+when the dashboard's verified outputs for this session are a sample name you did not type, the
+check passed all the same, and any other verified test session of the account shows the same
+sample. Say only whether it holds, never the names. Then:
 
 - `identity:session`: `newest_closed`, `lastStatus` `verified`, `dobUnavailable` `false`,
-  `typedNamesHeld` `false`, and a `redactDueAt` seven days after `closedAt` (on the review path,
-  seven days after the job saw your correction);
+  `typedNamesHeld` `false`, and a `redactDueAt` seven days after `closedAt`;
 - `POST /identity-check/sync`: `{"outcome":"unchanged","state":"verified"}` (no open session);
 - `/world-id/me`: `identity` reads `"required": false`, `"automatic": true`, `"state": "verified"`,
   with the typed names and the dates;
@@ -821,7 +864,7 @@ the least). The job's tests cover it; waiting for it is optional.
 grep -E '"opslog":"(identity_|person_screen_error|job_ran|job_failed)' ~/identity-first-run.log
 ```
 
-the three facts (each holds, or the line that says it does not), and the `identity:session` outputs
+the seven facts (each holds, or the line that says it does not), and the `identity:session` outputs
 with `providerRef` and `reportId` cut to their prefix. Never the output of `identity:show` or
 `/world-id/me` (they print the names), a key, the `whsec_` secret, the flow id or a session `url`.
 
