@@ -93,10 +93,10 @@ const SECRET = Symbol("novi.secret");
  * assertion in a test, an APM breadcrumb. Every one of those goes through `toString`, `toJSON` or
  * `util.inspect`, and all three of them answer `"[redacted]"` here.
  *
- * `reveal()` is the single deliberate exit, and it has exactly ONE caller: `buildCompanyInput`,
- * at the wire boundary, where the value is placed into the body doola is about to receive. A
- * second caller is a review question, which is the point — `grep -rn "\.reveal()"` is the whole
- * audit.
+ * `reveal()` is the single deliberate exit, used only at a wire boundary: `buildCompanyInput`
+ * (the body doola is about to receive) and the Stripe Identity and OpenSanctions clients' auth
+ * headers. A new caller is a review question, which is the point: `grep -rn "\.reveal()"` is the
+ * whole audit.
  */
 export interface Secret {
   readonly [SECRET]: true;

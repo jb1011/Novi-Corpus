@@ -228,6 +228,19 @@ describe("the verdict", () => {
     const { s } = screener([{ status: 200, body: answer([]) }]);
     expect(await s.screenPerson({ name: NAME, birthDate: null })).toBe("clear");
   });
+
+  test("a readable match is a hit even beside an unreadable result, in either order", async () => {
+    const unreadable = { id: "Q2", score: 0.99, match: "yes" };
+    for (const results of [
+      [result("Q1", 0.95, true), unreadable],
+      [unreadable, result("Q1", 0.95, true)],
+      [null, result("Q1", 0.95, true)],
+    ]) {
+      const { s } = screener([{ status: 200, body: answer(results) }]);
+      expect(await s.screenPerson({ name: NAME, birthDate: BIRTH_DATE })).toBe("hit");
+    }
+    expect(opsLines()).toHaveLength(0);
+  });
 });
 
 describe("an error is never a verdict", () => {
@@ -276,12 +289,12 @@ describe("an error is never a verdict", () => {
     expectOneErrorLine("unreadable");
   });
 
-  test("results that are not a list, or a result whose match is not a boolean, are an error", async () => {
+  test("results that are not a list, or an unreadable result with no readable match, are an error", async () => {
     const bodies = [
       { responses: { q: { status: 200, results: "none" } } },
       { responses: { q: { status: 200 } } },
       { responses: { other: answer([]).responses.q } },
-      answer([result("Q1", 0.95, true), { id: "Q2", score: 0.99, match: "yes" }]),
+      answer([result("Q1", 0.5, false), { id: "Q2", score: 0.99, match: "yes" }]),
       answer([null]),
     ];
     for (const body of bodies) {

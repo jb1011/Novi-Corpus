@@ -20,12 +20,13 @@ import { readCappedText } from "../util/readStreamCapped";
  * The answer is a verdict or an error, never a throw:
  *
  * - `"hit"`: at least one result of query `q` says `match: true` (the API sets it when the score
- *   is at or above the threshold). A hit is a review for the caller, never a refusal here.
+ *   is at or above the threshold), even beside a result that cannot be read. A hit is a review for
+ *   the caller, never a refusal here.
  * - `"clear"`: every result says `match: false`, or there is none.
  * - `"error"`: no verdict reached us. A non-2xx, a timeout, a torn connection, a body that cannot
- *   be read, a query whose own `status` is not 200, a result whose `match` is not a boolean, or a
- *   query this screener will not send (a blank name, a birth date not shaped `YYYY-MM-DD`). The
- *   caller waits and retries; an error is never read as clear.
+ *   be read, a query whose own `status` is not 200, a result whose `match` is not a boolean (and
+ *   no readable match beside it), or a query this screener will not send (a blank name, a birth
+ *   date not shaped `YYYY-MM-DD`). The caller waits and retries; an error is never read as clear.
  *
  * Each error writes ONE ops line, `person_screen_error { status }`, with the HTTP status or a
  * short reason word. Never the query, the name, the birth date, the key or the body: an error body
@@ -185,7 +186,8 @@ export class OpenSanctionsPersonScreener implements PersonScreener {
 
 /**
  * The answer's verdict for query `q`. Anything that is not the documented shape is unreadable:
- * the screen fails closed, so a shape it cannot read is never clear.
+ * the screen fails closed, so a shape it cannot read is never clear (only a readable match
+ * beside it turns it into a hit).
  */
 function verdictOf(json: unknown): "clear" | "hit" {
   const responses = isObject(json) ? json.responses : undefined;
@@ -197,12 +199,12 @@ function verdictOf(json: unknown): "clear" | "hit" {
   }
   const results = response.results;
   if (!Array.isArray(results)) throw new ScreenFailed("unreadable");
-  let hit = false;
-  for (const r of results) {
-    if (!isObject(r) || typeof r.match !== "boolean") throw new ScreenFailed("unreadable");
-    if (r.match) hit = true;
-  }
-  return hit ? "hit" : "clear";
+  // A readable match wins over an unreadable sibling: a hit reaches an operator's review, while an
+  // error would make the completion retry for as long as the provider sends that shape.
+  if (results.some((r) => isObject(r) && r.match === true)) return "hit";
+  if (results.some((r) => !isObject(r) || typeof r.match !== "boolean"))
+    throw new ScreenFailed("unreadable");
+  return "clear";
 }
 
 function isObject(v: unknown): v is Record<string, unknown> {
