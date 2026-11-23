@@ -123,7 +123,9 @@ LOCAL_CHAIN_AGREEMENT_VERSION=2026-10-draft-1 scripts/local-chain.sh up
 
 1. Refuses if a chain it started is still running, or if the port is taken.
 2. Deletes `back/backend/.local-chain/` and starts anvil as a fork of Arc testnet, chain id
-   5042002, on port 8555.
+   5042002, on port 8555, making a block every second. The API refuses a chain whose latest block
+   is too old, and a chain that made blocks only on transactions would look stalled after a few
+   quiet minutes (`503 chain_unavailable`).
 3. Creates four keys (deployer, admin, executor, operator) with `cast wallet new`, writes them to
    `.local-chain/keys.env` with owner-only permissions, and gives each gas. It never prints a key.
 4. Runs `DeployMinimal.s.sol` with the deployer key, the admin and the executor: a LegalManager

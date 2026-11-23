@@ -110,7 +110,9 @@ up() {
   mkdir -p "$STATE_DIR/data"
 
   say "starting a local copy of Arc testnet on $RPC_URL"
-  anvil --fork-url "$FORK_URL" --chain-id "$CHAIN_ID" --port "$PORT" >"$STATE_DIR/anvil.log" 2>&1 &
+  # A block every second: the API refuses a chain whose latest block is too old, and a chain
+  # that mines only on transactions looks stalled after a few quiet minutes.
+  anvil --fork-url "$FORK_URL" --chain-id "$CHAIN_ID" --port "$PORT" --block-time 1 >"$STATE_DIR/anvil.log" 2>&1 &
   printf '%s' "$!" >"$STATE_DIR/anvil.pid"
   local tries=0
   until cast chain-id --rpc-url "$RPC_URL" >/dev/null 2>&1; do
