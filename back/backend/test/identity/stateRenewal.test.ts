@@ -1,5 +1,5 @@
 /**
- * The renewal rule (Martin, 6 November, with I-A): a renewal attempt on top of a still-valid pass
+ * The renewal rule (decided 6 November, with I-A): a renewal attempt on top of a still-valid pass
  * keeps the pass counting. While the tenant's latest row is `started`, `failed`, or a review whose
  * reasons are neither a sanctions hit nor a blocked country, its latest pass reads `verified` and
  * is the current record, held to every rule a latest pass is held to (its expiry, its erased

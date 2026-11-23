@@ -93,7 +93,7 @@ function stateOf(
 
 /**
  * A row that ends the pass before it for good: its revocation, or a review that found a sanctions
- * hit or a blocked country, refused since or not (Martin, 6 November); or any row an operator's
+ * hit or a blocked country, refused since or not (decided 6 November); or any row an operator's
  * decision wrote since the pass (`DECISION_EVENT_KINDS`), on the pass itself (a correction of it)
  * or on a renewal attempt over it (a refusal of the attempt, a correction of its review): a
  * renewal an operator settled ends the old pass, which is what a decision means. Whatever is
@@ -118,7 +118,7 @@ function isRenewalAttempt(latest: GuardianIdentityCheck): boolean {
 }
 
 /**
- * THE RENEWAL RULE (Martin, 6 November, with I-A): a renewal under way keeps the earlier pass
+ * THE RENEWAL RULE (decided 6 November, with I-A): a renewal under way keeps the earlier pass
  * counting, and only a new attempt does. Under a latest row that is a renewal attempt
  * (`isRenewalAttempt`), the tenant's latest passed row counts while it reads `verified` by itself,
  * at `nowMs`, on `environment` (in date, its names held, and on production not a test record), and

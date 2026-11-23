@@ -1069,7 +1069,7 @@ async function completeVerified(
 }
 
 /**
- * Whether the tenant holds a revocation newer than its last pass (Martin to confirm: the
+ * Whether the tenant holds a revocation newer than its last pass (to be confirmed: the
  * controller's ruling F3). A revocation, for fraud or a court order, is never undone without an
  * operator: a result after it lands in review with `provider_flag`, never `passed`, and the start
  * stays open (the person may try; an operator decides). A pass written after the revocation, an

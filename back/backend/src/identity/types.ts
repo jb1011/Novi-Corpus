@@ -77,7 +77,7 @@ export const REVIEW_REASON_CODES: readonly string[] = [
   "name_rule_failed",
   "name_mismatch",
 ] satisfies readonly ReviewReasonCode[];
-/** The review reasons that end the pass a renewal renews (Martin, 6 November): a sanctions hit and
+/** The review reasons that end the pass a renewal renews (decided 6 November): a sanctions hit and
  *  a blocked country. A review for any other reason leaves the earlier pass counting
  *  (`identity/state.ts`). */
 export const PASS_ENDING_REVIEW_REASONS: readonly ReviewReasonCode[] = [
