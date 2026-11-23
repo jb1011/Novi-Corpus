@@ -426,6 +426,36 @@ describe("startSession", () => {
     });
   });
 
+  test("rule 2: a review as the latest row refuses the start 409 identity_under_review, even while the pass under it still counts", async () => {
+    // A pass in its renewal window, and a renewal's review on top of it: the state reads verified.
+    passFor(GUARDIAN, T0 - 1000 * DAY, T0 + 30 * DAY);
+    appended({
+      ...passedIdentityRow(GUARDIAN, { at: T0 - DAY, expiresAt: T0 + 1000 * DAY }),
+      environment: "sandbox",
+      synthetic: true,
+      status: "needs_review",
+      reviewReasons: ["provider_flag"],
+    });
+    expect(identityState(repo, GUARDIAN, now, "sandbox")).toBe("verified");
+
+    const review = await refusal(startSession(deps(), GUARDIAN, TYPED));
+    expect([review.code, review.status]).toEqual(["identity_under_review", 409]);
+    expect(provider.created).toHaveLength(0);
+  });
+
+  test("rule 3: a renewal whose open session's result lands in review answers 409 identity_under_review, and opens no session over the review", async () => {
+    appended(passedIdentityRow(GUARDIAN, { at: T0 - 1000 * DAY, expiresAt: T0 + 30 * DAY }));
+    const d = production();
+    const s = await started(d);
+    provider.verify(s.ref, { names: { firstName: "Ottilie-Rose", lastName: "BRANDWICK" } });
+
+    const review = await refusal(startSession(d, GUARDIAN, TYPED));
+    expect([review.code, review.status]).toEqual(["identity_under_review", 409]);
+    expect(latestRow()).toMatchObject({ status: "needs_review", reviewReasons: ["name_mismatch"] });
+    expect(provider.created).toHaveLength(1);
+    expect(sessions.openForTenant(GUARDIAN)).toBeUndefined();
+  });
+
   test("rule 2: a record of another person than the account's current World ID row does not block the account's own check", async () => {
     // The pass copied a nullifier the account's World row no longer holds.
     appended({
@@ -1700,11 +1730,12 @@ describe("sweepSessions", () => {
     expect(corrected.session().redactDueAt).toBe(now + 7 * DAY);
   });
 
-  test("a row over a review that is not a decision leaves the review waiting, its session undated", async () => {
+  test("a row over a review that is not a decision ends its wait all the same: the review is no longer the standing row, and its session gets its redaction date", async () => {
     const s = await started();
     provider.verify(s.ref, { country: "XK" });
     await syncSession(deps(), s.sessionId);
     const review = latestRow();
+    // identity:record over the review: a new check, not a decision on it.
     appended({
       ...passedIdentityRow(GUARDIAN, {
         at: review.completedAt as number,
@@ -1717,7 +1748,101 @@ describe("sweepSessions", () => {
 
     now = T0 + DAY;
     expect(await sweepSessions(deps(), now)).toEqual(zero);
+    expect(s.session().redactDueAt).toBe(now + 7 * DAY);
+  });
+
+  test("a review buried under a newer started row is no longer the standing row: its session gets its redaction date", async () => {
+    const s = await started();
+    provider.verify(s.ref, { country: "XK" });
+    await syncSession(deps(), s.sessionId);
+    const review = latestRow();
+    // A started row written over the review, as a start could before it refused one.
+    appended({
+      ...review,
+      status: "started",
+      supersedesCheckId: null,
+      completedAt: null,
+      expiresAt: null,
+      names: null,
+      nameHmac: null,
+      documentCountry: null,
+      reviewReasons: [],
+      operator: null,
+      operatorOsUser: null,
+    });
+
+    now = T0 + DAY;
+    await sweepSessions(deps(), now);
+    expect(s.session().redactDueAt).toBe(now + 7 * DAY);
+  });
+
+  test("a correction that leaves the check in review keeps it waiting; the decision after it dates the session", async () => {
+    const s = await started();
+    provider.verify(s.ref, { country: "XK" });
+    await syncSession(deps(), s.sessionId);
+    const review = latestRow();
+    const { checkId: _id, namesErasedAt: _erased, ...facts } = review;
+    const corrected = appended(
+      { ...facts, supersedesCheckId: review.checkId, operator: "ops.example" },
+      "name_corrected",
+    );
+
+    now = T0 + DAY;
+    await sweepSessions(deps(), now);
     expect(s.session().redactDueAt).toBeNull();
+
+    const { checkId: _cid, namesErasedAt: _cerased, ...correctedFacts } = corrected;
+    appended(
+      {
+        ...correctedFacts,
+        status: "failed",
+        supersedesCheckId: corrected.checkId,
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+        reviewReasons: [],
+      },
+      "refused",
+    );
+    now = T0 + 2 * DAY;
+    await sweepSessions(deps(), now);
+    expect(s.session().redactDueAt).toBe(now + 7 * DAY);
+  });
+
+  test("a review waiting more than 7 days for a decision raises one warning per sweep, with its days, until it is decided", async () => {
+    const s = await started();
+    provider.verify(s.ref, { country: "XK" });
+    await syncSession(deps(), s.sessionId);
+    const review = latestRow();
+
+    now = T0 + 6 * DAY;
+    await sweepSessions(deps(), now);
+    expect(opsLines("identity_review_waiting")).toEqual([]);
+
+    now = T0 + 8 * DAY;
+    await sweepSessions(deps(), now);
+    expect(opsLines("identity_review_waiting")).toEqual([
+      expect.objectContaining({ sessionId: s.sessionId, days: 8, level: "warn" }),
+    ]);
+
+    const { checkId: _id, namesErasedAt: _erased, ...facts } = review;
+    appended(
+      {
+        ...facts,
+        status: "failed",
+        supersedesCheckId: review.checkId,
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+        reviewReasons: [],
+        operator: "ops.example",
+      },
+      "refused",
+    );
+    now = T0 + 9 * DAY;
+    await sweepSessions(deps(), now);
+    expect(opsLines("identity_review_waiting")).toHaveLength(1);
+    expect(s.session().redactDueAt).toBe(now + 7 * DAY);
   });
 
   test("a screen pending for more than 24 hours raises one CRITICAL line per sweep, with its hours, until the screen answers", async () => {

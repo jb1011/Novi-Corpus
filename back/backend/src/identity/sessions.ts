@@ -166,6 +166,8 @@ const SWEEP_BATCH = 50;
 const SCREEN_PENDING_ALARM_MS = 24 * 3_600_000;
 /** Reviews waiting for a decision are few (an operator decides each); read many at once. */
 const DECISION_BATCH = 500;
+/** A review undecided longer than this raises a warning at each sweep (ruling F7). */
+const REVIEW_WAITING_ALARM_MS = 7 * DAY_MS;
 const NAME_MAX_CODE_POINTS = 100;
 /** Control, format, surrogate, private-use and unassigned characters. */
 const OTHER_CHARACTER = /\p{C}/u;
@@ -199,6 +201,15 @@ function underReview(): never {
     409,
     "the guardian's identity check is being reviewed: the result will show here once it is decided",
   );
+}
+
+/**
+ * A start waits while the tenant's latest row is a review, whatever the state reads (a renewal's
+ * review over a pass that still counts reads `verified`): a session opened over it would bury it,
+ * and a buried review is never decided (ruling F7).
+ */
+function assertNoReviewStanding(deps: IdentitySessionDeps, tenantId: string): void {
+  if (deps.identity.repo.latest(tenantId)?.status === "needs_review") underReview();
 }
 
 function providerUnavailable(): never {
@@ -378,7 +389,8 @@ function sameSealed(a: TypedNames | null, b: TypedNames | null): boolean {
  *
  * 1. A World row for the guardian action (on production a real human's), else 403
  *    `guardian_not_verified`.
- * 2. Verified with more than 90 days left: 409 `identity_already_verified`; under review: 409
+ * 2. The latest row a review, whatever the state reads: 409 `identity_under_review`. Verified
+ *    with more than 90 days left: 409 `identity_already_verified`; under review: 409
  *    `identity_under_review`; anything else goes on.
  * 3. An open session: past its days, or canceled or redacted at the provider, it is closed as
  *    abandoned and a new one opens; a result that has come is read first (409
@@ -411,6 +423,7 @@ async function start(
 ): Promise<StartedSession> {
   const now = clockOf(deps);
   const nullifier = guardianNullifier(deps, tenantId);
+  assertNoReviewStanding(deps, tenantId);
   const standing = standingAtStart(deps, tenantId, now);
   if (standing.state === "verified" && (standing.expiresAt ?? 0) - now > RENEWAL_WINDOW_MS)
     alreadyVerified();
@@ -578,6 +591,7 @@ async function reuseOpen(
     if ((await syncAt(deps, sessionId, now)) === "dropped") providerUnavailable();
     const fresh = deps.sessions.byId(sessionId);
     if (fresh !== undefined && fresh.closedAt === null) underReview();
+    assertNoReviewStanding(deps, open.tenantId);
     const { state } = standingAtStart(deps, open.tenantId, now);
     if (state === "verified") alreadyVerified();
     if (state === "needs_review") underReview();
@@ -1302,7 +1316,9 @@ async function requestRedaction(
  *    looked at), and one still waiting for its screen more than 24 hours on raises a CRITICAL line
  *    (`screenPendingAlarm`).
  * 2. Closed sessions whose row went to review: once the operator has decided the review (an
- *    acceptance, a refusal, or a name correction that settles it), their redaction falls due.
+ *    acceptance, a refusal, or a name correction that settles it), or once it is no longer the
+ *    tenant's standing row (anything written over it), their redaction falls due; a review left
+ *    undecided more than 7 days raises a warning (`reviewWaitingAlarm`).
  * 3. Sessions due for redaction (50 at a time): marked redacted when the provider says so, else
  *    the provider is asked (again, a week after a request it did not complete). A refusal for good
  *    counts as a request made: it is asked again a week later, and the batch moves on.
@@ -1355,6 +1371,7 @@ export async function sweepSessions(
     try {
       if (reviewDecided(deps, session))
         deps.sessions.setRedactDue(session.sessionId, nowMs + days(deps.limits.redactAfterDays));
+      else reviewWaitingAlarm(session, nowMs);
     } catch (e) {
       failed("decision", session.sessionId, e);
     }
@@ -1396,10 +1413,28 @@ function screenPendingAlarm(deps: IdentitySessionDeps, sessionId: string, nowMs:
 }
 
 /**
- * Whether the operator has decided the review a session completed with: a later row that
- * supersedes it under a decision (accepted, refused, name_corrected), followed through a
- * correction that left it in review, until a row that is not a review. A completion row that is
- * not a review needs no decision.
+ * A review still waiting for the operator more than 7 days after its session wrote it: one
+ * warning, `identity_review_waiting { sessionId, days }`, at each sweep. Its session is not
+ * redacted at the provider until the review is decided.
+ */
+function reviewWaitingAlarm(session: IdentitySession, nowMs: number): void {
+  if (session.closedAt === null) return;
+  const waited = nowMs - session.closedAt;
+  if (waited <= REVIEW_WAITING_ALARM_MS) return;
+  opsLog("identity_review_waiting", {
+    level: "warn",
+    sessionId: session.sessionId,
+    days: Math.floor(waited / DAY_MS),
+  });
+}
+
+/**
+ * Whether the review a session completed with waits no longer: a later row that supersedes it
+ * under a decision (accepted, refused, name_corrected), followed through a correction that left it
+ * in review, until a row that is not a review; or, once that chain ends in a review, any row
+ * written over that review (a new check by `identity:record`, a started row): the review is no
+ * longer the tenant's standing row, no decision will reach it, and its session is redacted as a
+ * decided one is (ruling F7). A completion row that is not a review needs no decision.
  */
 function reviewDecided(deps: IdentitySessionDeps, session: IdentitySession): boolean {
   const { repo } = deps.identity;
@@ -1416,5 +1451,6 @@ function reviewDecided(deps: IdentitySessionDeps, session: IdentitySession): boo
     if (row.status !== "needs_review") return true;
     under = row.checkId;
   }
-  return false;
+  // The review the chain ends in is still waiting only while it is the tenant's latest row.
+  return repo.latest(session.tenantId)?.checkId !== under;
 }
