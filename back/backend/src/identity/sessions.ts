@@ -65,6 +65,9 @@ import type { FailureReasonCode, IdentityState, Watchlist } from "./types";
  *   failed row and close the session; a completion closes it with its row. A closed session takes
  *   no write: two reads racing to close one session leave one row, the other answering
  *   `unchanged`.
+ * - An operator's row written while a session is open stands: the session's next completion,
+ *   failure, abandon or reuse closes it without a row of its own (`writtenOver`), its redaction due
+ *   as usual. The adapter never writes over an operator's row.
  * - The provider is asked to delete a session `redactAfterDays` after its row, or after the
  *   operator's decision when the row went to review.
  *
@@ -560,6 +563,8 @@ async function reuseOpen(
     if (redactionRequested) deps.sessions.markRedactionRequested(sessionId, now);
     return undefined;
   }
+  // An operator's row written over the session closes it: a new session opens.
+  if (closedIfWrittenOver(deps, sessionId, now)) return undefined;
   // The read that finds the session waiting needs no birth date.
   const read = await retrieved(deps, open, { withDob: false });
   if (read.redaction === null && (read.status === "verified" || read.status === "processing")) {
@@ -624,7 +629,10 @@ export function sessionView(deps: IdentitySessionDeps, tenantId: string): Sessio
  * - canceled: the failed row, abandoned, `closed`;
  * - verified: the screen, then the row (`completed`), or `screen_pending` when the screen errored
  *   (no row; the sweep reads it again). A result the record's rules refuse leaves the session
- *   open for an operator, with one ops line: `unchanged`.
+ *   open for an operator, with one ops line: `unchanged`;
+ * - an operator's row written since the session's `started` row, met where the session would
+ *   write its own (a completion, the failure that closes, a cancellation): the session closes
+ *   without a row, its redaction due, one ops line (`identity_session_superseded`): `closed`.
  *
  * The provider's errors answer 503 `identity_provider_unavailable` after their ops line.
  */
@@ -648,7 +656,8 @@ async function syncAt(
 /**
  * A verified result the record's rules refused (or one without typed names) waits for an
  * operator: open, its last read verified, no screen pending. A verified session is final at the
- * provider, so nothing there can change the plan; only an operator's row can (`rowWrittenSince`).
+ * provider, so nothing there can change the plan; only an operator's row can (`rowWrittenSince`),
+ * and the read it wakes closes the session without a row (`writtenOver`).
  */
 function waitsForOperator(session: IdentitySession): boolean {
   return (
@@ -748,6 +757,67 @@ function onOpenSession<T>(
 }
 
 /**
+ * Whether a row of the tenant was written over the session while it was open, by someone else
+ * than this session: a row newer than its `started` row that is not the session's own (the
+ * session's rows carry `operator: null` and its id as their subject, and it writes no other row
+ * before it closes), so an operator's. Such a session writes no row of its own any more: the
+ * operator's row stands, and the adapter never writes over it.
+ */
+function writtenOver(deps: IdentitySessionDeps, session: IdentitySession): boolean {
+  return deps.identity.repo
+    .list(session.tenantId)
+    .some(
+      (row) =>
+        row.checkId > session.startedCheckId &&
+        !(row.operator === null && row.subject === session.sessionId),
+    );
+}
+
+/**
+ * Inside the caller's transaction, on a session `writtenOver`: closed without a row (its typed
+ * names erased with the close), its redaction due as after a row of its own. The caller writes
+ * the ops line (`logSuperseded`) once the transaction is done.
+ */
+function closeSuperseded(
+  deps: IdentitySessionDeps,
+  fresh: IdentitySession,
+  now: number,
+  reportId: string | null,
+): "superseded" {
+  deps.sessions.close(fresh.sessionId, {
+    at: now,
+    completedCheckId: null,
+    reportId,
+    redactDueAt: now + days(deps.limits.redactAfterDays),
+  });
+  return "superseded";
+}
+
+function logSuperseded(sessionId: string): void {
+  opsLog("identity_session_superseded", { sessionId });
+}
+
+/**
+ * The session closed without a row when an operator's row was written over it (`writtenOver`), in
+ * a transaction of its own: true when it closed so here.
+ */
+function closedIfWrittenOver(
+  deps: IdentitySessionDeps,
+  sessionId: string,
+  now: number,
+  reportId?: string | null,
+): boolean {
+  const result = onOpenSession(deps, sessionId, (fresh) =>
+    writtenOver(deps, fresh)
+      ? closeSuperseded(deps, fresh, now, reportId === undefined ? fresh.reportId : reportId)
+      : ("open" as const),
+  );
+  if (result !== "superseded") return false;
+  logSuperseded(sessionId);
+  return true;
+}
+
+/**
  * The read as the sessions table records it. The report id stays the stored one: it moves only
  * with a failed attempt counted (`attemptFailed`) and with the completion, so a report a read
  * names while its attempt is still being processed is counted once that attempt fails, and never
@@ -812,10 +882,12 @@ async function applyRead(
         deps.sessions.recordRead(sessionId, readOf(fresh, read, now, dobNotRead));
         return "processing" as const;
       });
-    case "canceled":
-      return closeAbandoned(deps, session, now, "canceled", (fresh) =>
+    case "canceled": {
+      const closed = closeAbandoned(deps, session, now, "canceled", (fresh) =>
         readOf(fresh, read, now, dobNotRead),
       );
+      return closed === "superseded" ? "closed" : closed;
+    }
     case "attempt_failed":
       return attemptFailed(deps, session, read, outcome, dobNotRead, now);
     case "verified":
@@ -853,6 +925,8 @@ function attemptFailed(
     });
     if (!outcome.final && attempts < deps.limits.attemptsPerSession)
       return "attempt_failed" as const;
+    if (writtenOver(deps, fresh))
+      return closeSuperseded(deps, fresh, now, reportId ?? fresh.reportId);
     writeFailed(deps, fresh, now, reportId ?? fresh.reportId, {
       reasonCode,
       reason: `stripe requires_input: ${outcome.code}`,
@@ -860,6 +934,10 @@ function attemptFailed(
     });
     return "closed" as const;
   });
+  if (result === "superseded") {
+    logSuperseded(session.sessionId);
+    return "closed";
+  }
   if (result === "closed") logClosed(session, reasonCode);
   return result;
 }
@@ -883,6 +961,8 @@ async function completeVerified(
     opsLog("identity_session_refused", { sessionId, reason: "no_typed_names" });
     return result;
   }
+  // An operator's row written over the session stands: nobody is screened for a row not written.
+  if (closedIfWrittenOver(deps, sessionId, now, outcome.reportId)) return "closed";
   const names = { first: nameOfRecord(typed.first), last: nameOfRecord(typed.last) };
   const watchlist = await screen(deps, names, outcome.dob);
   if (watchlist === "error") {
@@ -898,6 +978,8 @@ async function completeVerified(
   }
 
   const result = onOpenSession(deps, sessionId, (fresh) => {
+    // An operator's row written while the screen ran stands as well.
+    if (writtenOver(deps, fresh)) return closeSuperseded(deps, fresh, now, outcome.reportId);
     // The name screened is the name recorded: names typed again since are read on the next sync.
     if (!sameSealed(fresh.typedNames, session.typedNames)) return "unchanged" as const;
     deps.sessions.recordRead(sessionId, {
@@ -940,6 +1022,10 @@ async function completeVerified(
     return check;
   });
   if (result === "unchanged") return "unchanged";
+  if (result === "superseded") {
+    logSuperseded(sessionId);
+    return "closed";
+  }
   if (result === "refused") {
     opsLog("identity_session_refused", { sessionId, reason: "plan_refused" });
     return "unchanged";
@@ -1047,14 +1133,18 @@ function writeFailed(
 /** Why a session is abandoned: its days ran out, or the provider canceled or redacted it. */
 type Abandon = "expired" | "canceled" | "redacted";
 
-/** The session closed with a failed row, `abandoned`; with `readFirst`, the read recorded too. */
+/**
+ * The session closed with a failed row, `abandoned`; with `readFirst`, the read recorded too. A
+ * session an operator's row was written over (`writtenOver`) closes without a row of its own:
+ * `superseded`.
+ */
 function closeAbandoned(
   deps: IdentitySessionDeps,
   session: IdentitySession,
   now: number,
   why: Abandon,
   readFirst?: (fresh: IdentitySession) => SessionRead,
-): "closed" | "unchanged" {
+): "closed" | "superseded" | "unchanged" {
   const ref = session.providerRef;
   const failure: Failure =
     why === "canceled"
@@ -1072,9 +1162,11 @@ function closeAbandoned(
           };
   const result = onOpenSession(deps, session.sessionId, (fresh) => {
     if (readFirst !== undefined) deps.sessions.recordRead(fresh.sessionId, readFirst(fresh));
+    if (writtenOver(deps, fresh)) return closeSuperseded(deps, fresh, now, fresh.reportId);
     writeFailed(deps, fresh, now, fresh.reportId, failure);
     return "closed" as const;
   });
+  if (result === "superseded") logSuperseded(session.sessionId);
   if (result === "closed") logClosed(session, failure.reasonCode);
   return result;
 }
@@ -1177,8 +1269,9 @@ async function requestRedaction(
  *
  * 1. Open sessions nobody read for two minutes (50 at a time): past their days, ended at the
  *    provider (redacted, or canceled when redaction does not take them: `endAtProvider`) and
- *    closed as abandoned; else read (`syncSession`; a refused result waiting for an operator is
- *    only looked at).
+ *    closed as abandoned, or without a row when an operator's row was written over them
+ *    (`writtenOver`); else read (`syncSession`; a refused result waiting for an operator is only
+ *    looked at).
  * 2. Closed sessions whose row went to review: once the operator has decided the review (an
  *    acceptance, a refusal, or a name correction that settles it), their redaction falls due.
  * 3. Sessions due for redaction (50 at a time): marked redacted when the provider says so, else

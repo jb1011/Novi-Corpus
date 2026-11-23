@@ -231,7 +231,7 @@ export function planCheck(deps: CheckDeps, input: CheckInput): CheckPlan {
       `a renewal must complete after the current pass (${new Date(renews.completedAt as number).toISOString()})`,
     );
   const duplicateOf =
-    hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId) : [];
+    hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId, nowMs) : [];
   const reviewReasons: ReviewReasonCode[] =
     duplicateOf.length > 0 ? [...flagged, "duplicate_identity"] : flagged;
   const row: NewGuardianIdentityCheck = {

@@ -114,8 +114,17 @@ export interface IdentityRepository {
   /** Oldest first. */
   events(checkId: number): IdentityEvent[];
   findById(checkId: number): GuardianIdentityCheck | undefined;
-  /** Check ids, oldest first, of OTHER tenants whose LATEST row passed with this hmac and country. */
-  passedElsewhere(nameHmac: string, documentCountry: string, exceptTenantId: string): number[];
+  /**
+   * Check ids, oldest first, of OTHER tenants' passes with this hmac and country that still hold
+   * the identity at `nowMs`: the tenant's LATEST row, or the pass the renewal rule still counts
+   * under a new attempt (`COUNTED_BY_RENEWAL`), so a renewal begun does not hide its pass.
+   */
+  passedElsewhere(
+    nameHmac: string,
+    documentCountry: string,
+    exceptTenantId: string,
+    nowMs: number,
+  ): number[];
   /**
    * The erasure of a row's names and its `names_erased` event, in one transaction. False, writing
    * nothing, when there is no such row or its names were erased already.
@@ -522,15 +531,16 @@ export class SqliteIdentityRepository implements IdentityRepository {
         "SELECT * FROM identity_check_events WHERE check_id = ? ORDER BY event_id",
       ),
       findById: db.prepare("SELECT * FROM guardian_identity_checks WHERE check_id = ?"),
-      // A tenant counts only while the passed row carrying the hmac is its latest: one revoked,
-      // corrected or re-verified since does not hold the identity any more.
+      // A tenant counts while the passed row carrying the hmac is its latest, or the pass a
+      // renewal under way still counts (a `started` row on top of it hides nothing): one revoked,
+      // corrected, decided or re-verified since does not hold the identity any more.
       passedElsewhere: db.prepare(
         `SELECT g.check_id AS check_id FROM guardian_identity_checks g
           WHERE g.name_hmac = @name_hmac
             AND g.document_country = @document_country
             AND g.status = 'passed'
             AND g.tenant_id <> @except_tenant_id
-            AND ${IS_LATEST}
+            AND (${IS_LATEST} OR ${COUNTED_BY_RENEWAL})
           ORDER BY g.check_id`,
       ),
       // The erase-only trigger allows exactly this update, once: `names_erased_at IS NULL` makes a
@@ -637,12 +647,18 @@ export class SqliteIdentityRepository implements IdentityRepository {
     return r ? toCheck(r) : undefined;
   }
 
-  passedElsewhere(nameHmac: string, documentCountry: string, exceptTenantId: string): number[] {
+  passedElsewhere(
+    nameHmac: string,
+    documentCountry: string,
+    exceptTenantId: string,
+    nowMs: number,
+  ): number[] {
     return (
       this.stmts.passedElsewhere.all({
         name_hmac: nameHmac,
         document_country: documentCountry,
         except_tenant_id: tenantIdShape("exceptTenantId", exceptTenantId),
+        now_ms: unixMs("nowMs", nowMs),
       }) as { check_id: number }[]
     ).map((r) => r.check_id);
   }

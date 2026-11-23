@@ -736,7 +736,7 @@ export function reviewIdentity(
       const elsewhere =
         latest.documentCountry === null
           ? []
-          : repo.passedElsewhere(hmac, latest.documentCountry, tenantId);
+          : repo.passedElsewhere(hmac, latest.documentCountry, tenantId, nowMs);
       if (elsewhere.length > 0)
         refuse(
           `another account holds a verified identity with the same name and document country (checks ${elsewhere.join(", ")}): refuse this one with duplicate_identity, or revoke the other first`,
@@ -841,7 +841,7 @@ export function correctIdentityName(
       const duplicate =
         latest.documentCountry !== null &&
         !remaining.includes("duplicate_identity") &&
-        repo.passedElsewhere(hmac, latest.documentCountry, tenantId).length > 0;
+        repo.passedElsewhere(hmac, latest.documentCountry, tenantId, nowMs).length > 0;
       const reviewReasons: ReviewReasonCode[] = duplicate
         ? [...remaining, "duplicate_identity"]
         : remaining;

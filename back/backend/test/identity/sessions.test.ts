@@ -23,7 +23,7 @@ import {
 import type { ProviderSession } from "../../src/adapters/stripe/mapSession";
 import type { WorldIdDeps } from "../../src/api/routes/worldId";
 import { ApiError } from "../../src/errors";
-import { decryptText, encryptText, toSecret } from "../../src/formation/pii";
+import { decryptText, encryptText, nameHmac, toSecret } from "../../src/formation/pii";
 import { IDENTITY_AAD } from "../../src/identity/names";
 import {
   IDENTITY_SESSION_AAD,
@@ -1103,7 +1103,7 @@ describe("syncSession", () => {
     expect(output.join("\n")).not.toContain("--liveness");
   });
 
-  test("a refused result is screened once: later sweeps neither read it at the provider nor screen it again, until an operator writes a row; the 14-day abandon still applies", async () => {
+  test("a refused result is screened once: later sweeps neither read it at the provider nor screen it again; an operator's row closes it without a row of its own", async () => {
     const d = production();
     const s = await started(d);
     provider.verify(s.ref, { selfie: "unverified" });
@@ -1121,7 +1121,7 @@ describe("syncSession", () => {
     // Looked at, so the sweep's queue moves past it.
     expect(s.session()).toMatchObject({ lastReadAt: T0 + 30 * MINUTE, closedAt: null });
 
-    // An operator's row: the result is planned once more, and refused again.
+    // An operator's row: the next sweep closes the session, writing nothing over it.
     now = T0 + 40 * MINUTE;
     repo.append(
       {
@@ -1143,15 +1143,181 @@ describe("syncSession", () => {
     );
     now = T0 + 50 * MINUTE;
     await sweepSessions(d, now);
-    now = T0 + 60 * MINUTE;
-    await sweepSessions(d, now);
-    expect(screener.queries).toHaveLength(2);
-    expect(opsLines("identity_session_refused")).toHaveLength(2);
+    expect(s.session()).toMatchObject({
+      closedAt: now,
+      completedCheckId: null,
+      redactDueAt: now + 7 * DAY,
+    });
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "failed"]);
+    expect(screener.queries).toHaveLength(1);
+    expect(opsLines("identity_session_refused")).toHaveLength(1);
+    expect(opsLines("identity_session_superseded")).toHaveLength(1);
 
     now = T0 + 15 * DAY;
-    expect(await sweepSessions(d, now)).toMatchObject({ abandoned: 1 });
-    expect(s.session().closedAt).toBe(now);
-    expect(screener.queries).toHaveLength(2);
+    expect(await sweepSessions(d, now)).toMatchObject({ abandoned: 0 });
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "failed"]);
+  });
+
+  test("an operator's pass written while the session waits for the screen: the sweep at day 15 closes the session without a failed row, its redaction due", async () => {
+    const s = await started();
+    provider.verify(s.ref);
+    screener.answer = "error";
+    expect(await syncSession(deps(), s.sessionId)).toBe("screen_pending");
+
+    // The runbook's path: the operator searched by hand and recorded the pass over the started row.
+    now = T0 + DAY;
+    const pass = passFor(GUARDIAN, now, now + 1000 * DAY);
+    now = T0 + 15 * DAY;
+
+    expect(await sweepSessions(deps(), now)).toMatchObject({ abandoned: 0, errors: 0 });
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "passed"]);
+    expect(latestRow().checkId).toBe(pass.checkId);
+    expect(s.session()).toMatchObject({
+      closedAt: now,
+      completedCheckId: null,
+      redactDueAt: now + 7 * DAY,
+      typedNames: null,
+    });
+    expect(identityState(repo, GUARDIAN, now, "sandbox")).toBe("verified");
+    expect(opsLines("identity_session_superseded")).toEqual([
+      expect.objectContaining({ sessionId: s.sessionId }),
+    ]);
+    expect(opsLines("identity_session_closed")).toEqual([]);
+  });
+
+  test("an operator's refusal written while the session is open: a verified result then writes no pass, the session closes without a row and nobody is screened", async () => {
+    const s = await started();
+    const begun = latestRow();
+    now = T0 + MINUTE;
+    appended(
+      {
+        ...begun,
+        status: "failed",
+        supersedesCheckId: begun.checkId,
+        completedAt: now,
+        operator: "ops.example",
+        operatorOsUser: "ops",
+      },
+      "refused",
+    );
+    provider.verify(s.ref);
+    now = T0 + 2 * MINUTE;
+
+    expect(await syncSession(deps(), s.sessionId)).toBe("closed");
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "failed"]);
+    expect(screener.queries).toEqual([]);
+    expect(s.session()).toMatchObject({
+      closedAt: now,
+      completedCheckId: null,
+      redactDueAt: now + 7 * DAY,
+      typedNames: null,
+    });
+    expect(identityState(repo, GUARDIAN, now, "sandbox")).toBe("failed");
+    expect(opsLines("identity_session_superseded")).toEqual([
+      expect.objectContaining({ sessionId: s.sessionId }),
+    ]);
+  });
+
+  test("an operator's row written while the session is open: a result read while the screen runs writes no row either", async () => {
+    const s = await started();
+    provider.verify(s.ref);
+    // The operator writes the refusal while the screen is out.
+    screener.screenPerson = async (q) => {
+      screener.queries.push(q);
+      const begun = repo.list(GUARDIAN)[0] as GuardianIdentityCheck;
+      appended(
+        {
+          ...begun,
+          status: "failed",
+          supersedesCheckId: begun.checkId,
+          completedAt: now,
+          operator: "ops.example",
+          operatorOsUser: "ops",
+        },
+        "refused",
+      );
+      return "clear";
+    };
+
+    expect(await syncSession(deps(), s.sessionId)).toBe("closed");
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "failed"]);
+    expect(s.session()).toMatchObject({ completedCheckId: null, redactDueAt: now + 7 * DAY });
+  });
+
+  test("an operator's row written while the session waits for the person: the failed attempt that reaches the limit writes no failed row of its own", async () => {
+    const d = deps({ limits: { ...deps().limits, attemptsPerSession: 1 } });
+    const s = await started(d);
+    const begun = latestRow();
+    appended(
+      {
+        ...begun,
+        status: "failed",
+        supersedesCheckId: begun.checkId,
+        completedAt: now,
+        operator: "ops.example",
+        operatorOsUser: "ops",
+      },
+      "refused",
+    );
+    provider.fail(s.ref, "document_unverified_other", "vr_attempt1");
+
+    expect(await syncSession(d, s.sessionId)).toBe("closed");
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "failed"]);
+    expect(s.session()).toMatchObject({ completedCheckId: null, redactDueAt: now + 7 * DAY });
+  });
+
+  test("an operator's row written while the session waits for the person: the next start closes it without a row and opens a new session", async () => {
+    const s = await started();
+    const begun = latestRow();
+    now = T0 + MINUTE;
+    appended(
+      {
+        ...begun,
+        status: "failed",
+        supersedesCheckId: begun.checkId,
+        completedAt: now,
+        operator: "ops.example",
+        operatorOsUser: "ops",
+      },
+      "refused",
+    );
+
+    const next = await startSession(deps(), GUARDIAN, TYPED);
+
+    expect(next.sessionId).not.toBe(s.sessionId);
+    expect(s.session()).toMatchObject({ closedAt: now, completedCheckId: null });
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "failed", "started"]);
+  });
+
+  test("the duplicate check sees another account's pass while that account's renewal runs: its started row does not hide it", async () => {
+    // Another account, verified on production with the same name and document country, has
+    // begun its renewal.
+    const other = tenant(2);
+    const otherPass = appended({
+      ...passedIdentityRow(other, { at: T0 - DAY, expiresAt: T0 + 60 * DAY }),
+      nameHmac: nameHmac(FINGERPRINT_KEY, "Ottilie", "Brandwick"),
+      documentCountry: "FRA",
+    });
+    appended({
+      ...otherPass,
+      status: "started",
+      completedAt: null,
+      expiresAt: null,
+      names: null,
+      nameHmac: null,
+      documentCountry: null,
+      operator: null,
+      operatorOsUser: null,
+    });
+    const d = production();
+    const s = await started(d);
+    provider.verify(s.ref);
+
+    expect(await syncSession(d, s.sessionId)).toBe("completed");
+    expect(latestRow()).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["duplicate_identity"],
+    });
   });
 
   test("a closed session is unchanged, and not read again", async () => {
