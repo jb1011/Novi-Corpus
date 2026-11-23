@@ -248,6 +248,7 @@ journalctl -u legalbody-api --since '7 days ago' | grep <sessionId>
 | `identity_webhook_unparsable { environment }` (warn) | Authentic, but not an event: ignored with 200. |
 | `identity_webhook_dropped { environment, eventId, type, reason }` | `mode` (warn): an event of the other mode, the endpoint is in the wrong mode. `no_session_object` (warn): a session event without its session, Stripe's shape changed. `unknown_session`: a session that is not ours (made in the dashboard, or by another box). |
 | `identity_webhook_sync_failed { environment, eventId, type, sessionId, failure }` (warn) | The read the event woke failed, with its code or class; the job reads again. |
+| `identity_webhook_task_failed { message }` (warn) | The webhook's background task failed outside its own wrapper, which catches a failed read and logs it as `identity_webhook_sync_failed` above. So it should never appear; it carries the thrown error's message, not a code, and no session id. Nothing is lost: the job reads every open session again at its next pass. Report it, with the lines around it. It is the identity check's only task line. |
 | `identity_check_route_failed { route, errorName }` (error) | An identity check route met an error it did not expect, and answered 500. Report it. |
 
 The operator's own commands write theirs (`identity_recorded`, `identity_accepted`,
@@ -725,12 +726,13 @@ npm run api:sandbox 2>&1 | tee ~/identity-first-run.log
 ```
 
 The boot prints `⚠ identity check: automatic (stripe, test), offered`. In another terminal, run the
-operator commands on the same file (`.env`, if there is one, fills only what `.env.sandbox` leaves
-unset):
+operator commands on the same file. `DOTENV_CONFIG_PATH` does not reach them: they load `.env`
+themselves, so the file goes in through Node's `--env-file`, and `.env`, if there is one, fills
+only what `.env.sandbox` leaves unset:
 
 ```bash
 cd back/backend
-cli() { npx tsx --env-file=.env.sandbox src/cli/index.ts "$@"; }
+cli() { ./node_modules/.bin/tsx --env-file=.env.sandbox src/cli/index.ts "$@"; }
 cli scheduler:list      # identity_sessions_sync, with its note
 ```
 
