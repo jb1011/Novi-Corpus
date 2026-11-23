@@ -168,6 +168,7 @@ const LEGAL_BODY_CONFIG_KEYS: Record<keyof AvailableLegalBodyConfig, true> = {
   gasSeedOffered: true,
   paymentRequired: true,
   identityRequired: true,
+  identityCheckAutomatic: true,
   formedDoor: true,
   filingWorkingDays: true,
   linkTtl: true,

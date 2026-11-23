@@ -50,6 +50,7 @@ const PROTECTED = [
   "/api-keys",
   "/connection-package",
   "/bootstrap-connection",
+  "/identity-check",
 ];
 
 test("no protected prefix answers without a token — bare path or subpath", async () => {

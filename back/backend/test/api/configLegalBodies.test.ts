@@ -15,6 +15,7 @@
  */
 import type { Address } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import type { IdentityProviderClient } from "../../src/adapters/stripe/identityClient";
 import {
   type ApiDeps,
   type LegalBodyConfig,
@@ -25,6 +26,7 @@ import type { StatementMessageAnswer } from "../../src/api/routes/customerCompan
 import type { LegalBodyAgreementAnswer } from "../../src/api/routes/legalBodyOrders";
 import type { ByAgentAnswer } from "../../src/api/routes/legalBodyStatements";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../../src/formation";
+import type { IdentitySessionDeps } from "../../src/identity/sessions";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import type { CustomerCompanyDeps } from "../../src/legalBody/customerCompany";
 import type { GasSeedDeps } from "../../src/legalBody/gasSeed";
@@ -33,10 +35,14 @@ import type { LegalBodyStatementDeps } from "../../src/legalBody/statements";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteDocumentIndexRepository } from "../../src/persistence/documentIndexRepository";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
+import { SqliteIdentityRepository } from "../../src/persistence/identityRepository";
+import { SqliteIdentitySessionRepository } from "../../src/persistence/identitySessionRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
+import { TaskTracker } from "../../src/util/taskTracker";
 import {
   ANVIL_ACCOUNT_3,
   SANDBOX_TYPED,
+  TEST_PII_RING,
   customerCompanyDeps,
   recordHuman,
   sandboxCustomerCompanyDeps,
@@ -141,11 +147,45 @@ function gasSeed(orders: LegalBodyOrderDeps, amountWei: bigint): GasSeedDeps {
   };
 }
 
+/** The identity check's deps on `environment`. `/config` reads only whether they are wired, so
+ *  every provider member throws. */
+function identityCheck(environment: "sandbox" | "production" = "sandbox"): IdentitySessionDeps {
+  const never = (member: string) => async () => {
+    throw new Error(`the provider was asked for ${member}`);
+  };
+  const provider: IdentityProviderClient = {
+    createSession: never("createSession"),
+    retrieveSession: never("retrieveSession"),
+    cancelSession: never("cancelSession"),
+    redactSession: never("redactSession"),
+  };
+  return {
+    identity: {
+      repo: new SqliteIdentityRepository(s.db),
+      pii: TEST_PII_RING,
+      reverifyYears: 3,
+      blockedCountries: new Set(),
+      nameHmacKey: Buffer.alloc(32, 5),
+      automatic: true,
+    },
+    world: undefined,
+    sessions: new SqliteIdentitySessionRepository(s.db),
+    provider,
+    screener: undefined,
+    environment,
+    flowId: "vf_test_flow",
+    webOrigin: "https://app.example.test",
+    limits: { sessionDays: 14, maxPerDay: 3, attemptsPerSession: 3, redactAfterDays: 7 },
+    tasks: new TaskTracker("identity_session"),
+  };
+}
+
 interface AppOptions {
   legalBodyOrders?: LegalBodyOrderDeps;
   customerCompanies?: CustomerCompanyDeps;
   legalBodyStatements?: LegalBodyStatementDeps;
   legalBodyGasSeed?: GasSeedDeps;
+  identityCheck?: IdentitySessionDeps;
   now?: () => number;
 }
 
@@ -168,6 +208,7 @@ function makeApp(o: AppOptions = {}) {
     legalBodyOrders: o.legalBodyOrders,
     legalBodyGasSeed: o.legalBodyGasSeed,
     legalBodyStatements: o.legalBodyStatements,
+    identityCheck: o.identityCheck,
     apiKeys: new SqliteApiKeyStore(s.db),
     passkeys: new SqlitePasskeyStore(s.db),
     jobs: new SqliteJobRepository(s.db),
@@ -210,6 +251,7 @@ describe("/config.legalBodies", () => {
       gasSeedOffered: false,
       paymentRequired: false,
       identityRequired: false,
+      identityCheckAutomatic: false,
       // No doola on this deployment: no formed door, and the waiting screen's default.
       formedDoor: "hidden",
       filingWorkingDays: 5,
@@ -223,6 +265,25 @@ describe("/config.legalBodies", () => {
     });
     expect(body.legalBodies.environment).toBe("production");
     expect(body.legalBodies.identityRequired).toBe(true);
+  });
+
+  test("identityCheckAutomatic is true where the identity check is wired and false without it, and changes nothing else", async () => {
+    for (const environment of ["sandbox", "production"] as const) {
+      const orders = orderDeps({ environment });
+      const without = (await configOf({ legalBodyOrders: orders })).body.legalBodies;
+      const wired = (
+        await configOf({ legalBodyOrders: orders, identityCheck: identityCheck(environment) })
+      ).body.legalBodies;
+      expect(without.identityCheckAutomatic, environment).toBe(false);
+      expect(wired.identityCheckAutomatic, environment).toBe(true);
+      // Required on production whether or not it runs automatically; never on a sandbox.
+      expect(wired.identityRequired, environment).toBe(environment === "production");
+      expect({ ...wired, identityCheckAutomatic: false }, environment).toEqual(without);
+    }
+    // Without the order doors there is no legal-body answer to carry it.
+    expect((await configOf({ identityCheck: identityCheck() })).body.legalBodies).toEqual({
+      available: false,
+    });
   });
 
   test("with customer doors that charge: declarations and paymentRequired", async () => {
@@ -267,13 +328,14 @@ describe("/config.legalBodies", () => {
     );
   });
 
-  test("the offered answer has exactly the thirteen keys of its type, and the link window exactly three", async () => {
+  test("the offered answer has exactly the fourteen keys of its type, and the link window exactly three", async () => {
     const orders = orderDeps();
     const { body } = await configOf({
       legalBodyOrders: orders,
       customerCompanies: customerCompanyDeps(s, () => Date.now()),
       legalBodyStatements: statementDeps(s, new FakeStatementChain()),
       legalBodyGasSeed: gasSeed(orders, 1n),
+      identityCheck: identityCheck(),
     });
     const keys = Object.keys(body.legalBodies).sort();
     expect(keys).toEqual(
@@ -288,12 +350,13 @@ describe("/config.legalBodies", () => {
         gasSeedOffered: true,
         paymentRequired: true,
         identityRequired: true,
+        identityCheckAutomatic: true,
         formedDoor: true,
         filingWorkingDays: true,
         linkTtl: true,
       }),
     );
-    expect(keys).toHaveLength(13);
+    expect(keys).toHaveLength(14);
     expect(Object.keys(body.legalBodies.linkTtl).sort()).toEqual(
       keysOf<OfferedConfig["linkTtl"]>({ min: true, max: true, default: true }),
     );
@@ -326,6 +389,7 @@ describe("/config.legalBodies", () => {
       customerCompanies: customerCompanyDeps(s, () => Date.now()),
       legalBodyStatements: statementDeps(s, new FakeStatementChain()),
       legalBodyGasSeed: gasSeed(orders, 1n),
+      identityCheck: identityCheck(),
     };
     const { body } = await configOf(wired);
     expect(body.legalBodies).toEqual(
