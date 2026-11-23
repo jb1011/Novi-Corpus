@@ -2639,12 +2639,14 @@ export function redact(cfg: Config): Record<string, unknown> {
         }
       : undefined,
     // The Stripe key and the webhook secrets are bearer credentials (a `Secret` already prints as
-    // "[redacted]"; masked here by name all the same). The mode and the flow id are what an
-    // operator checks in the boot line, and neither is a credential.
+    // "[redacted]"; masked here by name all the same). The flow id is not a credential, but the
+    // boot line never prints it and no log needs it (the runbook keeps it out of what is sent
+    // back): masked too. The mode is what an operator checks, and stays.
     stripeIdentity: cfg.stripeIdentity
       ? {
           ...cfg.stripeIdentity,
           key: "REDACTED",
+          flowId: "REDACTED",
           webhookSecret: "REDACTED",
           webhookSecretPrevious: cfg.stripeIdentity.webhookSecretPrevious ? "REDACTED" : undefined,
         }

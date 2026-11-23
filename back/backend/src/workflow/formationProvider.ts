@@ -837,9 +837,12 @@ function buildCompanyInput(
       // explicit `ssn: undefined` serializes away in JSON, but the shape of the object is what a
       // reader of this file has to trust, and "the key is not there" is the honest one.
       //
-      // ⚠ THE ONLY `.reveal()` IN THE SYSTEM. Everywhere else the decrypted value is a `Secret`
-      // that stringifies to "[redacted]"; this line is the wire boundary, and a second caller of
-      // `reveal()` is a review question by construction (`grep -rn "\.reveal()" src`).
+      // ⚠ THE ONLY `.reveal()` OF A PERSON'S DATA IN THE SYSTEM. Everywhere else the decrypted
+      // value is a `Secret` that stringifies to "[redacted]"; this line is the wire boundary. The
+      // other callers reveal keys and signing secrets at their own wire boundaries (the Stripe
+      // Identity and OpenSanctions clients' auth headers, the Stripe Identity webhook's signature
+      // check: `Secret` in `formation/pii.ts` lists them), and any new caller is a review question
+      // by construction (`grep -rn "\.reveal()" src`).
       ...(ssn !== undefined ? { ssn: ssn.reveal() } : {}),
     },
     // doola's own registered agent provides both addresses. This is not a convenience: an AGENT

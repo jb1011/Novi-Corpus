@@ -364,14 +364,15 @@ test("redact hides the key, the webhook secrets and the screening key", () => {
     screening: { openSanctions: Record<string, unknown> };
     identity: Record<string, unknown>;
   };
-  // The mode and the flow id are what an operator checks in the boot line; they stay.
+  // The mode stays; the flow id is masked too: the boot line never prints it, and no log needs it.
   expect(view.stripeIdentity).toEqual({
     key: "REDACTED",
     mode: "test",
-    flowId: FLOW_ID,
+    flowId: "REDACTED",
     webhookSecret: "REDACTED",
     webhookSecretPrevious: "REDACTED",
   });
+  expect(printed).not.toContain(FLOW_ID);
   expect(view.screening.openSanctions).toEqual({
     apiKey: "REDACTED",
     dataset: "default",
