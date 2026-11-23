@@ -587,17 +587,47 @@ describe("the Stripe Identity webhook: which session it wakes", () => {
     const app = makeApp();
     const track = vi.spyOn(tasks, "track");
     const { sessionId } = await openSession();
-    for (const body of [
-      event({ ref: "vs_elsewhere", reference: sessionId }),
-      event({ ref: null, reference: sessionId }),
-    ])
-      expect((await deliver(app, body)).status).toBe(200);
+    expect((await deliver(app, event({ ref: "vs_elsewhere", reference: sessionId }))).status).toBe(
+      200,
+    );
     expect(track).not.toHaveBeenCalled();
     expect(provider.reads).toBe(0);
     const dropped = opsLines("identity_webhook_dropped");
-    expect(dropped.map((l) => l.reason)).toEqual(["unknown_session", "unknown_session"]);
+    expect(dropped.map((l) => l.reason)).toEqual(["unknown_session"]);
+    // The expected line for another deployment's session, or the dashboard's: not a warning.
+    expect(dropped[0]).not.toHaveProperty("level");
     // Our session id is not named on a drop: the event did not prove it was about it.
     for (const line of dropped) expect(line).not.toHaveProperty("sessionId");
+  });
+
+  test("a session event without a session object answers 200, wakes nothing, and is dropped with a warning, not as an unknown session", async () => {
+    const app = makeApp();
+    const track = vi.spyOn(tasks, "track");
+    const { sessionId } = await openSession();
+    const envelope = { id: "evt_test_1", type: "identity.verification_session.verified" };
+    const bodies = [
+      // `data: {}`: no object at all.
+      JSON.stringify({ ...envelope, livemode: false, data: {} }),
+      // No `data` either.
+      JSON.stringify({ ...envelope, livemode: false }),
+      // An object without its id: the reference alone does not find a session.
+      event({ ref: null, reference: sessionId }),
+    ];
+    for (const body of bodies) expect((await deliver(app, body)).status, body).toBe(200);
+    expect(track).not.toHaveBeenCalled();
+    expect(provider.reads).toBe(0);
+    const dropped = opsLines("identity_webhook_dropped");
+    expect(dropped).toHaveLength(bodies.length);
+    for (const line of dropped) {
+      expect(line).toMatchObject({
+        level: "warn",
+        environment: "sandbox",
+        eventId: "evt_test_1",
+        type: "identity.verification_session.verified",
+        reason: "no_session_object",
+      });
+      expect(line).not.toHaveProperty("sessionId");
+    }
   });
 
   test("an event whose reference is not the session's own answers 200, wakes nothing, and is dropped as unknown_session", async () => {

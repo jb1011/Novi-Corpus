@@ -234,11 +234,20 @@ export function mountStripeIdentityWebhookRoutes(
     }
 
     // ── 5. The session: found by the provider's id, and only if the event's reference is the
-    //       one we gave that session. A session of another deployment sharing the Stripe
-    //       account, or one made in the dashboard, is not ours. Our id is not logged here: the
-    //       event has not proven it is about our session.
-    const session =
-      event.providerRef === null ? undefined : check.sessions.byProviderRef(event.providerRef);
+    //       one we gave that session. Our id is not logged on a drop: the event has not proven
+    //       it is about our session.
+    //
+    //       A session event with no session object (or an object without its id) is a warning:
+    //       every Stripe session event carries one, so its absence means the event's shape has
+    //       changed, and filed as an unknown session it would drop every event without a word
+    //       (only the sweep would catch up).
+    if (event.providerRef === null) {
+      opsLog("identity_webhook_dropped", { level: "warn", ...ids, reason: "no_session_object" });
+      return c.json(OK_BODY, 200);
+    }
+    //       A session of another deployment sharing the Stripe account, or one made in the
+    //       dashboard, is not ours: the expected drop, at info.
+    const session = check.sessions.byProviderRef(event.providerRef);
     if (session === undefined || session.sessionId !== event.clientReferenceId) {
       opsLog("identity_webhook_dropped", { ...ids, reason: "unknown_session" });
       return c.json(OK_BODY, 200);
