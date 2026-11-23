@@ -3,8 +3,15 @@ import type { Command } from "commander";
 import { getAddress } from "viem";
 import { type WorldIdDeps, buildWorldIdDeps, realHumanState } from "../api/routes/worldId";
 import { type Config, legalBodyEnvironment } from "../config/env";
-import { type PiiKeyring, encryptText, nameHmac } from "../formation/pii";
-import { IDENTITY_AAD, nameOfRecord, nameRuleProblem } from "../identity/names";
+import { type PiiKeyring, nameHmac } from "../formation/pii";
+import { nameOfRecord, nameRuleProblem } from "../identity/names";
+import {
+  CheckRefused,
+  assertProductionPass,
+  fullNameOfRecord,
+  planCheck,
+  sealNames,
+} from "../identity/record";
 import {
   type IdentityDeps,
   agreesWithWorld,
@@ -184,21 +191,10 @@ function sealingConfig(): Config {
 }
 
 // ── shared rules ─────────────────────────────────────────────────────────────────────────────
-
-/** `completedAt` plus whole UTC calendar years: 10 November stays 10 November. */
-function addUtcYears(ms: number, years: number): number {
-  const date = new Date(ms);
-  date.setUTCFullYear(date.getUTCFullYear() + years);
-  return date.getTime();
-}
+// The rules that make a row (the renewal, the review reasons, the status, the sealed names, the
+// production pass) are `identity/record.ts`'s, shared with the automatic adapter.
 
 const isoDate = (ms: number): string => new Date(ms).toISOString().slice(0, 10);
-
-/** `--name-full` through `nameOfRecord`; absent, empty or blank, no full name (as at the prompt). */
-function fullNameOfRecord(value: string | undefined): string | null {
-  const full = value === undefined ? "" : nameOfRecord(value);
-  return full === "" ? null : full;
-}
 
 interface Names {
   first: string;
@@ -206,22 +202,14 @@ interface Names {
   full: string | null;
 }
 
-/** The three names sealed under the current key, each bound to the tenant and its field. */
-function sealNames(
-  pii: PiiKeyring,
-  tenantId: string,
-  names: Names,
-): NonNullable<NewGuardianIdentityCheck["names"]> {
-  const seal = (field: "first" | "last" | "full", value: string) => {
-    const { ciphertext, iv } = encryptText(pii, value, IDENTITY_AAD(tenantId, field));
-    return { ciphertext, iv };
-  };
-  return {
-    first: seal("first", names.first),
-    last: seal("last", names.last),
-    full: names.full === null ? null : seal("full", names.full),
-    keyId: pii.current.id,
-  };
+/** A rule of `identity/record.ts` that refused, as this command's refusal: the same sentence. */
+function asRefusal<T>(fn: () => T): T {
+  try {
+    return fn();
+  } catch (err) {
+    if (err instanceof CheckRefused) return refuse(err.message);
+    throw err;
+  }
 }
 
 function identityDeps(cfg: Config, repo: SqliteIdentityRepository, pii: PiiKeyring): IdentityDeps {
@@ -267,32 +255,6 @@ function shapeChecked(row: NewGuardianIdentityCheck): NewGuardianIdentityCheck {
   } catch (err) {
     return refuse(err instanceof Error ? err.message : String(err));
   }
-}
-
-/**
- * A row that will read `passed` on production rests on the face match, the sanctions search and
- * the name rule, however it was built: `identity:record`, `identity:accept` or
- * `identity:correct-name`. Each refusal names the way out. A sandbox row is held to none of it.
- */
-function assertProductionPass(
-  row: NewGuardianIdentityCheck,
-  names: { first: string; last: string } | null,
-): void {
-  if (row.status !== "passed" || row.environment !== "production") return;
-  if (row.liveness !== "passed")
-    refuse(
-      "on production a passed check needs the face match (--liveness passed), and this check has none: refuse it with identity:refuse and record a new check",
-    );
-  if (row.watchlist !== "clear" && row.watchlist !== "hit")
-    refuse(
-      "on production a passed check needs the sanctions search (--watchlist clear or hit), and this check has none: refuse it with identity:refuse and record a new check",
-    );
-  // A passed row always holds its names (the shape check); none reads as a name with neither part.
-  const problem = nameRuleProblem(names?.first ?? "", names?.last ?? "");
-  if (problem !== null)
-    refuse(
-      `on production a passed check needs a name that passes the name rule (${problem}): correct it with identity:correct-name first`,
-    );
 }
 
 /** A decision lands no pass whose expiry, carried over from the check, has already come. */
@@ -409,7 +371,9 @@ const REASON_FLAGS: OptionTable = [
 /**
  * Records one check the operator read in the provider's dashboard. The names are the guardian's
  * own, as printed on the document, confirmed by the operator against the provider's verified names
- * and the document. A passed result is stored as `needs_review`, with its reasons, when the
+ * and the document. The command parses the flags, holds `--expect-latest` and the rule on a
+ * verified guardian, and plans the row through `planCheck` (`identity/record.ts`), whose rules the
+ * automatic adapter shares. A passed result is stored as `needs_review`, with its reasons, when the
  * watchlist search hit, the document was out of date, its country is blocked, the name breaks the
  * name rule, the guardian's name differs from the document's (`--name-mismatch`), or another
  * tenant's current passed check holds the same name and country (the other check ids are printed,
@@ -450,19 +414,10 @@ export function recordIdentity(
   const nowMs = Date.now();
   const completedAt =
     opts.completedAt === undefined ? nowMs : parseCompletedAt(opts.completedAt, nowMs);
-  if (result === "passed" && addUtcYears(completedAt, cfg.identity.reverifyYears) <= nowMs)
-    refuse("--completed-at is so old that this pass would already be expired");
   const country = opts.country === undefined ? null : parseCountry(opts.country);
   const documentType = optionalOneOf("--document-type", opts.documentType, DOCUMENT_TYPES);
   const liveness = optionalOneOf("--liveness", opts.liveness, LIVENESS);
   const watchlist = optionalOneOf("--watchlist", opts.watchlist, WATCHLIST);
-  // On production a pass rests on the face match and on the sanctions search, both of them run.
-  if (environment === "production" && result === "passed") {
-    if (watchlist === "not_run")
-      refuse("on production a passed check needs the sanctions search: --watchlist clear or hit");
-    if (liveness !== "passed") refuse("on production a passed check needs --liveness passed");
-  }
-  const documentExpired = opts.documentExpired === true;
   const reasonCode = failed ? oneOf("--reason-code", opts.reasonCode, FAILURE_REASON_CODES) : null;
   const reason = failed ? parseReason(opts.reason as string) : null;
   const names: Names | null = failed
@@ -472,18 +427,6 @@ export function recordIdentity(
         last: nameOfRecord(opts.nameLast as string),
         full: fullNameOfRecord(opts.nameFull),
       };
-  const hmac = names === null ? null : nameHmac(fingerprintKey, names.first, names.last);
-  // The reasons the flags alone decide, in the record's order; the duplicate is read below.
-  const flagged: ReviewReasonCode[] = [];
-  if (names !== null) {
-    if (result === "needs_review") flagged.push("provider_flag");
-    if (watchlist === "hit") flagged.push("watchlist_hit");
-    if (documentExpired) flagged.push("document_expired");
-    if (country !== null && cfg.identity.blockedCountries.has(country))
-      flagged.push("country_blocked");
-    if (nameRuleProblem(names.first, names.last) !== null) flagged.push("name_rule_failed");
-    if (opts.nameMismatch === true) flagged.push("name_mismatch");
-  }
   const operatorOsUser = osUser();
   const repo = new SqliteIdentityRepository(db);
   const world = cfg.world ? buildWorldIdDeps(cfg.world, new SqliteWorldStore(db)) : undefined;
@@ -494,7 +437,7 @@ export function recordIdentity(
     assertExpectedLatest(tenantId, latest, expected);
     // The latest row decides the state: a failed check or a review on top of a valid pass would
     // lock a verified guardian out of every production door. A pass is a renewal, or a new check
-    // after a change of name: it supersedes the current one, under every rule of a pass below.
+    // after a change of name: it supersedes the current one, under every rule of a pass.
     if (
       result !== "passed" &&
       latest !== undefined &&
@@ -503,44 +446,41 @@ export function recordIdentity(
       refuse(
         `the guardian is verified until ${isoDate(latest.expiresAt as number)}; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review`,
       );
-    // A pass over a pass is a renewal: it names the pass it replaces, and completes after it, so
-    // the expiry, counted from the completion, never moves back.
-    const renews = result === "passed" && latest?.status === "passed" ? latest : undefined;
-    // A passed row always says when it completed (the table's CHECK).
-    if (renews !== undefined && completedAt <= (renews.completedAt as number))
-      refuse(
-        `a renewal must complete after the current pass (${new Date(renews.completedAt as number).toISOString()})`,
-      );
-    const duplicateOf =
-      hmac !== null && country !== null ? repo.passedElsewhere(hmac, country, tenantId) : [];
-    const reviewReasons: ReviewReasonCode[] =
-      duplicateOf.length > 0 ? [...flagged, "duplicate_identity"] : flagged;
-    const row = shapeChecked({
-      nullifier,
-      tenantId,
-      provider,
-      providerRef: opts.providerRef,
-      subject: null,
-      status: failed ? "failed" : reviewReasons.length > 0 ? "needs_review" : "passed",
-      supersedesCheckId: renews?.checkId ?? null,
-      // The operator records a completed attempt: as far as the record knows, it began then.
-      startedAt: completedAt,
-      completedAt,
-      expiresAt: failed ? null : addUtcYears(completedAt, cfg.identity.reverifyYears),
-      names: names === null ? null : sealNames(pii, tenantId, names),
-      nameHmac: hmac,
-      documentCountry: country,
-      documentType,
-      documentExpired,
-      liveness,
-      watchlist,
-      reviewReasons,
-      environment,
-      synthetic: environment === "sandbox",
-      operator,
-      operatorOsUser,
-    });
-    assertProductionPass(row, names);
+    const { row: planned, duplicateOf } = asRefusal(() =>
+      planCheck(
+        {
+          repo,
+          pii,
+          nameHmacKey: fingerprintKey,
+          reverifyYears: cfg.identity.reverifyYears,
+          blockedCountries: cfg.identity.blockedCountries,
+          nowMs,
+        },
+        {
+          tenantId,
+          nullifier,
+          provider,
+          providerRef: opts.providerRef,
+          subject: null,
+          result,
+          names,
+          nameMismatch: opts.nameMismatch === true,
+          country,
+          documentType,
+          documentExpired: opts.documentExpired === true,
+          liveness,
+          watchlist,
+          // The operator records a completed attempt: as far as the record knows, it began then.
+          startedAt: completedAt,
+          completedAt,
+          environment,
+          synthetic: environment === "sandbox",
+          operator,
+          operatorOsUser,
+        },
+      ),
+    );
+    const row = shapeChecked(planned);
     if (opts.yes !== true) return { latest, duplicateOf, row, check: undefined };
     const check = repo.append(row, {
       kind: "recorded",
@@ -687,7 +627,7 @@ function decide(
       );
     const built = d.build(latest, carriedFrom(latest, operator, operatorOsUser), repo, nowMs);
     const row = shapeChecked(built.row);
-    assertProductionPass(row, built.names);
+    asRefusal(() => assertProductionPass(row, built.names));
     if (opts.yes !== true) return { latest, row, check: undefined };
     const check = repo.append(row, {
       kind: d.kind,
