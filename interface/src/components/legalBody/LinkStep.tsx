@@ -43,7 +43,7 @@ import {
 } from "@/lib/legalBody/link";
 import { noticeSentence } from "@/lib/legalBody/notice";
 import { linkSignGate, signThroughGate } from "@/lib/legalBody/signGate";
-import { IdentityLine } from "./IdentityLine";
+import { AgentWalletLine, IdentityLine } from "./IdentityLine";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
 
 const L = LEGAL_BODY_COPY.link;
@@ -96,6 +96,7 @@ export function LinkStep({
       <div>
         <StepHeader eyebrow={LEGAL_BODY_COPY.rail.labels.link} title={L.creating} />
         <IdentityLine agentId={shownId} />
+        <AgentWalletLine wallet={kit.agentWallet} />
         <Card className="p-6">
           <p className="flex items-center gap-2 text-[13.5px] leading-[1.6] text-muted">
             <Spinner className="h-3.5 w-3.5" /> {notice.body}
@@ -116,6 +117,7 @@ export function LinkStep({
         intro={agentId !== null ? fillCopy(L.intro, { agentId }) : undefined}
       />
       <IdentityLine agentId={shownId} />
+      <AgentWalletLine wallet={kit.agentWallet} />
       {order === null || agentId === null ? (
         <Callout tone="warn">{L.identityUnknown}</Callout>
       ) : (

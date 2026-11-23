@@ -497,6 +497,108 @@ export const LEGAL_BODY_COPY = {
     orChooseAnother: "Or choose another identity",
   },
 
+  /** The agent's own wallet, written on its identity between the identity and the link. The page
+   *  never makes a key: it takes an address, and the signature that wallet made. */
+  agentWallet: {
+    title: "Your agent's wallet",
+    why: "Your agent needs a wallet of its own: the key it signs and pays with. Anyone it pays can then find its company. It must not be your wallet.",
+    checking: "Reading the agent's wallet on the registry.",
+    unreadable: "The registry could not be read just now. Nothing was changed.",
+    retry: "Try again",
+    todayGuardian: "Today the registry names your own wallet as this agent's wallet.",
+    todayNone: "Today the registry names no wallet for this agent.",
+    hasKeyTitle: "My agent has its own key",
+    hasKeyLine: "Give the key's address. The key signs one message to prove itself.",
+    noKeyTitle: "My agent has no key yet",
+    noKeyLine: "Create one where your agent runs. The key never passes through this site.",
+    providerTitle: "My agent has a wallet with a provider",
+    providerLine:
+      "Give the wallet's address. The wallet signs one message through its provider. It must already exist on {network}.",
+    noKeyAsk:
+      'Ask your agent: "Create an Ethereum key for yourself. Keep the private key in your own secret storage and never show it. Tell me only the address."',
+    noKeyCommandIntro: "Or, with Foundry installed where the agent runs:",
+    noKeyCommand: "cast wallet new ~/.foundry/keystores agent-key",
+    addressLabel: "The agent's wallet address",
+    /** Under the address field. An empty field is not an address either. */
+    addressProblems: {
+      not_address: "This is not an address: it starts with 0x and has 40 more characters.",
+      zero: "This address cannot be an agent's wallet.",
+      guardian: "This is your own wallet. The agent's wallet must be a different one.",
+    },
+    prepare: "Prepare the message",
+    messageIntro: "The agent's wallet signs this message. It is valid for a few minutes.",
+    messageHeading: "The message to sign",
+    signAsk:
+      'Ask your agent: "Sign this EIP-712 message with your key and give me the signature."',
+    signCommandIntro: "Or save it as message.json and run:",
+    signCommand: "cast wallet sign --data --from-file message.json --account agent-key",
+    countdown: "Valid for {seconds} more seconds.",
+    expired: "This message has expired. Prepare a new one.",
+    signatureLabel: "The signature",
+    /** Said under the signature field, after its label, as the paste panel's problems are. */
+    signatureEmpty: "is empty: paste the signature the agent's wallet made",
+    signatureProblems: {
+      wrong_key: "This signature was not made by that wallet's key, or not over this message.",
+      compact:
+        "This is a compact signature of 64 bytes. The registry takes the usual 65-byte form: sign again without the compact option.",
+      wrapped:
+        "This signature is made for a wallet that does not exist on {network} yet. The wallet must exist on the chain first.",
+      not_on_chain:
+        "No wallet exists at this address on {network} yet. A provider's wallet must exist on the chain before it can sign.",
+      contract_refused: "The wallet did not accept this signature.",
+    },
+    send: "Write the wallet on the identity",
+    sending: "Waiting for your wallet.",
+    waiting: "Waiting for the registry to show the wallet.",
+    wouldRevert:
+      "The registry would refuse this transaction, so nothing was sent. Prepare a new message.",
+    reverted: "The transaction did not go through. Nothing was changed. Prepare a new message.",
+    notThisWallet:
+      "The wallet connected here does not own this identity. Connect the wallet that owns it.",
+    noIdentity:
+      "There is no identity {agentId} on the identity registry of {network} now, so no wallet can be written on it.",
+    domainMismatch:
+      "The registry's signing domain is not the one this deployment names, so no message was prepared.",
+    declined: "Your wallet did not send the transaction, so nothing was written.",
+    noReceipt:
+      "No receipt came back within 3 minutes, so whether the wallet was written is not known yet. Look at the transaction, then check again.",
+    elsewhere:
+      "This identity is owned by another key. That key must write the agent's wallet on the registry (setAgentWallet), with a signature of the new wallet that is at most five minutes old. This page checks again by itself.",
+    checkAgain: "Check again",
+    line: "This agent's wallet: {address}",
+    /** The allowlist refused the transaction this page built: ours, so said as ours. */
+    callRefused:
+      "The transaction was refused before your wallet opened ({problem}), so nothing was sent.",
+    callProblems: {
+      no_wallet_context:
+        "This page built the transaction without the identity, your wallet or the chain's time, so it will not send it. Nothing was sent.",
+      set_agent_wallet_args:
+        "This page built the transaction with values it does not take, so it will not send it. Nothing was sent.",
+      other_identity:
+        "This page built the transaction for another identity than this one, so it will not send it. Nothing was sent.",
+      wallet_is_zero:
+        "This page built the transaction with no wallet in it, so it will not send it. Nothing was sent.",
+      wallet_is_guardian:
+        "This page built the transaction with your own wallet as the agent's wallet, so it will not send it. Nothing was sent.",
+      deadline_out_of_window:
+        "The message's time does not fit the chain's clock, so this page will not send it. Nothing was sent. Prepare a new message.",
+      signature_shape:
+        "The signature is not whole bytes, or it is too long, so this page will not send it. Nothing was sent.",
+      sends_value:
+        "This page built the transaction with a value attached, so it will not send it. Nothing was sent.",
+      wrong_chain:
+        "This page built the transaction for another chain than this deployment's, so it will not send it. Nothing was sent.",
+      not_the_registry:
+        "This page built the transaction for another contract than the identity registry, so it will not send it. Nothing was sent.",
+      not_the_pinned_abi:
+        "This page built the transaction from another interface than the registry's, so it will not send it. Nothing was sent.",
+      wallet_on_another_chain:
+        "Your wallet is on another network than {network}. Switch it there and send again. Nothing was sent.",
+      chain_not_configured:
+        "This site sends to {network} only, and this deployment names another chain, so the wallet cannot be written here. Nothing was sent.",
+    },
+  },
+
   link: {
     sign: "Sign",
     creating: "Novi Corpus is creating the body",

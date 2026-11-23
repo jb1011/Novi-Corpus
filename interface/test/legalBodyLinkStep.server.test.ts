@@ -288,3 +288,28 @@ describe("the agent id, where a person looks for it", () => {
     expect(text(kit(), null)).not.toContain(LEGAL_BODY_COPY.identity.yourIdentity);
   });
 });
+
+describe("the agent's wallet, under the identity's line", () => {
+  const AGENT_WALLET = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as const;
+  const walletLine = fillCopy(LEGAL_BODY_COPY.agentWallet.line, { address: AGENT_WALLET });
+  const withWallet = (k: LegalBodyStepKit, agentWallet: LegalBodyStepKit["agentWallet"]) => ({
+    ...k,
+    agentWallet,
+  });
+
+  test("on the sign screen, after the identity and before what happens next", () => {
+    const page = text(withWallet(kit(), AGENT_WALLET));
+    expect(page).toContain(walletLine);
+    expect(page.indexOf(walletLine)).toBeGreaterThan(page.indexOf(LEGAL_BODY_COPY.identity.yourIdentity));
+    expect(page.indexOf(walletLine)).toBeLessThan(page.indexOf(L.howItWorks));
+  });
+
+  test("while the body is created", () => {
+    const k = withWallet(kit(CREATING, order({ state: "reserved", agentId: "900002" })), AGENT_WALLET);
+    expect(text(k, null)).toContain(walletLine);
+  });
+
+  test.each([null, "none", "unreadable"] as const)("no line for %s", (agentWallet) => {
+    expect(text(withWallet(kit(), agentWallet))).not.toContain("This agent's wallet");
+  });
+});

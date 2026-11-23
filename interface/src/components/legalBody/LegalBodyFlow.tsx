@@ -105,6 +105,7 @@ import { worldIdGateState, worldIdMeStatus } from "@/lib/legalBody/worldIdGate";
 import { readPersistedOnboarding } from "@/lib/onboarding/storage";
 import { START_COPY } from "@/lib/start/copy";
 import { fullProductHref, pathCards, pathFacts, preselectedPath } from "@/lib/start/paths";
+import { AgentWalletStep } from "./AgentWalletStep";
 import { AgreementStep } from "./AgreementStep";
 import { ClosedNotice } from "./ClosedNotice";
 import { CompanyStep } from "./CompanyStep";
@@ -699,9 +700,10 @@ function LegalBodySession({
           />
         );
       case "wallet":
-        // The agent's wallet step has no screen of its own on this page yet: its name, and one
-        // sentence.
-        return <StepPlaceholder kit={kit} />;
+        // One step per order: a click's state never carries over to another order. The registry's
+        // answer, read again after the transaction, moves the flow on to the link.
+        if (choices.agentId === null) return <StepPlaceholder kit={kit} />;
+        return <AgentWalletStep key={kit.orderId ?? "none"} kit={kit} agentId={choices.agentId} />;
       case "link":
         // One step per order: a click's state never carries over to another order. Another key
         // signs on its own panel, which never opens this browser's wallet.

@@ -557,6 +557,16 @@ describe("the agent id, where a person looks for it", () => {
     expect(text(linkMarkup(kit(LINK, order()), null))).not.toContain(LEGAL_BODY_COPY.identity.yourIdentity);
   });
 
+  test("the link panel: the agent's wallet under the identity's line, once the registry names one", () => {
+    const walletLine = fillCopy(LEGAL_BODY_COPY.agentWallet.line, { address: THIRD });
+    const page = text(linkMarkup({ ...kit(LINK, order()), agentWallet: THIRD }));
+    expect(page).toContain(walletLine);
+    expect(page.indexOf(walletLine)).toBeGreaterThan(page.indexOf(line(LIVE_AGENT)));
+    expect(page.indexOf(walletLine)).toBeLessThan(page.indexOf(P.howItWorks));
+    for (const agentWallet of [null, "none", "unreadable"] as const)
+      expect(text(linkMarkup({ ...kit(LINK, order()), agentWallet }))).not.toContain("This agent's wallet");
+  });
+
   test("the pointer panel: the order's identity, while the chain is read and once the call is shown", () => {
     expect(text(pointerMarkup(kit(POINTER, deployed())))).toContain(line(LIVE_AGENT));
     chainAgrees();
