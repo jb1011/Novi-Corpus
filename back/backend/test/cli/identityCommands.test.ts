@@ -685,6 +685,60 @@ describe("identity:record", () => {
     expect(repo.list(guardian)).toHaveLength(1);
   });
 
+  test("while a renewal is under way the guardian is still verified, and the refusal names the pass's expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2026, 10, 10, 13) });
+    human(guardian, "1001");
+    await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
+    // The automatic check's renewal attempt, begun: no names and no result yet.
+    const begun = repo.append(
+      {
+        nullifier: "1001",
+        tenantId: guardian,
+        provider: "stripe",
+        providerRef: "vs_test_0002",
+        subject: "session-example",
+        status: "started",
+        supersedesCheckId: null,
+        startedAt: Date.now(),
+        completedAt: null,
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+        documentCountry: null,
+        documentType: null,
+        documentExpired: null,
+        liveness: null,
+        watchlist: null,
+        reviewReasons: [],
+        environment: "sandbox",
+        synthetic: true,
+        operator: null,
+        operatorOsUser: null,
+      },
+      {
+        kind: "recorded",
+        at: Date.now(),
+        actor: "system",
+        actorOsUser: null,
+        reasonCode: "session_started",
+        reason: null,
+      },
+    );
+
+    expect(
+      await refusal(
+        recordLine(guardian, {
+          "--provider-ref": "vs_test_0003",
+          "--result": "needs_review",
+          "--expect-latest": String(begun.checkId),
+        }),
+      ),
+    ).toBe(
+      "refusing: the guardian is verified until 2029-11-10; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review",
+    );
+    expect(repo.list(guardian)).toHaveLength(2);
+  });
+
   test("record failed with --name-first refuses", async () => {
     human(guardian, "1001");
 

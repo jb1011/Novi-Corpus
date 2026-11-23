@@ -178,6 +178,7 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       const { body, text } = await me(makeApp(door, "production"), VERIFIED);
       expect(body.identity).toEqual({
         required: true,
+        automatic: false,
         state: "verified",
         firstName: FIRST,
         lastName: LAST,
@@ -197,7 +198,7 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       verifiedGuardian(VERIFIED);
       recordHuman(s.store, OTHER, "0xnullifier-other", T0);
       const { body, text } = await me(makeApp(door, "production"), OTHER);
-      expect(body.identity).toEqual({ required: true, state: "none" });
+      expect(body.identity).toEqual({ required: true, automatic: false, state: "none" });
       expect(body.identity).not.toHaveProperty("firstName");
       expect(body.identity).not.toHaveProperty("lastName");
       expect(text).not.toContain(FIRST);
@@ -209,7 +210,7 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       // Another person's World ID verification on the same account, newer than the first.
       recordHuman(s.store, VERIFIED, "0xnullifier-second-human", T0 + DAY);
       const { body, text } = await me(makeApp(door, "production"), VERIFIED);
-      expect(body.identity).toEqual({ required: true, state: "none" });
+      expect(body.identity).toEqual({ required: true, automatic: false, state: "none" });
       expect(text).not.toContain(FIRST);
       expect(text).not.toContain(LAST);
     });
@@ -228,6 +229,7 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       for (const tenantId of [VERIFIED, OTHER])
         expect((await me(app, tenantId)).body.identity, tenantId).toEqual({
           required: true,
+          automatic: false,
           state: "none",
         });
     });
@@ -236,7 +238,11 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       verifiedGuardian(VERIFIED);
       const app = makeApp(door, "sandbox");
       expect((await me(app, VERIFIED)).body.identity.required).toBe(false);
-      expect((await me(app, OTHER)).body.identity).toEqual({ required: false, state: "none" });
+      expect((await me(app, OTHER)).body.identity).toEqual({
+        required: false,
+        automatic: false,
+        state: "none",
+      });
     });
 
     test("a record sealed under a key no longer configured: 503 identity_unavailable, and a CRITICAL ops line with ids only", async () => {
@@ -287,12 +293,84 @@ describe.each(["legalBodyOrders", "customerCompanies"] as const)(
       }
     });
 
+    test("the block says whether the check is automatic: true when the deps say so, false otherwise", async () => {
+      verifiedGuardian(VERIFIED);
+      for (const environment of ["sandbox", "production"] as const) {
+        const automatic = makeApp(door, environment, { ...identity, automatic: true });
+        expect((await me(automatic, VERIFIED)).body.identity, environment).toMatchObject({
+          automatic: true,
+          state: "verified",
+        });
+        expect((await me(automatic, OTHER)).body.identity, environment).toEqual({
+          required: environment === "production",
+          automatic: true,
+          state: "none",
+        });
+        const operator = makeApp(door, environment, { ...identity, automatic: false });
+        expect((await me(operator, VERIFIED)).body.identity.automatic, environment).toBe(false);
+        // Absent reads false.
+        expect((await me(makeApp(door, environment), VERIFIED)).body.identity.automatic).toBe(
+          false,
+        );
+      }
+    });
+
+    test("a renewal under way keeps the earlier pass counting: verified, with the pass's names and dates", async () => {
+      verifiedGuardian(VERIFIED);
+      // The automatic check's renewal attempt, begun: no names and no result yet.
+      repo.append(
+        {
+          nullifier: `0xnullifier-${VERIFIED}`,
+          tenantId: VERIFIED,
+          provider: "stripe",
+          providerRef: "vs_renewal",
+          subject: "session-example",
+          status: "started",
+          supersedesCheckId: null,
+          startedAt: NOW - DAY,
+          completedAt: null,
+          expiresAt: null,
+          names: null,
+          nameHmac: null,
+          documentCountry: null,
+          documentType: null,
+          documentExpired: null,
+          liveness: null,
+          watchlist: null,
+          reviewReasons: [],
+          environment: "production",
+          synthetic: false,
+          operator: null,
+          operatorOsUser: null,
+        },
+        {
+          kind: "recorded",
+          at: NOW - DAY,
+          actor: "system",
+          actorOsUser: null,
+          reasonCode: "session_started",
+          reason: null,
+        },
+      );
+      const { body } = await me(makeApp(door, "production"), VERIFIED);
+      expect(body.identity).toEqual({
+        required: true,
+        automatic: false,
+        state: "verified",
+        firstName: FIRST,
+        lastName: LAST,
+        verifiedAt: T0,
+        expiresAt: EXPIRES,
+      });
+    });
+
     test("without the identity record wired (a box with no PII key): the record-less answer", async () => {
       verifiedGuardian(VERIFIED);
       for (const environment of ["sandbox", "production"] as const) {
         const { body } = await me(makeApp(door, environment, null), VERIFIED);
         expect(body.identity, environment).toEqual({
           required: environment === "production",
+          automatic: false,
           state: "none",
         });
       }

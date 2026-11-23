@@ -158,6 +158,21 @@ describe("SqliteIdentityRepository", () => {
     ]);
   });
 
+  test("latestPassed returns the tenant's passed row with the highest check_id, whatever came after it", () => {
+    repo.append(row(tenant(1), "passed"), event("recorded")); // 1
+    repo.append(row(tenant(2), "passed"), event("recorded")); // 2
+    repo.append(row(tenant(1), "passed", { supersedesCheckId: 1 }), event("recorded")); // 3
+    repo.append(row(tenant(1), "started"), event("recorded")); // 4
+    repo.append(row(tenant(1), "failed", { reviewReasons: [] }), event("recorded")); // 5
+    repo.append(row(tenant(3), "started"), event("recorded")); // 6
+
+    expect(repo.latest(tenant(1))?.checkId).toBe(5);
+    expect(repo.latestPassed(tenant(1))).toEqual(repo.findById(3));
+    expect(repo.latestPassed(tenant(2))?.checkId).toBe(2);
+    expect(repo.latestPassed(tenant(3))).toBeUndefined();
+    expect(repo.latestPassed(tenant(9))).toBeUndefined();
+  });
+
   test("passedElsewhere finds another tenant's latest passed row with the same hmac and country, and ignores a superseded one", () => {
     repo.append(row(tenant(1), "passed"), event("recorded")); // 1: latest, passed
     repo.append(row(tenant(2), "passed"), event("recorded")); // 2: superseded by 3
@@ -351,6 +366,7 @@ describe("SqliteIdentityRepository", () => {
     const checksummed = /^identity check: tenantId must be an EIP-55 checksummed address$/;
     expect(() => repo.append(row(lower, "passed"), event("recorded"))).toThrow(checksummed);
     expect(() => repo.latest(lower)).toThrow(checksummed);
+    expect(() => repo.latestPassed(lower)).toThrow(checksummed);
     expect(() => repo.list(lower)).toThrow(checksummed);
     expect(() => repo.passedElsewhere(HMAC_A, "FRA", lower)).toThrow(
       /^identity check: exceptTenantId must be an EIP-55 checksummed address$/,

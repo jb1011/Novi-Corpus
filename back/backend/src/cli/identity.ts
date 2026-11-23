@@ -15,6 +15,7 @@ import {
 import {
   type IdentityDeps,
   agreesWithWorld,
+  currentRecord,
   identityState,
   namesOfRecord,
 } from "../identity/state";
@@ -435,16 +436,15 @@ export function recordIdentity(
     const nullifier = guardianNullifier(world, tenantId, environment);
     const latest = repo.latest(tenantId);
     assertExpectedLatest(tenantId, latest, expected);
-    // The latest row decides the state: a failed check or a review on top of a valid pass would
-    // lock a verified guardian out of every production door. A pass is a renewal, or a new check
-    // after a change of name: it supersedes the current one, under every rule of a pass.
-    if (
-      result !== "passed" &&
-      latest !== undefined &&
-      identityState(repo, tenantId, nowMs) === "verified"
-    )
+    // A verified guardian takes only a pass here: a renewal, or a new check after a change of
+    // name, which supersedes the current one under every rule of a pass. A failed check or a
+    // review typed on top of a valid pass is refused. The record the guardian is verified on is
+    // the latest row, or while a renewal is under way the pass it renews (`currentRecord`), so the
+    // date is that pass's.
+    const current = currentRecord(repo, tenantId, nowMs);
+    if (result !== "passed" && current !== undefined)
       refuse(
-        `the guardian is verified until ${isoDate(latest.expiresAt as number)}; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review`,
+        `the guardian is verified until ${isoDate(current.expiresAt as number)}; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review`,
       );
     const { row: planned, duplicateOf } = asRefusal(() =>
       planCheck(

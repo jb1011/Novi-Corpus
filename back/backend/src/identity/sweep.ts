@@ -49,7 +49,8 @@ function osUserIfReadable(): string | null {
 /**
  * The names due for erasure under the retention rules (`erasureCandidates`: superseded or
  * abandoned after `IDENTITY_FAILED_RETENTION_DAYS`, a passed check unused after
- * `IDENTITY_UNUSED_RETENTION_DAYS`, never a tenant with a live company, never a review), and with
+ * `IDENTITY_UNUSED_RETENTION_DAYS`, the pass a renewal under way still counts held to the unused
+ * rule as a latest pass is, never a tenant with a live company, never a review), and with
  * `yes` their erasure, each with a `names_erased` event by `system`, in ONE immediate transaction.
  * The scheduler runs it daily; `identity:sweep` is the manual path.
  */
