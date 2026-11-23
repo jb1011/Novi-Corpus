@@ -5,13 +5,16 @@ import {Test} from "forge-std/Test.sol";
 import {ControllerRelayHarness} from "./helpers/ControllerRelayHarness.sol";
 import {DeployLegalBodyFactory} from "../script/DeployLegalBodyFactory.s.sol";
 import {NoviController} from "../src/NoviController.sol";
+import {LegalBody} from "../src/LegalBody.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
 import {LegalManager} from "../src/LegalManager.sol";
 import {LegalManagerFactory} from "../src/LegalManagerFactory.sol";
 import {IIdentityRegistry} from "../src/interfaces/IIdentityRegistry.sol";
+import {ERC1967Utils} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Utils.sol";
 
 /// @notice Rehearses the legal-body factory against live Arc testnet state: the live identity
-///         registry, clones of the live LegalManager implementation, and the live controller
+///         registry, bodies created on a LegalBody implementation deployed on the fork, and
+///         the live controller
 ///         with its real admin performing the pin-then-grant ceremony. Nothing is broadcast.
 contract LegalBodyFactoryForkTest is ControllerRelayHarness {
     address internal constant LIVE_REGISTRY = 0x8004A818BFB912233c491871b3d84c89A494BD9e;
@@ -20,6 +23,8 @@ contract LegalBodyFactoryForkTest is ControllerRelayHarness {
 
     IIdentityRegistry internal registry = IIdentityRegistry(LIVE_REGISTRY);
     LegalBodyFactory internal factory;
+    LegalBody internal impl;
+    /// @dev The LegalManager implementation the full product's beacon serves on testnet.
     address internal liveImpl;
     bool internal forked;
 
@@ -30,6 +35,7 @@ contract LegalBodyFactoryForkTest is ControllerRelayHarness {
     uint256 internal agentId;
     bytes32 internal constant OA = keccak256("oa-manifest-v1");
     uint256 internal constant DELAY = 48 hours;
+    bytes32 internal _lastLinkDigest;
 
     modifier onlyFork() {
         vm.skip(!forked);
@@ -60,7 +66,8 @@ contract LegalBodyFactoryForkTest is ControllerRelayHarness {
         liveImpl = LegalManagerFactory(LIVE_FULL_FACTORY).beacon().implementation();
         require(liveImpl.code.length > 0, "live implementation missing");
 
-        factory = new LegalBodyFactory(liveImpl, LIVE_REGISTRY, LIVE_CONTROLLER);
+        impl = new LegalBody();
+        factory = new LegalBodyFactory(address(impl), LIVE_REGISTRY, LIVE_CONTROLLER);
         _minimalCeremony(address(factory));
 
         idOwner = vm.addr(ownerPk);
@@ -76,7 +83,8 @@ contract LegalBodyFactoryForkTest is ControllerRelayHarness {
 
     function _createViaLiveController() internal returns (address body) {
         uint256 deadline = block.timestamp + 1 hours;
-        bytes memory link = _sig(ownerPk, factory.linkDigest(agentId, guardian, DELAY, OA, deadline));
+        _lastLinkDigest = factory.linkDigest(agentId, guardian, DELAY, OA, deadline);
+        bytes memory link = _sig(ownerPk, _lastLinkDigest);
         bytes memory ret = _relayOk(
             executor,
             address(factory),
@@ -85,16 +93,16 @@ contract LegalBodyFactoryForkTest is ControllerRelayHarness {
         body = abi.decode(ret, (address));
     }
 
-    function test_fork_createClonesLiveImplementation() public onlyFork {
+    function test_fork_createIsProxyOfVersionOne() public onlyFork {
         address body = _createViaLiveController();
-        assertEq(body.code.length, 45);
-        // EIP-1167 runtime embeds the implementation at bytes [10, 30).
-        bytes memory code = body.code;
-        address embedded;
-        assembly {
-            embedded := shr(96, mload(add(code, 0x2a)))
-        }
-        assertEq(embedded, liveImpl);
+        assertEq(body, factory.predictLegalBody(_lastLinkDigest), "the predicted address");
+        assertEq(
+            address(uint160(uint256(vm.load(body, ERC1967Utils.IMPLEMENTATION_SLOT)))),
+            address(impl),
+            "an ERC-1967 proxy of version 1"
+        );
+        assertEq(factory.versionOf(body), 1);
+        assertEq(LegalBody(payable(body)).initializedVersion(), 1);
         assertEq(LegalManager(payable(body)).manager(), address(factory));
         assertEq(uint8(LegalManager(payable(body)).status()), 0);
     }
@@ -162,9 +170,18 @@ contract LegalBodyFactoryForkTest is ControllerRelayHarness {
         assertEq(oa, hs[1]);
     }
 
-    function test_fork_liveImplementationConstructs() public onlyFork {
-        LegalBodyFactory f = new LegalBodyFactory(liveImpl, LIVE_REGISTRY, LIVE_CONTROLLER);
-        assertEq(f.implementation(), liveImpl);
+    function test_fork_freshLegalBodyImplementationConstructs() public onlyFork {
+        LegalBody fresh = new LegalBody();
+        LegalBodyFactory f = new LegalBodyFactory(address(fresh), LIVE_REGISTRY, LIVE_CONTROLLER);
+        assertEq(f.implementation(), address(fresh));
+        assertEq(f.versionCount(), 1);
+    }
+
+    /// The live LegalManager implementation has no upgrade entry point: a body created on it
+    /// could never leave it, so it is refused.
+    function test_fork_liveLegalManagerRefusedAsImplementation() public onlyFork {
+        vm.expectRevert(abi.encodeWithSelector(LegalBodyFactory.NotImplementation.selector, liveImpl));
+        new LegalBodyFactory(liveImpl, LIVE_REGISTRY, LIVE_CONTROLLER);
     }
 
     /// A live full-product body is a BeaconProxy behind the live, upgradeable beacon. Used as

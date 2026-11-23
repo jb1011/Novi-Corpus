@@ -41,6 +41,9 @@ const TARGETS: Record<string, string> = {
   // The legal-body factory: the backend relays createLegalBody and the guardian-signed amendment
   // schedule through the controller, and reads the on-chain link predicate from it.
   legalBodyFactoryAbi: "LegalBodyFactory.sol/LegalBodyFactory.json",
+  // The logic contract behind every body the factory creates: LegalManager plus the upgrade
+  // entry point. Its ABI carries the ERC-1967 `Upgraded` event a body emits when its code moves.
+  legalBodyAbi: "LegalBody.sol/LegalBody.json",
   // Test-only doubles (used by anvil integration tests):
   mockIdentityRegistryAbi: "MockIdentityRegistry.sol/MockIdentityRegistry.json",
   mockUsdcAbi: "MockUSDC.sol/MockUSDC.json",

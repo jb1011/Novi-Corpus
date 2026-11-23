@@ -19,7 +19,14 @@ remappings = [
 # selector surface from out/NoviController.sol/NoviController.json (`methodIdentifiers`) instead of
 # a hand-pinned list, so the selector-disjointness test can never be checked against a stale copy
 # of the ABI. Read-only and scoped to the output directory.
-fs_permissions = [{ access = "read", path = "./out" }]
+fs_permissions = [
+    { access = "read", path = "./out" },
+    # The committed storage-layout snapshots of the legal body's versions, read by the layout test.
+    { access = "read", path = "./test/layout" },
+]
+# The artifacts carry each contract's storage layout, so a test can compare the layout of every
+# version of the legal body's code with the version before it.
+extra_output = ["storageLayout"]
 
 [rpc_endpoints]
 arc_testnet = "${ARC_TESTNET_RPC_URL}"

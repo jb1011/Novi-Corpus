@@ -107,7 +107,7 @@ export function revokeSelector(p: {
 }
 
 /**
- * The legal-body stack on a local anvil: the mock identity registry, the LegalManager
+ * The legal-body stack on a local anvil: the mock identity registry, the LegalBody
  * implementation, the REAL NoviController with no standing grant, and the REAL LegalBodyFactory
  * owned by that controller. Then the admin's ceremony: each factory selector is pinned to the
  * factory first, and only then granted to the executor, so no selector is ever relayable to
@@ -120,7 +120,7 @@ export async function deployLegalBodyStack(p: {
   executor: Address;
 }): Promise<LegalBodyStack> {
   const registry = await deployContract(p.deployer, p.pub, "MockIdentityRegistry");
-  const implementation = await deployContract(p.deployer, p.pub, "LegalManager");
+  const implementation = await deployContract(p.deployer, p.pub, "LegalBody");
   const controller = await deployContract(p.deployer, p.pub, "NoviController", [
     86_400, // the admin handover delay
     p.admin.account!.address,
