@@ -112,6 +112,8 @@ export interface IdentitySessionRepository {
   byProviderRef(providerRef: string): IdentitySession | undefined;
   /** The tenant's open session, the newest if there were ever two. */
   openForTenant(tenantId: string): IdentitySession | undefined;
+  /** The tenant's newest session, open or closed (the operator's `identity:session`). */
+  latestForTenant(tenantId: string): IdentitySession | undefined;
   /** The tenant's sessions created at or after `sinceMs`, closed ones included. */
   countCreatedSince(tenantId: string, sinceMs: number): number;
   /** The read of an open session; refused on a closed one, whose completion it would overwrite. */
@@ -423,6 +425,12 @@ export class SqliteIdentitySessionRepository implements IdentitySessionRepositor
         `SELECT * FROM identity_sessions WHERE tenant_id = ? AND closed_at IS NULL
           ORDER BY created_at DESC, rowid DESC LIMIT 1`,
       ),
+      // No index serves it (the tenant's index holds open sessions only): an operator's read, by
+      // hand. The rowid orders two sessions created in one ms.
+      latestForTenant: db.prepare(
+        `SELECT * FROM identity_sessions WHERE tenant_id = ?
+          ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+      ),
       countCreatedSince: db.prepare(
         "SELECT COUNT(*) AS n FROM identity_sessions WHERE tenant_id = ? AND created_at >= ?",
       ),
@@ -533,6 +541,11 @@ export class SqliteIdentitySessionRepository implements IdentitySessionRepositor
 
   openForTenant(tenantId: string): IdentitySession | undefined {
     const r = this.stmts.openForTenant.get(tenantIdShape(tenantId)) as Row | undefined;
+    return r ? toSession(r) : undefined;
+  }
+
+  latestForTenant(tenantId: string): IdentitySession | undefined {
+    const r = this.stmts.latestForTenant.get(tenantIdShape(tenantId)) as Row | undefined;
     return r ? toSession(r) : undefined;
   }
 

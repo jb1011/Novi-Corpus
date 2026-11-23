@@ -1,7 +1,7 @@
 /**
  * The operator's commands over the guardian's identity record: `identity:record`, `identity:accept`,
- * `identity:refuse`, `identity:revoke`, `identity:correct-name`, `identity:show` and
- * `identity:sweep`.
+ * `identity:refuse`, `identity:revoke`, `identity:correct-name`, `identity:show`, `identity:sweep`
+ * and `identity:session` (the automatic check's session, read only).
  *
  * Each command opens the database through the configuration, so every test works in a temporary
  * data directory and writes its World rows through its own connection over the same file. With
@@ -25,7 +25,8 @@ import {
 } from "../../src/cli/identity";
 import { buildCli } from "../../src/cli/index";
 import { type Config, loadConfig } from "../../src/config/env";
-import { nameHmac, parsePiiKey } from "../../src/formation/pii";
+import { encryptText, nameHmac, parsePiiKey } from "../../src/formation/pii";
+import { IDENTITY_SESSION_AAD } from "../../src/identity/sessions";
 import { sweepIdentityNames } from "../../src/identity/sweep";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
@@ -33,6 +34,10 @@ import {
   type NewGuardianIdentityCheck,
   SqliteIdentityRepository,
 } from "../../src/persistence/identityRepository";
+import {
+  SqliteIdentitySessionRepository,
+  type TypedNames,
+} from "../../src/persistence/identitySessionRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
 import {
   ANVIL_ACCOUNT_2,
@@ -2139,6 +2144,165 @@ describe("identity:sweep", () => {
       sweepIdentityNames(db, config(), { yes: true, nowMs: Date.now() + 31 * DAY }),
     ).toMatchObject({ erased: true, count: 1, rules: { superseded: 1 } });
     expect(repo.findById(review.checkId)?.names).toBeNull();
+  });
+});
+
+// ── identity:session ──────────────────────────────────────────────────────────────────────────
+
+describe("identity:session", () => {
+  /** A nullifier no timestamp or id could contain, so a match in the output is a leak. */
+  const NULLIFIER = "0x5eed00d4";
+  /** Our session ids: 32 lower-case hex digits. */
+  const FIRST_SESSION = "ab".repeat(16);
+  const SECOND_SESSION = "cd".repeat(16);
+
+  /** The typed names as the automatic check seals them: the fixture's, under the PII key. */
+  function typedNames(sessionId: string): TypedNames {
+    const ring = { current: parsePiiKey(PII_KEY, "FORMATION_PII_KEY") };
+    const seal = (field: "first" | "last", value: string) => {
+      const { ciphertext, iv } = encryptText(ring, value, IDENTITY_SESSION_AAD(sessionId, field));
+      return { ciphertext, iv };
+    };
+    return { first: seal("first", FIRST), last: seal("last", LAST), keyId: ring.current.id };
+  }
+
+  /** A session opened for the guardian as the automatic check opens one, beside its started row. */
+  function opened(sessionId: string, providerRef: string, createdAt: number): TypedNames {
+    const started = renewalBegun(guardian, NULLIFIER, { providerRef, subject: sessionId });
+    const typed = typedNames(sessionId);
+    new SqliteIdentitySessionRepository(db).insert({
+      sessionId,
+      tenantId: guardian,
+      nullifier: NULLIFIER,
+      provider: "stripe",
+      providerRef,
+      environment: "sandbox",
+      livemode: false,
+      returnPath: "/legal-body",
+      createdAt,
+      startedCheckId: started.checkId,
+      typedNames: typed,
+    });
+    return typed;
+  }
+
+  /** Neither a name, the nullifier nor a byte of the sealed names, in any spelling. */
+  function holdsNothingSealed(output: unknown, typed: TypedNames): void {
+    const text = JSON.stringify(output);
+    expect(text).not.toMatch(SURNAME);
+    expect(text).not.toMatch(new RegExp(FIRST, "i"));
+    expect(text).not.toContain(NULLIFIER);
+    expect(text).not.toMatch(/ciphertext|"iv"|Buffer/);
+    for (const name of [typed.first, typed.last])
+      for (const bytes of [name.ciphertext, name.iv])
+        for (const spelling of [bytes.toString("base64"), bytes.toString("hex")])
+          expect(text).not.toContain(spelling);
+  }
+
+  test("prints the open session's ids, dates, status, attempts and redaction fields; never a name or a ciphertext; writes no ops line", async () => {
+    const createdAt = Date.now() - DAY;
+    const typed = opened(FIRST_SESSION, "vs_test_0011", createdAt);
+    const started = latestOf(guardian);
+    const sessions = new SqliteIdentitySessionRepository(db);
+    sessions.recordRead(FIRST_SESSION, {
+      at: createdAt + 60_000,
+      status: "requires_input",
+      lastErrorCode: "document_unverified_other",
+      failedAttempts: 1,
+      reportId: "vr_test_0011",
+      dobUnavailable: true,
+      screenPendingSince: createdAt + 30_000,
+    });
+
+    const { output, ops } = await run(["identity:session", guardian.toLowerCase()]);
+
+    expect(ops).toEqual([]);
+    expect(output).toEqual({
+      tenantId: guardian,
+      shown: "open",
+      session: {
+        sessionId: FIRST_SESSION,
+        provider: "stripe",
+        providerRef: "vs_test_0011",
+        reportId: "vr_test_0011",
+        startedCheckId: started.checkId,
+        completedCheckId: null,
+        environment: "sandbox",
+        livemode: false,
+        returnPath: "/legal-body",
+        createdAt,
+        lastReadAt: createdAt + 60_000,
+        closedAt: null,
+        updatedAt: createdAt + 60_000,
+        lastStatus: "requires_input",
+        lastErrorCode: "document_unverified_other",
+        failedAttempts: 1,
+        attemptsPerSession: 3,
+        dobUnavailable: true,
+        screenPendingSince: createdAt + 30_000,
+        typedNamesHeld: true,
+        typedErasedAt: null,
+        redactDueAt: null,
+        redactionRequestedAt: null,
+        redactedAt: null,
+      },
+    });
+    holdsNothingSealed(output, typed);
+  });
+
+  test("with no open session it prints the newest closed one and says so; with none at all, none", async () => {
+    const empty = await run(["identity:session", guardian]);
+    expect(empty.output).toEqual({ tenantId: guardian, shown: "none", session: null });
+
+    const sessions = new SqliteIdentitySessionRepository(db);
+    const createdAt = Date.now() - 3 * DAY;
+    opened(FIRST_SESSION, "vs_test_0011", createdAt);
+    sessions.close(FIRST_SESSION, {
+      at: createdAt + DAY,
+      completedCheckId: null,
+      reportId: null,
+      redactDueAt: createdAt + 8 * DAY,
+    });
+    const typed = opened(SECOND_SESSION, "vs_test_0012", createdAt + DAY);
+    sessions.close(SECOND_SESSION, {
+      at: createdAt + 2 * DAY,
+      completedCheckId: null,
+      reportId: "vr_test_0012",
+      redactDueAt: createdAt + 9 * DAY,
+    });
+    sessions.markRedactionRequested(SECOND_SESSION, createdAt + 2 * DAY + 1);
+
+    const closed = await run(["identity:session", guardian]);
+    expect(closed.ops).toEqual([]);
+    expect(closed.output).toMatchObject({
+      tenantId: guardian,
+      shown: "newest_closed",
+      session: {
+        sessionId: SECOND_SESSION,
+        providerRef: "vs_test_0012",
+        reportId: "vr_test_0012",
+        closedAt: createdAt + 2 * DAY,
+        typedNamesHeld: false,
+        typedErasedAt: createdAt + 2 * DAY,
+        redactDueAt: createdAt + 9 * DAY,
+        redactionRequestedAt: createdAt + 2 * DAY + 1,
+        redactedAt: null,
+      },
+    });
+    holdsNothingSealed(closed.output, typed);
+
+    // Another tenant's sessions are not this one's.
+    expect((await run(["identity:session", second])).output).toEqual({
+      tenantId: second,
+      shown: "none",
+      session: null,
+    });
+  });
+
+  test("a tenant that is not a wallet address is refused", async () => {
+    expect(await refusal(["identity:session", "not-a-wallet"])).toBe(
+      "refusing: <tenantId> must be a wallet address",
+    );
   });
 });
 

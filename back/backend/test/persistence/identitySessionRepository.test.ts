@@ -126,6 +126,27 @@ describe("SqliteIdentitySessionRepository", () => {
     expect(repo.openForTenant(tenant(7))?.sessionId).toBe(sid(2));
   });
 
+  test("latestForTenant reads the tenant's newest session, open or closed", () => {
+    expect(repo.latestForTenant(tenant(7))).toBeUndefined();
+    repo.insert(session(1, { tenantId: tenant(7) }));
+    repo.close(sid(1), CLOSE);
+    repo.insert(session(2, { tenantId: tenant(7), createdAt: T0 + 2 * DAY }));
+    repo.close(sid(2), { ...CLOSE, at: T0 + 3 * DAY });
+    repo.insert(session(3)); // another tenant's, newer
+    repo.close(sid(3), { ...CLOSE, at: T0 + 4 * DAY });
+
+    expect(repo.latestForTenant(tenant(7))).toMatchObject({
+      sessionId: sid(2),
+      closedAt: T0 + 3 * DAY,
+    });
+    // Two sessions created in one millisecond: the later insert is the newer.
+    repo.insert(session(4, { tenantId: tenant(7), createdAt: T0 + 2 * DAY }));
+    expect(repo.latestForTenant(tenant(7))).toMatchObject({ sessionId: sid(4), closedAt: null });
+    expect(() => repo.latestForTenant(tenant(7).toLowerCase())).toThrow(
+      "identity session: tenantId must be an EIP-55 checksummed address",
+    );
+  });
+
   test("a second open session for one tenant is refused, and nothing is written", () => {
     repo.insert(session(1, { tenantId: tenant(7) }));
     expect(() => repo.insert(session(2, { tenantId: tenant(7) }))).toThrow(

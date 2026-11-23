@@ -40,6 +40,7 @@ import {
   SqliteIdentityRepository,
   validateIdentityCheck,
 } from "../persistence/identityRepository";
+import { SqliteIdentitySessionRepository } from "../persistence/identitySessionRepository";
 import { SqliteWorldStore } from "../persistence/worldStore";
 import { readNames, withPromptedNames } from "./namesPrompt";
 import {
@@ -58,7 +59,8 @@ import {
  * THE OPERATOR'S COMMANDS over the guardian's identity record (slice I-0: the operator reads the
  * provider's dashboard and records what it shows, from the box): show a tenant's record, record a
  * check, decide a review (accept or refuse it), revoke a passed check, correct the name of record,
- * and erase the names the retention rules say are due.
+ * and erase the names the retention rules say are due. `identity:session` shows the automatic
+ * check's session of a tenant, read only.
  *
  * World ID proves one real person; the identity check says who.
  *
@@ -71,8 +73,8 @@ import {
  *    view another operator has since changed, or replayed from the shell history, is refused;
  *  - the rules and the write run in ONE immediate transaction, so nothing lands between them;
  *  - each row written has one ops line, which carries ids, states, codes and the operator: never a
- *    name, the nullifier or a reason's text. `identity:show` writes no ops line at all, and is the
- *    only command that prints a name.
+ *    name, the nullifier or a reason's text. `identity:show` and `identity:session` write no ops
+ *    line at all, and `identity:show` is the only command that prints a name.
  *
  * Rows and events are kept for ever: a reason must hold no personal data, a name above all.
  */
@@ -958,6 +960,62 @@ export function showIdentity(
   };
 }
 
+// ── identity:session ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * What `identity:session` prints; it writes nothing, and no ops line: the tenant's open session of
+ * the automatic check, or its newest closed one when none is open (`shown`: `open`,
+ * `newest_closed`, or `none` with `session: null`), with its ids, dates, status, attempts,
+ * redaction fields, `dobUnavailable` and `screenPendingSince`.
+ *
+ * Never the sealed typed names, not even as ciphertext (only whether the row still holds them,
+ * and when they were erased), and never the nullifier. It needs no PII key: nothing is decrypted.
+ * The record the session writes is `identity:show`'s.
+ */
+export function showIdentitySession(
+  db: Database.Database,
+  cfg: Config,
+  tenantArg: string,
+): Record<string, unknown> {
+  const tenantId = parseTenant(tenantArg);
+  const sessions = new SqliteIdentitySessionRepository(db);
+  const open = sessions.openForTenant(tenantId);
+  const session = open ?? sessions.latestForTenant(tenantId);
+  return {
+    tenantId,
+    shown: open !== undefined ? "open" : session !== undefined ? "newest_closed" : "none",
+    session:
+      session === undefined
+        ? null
+        : {
+            sessionId: session.sessionId,
+            provider: session.provider,
+            providerRef: session.providerRef,
+            reportId: session.reportId,
+            startedCheckId: session.startedCheckId,
+            completedCheckId: session.completedCheckId,
+            environment: session.environment,
+            livemode: session.livemode,
+            returnPath: session.returnPath,
+            createdAt: session.createdAt,
+            lastReadAt: session.lastReadAt,
+            closedAt: session.closedAt,
+            updatedAt: session.updatedAt,
+            lastStatus: session.lastStatus,
+            lastErrorCode: session.lastErrorCode,
+            failedAttempts: session.failedAttempts,
+            attemptsPerSession: cfg.identity.attemptsPerSession,
+            dobUnavailable: session.dobUnavailable,
+            screenPendingSince: session.screenPendingSince,
+            typedNamesHeld: session.typedNames !== null,
+            typedErasedAt: session.typedErasedAt,
+            redactDueAt: session.redactDueAt,
+            redactionRequestedAt: session.redactionRequestedAt,
+            redactedAt: session.redactedAt,
+          },
+  };
+}
+
 // ── Registration ─────────────────────────────────────────────────────────────────────────────
 
 const codesHelp = (codes: readonly string[]): string => codes.join(", ");
@@ -971,6 +1029,16 @@ export function registerIdentityCommands(program: Command): void {
     )
     .action((tenantId: string) =>
       withDatabase((db, _docStoreDir, cfg) => print(showIdentity(db, cfg, tenantId))),
+    );
+
+  program
+    .command("identity:session")
+    .argument("<tenantId>", TENANT_HELP)
+    .description(
+      "show a guardian's open identity check session, or the newest closed one when none is open: its ids, dates, status, attempts and redaction, never a name. Writes no ops line",
+    )
+    .action((tenantId: string) =>
+      withDatabase((db, _docStoreDir, cfg) => print(showIdentitySession(db, cfg, tenantId))),
     );
 
   program
