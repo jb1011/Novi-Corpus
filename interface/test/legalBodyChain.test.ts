@@ -30,20 +30,24 @@ import {
   POINTER_VERSION,
   potExecCall,
   potSetupCall,
+  potTransferCall,
   registerCall,
   sendAllowedCall,
   TRANSFER_TOPIC,
   walletKindOf,
   type CallContext,
   type PotCallContext,
+  type WalletKind,
   type WriteRequest,
 } from "@/lib/legalBody/chain";
 import {
   erc20Abi,
   multicall3Abi,
   ownerApprovalSignature,
+  POT_AGENT_GAS_MAX_UNITS,
   POT_CEILING_MAX_USDC,
   POT_FUND_MAX_UNITS,
+  POT_TRANSFER_GAS_CAP,
   potAddresses,
   potSetupCalls,
   safeAbi,
@@ -971,11 +975,12 @@ type Restore = Extract<PotCallContext, { kind: "restore" }>;
 type Exec = Change | Stop | Withdraw | Restore;
 
 /** V5: 50 USDC in each thirty-day period, salt nonce 1, 60 USDC for the pot and 0.1 USDC of fee
- *  money for the agent's key. */
+ *  money for the agent's key, a plain key (no code, as the real run's agent key). */
 const SETUP_V5: Setup = {
   kind: "setup",
   guardian: G,
   agentWallet: A,
+  agentWalletKind: "key",
   ceilingUnits: BigInt(50_000_000),
   saltNonce: BigInt(1),
   fundWei: BigInt("60000000000000000000"),
@@ -1780,8 +1785,18 @@ describe("the allowlist refuses a pot call", () => {
     expect(potSetupCall(config, odd({ ...CHANGE_V6 }) as Setup, SETUP_GAS)).toEqual(refused("no_pot_context"));
   });
 
-  test("a function outside the six takes the registry's path, and is refused", () => {
-    const names = ["aggregate3", "aggregate", "multicall", "execTransactionFromModule", "enableModule", "setup", "transfer"];
+  test("a function outside the seven takes the registry's path, and is refused", () => {
+    // `transfer` is one of the seven since the USDC transfers: its refusals are in their block.
+    const names = [
+      "aggregate3",
+      "aggregate",
+      "multicall",
+      "execTransactionFromModule",
+      "enableModule",
+      "setup",
+      "transferFrom",
+      "approve",
+    ];
     for (const functionName of names) {
       const fn = functionName as unknown as WriteRequest["functionName"];
       // The registry's rules, in their order: a value first, then the registry's address.
@@ -1973,6 +1988,887 @@ describe("sendAllowedCall, the pot's calls", () => {
       expect(out.ok).toBe(true);
       expect(writeContract).toHaveBeenCalledWith(goodPointer());
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The company's pot: the two USDC transfers, "Add money" and "Send fee money"
+// ---------------------------------------------------------------------------------------------
+
+type AddMoney = Extract<PotCallContext, { kind: "add_money" }>;
+type FeeMoney = Extract<PotCallContext, { kind: "fee_money" }>;
+type Transfer = AddMoney | FeeMoney;
+
+/** V14: 5 USDC for the real Safe, in units. */
+const ADD_V14: AddMoney = { kind: "add_money", pot: REAL_SAFE, guardian: G, amountUnits: BigInt(5_000_000) };
+/** V15: 0.1 USDC of fee money for the agent's key, a plain key (no code). */
+const FEE_V15: FeeMoney = {
+  kind: "fee_money",
+  guardian: G,
+  agentWallet: A,
+  agentHasCode: false,
+  amountUnits: BigInt(100_000),
+};
+const V4_HASH = "0x50c45965c858bc26d42cfe3d36b6a90e33a0dca0a984b03af5e41112a9d23e73" as const;
+const V5_HASH = "0xb5141445053d556060d1ea2ca1cb75be1d85193cc326b949272fff21238a772d" as const;
+const V14_HASH = "0x6269aa34f7e2541c8a744afcb67cfe5d56fe010b0019d20866a2d1ae6bd4e168" as const;
+const V15_HASH = "0x81c73e55a126dfa49b01a558cb943527c09e803ac8ae17fa26f2b84a6532ab10" as const;
+const TRANSFER_GAS = BigInt(65_000);
+const BOTH: Transfer[] = [ADD_V14, FEE_V15];
+
+/** A transfer, as a screen builds it. */
+function transferReq(p: Transfer, gas: bigint = TRANSFER_GAS): WriteRequest {
+  const req = potTransferCall(config, p, gas);
+  if ("ok" in req) throw new Error(`the transfer was refused: ${req.problem}`);
+  return req;
+}
+
+describe("the allowlist takes the two USDC transfers", () => {
+  test("V14: add money to the noted pot is accepted, and its data is V14's bytes (5000000 units, never wei)", () => {
+    const ctx = { kind: "add_money", pot: REAL_SAFE, guardian: G, amountUnits: BigInt(5_000_000) } as const;
+    const req = potTransferCall(config, ctx, BigInt(65_000)) as WriteRequest;
+    const a = allowedCall(req, { config, order: linked(), pot: ctx });
+    expect(a.ok && keccak256(a.data)).toBe("0x6269aa34f7e2541c8a744afcb67cfe5d56fe010b0019d20866a2d1ae6bd4e168");
+    expect(req.value ?? BigInt(0)).toBe(BigInt(0));
+    // 68 bytes: `transfer` on the table's USDC over the pinned ABI, to the pot, the units, the gas.
+    pinned(accepted(req, potCtx(ADD_V14)), 68, V14_HASH);
+    expect(req).toEqual({
+      chainId: CHAIN,
+      address: T.usdc,
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [REAL_SAFE, BigInt(5_000_000)],
+      gas: TRANSFER_GAS,
+    });
+    expect(req.abi).toBe(erc20Abi);
+    expect("value" in req).toBe(false);
+    expect(decodeFunctionData({ abi: erc20Abi, data: accepted(req, potCtx(ADD_V14)) }).args).toEqual([
+      REAL_SAFE,
+      BigInt(5_000_000),
+    ]);
+  });
+
+  test("V15: fee money of 0.1 USDC to the agent's key is accepted with V15's data", () => {
+    const req = transferReq(FEE_V15);
+    const a = allowedCall(req, { config, order: linked(), pot: FEE_V15 });
+    expect(a.ok && keccak256(a.data)).toBe(V15_HASH);
+    pinned(accepted(req, potCtx(FEE_V15)), 68, V15_HASH);
+    expect(req).toEqual({
+      chainId: CHAIN,
+      address: T.usdc,
+      abi: erc20Abi,
+      functionName: "transfer",
+      args: [A, BigInt(100_000)],
+      gas: TRANSFER_GAS,
+    });
+    expect("value" in req).toBe(false);
+  });
+
+  test("the amounts are units: the same money written in wei is refused", () => {
+    // 5 USDC as wei (5e18) is far above 1,000,000,000 USDC in units; 0.1 USDC as wei above 1 USDC.
+    const add = { ...ADD_V14, amountUnits: BigInt("5000000000000000000") };
+    const fee = { ...FEE_V15, amountUnits: BigInt("100000000000000000") };
+    expect(potTransferCall(config, add, TRANSFER_GAS)).toEqual(refused("fund_out_of_bounds"));
+    expect(potTransferCall(config, fee, TRANSFER_GAS)).toEqual(refused("agent_gas_out_of_bounds"));
+    expect(allowedCall(transferReq(ADD_V14), potCtx(add))).toEqual(refused("fund_out_of_bounds"));
+    expect(allowedCall(transferReq(FEE_V15), potCtx(fee))).toEqual(refused("agent_gas_out_of_bounds"));
+  });
+
+  test("the pot, the key, the guardian and the token in another letter case: the same data; a value of 0 is no value", () => {
+    const add = transferReq(ADD_V14);
+    const shouted: WriteRequest = { ...add, address: lower(T.usdc), args: [lower(REAL_SAFE), ADD_V14.amountUnits] };
+    const loud: AddMoney = { ...ADD_V14, pot: upper(REAL_SAFE), guardian: lower(G) };
+    expect(accepted(shouted, potCtx(loud, { order: linked({ guardian: upper(G) }) }))).toBe(
+      accepted(add, potCtx(ADD_V14)),
+    );
+    const fee = transferReq(FEE_V15);
+    const feeShouted: WriteRequest = { ...fee, args: [upper(A), FEE_V15.amountUnits] };
+    const feeLoud: FeeMoney = { ...FEE_V15, agentWallet: lower(A), guardian: upper(G) };
+    expect(accepted(feeShouted, potCtx(feeLoud))).toBe(accepted(fee, potCtx(FEE_V15)));
+    for (const p of BOTH)
+      expect(accepted({ ...transferReq(p), value: NO_WEI }, potCtx(p))).toBe(accepted(transferReq(p), potCtx(p)));
+  });
+
+  test("a transfer to another address than the noted pot, or than the agent's wallet: transfer_args", () => {
+    // Add money built for another pot than the one noted for the order.
+    expect(allowedCall(transferReq({ ...ADD_V14, pot: V3_POT }), potCtx(ADD_V14))).toEqual(refused("transfer_args"));
+    for (const to of [G, A, P, ANOTHER_CONTRACT, T.usdc, T.multicall3, ZERO])
+      expect(allowedCall({ ...transferReq(ADD_V14), args: [to, ADD_V14.amountUnits] }, potCtx(ADD_V14))).toEqual(
+        refused("transfer_args"),
+      );
+    // Fee money built for the key the card showed, while the registry names a new one.
+    expect(allowedCall(transferReq({ ...FEE_V15, agentWallet: P }), potCtx(FEE_V15))).toEqual(refused("transfer_args"));
+    for (const to of [G, P, REAL_SAFE, ANOTHER_CONTRACT, T.usdc, ZERO])
+      expect(allowedCall({ ...transferReq(FEE_V15), args: [to, FEE_V15.amountUnits] }, potCtx(FEE_V15))).toEqual(
+        refused("transfer_args"),
+      );
+    // Each kind's request under the other kind's context, for the same amount.
+    expect(allowedCall(transferReq({ ...ADD_V14, amountUnits: FEE_V15.amountUnits }), potCtx(FEE_V15))).toEqual(
+      refused("transfer_args"),
+    );
+    expect(allowedCall(transferReq(FEE_V15), potCtx({ ...ADD_V14, amountUnits: FEE_V15.amountUnits }))).toEqual(
+      refused("transfer_args"),
+    );
+    // Another amount than the context's: one unit apart, or the same as a number or a string.
+    for (const amount of [ADD_V14.amountUnits + BigInt(1), ADD_V14.amountUnits - BigInt(1), 5_000_000, "5000000"])
+      expect(allowedCall({ ...transferReq(ADD_V14), args: [REAL_SAFE, amount] }, potCtx(ADD_V14))).toEqual(
+        refused("transfer_args"),
+      );
+    // One value, three, none, an address that is not a string, arguments that are not a list.
+    const shapes: unknown[] = [[REAL_SAFE], [REAL_SAFE, ADD_V14.amountUnits, "0x"], [], [BigInt(1), ADD_V14.amountUnits], undefined, "args"];
+    for (const args of shapes)
+      expect(allowedCall({ ...transferReq(ADD_V14), args: args as unknown[] }, potCtx(ADD_V14))).toEqual(
+        refused("transfer_args"),
+      );
+  });
+
+  test("a transfer on another token address: not_usdc; with a value: sends_value; over another ABI: not_the_pinned_abi", () => {
+    for (const p of BOTH) {
+      const req = transferReq(p);
+      for (const address of [ANOTHER_CONTRACT, T.multicall3, REAL_SAFE, REGISTRY, A, G])
+        expect(allowedCall({ ...req, address }, potCtx(p))).toEqual(refused("not_usdc"));
+      for (const value of [BigInt(1), BigInt(10) ** BigInt(18), 0 as unknown as bigint, "0" as unknown as bigint])
+        expect(allowedCall({ ...req, value }, potCtx(p))).toEqual(refused("sends_value"));
+      const abis: WriteRequest["abi"][] = [
+        [...erc20Abi] as unknown as typeof erc20Abi,
+        safeAbi,
+        multicall3Abi,
+        identityRegistryAbi,
+      ];
+      for (const abi of abis) expect(allowedCall({ ...req, abi }, potCtx(p))).toEqual(refused("not_the_pinned_abi"));
+    }
+  });
+
+  test("add money of 0, or above 1,000,000,000 USDC: fund_out_of_bounds; fee money of 0 or of 1.000001 USDC: agent_gas_out_of_bounds", () => {
+    const add = transferReq(ADD_V14);
+    for (const amountUnits of [NO_WEI, POT_FUND_MAX_UNITS + BigInt(1)]) {
+      expect(allowedCall(add, potCtx({ ...ADD_V14, amountUnits }))).toEqual(refused("fund_out_of_bounds"));
+      expect(potTransferCall(config, { ...ADD_V14, amountUnits }, TRANSFER_GAS)).toEqual(refused("fund_out_of_bounds"));
+    }
+    const fee = transferReq(FEE_V15);
+    for (const amountUnits of [NO_WEI, BigInt(1_000_001)]) {
+      expect(allowedCall(fee, potCtx({ ...FEE_V15, amountUnits }))).toEqual(refused("agent_gas_out_of_bounds"));
+      expect(potTransferCall(config, { ...FEE_V15, amountUnits }, TRANSFER_GAS)).toEqual(
+        refused("agent_gas_out_of_bounds"),
+      );
+    }
+    // At the bounds: one unit, 1,000,000,000 USDC for the pot, 1 USDC of fee money.
+    expect(POT_FUND_MAX_UNITS).toBe(BigInt(1_000_000_000) * USDC_UNIT);
+    expect(POT_AGENT_GAS_MAX_UNITS).toBe(USDC_UNIT);
+    const edges: Transfer[] = [
+      { ...ADD_V14, amountUnits: BigInt(1) },
+      { ...ADD_V14, amountUnits: POT_FUND_MAX_UNITS },
+      { ...FEE_V15, amountUnits: BigInt(1) },
+      { ...FEE_V15, amountUnits: POT_AGENT_GAS_MAX_UNITS },
+    ];
+    for (const p of edges) expect(allowedCall(transferReq(p), potCtx(p)).ok).toBe(true);
+  });
+
+  test("fee money to a wallet with code: fee_money_contract_wallet; to the guardian: wallet_is_guardian", () => {
+    // `agentHasCode` is `readPotRaw`'s: true for any code, a delegated key's 23 bytes included, so
+    // fee money goes to a plain key only, as in the setup.
+    const fee = transferReq(FEE_V15);
+    expect(allowedCall(fee, potCtx({ ...FEE_V15, agentHasCode: true }))).toEqual(refused("fee_money_contract_wallet"));
+    expect(potTransferCall(config, { ...FEE_V15, agentHasCode: true }, TRANSFER_GAS)).toEqual(
+      refused("fee_money_contract_wallet"),
+    );
+    for (const wallet of [G, lower(G), upper(G)]) {
+      expect(allowedCall(fee, potCtx({ ...FEE_V15, agentWallet: wallet }))).toEqual(refused("wallet_is_guardian"));
+      expect(potTransferCall(config, { ...FEE_V15, agentWallet: wallet }, TRANSFER_GAS)).toEqual(
+        refused("wallet_is_guardian"),
+      );
+    }
+    expect(allowedCall(fee, potCtx({ ...FEE_V15, agentWallet: ZERO }))).toEqual(refused("wallet_is_zero"));
+    expect(potTransferCall(config, { ...FEE_V15, agentWallet: ZERO }, TRANSFER_GAS)).toEqual(refused("wallet_is_zero"));
+  });
+
+  test("gas 120,001: gas_out_of_bounds; an order not linked: order_not_linked", () => {
+    expect(POT_TRANSFER_GAS_CAP).toBe(BigInt(120_000));
+    for (const p of BOTH) {
+      expect(allowedCall(transferReq(p, POT_TRANSFER_GAS_CAP), potCtx(p)).ok).toBe(true);
+      for (const gas of [BigInt(120_001), undefined, NO_WEI, BigInt(-1), SETUP_GAS, 65_000 as unknown as bigint])
+        expect(allowedCall({ ...transferReq(p), gas }, potCtx(p))).toEqual(refused("gas_out_of_bounds"));
+      const orders = [
+        linked({ state: "deployed" }),
+        linked({ state: "broken", brokenReason: "not_linked" }),
+        linked({ revoked: true }),
+        linked({ state: "draft" }),
+        linked({ revoked: undefined as unknown as boolean }),
+      ];
+      for (const o of orders)
+        expect(allowedCall(transferReq(p), potCtx(p, { order: o }))).toEqual(refused("order_not_linked"));
+    }
+  });
+
+  test("sendAllowedCall refuses a transfer from another connected account, or on another chain, and writeContract is not called", async () => {
+    const writeContract = vi.fn<(req: WriteRequest) => Promise<Hex>>(async () => "0xabc");
+    for (const p of BOTH) {
+      const req = transferReq(p);
+      for (const walletAddress of [GUARDIAN, A, P, REAL_SAFE, ZERO, undefined, "" as Address])
+        expect(
+          await sendAllowedCall(req, potCtx(p), { walletChainId: CHAIN, walletAddress, configuredChainIds: [CHAIN], writeContract }),
+        ).toEqual(refused("wallet_is_not_the_guardian"));
+      expect(await sendAllowedCall(req, potCtx(p), { walletChainId: CHAIN, configuredChainIds: [CHAIN], writeContract })).toEqual(
+        refused("wallet_is_not_the_guardian"),
+      );
+      for (const walletChainId of [1, OTHER_CHAIN, undefined])
+        expect(
+          await sendAllowedCall(req, potCtx(p), { walletChainId, walletAddress: G, configuredChainIds: [CHAIN], writeContract }),
+        ).toEqual(refused("wallet_on_another_chain"));
+      expect(
+        await sendAllowedCall(req, potCtx(p), { walletChainId: CHAIN, walletAddress: G, configuredChainIds: [OTHER_CHAIN], writeContract }),
+      ).toEqual(refused("chain_not_configured"));
+    }
+    expect(writeContract).not.toHaveBeenCalled();
+  });
+
+  test("the guardian's own account sends a transfer once: the rebuilt request, the pinned ABI, no value, nothing of the caller's", async () => {
+    for (const p of BOTH) {
+      // wagmi reads the request's variables a tick later, after its own `onMutate`.
+      let seen: unknown[] = [];
+      const writeContract = vi.fn<(r: WriteRequest) => Promise<Hex>>(async (r) => {
+        await Promise.resolve();
+        seen = [...r.args];
+        return "0xabc";
+      });
+      const req = transferReq(p);
+      const args: unknown[] = [lower(req.args[0] as string), req.args[1]];
+      // USDC's address has no letters: in another letter case only its prefix can differ.
+      const shoutedUsdc = `0X${T.usdc.slice(2)}` as Address;
+      expect(shoutedUsdc).not.toBe(T.usdc);
+      const padded = {
+        ...req,
+        address: shoutedUsdc,
+        args,
+        value: NO_WEI,
+        account: GUARDIAN,
+        dataSuffix: "0xdeadbeef",
+      } as WriteRequest;
+      const pending = sendAllowedCall(padded, potCtx(p), {
+        walletChainId: CHAIN,
+        walletAddress: upper(G),
+        configuredChainIds: [CHAIN],
+        writeContract,
+      });
+      // The caller changes its own list while the wallet opens.
+      args[0] = ANOTHER_CONTRACT;
+      args[1] = BigInt(1);
+      args.push("0x");
+      expect(await pending).toEqual({ ok: true, hash: "0xabc", data: accepted(req, potCtx(p)) });
+      expect(writeContract).toHaveBeenCalledTimes(1);
+      const sent = writeContract.mock.calls[0][0];
+      expect(sent).toEqual(req);
+      expect(sent.abi).toBe(erc20Abi);
+      expect(sent.address).toBe(T.usdc);
+      expect(Object.keys(sent).sort()).toEqual(["abi", "address", "args", "chainId", "functionName", "gas"]);
+      expect(seen).toEqual([...req.args]);
+      expect(sent.args).not.toBe(args);
+    }
+  });
+
+  test("transfer is one of the seven: it takes the pot's rules, and every request the registry's path refused is still refused", () => {
+    const setup = setupReq();
+    const change = execReq(CHANGE_V6);
+    const t = "transfer" as const;
+    // The requests the "outside the list" test sent with this name, over a setup's or an action's context.
+    expect(allowedCall({ ...setup, functionName: t }, potCtx(SETUP_V5))).toEqual(refused("no_pot_context"));
+    expect(allowedCall({ ...setup, value: undefined, functionName: t }, potCtx(SETUP_V5))).toEqual(
+      refused("no_pot_context"),
+    );
+    expect(allowedCall({ ...change, functionName: t }, potCtx(CHANGE_V6))).toEqual(refused("no_pot_context"));
+    expect(allowedCall({ ...registerCall(config, null), functionName: t }, potCtx(SETUP_V5))).toEqual(
+      refused("no_pot_context"),
+    );
+    // Under a transfer's own context: the setup's gas is above a transfer's cap; the registry is not USDC.
+    expect(allowedCall({ ...setup, functionName: t }, potCtx(ADD_V14))).toEqual(refused("gas_out_of_bounds"));
+    expect(
+      allowedCall({ ...registerCall(config, null), functionName: t, gas: TRANSFER_GAS }, potCtx(ADD_V14)),
+    ).toEqual(refused("not_usdc"));
+    // With no pot context at all, as the registry's screens call it.
+    expect(allowedCall(transferReq(ADD_V14), ctx)).toEqual(refused("no_pot_context"));
+    expect(allowedCall(transferReq(FEE_V15), walletCtx())).toEqual(refused("no_pot_context"));
+    // ERC-20's other writes on USDC take the registry's path, and are refused.
+    for (const name of ["approve", "transferFrom", "increaseAllowance", "permit"]) {
+      const fn = name as unknown as WriteRequest["functionName"];
+      expect(allowedCall({ ...transferReq(ADD_V14), functionName: fn }, potCtx(ADD_V14))).toEqual(
+        refused("not_the_registry"),
+      );
+    }
+  });
+});
+
+describe("the allowlist refuses a USDC transfer", () => {
+  const add = transferReq(ADD_V14);
+  const fee = transferReq(FEE_V15);
+  const on1: CallContext = { config: { ...config, chainId: 1 }, order: linked({ chainId: 1 }) };
+  const cases: [string, WriteRequest, CallContext, string][] = [
+    ["add money on another chain", { ...add, chainId: OTHER_CHAIN }, potCtx(ADD_V14), "wrong_chain"],
+    ["fee money on another chain", { ...fee, chainId: OTHER_CHAIN }, potCtx(FEE_V15), "wrong_chain"],
+    ["add money on a chain the table does not know", { ...add, chainId: 1 }, { ...on1, pot: ADD_V14 }, "pot_chain_unsupported"],
+    ["fee money on a chain the table does not know", { ...fee, chainId: 1 }, { ...on1, pot: FEE_V15 }, "pot_chain_unsupported"],
+    ["a transfer with no pot context", add, { config, order: linked() }, "no_pot_context"],
+    ["a transfer over the setup's context", fee, potCtx(SETUP_V5), "no_pot_context"],
+    ["a transfer over an action's context", add, potCtx(CHANGE_V6), "no_pot_context"],
+    ["a setup over a transfer's context", setupReq(), potCtx(ADD_V14), "no_pot_context"],
+    ["an action over a transfer's context", execReq(CHANGE_V6), potCtx(FEE_V15), "no_pot_context"],
+    ["a transfer of a kind the allowlist does not know", add, potCtx(odd({ ...ADD_V14, kind: "take" })), "no_pot_context"],
+    ["add money with no pot", add, potCtx(odd({ ...ADD_V14, pot: undefined })), "no_pot_context"],
+    ["add money to a pot that is not an address", add, potCtx(odd({ ...ADD_V14, pot: "0xb0d1e" })), "no_pot_context"],
+    ["add money's fields under fee money's kind", add, potCtx(odd({ ...ADD_V14, kind: "fee_money" })), "no_pot_context"],
+    ["fee money's fields under add money's kind", fee, potCtx(odd({ ...FEE_V15, kind: "add_money" })), "no_pot_context"],
+    ["a transfer with no guardian", fee, potCtx(odd({ ...FEE_V15, guardian: undefined })), "no_pot_context"],
+    ["a guardian that is not an address", add, potCtx(odd({ ...ADD_V14, guardian: "0x1234" })), "no_pot_context"],
+    ["fee money with no agent's wallet", fee, potCtx(odd({ ...FEE_V15, agentWallet: undefined })), "no_pot_context"],
+    ["fee money that does not say whether the wallet has code", fee, potCtx(odd({ ...FEE_V15, agentHasCode: undefined })), "no_pot_context"],
+    ["fee money whose code fact is a string", fee, potCtx(odd({ ...FEE_V15, agentHasCode: "false" })), "no_pot_context"],
+    ["fee money whose code fact is a number", fee, potCtx(odd({ ...FEE_V15, agentHasCode: 0 })), "no_pot_context"],
+    ["an amount as a number", add, potCtx(odd({ ...ADD_V14, amountUnits: 5_000_000 })), "no_pot_context"],
+    ["an amount as a string", fee, potCtx(odd({ ...FEE_V15, amountUnits: "100000" })), "no_pot_context"],
+    ["an amount below 0", add, potCtx(odd({ ...ADD_V14, amountUnits: BigInt(-1) })), "no_pot_context"],
+    ["no amount", fee, potCtx(odd({ ...FEE_V15, amountUnits: undefined })), "no_pot_context"],
+    ["a transfer with no order", add, potCtx(ADD_V14, { order: null }), "no_order"],
+    ["an order that is undefined", fee, potCtx(FEE_V15, { order: undefined as unknown as null }), "no_order"],
+    ["an order on another chain", add, potCtx(ADD_V14, { order: linked({ chainId: OTHER_CHAIN }) }), "order_on_another_deployment"],
+    ["an order of another factory", fee, potCtx(FEE_V15, { order: linked({ factory: ANOTHER_FACTORY }) }), "order_on_another_deployment"],
+    ["a body not linked yet", add, potCtx(ADD_V14, { order: linked({ state: "deployed" }) }), "order_not_linked"],
+    ["a revoked body", fee, potCtx(FEE_V15, { order: linked({ revoked: true }) }), "order_not_linked"],
+    ["another guardian", add, potCtx(ADD_V14, { order: linked({ guardian: GUARDIAN }) }), "guardian_is_not_the_orders"],
+    ["a context built for another guardian", fee, potCtx({ ...FEE_V15, guardian: GUARDIAN }), "guardian_is_not_the_orders"],
+    ["a transfer with no gas", { ...add, gas: undefined }, potCtx(ADD_V14), "gas_out_of_bounds"],
+    ["a transfer with gas 120,001", { ...fee, gas: BigInt(120_001) }, potCtx(FEE_V15), "gas_out_of_bounds"],
+    ["a transfer with gas 0", { ...add, gas: NO_WEI }, potCtx(ADD_V14), "gas_out_of_bounds"],
+    ["a transfer on another token", { ...add, address: ANOTHER_CONTRACT }, potCtx(ADD_V14), "not_usdc"],
+    ["a transfer on the pot itself", { ...fee, address: REAL_SAFE }, potCtx(FEE_V15), "not_usdc"],
+    ["a transfer on Multicall3", { ...add, address: T.multicall3 }, potCtx(ADD_V14), "not_usdc"],
+    [
+      "a transfer over an ABI equal to the pinned one but not it",
+      { ...add, abi: [...erc20Abi] as unknown as typeof erc20Abi },
+      potCtx(ADD_V14),
+      "not_the_pinned_abi",
+    ],
+    ["a transfer over the Safe's ABI", { ...fee, abi: safeAbi }, potCtx(FEE_V15), "not_the_pinned_abi"],
+    ["add money that sends value", { ...add, value: BigInt(1) }, potCtx(ADD_V14), "sends_value"],
+    [
+      "fee money that sends its amount as value too",
+      { ...fee, value: FEE_V15.amountUnits * WEI_PER_UNIT },
+      potCtx(FEE_V15),
+      "sends_value",
+    ],
+    ["add money of 0", add, potCtx({ ...ADD_V14, amountUnits: NO_WEI }), "fund_out_of_bounds"],
+    [
+      "add money above 1,000,000,000 USDC",
+      add,
+      potCtx({ ...ADD_V14, amountUnits: POT_FUND_MAX_UNITS + BigInt(1) }),
+      "fund_out_of_bounds",
+    ],
+    ["fee money to the zero address", fee, potCtx({ ...FEE_V15, agentWallet: ZERO }), "wallet_is_zero"],
+    ["fee money to the guardian's own wallet", fee, potCtx({ ...FEE_V15, agentWallet: lower(G) }), "wallet_is_guardian"],
+    ["fee money to a wallet with code", fee, potCtx({ ...FEE_V15, agentHasCode: true }), "fee_money_contract_wallet"],
+    ["fee money of 0", fee, potCtx({ ...FEE_V15, amountUnits: NO_WEI }), "agent_gas_out_of_bounds"],
+    ["fee money of 1.000001 USDC", fee, potCtx({ ...FEE_V15, amountUnits: BigInt(1_000_001) }), "agent_gas_out_of_bounds"],
+    ["add money to another pot", transferReq({ ...ADD_V14, pot: V3_POT }), potCtx(ADD_V14), "transfer_args"],
+    ["fee money to another key", transferReq({ ...FEE_V15, agentWallet: P }), potCtx(FEE_V15), "transfer_args"],
+    ["add money of another amount", transferReq({ ...ADD_V14, amountUnits: BigInt(6_000_000) }), potCtx(ADD_V14), "transfer_args"],
+    ["the amount as a number", { ...fee, args: [A, 100_000] }, potCtx(FEE_V15), "transfer_args"],
+    ["one argument", { ...add, args: [REAL_SAFE] }, potCtx(ADD_V14), "transfer_args"],
+    ["three arguments", { ...fee, args: [A, FEE_V15.amountUnits, "0x"] }, potCtx(FEE_V15), "transfer_args"],
+    ["an address that is not a string", { ...add, args: [BigInt(1), ADD_V14.amountUnits] }, potCtx(ADD_V14), "transfer_args"],
+    ["transfer arguments that are not a list", { ...add, args: null as unknown as unknown[] }, potCtx(ADD_V14), "transfer_args"],
+  ];
+
+  test.each(cases)("%s", (_name, req, c, problem) => {
+    expect(allowedCall(req, c)).toEqual(refused(problem));
+  });
+
+  test("covers every problem a transfer can name", () => {
+    expect(new Set(cases.map((c) => c[3]))).toEqual(
+      new Set([
+        "wrong_chain",
+        "pot_chain_unsupported",
+        "no_pot_context",
+        "no_order",
+        "order_on_another_deployment",
+        "order_not_linked",
+        "guardian_is_not_the_orders",
+        "gas_out_of_bounds",
+        "not_usdc",
+        "not_the_pinned_abi",
+        "sends_value",
+        "fund_out_of_bounds",
+        "wallet_is_zero",
+        "wallet_is_guardian",
+        "fee_money_contract_wallet",
+        "agent_gas_out_of_bounds",
+        "transfer_args",
+      ]),
+    );
+  });
+
+  test("add money: the common rules, then the transfer's, then its own, in the order they are written", () => {
+    const bad: AddMoney = { ...ADD_V14, amountUnits: NO_WEI };
+    const everything: WriteRequest = {
+      ...add,
+      address: ANOTHER_CONTRACT,
+      abi: [...erc20Abi] as unknown as typeof erc20Abi,
+      gas: undefined,
+      value: BigInt(1),
+      args: [],
+    };
+    const chain1 = { ...config, chainId: 1 };
+    const stranger = linked({ factory: ANOTHER_FACTORY, state: "deployed", guardian: GUARDIAN });
+    const sound = { ...everything, gas: TRANSFER_GAS, address: T.usdc, abi: erc20Abi, value: undefined };
+    const steps: [WriteRequest, CallContext, string][] = [
+      [{ ...everything, chainId: OTHER_CHAIN }, { config, order: stranger, pot: bad }, "wrong_chain"],
+      [{ ...everything, chainId: 1 }, { config: chain1, order: stranger, pot: bad }, "pot_chain_unsupported"],
+      [everything, { config, order: stranger }, "no_pot_context"],
+      [everything, { config, order: stranger, pot: odd({ ...bad, kind: "fee_money" }) }, "no_pot_context"],
+      [everything, { config, order: null, pot: bad }, "no_order"],
+      [everything, { config, order: stranger, pot: bad }, "order_on_another_deployment"],
+      [everything, { config, order: linked({ state: "deployed", guardian: GUARDIAN }), pot: bad }, "order_not_linked"],
+      [everything, { config, order: linked({ guardian: GUARDIAN }), pot: bad }, "guardian_is_not_the_orders"],
+      [everything, potCtx(bad), "gas_out_of_bounds"],
+      [{ ...everything, gas: TRANSFER_GAS }, potCtx(bad), "not_usdc"],
+      [{ ...everything, gas: TRANSFER_GAS, address: T.usdc }, potCtx(bad), "not_the_pinned_abi"],
+      [{ ...everything, gas: TRANSFER_GAS, address: T.usdc, abi: erc20Abi }, potCtx(bad), "sends_value"],
+      [sound, potCtx(bad), "fund_out_of_bounds"],
+      [sound, potCtx(ADD_V14), "transfer_args"],
+    ];
+    for (const [req, c, problem] of steps) expect(allowedCall(req, c)).toEqual(refused(problem));
+    expect(allowedCall({ ...sound, args: add.args }, potCtx(ADD_V14)).ok).toBe(true);
+  });
+
+  test("fee money: the common rules, then the transfer's, then its own, in the order they are written", () => {
+    const bad: FeeMoney = { ...FEE_V15, agentWallet: ZERO, agentHasCode: true, amountUnits: NO_WEI };
+    const everything: WriteRequest = {
+      ...fee,
+      address: REAL_SAFE,
+      abi: safeAbi,
+      gas: BigInt(120_001),
+      value: BigInt(1),
+      args: [A],
+    };
+    const chain1 = { ...config, chainId: 1 };
+    const stranger = linked({ chainId: OTHER_CHAIN, state: "broken", guardian: GUARDIAN });
+    const sound = { ...everything, gas: TRANSFER_GAS, address: T.usdc, abi: erc20Abi, value: NO_WEI };
+    const steps: [WriteRequest, CallContext, string][] = [
+      [{ ...everything, chainId: OTHER_CHAIN }, { config, order: stranger, pot: bad }, "wrong_chain"],
+      [{ ...everything, chainId: 1 }, { config: chain1, order: stranger, pot: bad }, "pot_chain_unsupported"],
+      [everything, { config, order: stranger, pot: odd({ ...bad, agentHasCode: "yes" }) }, "no_pot_context"],
+      [everything, { config, order: undefined as unknown as null, pot: bad }, "no_order"],
+      [everything, { config, order: stranger, pot: bad }, "order_on_another_deployment"],
+      [everything, { config, order: linked({ state: "broken", guardian: GUARDIAN }), pot: bad }, "order_not_linked"],
+      [everything, { config, order: linked({ guardian: GUARDIAN }), pot: bad }, "guardian_is_not_the_orders"],
+      [everything, potCtx(bad), "gas_out_of_bounds"],
+      [{ ...everything, gas: TRANSFER_GAS }, potCtx(bad), "not_usdc"],
+      [{ ...everything, gas: TRANSFER_GAS, address: T.usdc }, potCtx(bad), "not_the_pinned_abi"],
+      [{ ...everything, gas: TRANSFER_GAS, address: T.usdc, abi: erc20Abi }, potCtx(bad), "sends_value"],
+      [sound, potCtx(bad), "wallet_is_zero"],
+      // A zero guardian makes the zero address both: the zero rule comes first.
+      [sound, potCtx({ ...bad, guardian: ZERO }, { order: linked({ guardian: ZERO }) }), "wallet_is_zero"],
+      [sound, potCtx({ ...bad, agentWallet: G }), "wallet_is_guardian"],
+      [sound, potCtx({ ...bad, agentWallet: A }), "fee_money_contract_wallet"],
+      [sound, potCtx({ ...bad, agentWallet: A, agentHasCode: false }), "agent_gas_out_of_bounds"],
+      [sound, potCtx(FEE_V15), "transfer_args"],
+    ];
+    for (const [req, c, problem] of steps) expect(allowedCall(req, c)).toEqual(refused(problem));
+    expect(allowedCall({ ...sound, args: fee.args }, potCtx(FEE_V15)).ok).toBe(true);
+  });
+
+  test("never throws on what it is handed: every case above refuses, and so does a request with nothing in it", () => {
+    for (const [, req, c] of cases) expect(() => allowedCall(req, c)).not.toThrow();
+    const empties: unknown[][] = [[], [undefined, undefined], [{}, {}], [[], []], [REAL_SAFE, undefined]];
+    for (const args of empties)
+      for (const p of BOTH) expect(allowedCall({ ...transferReq(p), args }, potCtx(p))).toEqual(refused("transfer_args"));
+    const strange = [42, "0x", [], { kind: "add_money" }, { kind: "fee_money" }, { kind: "fee_money", agentHasCode: false }];
+    for (const pot of strange)
+      for (const req of [add, fee])
+        expect(allowedCall(req, potCtx(odd(pot as Record<string, unknown>)))).toEqual(refused("no_pot_context"));
+  });
+
+  test("the builder refuses what it cannot build, and never throws; the order and the gas are the allowlist's", () => {
+    expect(potTransferCall({ ...config, chainId: 1 }, ADD_V14, TRANSFER_GAS)).toEqual(refused("pot_chain_unsupported"));
+    expect(potTransferCall({ ...config, chainId: 1 }, FEE_V15, TRANSFER_GAS)).toEqual(refused("pot_chain_unsupported"));
+    expect(potTransferCall(config, odd({ ...ADD_V14, pot: "0x1" }) as AddMoney, TRANSFER_GAS)).toEqual(refused("no_pot_context"));
+    expect(potTransferCall(config, odd({ ...FEE_V15, agentHasCode: "no" }) as FeeMoney, TRANSFER_GAS)).toEqual(
+      refused("no_pot_context"),
+    );
+    expect(potTransferCall(config, odd({ ...SETUP_V5 }) as AddMoney, TRANSFER_GAS)).toEqual(refused("no_pot_context"));
+    expect(potTransferCall(config, odd({ ...CHANGE_V6 }) as FeeMoney, TRANSFER_GAS)).toEqual(refused("no_pot_context"));
+    expect(potTransferCall(config, odd(null as unknown as Record<string, unknown>) as AddMoney, TRANSFER_GAS)).toEqual(
+      refused("no_pot_context"),
+    );
+    expect(potSetupCall(config, odd({ ...ADD_V14 }) as Setup, SETUP_GAS)).toEqual(refused("no_pot_context"));
+    expect(potExecCall(config, odd({ ...FEE_V15 }) as Change, EXEC_GAS)).toEqual(refused("no_pot_context"));
+    // A gas above the cap is built, and the allowlist refuses it.
+    const heavy = potTransferCall(config, ADD_V14, BigInt(1_000_000)) as WriteRequest;
+    expect(heavy.gas).toBe(BigInt(1_000_000));
+    expect(allowedCall(heavy, potCtx(ADD_V14))).toEqual(refused("gas_out_of_bounds"));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The setup's fee money: to a plain key only
+// ---------------------------------------------------------------------------------------------
+
+describe("the setup's fee money goes to a plain key only", () => {
+  /** A key delegated under EIP-7702 (23 bytes), and a contract's code: both inventions. */
+  const DELEGATED = `0xef0100${"ab".repeat(20)}` as Hex;
+  const CONTRACT = "0x6080604052348015600f57600080fd5b50" as Hex;
+  const NOT_A_KEY: WalletKind[] = ["delegated", "contract"];
+  /** The context with no kind at all, as a screen that never read the code would hand it over. */
+  const withoutKind = (p: Setup): PotCallContext => {
+    const copy: Record<string, unknown> = { ...p };
+    delete copy.agentWalletKind;
+    return odd(copy);
+  };
+
+  test("fee money above 0 for a delegated key or a contract wallet: fee_money_needs_plain_key, from the allowlist and the builder", () => {
+    for (const agentWalletKind of NOT_A_KEY) {
+      const p: Setup = { ...SETUP_V5, agentWalletKind };
+      expect(allowedCall(setupReq(), potCtx(p))).toEqual(refused("fee_money_needs_plain_key"));
+      expect(potSetupCall(config, p, SETUP_GAS)).toEqual(refused("fee_money_needs_plain_key"));
+      // One unit of fee money is fee money.
+      const one: Setup = { ...p, agentGasWei: WEI_PER_UNIT };
+      expect(allowedCall(setupReq({ ...one, agentWalletKind: "key" }), potCtx(one))).toEqual(
+        refused("fee_money_needs_plain_key"),
+      );
+      expect(potSetupCall(config, one, SETUP_GAS)).toEqual(refused("fee_money_needs_plain_key"));
+    }
+  });
+
+  test("the kind is walletKindOf of the code read in the click: a key with no code takes fee money, a delegated key or a contract does not", () => {
+    for (const code of [undefined, "0x" as Hex]) {
+      const p: Setup = { ...SETUP_V5, agentWalletKind: walletKindOf(code) };
+      pinned(accepted(setupReq(p), potCtx(p)), 1796, V5_HASH);
+    }
+    for (const code of [DELEGATED, CONTRACT])
+      expect(allowedCall(setupReq(), potCtx({ ...SETUP_V5, agentWalletKind: walletKindOf(code) }))).toEqual(
+        refused("fee_money_needs_plain_key"),
+      );
+  });
+
+  test("with no fee money, any kind of wallet: the pot is created and funded, and V4 keeps its bytes", () => {
+    for (const agentWalletKind of ["key", "delegated", "contract"] as WalletKind[]) {
+      const p: Setup = { ...SETUP_V4, agentWalletKind };
+      pinned(accepted(setupReq(p), potCtx(p)), 1412, V4_HASH);
+      const funded: Setup = { ...p, fundWei: SETUP_V5.fundWei };
+      expect(allowedCall(setupReq(funded), potCtx(funded)).ok).toBe(true);
+      expect(callsOf(setupReq(funded)).map((c) => c.target)).toEqual([T.proxyFactory, V3_POT]);
+    }
+  });
+
+  test("a kind left out: no_pot_context when fee money is sent; with none, the kind decides nothing", () => {
+    expect(allowedCall(setupReq(), potCtx(withoutKind(SETUP_V5)))).toEqual(refused("no_pot_context"));
+    expect(potSetupCall(config, withoutKind(SETUP_V5) as Setup, SETUP_GAS)).toEqual(refused("no_pot_context"));
+    expect(allowedCall(setupReq(), potCtx(odd({ ...SETUP_V5, agentWalletKind: undefined })))).toEqual(
+      refused("no_pot_context"),
+    );
+    // Read before the order: a context missing a fact is no context.
+    expect(allowedCall(setupReq(), potCtx(withoutKind(SETUP_V5), { order: null }))).toEqual(refused("no_pot_context"));
+    pinned(accepted(setupReq(SETUP_V4), potCtx(withoutKind(SETUP_V4))), 1412, V4_HASH);
+    expect(potSetupCall(config, withoutKind(SETUP_V4) as Setup, SETUP_GAS)).toEqual(setupReq(SETUP_V4));
+  });
+
+  test("a kind that is none of the three: no_pot_context, with fee money or without", () => {
+    for (const agentWalletKind of ["eoa", "Key", "", null, 1, true, {}])
+      for (const p of [SETUP_V5, SETUP_V4]) {
+        expect(allowedCall(setupReq(p), potCtx(odd({ ...p, agentWalletKind })))).toEqual(refused("no_pot_context"));
+        expect(potSetupCall(config, odd({ ...p, agentWalletKind }) as Setup, SETUP_GAS)).toEqual(
+          refused("no_pot_context"),
+        );
+      }
+  });
+
+  test("its place in the setup's rules: right after the fee money's amount, before the salt nonce, the value and the calls", () => {
+    const contract: Setup = { ...SETUP_V5, agentWalletKind: "contract" };
+    const req = setupReq();
+    // Earlier rules speak first.
+    expect(allowedCall({ ...req, gas: undefined }, potCtx(contract))).toEqual(refused("gas_out_of_bounds"));
+    expect(allowedCall({ ...req, address: ANOTHER_CONTRACT }, potCtx(contract))).toEqual(refused("not_multicall3"));
+    expect(allowedCall(req, potCtx({ ...contract, agentWallet: G }))).toEqual(refused("wallet_is_guardian"));
+    expect(allowedCall(req, potCtx({ ...contract, ceilingUnits: NO_WEI }))).toEqual(refused("ceiling_out_of_bounds"));
+    expect(allowedCall(req, potCtx({ ...contract, fundWei: BigInt(1) }))).toEqual(refused("fund_out_of_bounds"));
+    expect(allowedCall(req, potCtx({ ...contract, agentGasWei: BigInt(1) }))).toEqual(refused("agent_gas_out_of_bounds"));
+    expect(allowedCall(req, potCtx({ ...contract, agentGasWei: (USDC_UNIT + BigInt(1)) * WEI_PER_UNIT }))).toEqual(
+      refused("agent_gas_out_of_bounds"),
+    );
+    // Then this rule, before the later ones.
+    expect(allowedCall(req, potCtx({ ...contract, saltNonce: MAX_UINT256 + BigInt(1) }))).toEqual(
+      refused("fee_money_needs_plain_key"),
+    );
+    expect(allowedCall({ ...req, value: NO_WEI }, potCtx(contract))).toEqual(refused("fee_money_needs_plain_key"));
+    expect(allowedCall({ ...req, args: [] }, potCtx(contract))).toEqual(refused("fee_money_needs_plain_key"));
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The gate: each request read once, and never a throw
+// ---------------------------------------------------------------------------------------------
+
+/** A request whose fields answer `first` on their first read and `later` on every read after. */
+function shifting(first: object, later: Record<string, unknown>): WriteRequest {
+  const firstValues = first as Record<string, unknown>;
+  const out = {};
+  for (const key of new Set([...Object.keys(first), ...Object.keys(later)])) {
+    let read = false;
+    Object.defineProperty(out, key, {
+      enumerable: true,
+      get() {
+        if (read) return key in later ? later[key] : firstValues[key];
+        read = true;
+        return firstValues[key];
+      },
+    });
+  }
+  return out as WriteRequest;
+}
+
+/** A copy of `base` whose `key` throws `thrown` on every read. */
+function throwing<T extends object>(base: T, key: string, thrown: unknown = new Error("a getter that throws")): T {
+  return Object.defineProperty({ ...base }, key, {
+    enumerable: true,
+    get() {
+      throw thrown;
+    },
+  });
+}
+
+/** A Proxy already revoked: any read of it throws, and so does `Array.isArray`. */
+function revoked<T>(): T {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  return proxy as T;
+}
+
+describe("the gate reads a request once, and never throws", () => {
+  const wallet = () => vi.fn<(req: WriteRequest) => Promise<Hex>>(async () => "0xabc");
+  const pointer: WriteRequest = { ...goodPointer(), gas: BigInt(100_000) };
+  const pots: [string, WriteRequest, CallContext][] = [
+    ["the setup", setupReq(), potCtx(SETUP_V5)],
+    ["a change", execReq(CHANGE_V6), potCtx(CHANGE_V6)],
+    ["a restore", execReq(RESTORE_V12), potCtx(RESTORE_V12)],
+    ["add money", transferReq(ADD_V14), potCtx(ADD_V14)],
+    ["fee money", transferReq(FEE_V15), potCtx(FEE_V15)],
+  ];
+
+  test("each of the request's seven fields is read once, for every call the allowlist takes", async () => {
+    const all: [string, WriteRequest, CallContext][] = [
+      ["register()", registerCall(config, null), { config, order: null }],
+      ["register(string)", registerCall(config, "https://example.com/agent.json"), { config, order: null }],
+      ["the pointer", pointer, ctx],
+      ["the agent's wallet", goodWallet(), walletCtx()],
+      ...pots,
+    ];
+    for (const [name, req, c] of all) {
+      for (const door of ["allowedCall", "sendAllowedCall"]) {
+        const reads = new Map<PropertyKey, number>();
+        const proxy = new Proxy(
+          { ...req },
+          {
+            get(target, key, receiver) {
+              reads.set(key, (reads.get(key) ?? 0) + 1);
+              return Reflect.get(target, key, receiver);
+            },
+          },
+        ) as WriteRequest;
+        const out =
+          door === "allowedCall"
+            ? allowedCall(proxy, c)
+            : await sendAllowedCall(proxy, c, {
+                walletChainId: CHAIN,
+                walletAddress: G,
+                configuredChainIds: [CHAIN],
+                writeContract: wallet(),
+              });
+        expect(out.ok, `${name}, ${door}`).toBe(true);
+        expect(Object.fromEntries(reads), `${name}, ${door}`).toEqual({
+          chainId: 1,
+          address: 1,
+          abi: 1,
+          functionName: 1,
+          args: 1,
+          value: 1,
+          gas: 1,
+        });
+      }
+    }
+  });
+
+  test("a registry request whose fields answer otherwise after their first read: the wallet gets the first-read values, never the later ones", async () => {
+    const later: Record<string, unknown> = {
+      chainId: OTHER_CHAIN,
+      address: ANOTHER_CONTRACT,
+      abi: multicall3Abi,
+      functionName: "setAgentWallet",
+      args: [BigInt(1), "legalBody", encodePointer(CHAIN, ANOTHER_BODY)],
+      value: BigInt(10) ** BigInt(18),
+      gas: BigInt(30_000_000),
+    };
+    const data = accepted(pointer, ctx);
+    for (const key of [...Object.keys(later), "every field"]) {
+      const shifted = key === "every field" ? later : { [key]: later[key] };
+      expect(allowedCall(shifting(pointer, shifted), ctx), key).toEqual({ ok: true, data });
+      const writeContract = wallet();
+      const out = await sendAllowedCall(shifting(pointer, shifted), ctx, {
+        walletChainId: CHAIN,
+        configuredChainIds: [CHAIN],
+        writeContract,
+      });
+      expect(out, key).toEqual({ ok: true, hash: "0xabc", data });
+      expect(writeContract, key).toHaveBeenCalledTimes(1);
+      const sent = writeContract.mock.calls[0][0];
+      expect(sent, key).toEqual(pointer);
+      expect(sent.abi, key).toBe(identityRegistryAbi);
+      expect(Object.keys(sent).sort(), key).toEqual(["abi", "address", "args", "chainId", "functionName", "gas"]);
+    }
+    // A value of 0 on its first read is sent as 0, never as the later coin.
+    const writeContract = wallet();
+    await sendAllowedCall(shifting({ ...pointer, value: NO_WEI }, { value: later.value }), ctx, {
+      walletChainId: CHAIN,
+      configuredChainIds: [CHAIN],
+      writeContract,
+    });
+    expect(writeContract.mock.calls[0][0].value).toBe(NO_WEI);
+    // The wallet's chain is compared with the first answer: a wallet on the later chain is refused.
+    const elsewhere = wallet();
+    expect(
+      await sendAllowedCall(shifting(pointer, { chainId: OTHER_CHAIN }), ctx, {
+        walletChainId: OTHER_CHAIN,
+        configuredChainIds: [CHAIN, OTHER_CHAIN],
+        writeContract: elsewhere,
+      }),
+    ).toEqual(refused("wallet_on_another_chain"));
+    expect(elsewhere).not.toHaveBeenCalled();
+  });
+
+  test("a pot request whose chain answers otherwise after its first read: refused on the later chain, sent once on the first", async () => {
+    for (const [name, req, c] of pots) {
+      const elsewhere = wallet();
+      expect(
+        await sendAllowedCall(shifting(req, { chainId: OTHER_CHAIN }), c, {
+          walletChainId: OTHER_CHAIN,
+          walletAddress: G,
+          configuredChainIds: [CHAIN, OTHER_CHAIN],
+          writeContract: elsewhere,
+        }),
+        name,
+      ).toEqual(refused("wallet_on_another_chain"));
+      expect(elsewhere, name).not.toHaveBeenCalled();
+      const later: Record<string, unknown> = {
+        chainId: OTHER_CHAIN,
+        address: ANOTHER_CONTRACT,
+        abi: identityRegistryAbi,
+        functionName: "register",
+        args: [],
+        value: BigInt(10) ** BigInt(18),
+        gas: BigInt(30_000_000),
+      };
+      for (const shifted of [{ chainId: OTHER_CHAIN }, later]) {
+        const writeContract = wallet();
+        const out = await sendAllowedCall(shifting(req, shifted), c, {
+          walletChainId: CHAIN,
+          walletAddress: G,
+          configuredChainIds: [CHAIN],
+          writeContract,
+        });
+        expect(out, name).toEqual({ ok: true, hash: "0xabc", data: accepted(req, c) });
+        expect(writeContract, name).toHaveBeenCalledTimes(1);
+        expect(writeContract.mock.calls[0][0], name).toEqual(req);
+      }
+    }
+  });
+
+  test("a context whose fields answer otherwise after their first read: checked and sent as on the first reading", async () => {
+    const movingConfig = () =>
+      shifting(config, {
+        chainId: OTHER_CHAIN,
+        identityRegistry: ANOTHER_CONTRACT,
+        factory: ANOTHER_FACTORY,
+      }) as unknown as CallContext["config"];
+    const cases: [string, WriteRequest, () => CallContext, CallContext][] = [
+      ["the pointer, its /config", pointer, () => ({ config: movingConfig(), order: order() }), ctx],
+      [
+        "the pointer, its order's chain",
+        pointer,
+        () => ({ config, order: shifting(order(), { chainId: OTHER_CHAIN }) as unknown as LegalBodyOrderView }),
+        ctx,
+      ],
+      [
+        "the agent's wallet, its /config and the identity's facts",
+        goodWallet(),
+        () => ({
+          config: movingConfig(),
+          order: null,
+          wallet: shifting(WALLET, { agentId: "1", guardian: OTHER_WALLET, nowSeconds: NOW + 1_000 }) as unknown as CallContext["wallet"],
+        }),
+        walletCtx(),
+      ],
+      ["the setup, its /config", setupReq(), () => ({ ...potCtx(SETUP_V5), config: movingConfig() }), potCtx(SETUP_V5)],
+      ["add money, its /config", transferReq(ADD_V14), () => ({ ...potCtx(ADD_V14), config: movingConfig() }), potCtx(ADD_V14)],
+    ];
+    for (const [name, req, moving, still] of cases) {
+      expect(allowedCall(req, still).ok, name).toBe(true);
+      expect(allowedCall(req, moving()), name).toEqual(allowedCall(req, still));
+      const deps = { walletChainId: CHAIN, walletAddress: G, configuredChainIds: [CHAIN] };
+      const writeContract = wallet();
+      const steady = wallet();
+      expect(await sendAllowedCall(req, moving(), { ...deps, writeContract }), name).toEqual(
+        await sendAllowedCall(req, still, { ...deps, writeContract: steady }),
+      );
+      expect(writeContract, name).toHaveBeenCalledTimes(1);
+      expect(writeContract.mock.calls[0][0], name).toEqual(steady.mock.calls[0][0]);
+    }
+  });
+
+  test("a getter that throws, or a revoked Proxy, in the request, its context, its order or its pot: bad_request, and writeContract is never called", async () => {
+    const setup = setupReq();
+    const cases: [string, WriteRequest, CallContext][] = [
+      ["a request whose arguments throw", throwing(pointer, "args"), ctx],
+      ["a request whose chain throws", throwing(pointer, "chainId"), ctx],
+      ["a request whose value throws something that is not an error", throwing(pointer, "value", "no"), ctx],
+      ["a revoked request", revoked<WriteRequest>(), ctx],
+      ["a request with nothing at all", undefined as unknown as WriteRequest, ctx],
+      ["a pointer whose arguments are a revoked list", { ...pointer, args: revoked<unknown[]>() }, ctx],
+      ["a setup whose gas throws", throwing(setup, "gas"), potCtx(SETUP_V5)],
+      ["a setup whose calls are a revoked list", { ...setup, args: [revoked<unknown[]>()] }, potCtx(SETUP_V5)],
+      ["a setup with a revoked call", { ...setup, args: [[revoked<object>(), ...callsOf(setup).slice(1)]] }, potCtx(SETUP_V5)],
+      ["an action whose arguments throw", throwing(execReq(CHANGE_V6), "args"), potCtx(CHANGE_V6)],
+      ["a transfer whose address throws", throwing(transferReq(ADD_V14), "address"), potCtx(ADD_V14)],
+      ["a setup context whose guardian throws", setup, potCtx(throwing(SETUP_V5, "guardian"))],
+      ["a setup context whose wallet kind throws", setup, potCtx(throwing(SETUP_V5, "agentWalletKind"))],
+      ["a revoked pot context", execReq(STOP_V9), potCtx(revoked<PotCallContext>())],
+      ["a stop whose delegates are a revoked list", execReq(STOP_V9), potCtx(odd({ ...STOP_V9, delegates: revoked<unknown[]>() }))],
+      ["a transfer context whose amount throws", transferReq(FEE_V15), potCtx(throwing(FEE_V15, "amountUnits"))],
+      ["a revoked transfer context", transferReq(ADD_V14), potCtx(revoked<PotCallContext>())],
+      ["an order whose state throws, for a pot call", setup, potCtx(SETUP_V5, { order: throwing(linked(), "state") })],
+      ["a revoked order, for a transfer", transferReq(ADD_V14), potCtx(ADD_V14, { order: revoked<LegalBodyOrderView>() })],
+      ["an order whose state throws, for the pointer", pointer, { config, order: throwing(order(), "state") }],
+      ["a revoked order, for the pointer", pointer, { config, order: revoked<LegalBodyOrderView>() }],
+      ["a wallet context whose guardian throws", goodWallet(), { config, order: null, wallet: throwing(WALLET, "guardian") }],
+      ["a context whose pot throws", setup, throwing(potCtx(SETUP_V5), "pot")],
+      ["a context whose config throws", pointer, throwing(ctx, "config")],
+      ["a revoked context", pointer, revoked<CallContext>()],
+    ];
+    for (const [name, req, c] of cases) {
+      expect(() => allowedCall(req, c), name).not.toThrow();
+      expect(allowedCall(req, c), name).toEqual(refused("bad_request"));
+      const writeContract = wallet();
+      expect(
+        await sendAllowedCall(req, c, { walletChainId: CHAIN, walletAddress: G, configuredChainIds: [CHAIN], writeContract }),
+        name,
+      ).toEqual(refused("bad_request"));
+      expect(writeContract, name).not.toHaveBeenCalled();
+    }
+  });
+
+  test("a wallet that refuses still rejects: the gate turns only its own reading into a refusal", async () => {
+    const declined = vi.fn<(req: WriteRequest) => Promise<Hex>>(async () => {
+      throw new Error("User rejected the request.");
+    });
+    const deps = { walletChainId: CHAIN, walletAddress: G, configuredChainIds: [CHAIN], writeContract: declined };
+    await expect(sendAllowedCall(transferReq(ADD_V14), potCtx(ADD_V14), deps)).rejects.toThrow("User rejected the request.");
+    await expect(sendAllowedCall(pointer, ctx, deps)).rejects.toThrow("User rejected the request.");
+    expect(declined).toHaveBeenCalledTimes(2);
   });
 });
 

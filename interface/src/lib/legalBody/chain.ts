@@ -2,22 +2,30 @@
  * The legal-body flow's chain layer: the pinned ABI fragments, the pointer encoder, the one
  * allowlist every wallet write request passes, the door that sends it, and the mint parse.
  *
- * Pin and assert, then send: nothing reaches a wallet unless it is one of the six calls below.
+ * Pin and assert, then send: nothing reaches a wallet unless it is one of the seven calls below.
  * Four are on the identity registry, built for the selected order or, for the agent's wallet, the
  * selected identity, on the chain and registry that `/config` names: never an approval, a transfer
- * or a value. Two are the company's pot, sent from the order's guardian's own account: its setup,
- * one transaction to Multicall3 that creates the pot and may carry money to two places only, the
- * pot it creates and the agent's own wallet; and the guardian's `execTransaction` on the noted pot,
- * which carries no value and changes the ceiling, stops the allowance, takes the pot's money back
- * to the guardian, or starts it again. A pot call is rebuilt from the allowlist's own context and
- * sent only when the request equals the rebuild. The registry's addresses come from the API
- * (`/config.legalBodies`, the order), never from this bundle; the pot's contracts are pinned per
- * chain in `safePot.ts`, and the pot's own address is the one the server noted for the order.
+ * or a value. Three are the company's pot, sent from the order's guardian's own account, each with
+ * what it may move and to whom:
+ * - its setup, one transaction to Multicall3 that creates the pot and may carry money to two
+ *   places only, the pot it creates (at most 1,000,000,000 USDC) and the agent's own key (at most
+ *   1 USDC, and only to a plain key);
+ * - the guardian's `execTransaction` on the noted pot, which carries no value and changes the
+ *   ceiling, stops the allowance, takes the pot's money back to the guardian, or starts it again;
+ * - a USDC `transfer` with no value: "Add money" to the noted pot (at most 1,000,000,000 USDC), or
+ *   "Send fee money" to the agent's own key, a plain key (at most 1 USDC).
+ * Money goes to the guardian's own pot, to the agent's own key, or back to the guardian: nothing
+ * goes to Novi Corpus, which holds no key and no money. A pot call is rebuilt from the
+ * allowlist's own context and sent only when the request equals the rebuild. Each request is read
+ * once, and what cannot be read is refused, never thrown. The registry's addresses come from the
+ * API (`/config.legalBodies`, the order), never from this bundle; the pot's contracts are pinned
+ * per chain in `safePot.ts`, and the pot's own address is the one the server noted for the order.
  */
 import { encodeAbiParameters, encodeFunctionData, formatUnits, getAddress } from "viem";
 import type { Address, Hex, LegalBodyConfig, LegalBodyOrderView } from "@/lib/api/types";
 import { sameAddress } from "./flow";
 import {
+  erc20Abi,
   multicall3Abi,
   POT_AGENT_GAS_MAX_UNITS,
   POT_CEILING_MAX_USDC,
@@ -25,6 +33,7 @@ import {
   POT_FUND_MAX_UNITS,
   POT_PERIOD_MINUTES,
   POT_SETUP_GAS_CAP,
+  POT_TRANSFER_GAS_CAP,
   potAddresses,
   potChangeArgs,
   potRestoreArgs,
@@ -234,20 +243,22 @@ export function walletKindOf(code: Hex | undefined): WalletKind {
 
 /**
  * The only shape a wallet write request takes in this flow: the registry's three functions over
- * `identityRegistryAbi`, `aggregate3Value` over `multicall3Abi`, or `execTransaction` over
- * `safeAbi`. One object type rather than one per pair: which ABI goes with which name, like every
- * other field, is the allowlist's to check at run time, since the type was never proof.
+ * `identityRegistryAbi`, `aggregate3Value` over `multicall3Abi`, `execTransaction` over `safeAbi`,
+ * or USDC's `transfer` over `erc20Abi`. One object type rather than one per pair: which ABI goes
+ * with which name, like every other field, is the allowlist's to check at run time, since the type
+ * was never proof.
  */
 export type WriteRequest = {
   chainId: number;
   address: Address;
-  abi: typeof identityRegistryAbi | typeof multicall3Abi | typeof safeAbi;
+  abi: typeof identityRegistryAbi | typeof multicall3Abi | typeof safeAbi | typeof erc20Abi;
   functionName:
     | "register"
     | "setMetadata"
     | "setAgentWallet"
     | "aggregate3Value"
-    | "execTransaction";
+    | "execTransaction"
+    | "transfer";
   args: readonly unknown[];
   value?: bigint;
   gas?: bigint;
@@ -257,14 +268,19 @@ export type WriteRequest = {
  * What the allowlist rebuilds a pot call from. It is pure and reads nothing: a screen reads these
  * in the same click. `guardian` is the order's `guardian` as the API served it; `agentWallet` is
  * the registry's `getAgentWallet` for the order's identity; `pot` is the address the server noted
- * for the order; `delegates`, `modules` and `balanceWei` are a `readPotRaw` of that pot. Money
- * sent as value is in native wei (18 decimals); the ceiling is in USDC units (6).
+ * for the order; `delegates`, `modules` and `balanceWei` are a `readPotRaw` of that pot, and
+ * `agentHasCode` is its field for the agent's wallet. The setup's `agentWalletKind` is
+ * `walletKindOf` of the agent wallet's `getCode` in the same click: fee money goes to a plain key
+ * only, and a context that leaves the kind out is read only when it sends no fee money. Money sent
+ * as value is in native wei (18 decimals); the ceiling, and the amount of a USDC transfer, are in
+ * USDC units (6): a transfer never carries wei.
  */
 export type PotCallContext =
   | {
       kind: "setup";
       guardian: Address;
       agentWallet: Address;
+      agentWalletKind: WalletKind;
       ceilingUnits: bigint;
       saltNonce: bigint;
       fundWei: bigint;
@@ -293,6 +309,14 @@ export type PotCallContext =
       ceilingUnits: bigint;
       delegates: readonly Address[];
       modules: readonly Address[];
+    }
+  | { kind: "add_money"; pot: Address; guardian: Address; amountUnits: bigint }
+  | {
+      kind: "fee_money";
+      guardian: Address;
+      agentWallet: Address;
+      agentHasCode: boolean;
+      amountUnits: bigint;
     };
 
 export type CallContext = {
@@ -375,7 +399,10 @@ const MAX_CEILING_UNITS = BigInt(POT_CEILING_MAX_USDC) * USDC_UNIT;
 /** The most delegates, or modules, a context may list: the first page `readPotRaw` reads. */
 const MAX_POT_LIST = 10;
 
-type SetupContext = Extract<PotCallContext, { kind: "setup" }>;
+/** The setup's context as read: its wallet kind left out only when it sends no fee money. */
+type SetupContext = Omit<Extract<PotCallContext, { kind: "setup" }>, "agentWalletKind"> & {
+  agentWalletKind: WalletKind | undefined;
+};
 /** A list as the context held it: copied, its entries not read yet. */
 type UnreadList = readonly unknown[];
 /** An action's context as read: every field of its kind, the lists copied but their entries
@@ -395,6 +422,8 @@ type ExecRead =
     };
 
 const isAddress = (x: unknown): x is Address => typeof x === "string" && ADDRESS.test(x);
+const WALLET_KINDS: readonly unknown[] = ["key", "delegated", "contract"];
+const isWalletKind = (x: unknown): x is WalletKind => WALLET_KINDS.includes(x);
 /** A bigint of 0 or more. */
 const isAmount = (x: unknown): x is bigint => typeof x === "bigint" && x >= ZERO;
 /** Addresses compared without regard to letter case; what is not a string is never equal. */
@@ -407,12 +436,21 @@ const sameHex = (a: unknown, b: Hex): boolean =>
 const checksummed = (a: Address): Address => getAddress(a.toLowerCase());
 
 /** The setup's context, read once into a copy of its own, or null when it is no setup's context:
- *  not an object, another kind, an address that is not `0x` and 40 hex digits, or a number that is
- *  not a bigint of 0 or more. The rules read the copy only. */
+ *  not an object, another kind, an address that is not `0x` and 40 hex digits, a number that is
+ *  not a bigint of 0 or more, a wallet kind that is none of the three, or no wallet kind while fee
+ *  money is sent. The rules read the copy only. */
 function readSetupContext(raw: unknown): SetupContext | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const { kind, guardian, agentWallet, ceilingUnits, saltNonce, fundWei, agentGasWei } =
-    raw as Record<string, unknown>;
+  const {
+    kind,
+    guardian,
+    agentWallet,
+    agentWalletKind,
+    ceilingUnits,
+    saltNonce,
+    fundWei,
+    agentGasWei,
+  } = raw as Record<string, unknown>;
   if (
     kind !== "setup" ||
     !isAddress(guardian) ||
@@ -423,7 +461,20 @@ function readSetupContext(raw: unknown): SetupContext | null {
     !isAmount(agentGasWei)
   )
     return null;
-  return { kind: "setup", guardian, agentWallet, ceilingUnits, saltNonce, fundWei, agentGasWei };
+  // One of the three kinds; or none at all, read only when no fee money is sent.
+  const walletKind = isWalletKind(agentWalletKind) ? agentWalletKind : undefined;
+  if (agentWalletKind !== undefined && walletKind === undefined) return null;
+  if (walletKind === undefined && agentGasWei !== ZERO) return null;
+  return {
+    kind: "setup",
+    guardian,
+    agentWallet,
+    agentWalletKind: walletKind,
+    ceilingUnits,
+    saltNonce,
+    fundWei,
+    agentGasWei,
+  };
 }
 
 /** An action's context, read once into a copy of its own, or null when it is no action's context:
@@ -461,6 +512,30 @@ function readExecContext(raw: unknown): ExecRead | null {
       delegates: listed,
       modules: on,
     };
+  }
+  return null;
+}
+
+type TransferContext = Extract<PotCallContext, { kind: "add_money" | "fee_money" }>;
+
+/** A transfer's context, read once into a copy of its own, or null when it is no transfer's
+ *  context: not an object, a kind other than add_money and fee_money, an address that is not `0x`
+ *  and 40 hex digits, an amount that is not a bigint of 0 or more, or a code fact that is not a
+ *  boolean. */
+function readTransferContext(raw: unknown): TransferContext | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const { kind, pot, guardian, agentWallet, agentHasCode, amountUnits } = raw as Record<
+    string,
+    unknown
+  >;
+  if (!isAddress(guardian) || !isAmount(amountUnits)) return null;
+  if (kind === "add_money") {
+    if (!isAddress(pot)) return null;
+    return { kind: "add_money", pot, guardian, amountUnits };
+  }
+  if (kind === "fee_money") {
+    if (!isAddress(agentWallet) || typeof agentHasCode !== "boolean") return null;
+    return { kind: "fee_money", guardian, agentWallet, agentHasCode, amountUnits };
   }
   return null;
 }
@@ -506,8 +581,9 @@ const potSetupOf = (
 
 /** The setup's own rules, in order, then its rebuild: the wallet and the ceiling; the pot's money
  *  in whole units, at most POT_FUND_MAX_UNITS; the fee money the same, at most
- *  POT_AGENT_GAS_MAX_UNITS; a salt nonce no larger than a uint256. Nothing reaches the encoder
- *  before every rule has passed. */
+ *  POT_AGENT_GAS_MAX_UNITS, and only for a plain key (a delegated key or a contract wallet takes
+ *  none); a salt nonce no larger than a uint256. Nothing reaches the encoder before every rule has
+ *  passed. */
 function rebuildSetup(
   a: PotAddresses,
   p: SetupContext,
@@ -516,6 +592,8 @@ function rebuildSetup(
   if (problem !== null) return problem;
   if (!wholeUnits(p.fundWei, POT_FUND_MAX_UNITS)) return refuse("fund_out_of_bounds");
   if (!wholeUnits(p.agentGasWei, POT_AGENT_GAS_MAX_UNITS)) return refuse("agent_gas_out_of_bounds");
+  if (p.agentGasWei !== ZERO && p.agentWalletKind !== "key")
+    return refuse("fee_money_needs_plain_key");
   if (p.saltNonce > MAX_UINT256) return refuse("salt_out_of_bounds");
   const { calls, value } = potSetupCalls(a, {
     ...potSetupOf(a, p),
@@ -555,6 +633,27 @@ function rebuildExec(a: PotAddresses, p: ExecRead): { ok: true; args: SafeExecAr
   if (delegates === null || modules === null) return refuse("no_pot_context");
   const args = potRestoreArgs(a, { ...potSetupOf(a, p), delegates, modules });
   return args === null ? refuse("restore_other_module") : { ok: true, args };
+}
+
+/** A USDC transfer's two arguments: the payee, checksummed, and the amount in units. */
+type TransferArgs = readonly [Address, bigint];
+
+/** A transfer's own rules, by kind, then its rebuild. Add money: 1 unit to POT_FUND_MAX_UNITS,
+ *  to the noted pot. Fee money, in this order: never the zero address; never the guardian's own
+ *  wallet; never a wallet with code, so only a plain key; 1 unit to POT_AGENT_GAS_MAX_UNITS; to
+ *  the agent's wallet. */
+function rebuildTransfer(p: TransferContext): { ok: true; args: TransferArgs } | Refusal {
+  if (p.kind === "add_money") {
+    if (p.amountUnits === ZERO || p.amountUnits > POT_FUND_MAX_UNITS)
+      return refuse("fund_out_of_bounds");
+    return { ok: true, args: [checksummed(p.pot), p.amountUnits] };
+  }
+  if (ZERO_ADDRESS.test(p.agentWallet)) return refuse("wallet_is_zero");
+  if (sameAddress(p.agentWallet, p.guardian)) return refuse("wallet_is_guardian");
+  if (p.agentHasCode) return refuse("fee_money_contract_wallet");
+  if (p.amountUnits === ZERO || p.amountUnits > POT_AGENT_GAS_MAX_UNITS)
+    return refuse("agent_gas_out_of_bounds");
+  return { ok: true, args: [checksummed(p.agentWallet), p.amountUnits] };
 }
 
 /** The setup, as the screen asks for it: `aggregate3Value` on the table's Multicall3, its value
@@ -602,6 +701,30 @@ export function potExecCall(
     address: checksummed(read.pot),
     abi: safeAbi,
     functionName: "execTransaction",
+    args: rebuilt.args,
+    gas,
+  };
+}
+
+/** "Add money" or "Send fee money": `transfer` on the table's USDC, with no value, and the gas
+ *  given. Refused, never thrown, when the chain has no pot or the context breaks its kind's rules;
+ *  whether it may be sent is `allowedCall`'s to say. */
+export function potTransferCall(
+  config: CallContext["config"],
+  p: Extract<PotCallContext, { kind: "add_money" | "fee_money" }>,
+  gas: bigint,
+): WriteRequest | Refusal {
+  const a = potAddresses(config.chainId);
+  if (a === null) return refuse("pot_chain_unsupported");
+  const read = readTransferContext(p);
+  if (read === null) return refuse("no_pot_context");
+  const rebuilt = rebuildTransfer(read);
+  if (!rebuilt.ok) return rebuilt;
+  return {
+    chainId: config.chainId,
+    address: checksummed(a.usdc),
+    abi: erc20Abi,
+    functionName: "transfer",
     args: rebuilt.args,
     gas,
   };
@@ -666,22 +789,39 @@ function sameExecArgs(args: unknown, want: SafeExecArgs): boolean {
   );
 }
 
+/** Two values equal to the rebuild's: the payee without regard to case, the amount exactly and a
+ *  bigint. */
+function sameTransferArgs(args: unknown, want: TransferArgs): boolean {
+  if (!Array.isArray(args) || args.length !== 2) return false;
+  const [to, amount] = args as unknown[];
+  return sameAddr(to, want[0]) && amount === want[1];
+}
+
+/** The pot's three functions. */
+type PotFunction = "aggregate3Value" | "execTransaction" | "transfer";
+
+/** The context of the function's kinds, read once, or null: each reader reads only its own. */
+function readPotContext(
+  fn: PotFunction,
+  raw: unknown,
+): SetupContext | ExecRead | TransferContext | null {
+  if (fn === "aggregate3Value") return readSetupContext(raw);
+  if (fn === "execTransaction") return readExecContext(raw);
+  return readTransferContext(raw);
+}
+
 /**
- * The pot's two calls. First, for both: the request's chain is the configured one; the chain has
- * the pot's contracts; a complete context of the function's kind; an order on this deployment,
- * linked and not revoked, whose guardian is the context's; a gas from 1 to the call's cap. Then
- * the call's own rules (`checkSetup`, `checkExec`).
+ * The pot's three functions. First, for all: the request's chain is the configured one; the chain
+ * has the pot's contracts; a complete context of the function's kinds; an order on this
+ * deployment, linked and not revoked, whose guardian is the context's; a gas from 1 to the
+ * function's cap. Then the function's own rules (`checkSetup`, `checkExec`, `checkTransfer`).
  */
-function checkPotCall(
-  req: WriteRequest,
-  ctx: CallContext,
-  fn: "aggregate3Value" | "execTransaction",
-): Checked | Refusal {
+function checkPotCall(req: WriteRequest, ctx: CallContext, fn: PotFunction): Checked | Refusal {
   const { config } = ctx;
   if (req.chainId !== config.chainId) return refuse("wrong_chain");
   const table = potAddresses(config.chainId);
   if (table === null) return refuse("pot_chain_unsupported");
-  const p = fn === "aggregate3Value" ? readSetupContext(ctx.pot) : readExecContext(ctx.pot);
+  const p = readPotContext(fn, ctx.pot);
   if (p === null) return refuse("no_pot_context");
   const order: unknown = ctx.order;
   if (typeof order !== "object" || order === null) return refuse("no_order");
@@ -691,13 +831,18 @@ function checkPotCall(
   if (o.state !== "linked" || o.revoked !== false) return refuse("order_not_linked");
   if (!sameAddr(o.guardian, p.guardian)) return refuse("guardian_is_not_the_orders");
   const gas: unknown = req.gas;
-  const cap = p.kind === "setup" ? POT_SETUP_GAS_CAP : POT_EXEC_GAS_CAP;
+  const cap =
+    fn === "aggregate3Value"
+      ? POT_SETUP_GAS_CAP
+      : fn === "execTransaction"
+        ? POT_EXEC_GAS_CAP
+        : POT_TRANSFER_GAS_CAP;
   if (typeof gas !== "bigint" || gas <= ZERO || gas > cap) return refuse("gas_out_of_bounds");
-  // `readSetupContext` reads only a setup and `readExecContext` never one: the kind is the
-  // function's.
-  return p.kind === "setup"
-    ? checkSetup(req, config.chainId, table, p, gas)
-    : checkExec(req, config.chainId, table, p, gas);
+  // Each reader reads only its function's kinds: the kind is the function's.
+  if (p.kind === "setup") return checkSetup(req, config.chainId, table, p, gas);
+  if (p.kind === "add_money" || p.kind === "fee_money")
+    return checkTransfer(req, config.chainId, table, p, gas);
+  return checkExec(req, config.chainId, table, p, gas);
 }
 
 /** The setup: to the table's Multicall3, over the pinned ABI; its own rules and the rebuild; the
@@ -773,11 +918,48 @@ function checkExec(
   };
 }
 
-/** The allowlist itself; `allowedCall` shows its answer, `sendAllowedCall` sends it. The pot's two
- *  functions take their own rules; any other name takes the registry's, which refuse any value. */
+/** A transfer: on the table's USDC; over the pinned ABI; no value (absent or 0); its kind's rules
+ *  and the rebuild; the two arguments the rebuild's. The wallet gets the rebuild with no value:
+ *  the money moves as USDC units, never as wei. */
+function checkTransfer(
+  req: WriteRequest,
+  chainId: number,
+  a: PotAddresses,
+  p: TransferContext,
+  gas: bigint,
+): Checked | Refusal {
+  if (!sameAddr(req.address, a.usdc)) return refuse("not_usdc");
+  if (req.abi !== erc20Abi) return refuse("not_the_pinned_abi");
+  const value: unknown = req.value;
+  if (value !== undefined && value !== ZERO) return refuse("sends_value");
+  const rebuilt = rebuildTransfer(p);
+  if (!rebuilt.ok) return rebuilt;
+  if (!sameTransferArgs(req.args, rebuilt.args)) return refuse("transfer_args");
+  return {
+    ok: true,
+    data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: rebuilt.args }),
+    args: rebuilt.args,
+    pot: {
+      guardian: p.guardian,
+      request: {
+        chainId,
+        address: checksummed(a.usdc),
+        abi: erc20Abi,
+        functionName: "transfer",
+        args: rebuilt.args,
+        gas,
+      },
+    },
+  };
+}
+
+/** The allowlist itself; `allowedCall` shows its answer, `sendAllowedCall` sends it. The pot's
+ *  three functions take their own rules; any other name takes the registry's, which refuse any
+ *  value. It reads what `gate` read once, never the caller's objects. */
 function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
   const fn = req.functionName;
-  if (fn === "aggregate3Value" || fn === "execTransaction") return checkPotCall(req, ctx, fn);
+  if (fn === "aggregate3Value" || fn === "execTransaction" || fn === "transfer")
+    return checkPotCall(req, ctx, fn);
   const { config } = ctx;
   if (req.value !== undefined && req.value !== BigInt(0)) return refuse("sends_value");
   if (req.chainId !== config.chainId) return refuse("wrong_chain");
@@ -809,7 +991,9 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
   if (req.functionName === "setMetadata") {
     const order = ctx.order;
     if (order === null) return refuse("no_order");
-    if (order.chainId !== config.chainId || !sameAddress(order.factory, config.factory))
+    // The order's chain is read once: the one compared is the one the pointer encodes.
+    const orderChainId = order.chainId;
+    if (orderChainId !== config.chainId || !sameAddress(order.factory, config.factory))
       return refuse("order_on_another_deployment");
     if (!pointable(order)) return refuse("order_not_pointable");
     const own = bodyOf(order);
@@ -818,7 +1002,7 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
     const [agentId, key, value] = args;
     if (typeof agentId !== "bigint" || agentId !== own.agentId) return refuse("other_identity");
     if (key !== POINTER_KEY) return refuse("other_key");
-    const expected = encodePointer(order.chainId, own.body);
+    const expected = encodePointer(orderChainId, own.body);
     if (typeof value !== "string" || value.toLowerCase() !== expected) return refuse("other_body");
     return {
       ok: true,
@@ -833,20 +1017,20 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
 
   if (req.functionName === "setAgentWallet") {
     const wallet = ctx.wallet;
+    if (!wallet) return refuse("no_wallet_context");
+    // Each field read once: the rules below compare what was checked here.
+    const { agentId: contextId, guardian, nowSeconds: now } = wallet;
     // The type is not proof, and an incomplete context is no context: a guardian that is not an
     // address would let its rule pass unread, and an id that is not a string or a time that is not
     // a finite number at or above 0 cannot be compared with anything.
     if (
-      !wallet ||
-      typeof wallet.guardian !== "string" ||
-      !ADDRESS.test(wallet.guardian) ||
-      typeof wallet.agentId !== "string" ||
-      !Number.isFinite(wallet.nowSeconds) ||
-      wallet.nowSeconds < 0
+      typeof guardian !== "string" ||
+      !ADDRESS.test(guardian) ||
+      typeof contextId !== "string" ||
+      !Number.isFinite(now) ||
+      now < 0
     )
       return refuse("no_wallet_context");
-    const contextId = wallet.agentId;
-    const now = wallet.nowSeconds;
     if (args === null || args.length !== 4) return refuse("set_agent_wallet_args");
     const [agentId, newWallet, deadline, signature] = args;
     if (
@@ -866,7 +1050,7 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
     )
       return refuse("other_identity");
     if (ZERO_ADDRESS.test(newWallet)) return refuse("wallet_is_zero");
-    if (sameAddress(newWallet, wallet.guardian)) return refuse("wallet_is_guardian");
+    if (sameAddress(newWallet, guardian)) return refuse("wallet_is_guardian");
     // A bigint compares with a number exactly, a fraction of a second included. A huge but finite
     // time puts its whole window past any uint256: refused too, never handed to the encoder.
     const inWindow =
@@ -892,9 +1076,52 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
   return refuse("not_allowed");
 }
 
+/** The request as the allowlist reads it: each of its seven fields read once, the arguments copied
+ *  into a list of its own when they are a list. The rules read this copy only, and the wallet gets
+ *  only what was built from it: a request whose fields answer otherwise on a later read changes
+ *  nothing. */
+function snapshotOf(req: WriteRequest): WriteRequest {
+  const { chainId, address, abi, functionName, args, value, gas } = req;
+  const copy: WriteRequest = {
+    chainId,
+    address,
+    abi,
+    functionName,
+    args: Array.isArray(args) ? Array.prototype.slice.call(args) : args,
+  };
+  if (value !== undefined) copy.value = value;
+  if (gas !== undefined) copy.gas = gas;
+  return copy;
+}
+
+/** The context as the allowlist reads it: each of its four fields read once, and the three values
+ *  of `/config`. The order, the identity's facts and the pot's are each read once by the rule that
+ *  takes them. */
+function contextOf(ctx: CallContext): CallContext {
+  const { config, order, wallet, pot } = ctx;
+  const { chainId, identityRegistry, factory } = config;
+  return { config: { chainId, identityRegistry, factory }, order, wallet, pot };
+}
+
+/** Both doors' one entry: the request and its context read once, then the rules. A request or a
+ *  context that throws while it is read (a getter, a revoked Proxy) is refused `bad_request`:
+ *  nothing it holds reaches the wallet, and the screen gets a problem, never a throw. */
+function gate(
+  req: WriteRequest,
+  ctx: CallContext,
+): { ok: true; request: WriteRequest; checked: Checked } | Refusal {
+  try {
+    const request = snapshotOf(req);
+    const checked = checkCall(request, contextOf(ctx));
+    return checked.ok ? { ok: true, request, checked } : checked;
+  } catch {
+    return refuse("bad_request");
+  }
+}
+
 /**
  * The allowlist's answer, for a screen to show. Both doors, this one and `sendAllowedCall`, pass
- * `checkCall`, which holds the rules, so there is one allowlist: exactly six calls.
+ * `checkCall`, which holds the rules, so there is one allowlist: exactly seven calls.
  *
  * Four on the registry of `/config`'s chain, never with a value. `register()` and
  * `register(string)`; `setMetadata(agentId, "legalBody", pointer)` for the selected order's own
@@ -905,46 +1132,51 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
  * guardian's own wallet; a deadline from the chain's time to 300 seconds after it, no larger than a
  * uint256; a signature of 1 to 2,048 whole bytes.
  *
- * Two for the company's pot, for an order that is linked and not revoked, from a context whose
+ * Three for the company's pot, for an order that is linked and not revoked, from a context whose
  * guardian is the order's, on a chain the pot's table holds, with a gas from 1 to the call's cap.
  * The setup, `aggregate3Value` on the table's Multicall3: it creates the Safe the context
  * describes (the guardian its only owner, the agent's wallet its only delegate, the ceiling in
  * each thirty-day period) and may carry money to two places only, the pot it creates (at most
- * 1,000,000,000 USDC) and the agent's own wallet (at most 1 USDC), each in whole units; its value
- * is the sum of the two. And the guardian's `execTransaction` on the noted pot, with no value:
- * change the ceiling, stop the allowance, take the pot's money back to the guardian (only once no
- * module is on), or start again with the registry's key. Each is rebuilt from the context alone,
- * with the table's USDC and the thirty-day period, and accepted only when the request equals the
- * rebuild. `sendAllowedCall` then asks that the connected account be the guardian's.
+ * 1,000,000,000 USDC) and the agent's own wallet (at most 1 USDC, and only to a plain key), each in
+ * whole units; its value is the sum of the two. The guardian's `execTransaction` on the noted pot,
+ * with no value: change the ceiling, stop the allowance, take the pot's money back to the guardian
+ * (only once no module is on), or start again with the registry's key. And USDC's `transfer` on
+ * the table's USDC, with no value: "Add money", 1 unit to 1,000,000,000 USDC to the noted pot; or
+ * "Send fee money", 1 unit to 1 USDC to the agent's own wallet, a plain key with no code, never
+ * the guardian's. Each is rebuilt from the context alone, with the table's USDC and the thirty-day
+ * period, and accepted only when the request equals the rebuild. `sendAllowedCall` then asks that
+ * the connected account be the guardian's. Money moves to the guardian's own pot, to the agent's
+ * own key, or back to the guardian, and to nobody else: nothing goes to Novi Corpus.
  *
- * Refuses with the first rule broken, in the order they are written, and never throws on what it
- * is handed. Returns the calldata it checked, encoded over the pinned ABI.
+ * Reads the request and its context once, and refuses with the first rule broken, in the order
+ * they are written. Never throws on what it is handed: what cannot be read is `bad_request`.
+ * Returns the calldata it checked, encoded over the pinned ABI.
  */
 export function allowedCall(
   req: WriteRequest,
   ctx: CallContext,
 ): { ok: true; data: Hex } | Refusal {
-  const checked = checkCall(req, ctx);
-  return checked.ok ? { ok: true, data: checked.data } : checked;
+  const gated = gate(req, ctx);
+  return gated.ok ? { ok: true, data: gated.checked.data } : gated;
 }
 
-/** The request the wallet gets: the fields the allowlist read, with the arguments it checked
- *  (a new array, never the caller's, which could still change), and nothing else: a key it did not
- *  read (a calldata suffix, a nonce, an account) never reaches the wallet. The ABI is the pinned
- *  one of the branch that accepted, never the request's. For the registry's calls `value` and
- *  `gas` pass through untouched; a pot call's request is the one its branch rebuilt, with the value
- *  and the gas it checked. */
-function forwarded(req: WriteRequest, checked: Checked): WriteRequest {
+/** The request the wallet gets: the fields the allowlist read in its one reading, with the
+ *  arguments it checked (a new array, never the caller's, which could still change), and nothing
+ *  else: a key it did not read (a calldata suffix, a nonce, an account) never reaches the wallet.
+ *  The ABI is the pinned one of the branch that accepted, never the request's. For the registry's
+ *  calls `value` and `gas` pass through as read; a pot call's request is the one its branch
+ *  rebuilt, with the value and the gas it checked. */
+function forwarded(read: WriteRequest, checked: Checked): WriteRequest {
   if (checked.pot !== undefined) return checked.pot.request;
   const out: WriteRequest = {
-    chainId: req.chainId,
-    address: req.address,
+    chainId: read.chainId,
+    address: read.address,
     abi: identityRegistryAbi,
-    functionName: req.functionName,
+    functionName: read.functionName,
     args: checked.args,
   };
-  if (req.value !== undefined) out.value = req.value;
-  if (req.gas !== undefined) out.gas = req.gas;
+  if (read.value !== undefined) out.value = read.value;
+  if (read.gas !== undefined) out.gas = read.gas;
   return out;
 }
 
@@ -952,9 +1184,10 @@ function forwarded(req: WriteRequest, checked: Checked): WriteRequest {
  * The one door to the wallet: the allowlist, then the chain. Refuses, with a problem the screen
  * turns into a sentence, when this site is not configured for the request's chain or the wallet
  * is on another one, instead of switching the wallet silently; and, for a pot call, when the
- * connected account (`walletAddress`) is not the order's guardian or none is named: the setup's
- * money would come from another account, and an action's approval holds only from the guardian's
- * own. Otherwise one `writeContract`.
+ * connected account (`walletAddress`) is not the order's guardian or none is named: the money
+ * would come from another account, and an action's approval holds only from the guardian's own.
+ * The chain compared is the one the allowlist read. Otherwise one `writeContract`, of what the
+ * allowlist built from its one reading.
  */
 export async function sendAllowedCall(
   req: WriteRequest,
@@ -967,13 +1200,14 @@ export async function sendAllowedCall(
     writeContract: (req: WriteRequest) => Promise<Hex>;
   },
 ): Promise<{ ok: true; hash: Hex; data: Hex } | Refusal> {
-  const checked = checkCall(req, ctx);
-  if (!checked.ok) return checked;
-  if (!deps.configuredChainIds.includes(req.chainId)) return refuse("chain_not_configured");
-  if (deps.walletChainId !== req.chainId) return refuse("wallet_on_another_chain");
+  const gated = gate(req, ctx);
+  if (!gated.ok) return gated;
+  const { request, checked } = gated;
+  if (!deps.configuredChainIds.includes(request.chainId)) return refuse("chain_not_configured");
+  if (deps.walletChainId !== request.chainId) return refuse("wallet_on_another_chain");
   if (checked.pot !== undefined && !sameAddr(deps.walletAddress, checked.pot.guardian))
     return refuse("wallet_is_not_the_guardian");
-  const hash = await deps.writeContract(forwarded(req, checked));
+  const hash = await deps.writeContract(forwarded(request, checked));
   return { ok: true, hash, data: checked.data };
 }
 
