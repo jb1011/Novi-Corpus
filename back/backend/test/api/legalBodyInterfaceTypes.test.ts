@@ -3,10 +3,11 @@
  *
  * The interface never imports backend code, so it carries its own copy of every union and view the
  * legal-body flow reads: the order, its binding, the link message, the statement message, the
- * agreement, `/config.legalBodies` and the transparency rows. Beside each copy it keeps a runtime
- * list, its members or its keys, written `as const` so this guard has something unambiguous to
- * read. Nothing in either compiler ties the two packages together: a state added here would still
- * build and render there, with no branch for it.
+ * agreement, `/config.legalBodies`, the transparency rows, the guardian's identity record as
+ * `/world-id/me` serves it and the identity check's session view. Beside each copy it keeps a
+ * runtime list, its members or its keys, written `as const` so this guard has something
+ * unambiguous to read. Nothing in either compiler ties the two packages together: a state added
+ * here would still build and render there, with no branch for it.
  *
  * Each union and each view is written out ONCE below as an exhaustive record. A
  * `Record<Union, true>` or a `Record<keyof View, true>` cannot be short a key, nor carry one too
@@ -23,6 +24,9 @@ import { describe, expect, test } from "vitest";
 import type { LegalBodyConfig } from "../../src/api/app";
 import type { StatementMessageAnswer } from "../../src/api/routes/customerCompanies";
 import type { LegalBodyAgreementAnswer } from "../../src/api/routes/legalBodyOrders";
+import type { SessionHold, SessionView } from "../../src/identity/sessions";
+import type { IdentityView } from "../../src/identity/state";
+import type { IdentityState } from "../../src/identity/types";
 import { ADOPTION_FIELDS } from "../../src/legalBody/adoption";
 import type { VerificationState } from "../../src/legalBody/attestation";
 import type { BindingView } from "../../src/legalBody/binding";
@@ -108,6 +112,21 @@ const FILING_STATUSES: Record<FilingStatus, true> = {
   filed: true,
   past_due_unverified: true,
   unverified: true,
+};
+
+const GUARDIAN_IDENTITY_STATES: Record<IdentityState, true> = {
+  none: true,
+  pending: true,
+  needs_review: true,
+  failed: true,
+  verified: true,
+  expired: true,
+  revoked: true,
+};
+
+const IDENTITY_SESSION_HOLDS: Record<SessionHold, true> = {
+  system: true,
+  operator: true,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -214,6 +233,29 @@ const TRANSPARENCY_LEGAL_BODY_KEYS: Record<keyof TransparencyLegalBody, true> = 
   links: true,
 };
 
+const GUARDIAN_IDENTITY_VIEW_KEYS: Record<keyof IdentityView, true> = {
+  required: true,
+  automatic: true,
+  state: true,
+  firstName: true,
+  lastName: true,
+  verifiedAt: true,
+  expiresAt: true,
+};
+
+/** The open session: the other arm is `{ status: "none" }`. */
+type OpenSessionView = Extract<SessionView, { status: "open" }>;
+
+const IDENTITY_SESSION_VIEW_KEYS: Record<keyof OpenSessionView, true> = {
+  status: true,
+  sessionId: true,
+  startedAt: true,
+  attemptsLeft: true,
+  lastErrorCode: true,
+  reading: true,
+  held: true,
+};
+
 // ---------------------------------------------------------------------------------------------
 // The interface's lists, read as text.
 // ---------------------------------------------------------------------------------------------
@@ -261,6 +303,8 @@ describe("each union the interface copies has exactly this backend's members", (
     ["BROKEN_REASONS", BROKEN_REASONS],
     ["STANDINGS", STANDINGS],
     ["FILING_STATUSES", FILING_STATUSES],
+    ["GUARDIAN_IDENTITY_STATES", GUARDIAN_IDENTITY_STATES],
+    ["IDENTITY_SESSION_HOLDS", IDENTITY_SESSION_HOLDS],
   ];
   test.each(unions)("%s", (list, backend) => {
     expect(sorted(interfaceList(list))).toEqual(sorted(Object.keys(backend)));
@@ -276,6 +320,8 @@ describe("each view the interface copies has exactly this backend's keys", () =>
     ["LEGAL_BODY_AGREEMENT_KEYS", LEGAL_BODY_AGREEMENT_KEYS],
     ["LINK_MESSAGE_RESULT_KEYS", LINK_MESSAGE_RESULT_KEYS],
     ["TRANSPARENCY_LEGAL_BODY_KEYS", TRANSPARENCY_LEGAL_BODY_KEYS],
+    ["GUARDIAN_IDENTITY_VIEW_KEYS", GUARDIAN_IDENTITY_VIEW_KEYS],
+    ["IDENTITY_SESSION_VIEW_KEYS", IDENTITY_SESSION_VIEW_KEYS],
   ];
   test.each(views)("%s", (list, backend) => {
     expect(sorted(interfaceList(list))).toEqual(sorted(Object.keys(backend)));

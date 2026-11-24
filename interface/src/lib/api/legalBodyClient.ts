@@ -24,6 +24,9 @@ import type {
   CustomerCompanyInput,
   CustomerStatementInput,
   Hex,
+  IdentityCheckStarted,
+  IdentityCheckSync,
+  IdentitySessionView,
   LegalBodyAgreement,
   LegalBodyByAgent,
   LegalBodyOrderView,
@@ -169,6 +172,35 @@ export function refreshBinding(token: string, id: string): Promise<BindingView> 
  *  body. */
 export function requestGasSeed(token: string, id: string): Promise<{ status: "sent"; txHash: Hex }> {
   return request(`${orderPath(id)}/gas-seed`, { method: "POST", token });
+}
+
+/* The identity check. World ID proves one real person; the identity check says who. */
+
+/** `POST /identity-check/sessions`: starts the guardian's identity check, or reuses the one under
+ *  way. The two names and the return path are sent field by field, so nothing else a caller holds
+ *  leaves with them; the names are never kept here. */
+export function startIdentityCheck(
+  token: string,
+  input: { firstName: string; lastName: string; returnPath: string },
+): Promise<IdentityCheckStarted> {
+  const body = {
+    firstName: input.firstName,
+    lastName: input.lastName,
+    returnPath: input.returnPath,
+  };
+  return request("/identity-check/sessions", { method: "POST", token, body });
+}
+
+/** `GET /identity-check/session`: the tenant's open session, ids and counts only, or
+ *  `{ status: "none" }`. */
+export function getIdentityCheckSession(token: string): Promise<IdentitySessionView> {
+  return request("/identity-check/session", { token });
+}
+
+/** `POST /identity-check/sync`: reads the open session back from the provider. The door reads no
+ *  body, and an empty object is sent so the request is plain JSON. */
+export function syncIdentityCheck(token: string): Promise<IdentityCheckSync> {
+  return request("/identity-check/sync", { method: "POST", token, body: {} });
 }
 
 /** A public read: the answer as served, or why it could not be made. There is no third case, and

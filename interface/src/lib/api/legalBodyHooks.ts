@@ -30,6 +30,7 @@ import {
   createCustomerCompany,
   createLegalBodyOrder,
   getBinding,
+  getIdentityCheckSession,
   getLegalBodyAgreement,
   getLegalBodyByAgent,
   getLegalBodyOrder,
@@ -38,7 +39,9 @@ import {
   requestGasSeed,
   requestLinkMessage,
   requestStatementMessage,
+  startIdentityCheck,
   submitLink,
+  syncIdentityCheck,
 } from "./legalBodyClient";
 import { ApiError } from "./types";
 import type {
@@ -265,6 +268,60 @@ export function useGasSeedMutation(id: string) {
   const token = useAuthToken();
   return useMutation({
     mutationFn: () => requestGasSeed(requireToken(token), id),
+  });
+}
+
+/* ── The identity check ──────────────────────────────────────────────────────────────────── */
+
+/** The tenant's open identity check session, ids and counts only. A refusal (the 404 of a
+ *  deployment that does not run the check automatically, a 401) is said at once (`retryRead`). */
+export function useIdentityCheckSessionQuery(options: { enabled: boolean }) {
+  const token = useAuthToken();
+  return useQuery({
+    queryKey: apiKeys.identityCheckSession(token ?? ""),
+    queryFn: () => getIdentityCheckSession(token!),
+    enabled: options.enabled && !!token,
+    retry: retryRead,
+  });
+}
+
+/** Reads again the two things a check can move: the World ID record, with its identity block, and
+ *  the open session. */
+function useInvalidateIdentity() {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useCallback(async () => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: apiKeys.worldIdMe(token ?? "") }),
+      queryClient.invalidateQueries({ queryKey: apiKeys.identityCheckSession(token ?? "") }),
+    ]);
+  }, [queryClient, token]);
+}
+
+/**
+ * Starts the guardian's identity check, or reuses the one under way. On success nothing is read
+ * again: the browser leaves for the provider's page. A refusal may mean the record moved (a review
+ * stands, a session is held), so both reads are asked again. The names are the mutation's
+ * variables, in memory only: never a query key, never stored.
+ */
+export function useStartIdentityCheckMutation() {
+  const token = useAuthToken();
+  const invalidate = useInvalidateIdentity();
+  return useMutation({
+    mutationFn: (input: { firstName: string; lastName: string; returnPath: string }) =>
+      startIdentityCheck(requireToken(token), input),
+    onError: invalidate,
+  });
+}
+
+/** Reads the open session back from the provider. Whatever it answered, a refusal included, the
+ *  record may have moved, so both reads are asked again before the mutation settles. */
+export function useSyncIdentityCheckMutation() {
+  const token = useAuthToken();
+  const invalidate = useInvalidateIdentity();
+  return useMutation({
+    mutationFn: () => syncIdentityCheck(requireToken(token)),
+    onSettled: invalidate,
   });
 }
 

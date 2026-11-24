@@ -125,3 +125,17 @@ test("the client waits 5 seconds longer on the legal-body and evidence paths too
   expect(clientBudgetMs("GET", "legal-body-orders/ord_1/link")).toBe(30_000);
   expect(clientBudgetMs("GET", "companies/cmp_1/evidence")).toBe(30_000);
 });
+
+test("the identity check's start and sync get 60 seconds, and the session read keeps the default", () => {
+  // Each of the two writes can chain three provider calls of up to 10 seconds: at 25 seconds the
+  // proxy would answer 504 on a check that completes.
+  expect(budgetMs("POST", "identity-check/sessions")).toBe(60_000);
+  expect(budgetMs("POST", "identity-check/sync")).toBe(60_000);
+  expect(budgetMs("GET", "identity-check/session")).toBe(25_000);
+  expect(clientBudgetMs("POST", "/identity-check/sessions")).toBe(65_000);
+  expect(clientBudgetMs("POST", "/identity-check/sync")).toBe(65_000);
+  // Method-sensitive like every row, and the paths are whole.
+  expect(budgetMs("GET", "identity-check/sessions")).toBe(25_000);
+  expect(budgetMs("POST", "identity-check/session")).toBe(25_000);
+  expect(budgetMs("POST", "identity-check/sync/extra")).toBe(25_000);
+});

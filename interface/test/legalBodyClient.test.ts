@@ -18,6 +18,9 @@ import type {
   Address,
   BindingView,
   Hex,
+  IdentityCheckStarted,
+  IdentityCheckSync,
+  IdentitySessionView,
   LegalBodyAgreement,
   LegalBodyByAgent,
   LegalBodyOrderView,
@@ -560,6 +563,76 @@ describe("getTransparency reads the public origin", () => {
   });
 });
 
+describe("the identity check", () => {
+  /** What the start answers: our session id, the provider's page, and when that page closes. */
+  const STARTED: IdentityCheckStarted = {
+    sessionId: "ics_test_1",
+    url: "https://verify.example.test/start/ics_test_1",
+    expiresAt: 1_760_522_400_000,
+  };
+  const OPEN: IdentitySessionView = {
+    status: "open",
+    sessionId: "ics_test_1",
+    startedAt: 1_760_519_000_000,
+    attemptsLeft: 3,
+    lastErrorCode: null,
+    reading: false,
+    held: null,
+  };
+  const SYNCED: IdentityCheckSync = { outcome: "unchanged", state: "pending" };
+  const INPUT = { firstName: "Test", lastName: "Person", returnPath: "/start" };
+
+  test("the identity check's three calls go through API_URL with the bearer token", async () => {
+    const { API_URL, calls } = await load();
+    const answers = [json(201, STARTED), json(200, OPEN), json(200, SYNCED)];
+    const seen = stubFetch(() => answers.shift()!);
+
+    await expect(calls.startIdentityCheck(TOKEN, INPUT)).resolves.toEqual(STARTED);
+    await expect(calls.getIdentityCheckSession(TOKEN)).resolves.toEqual(OPEN);
+    await expect(calls.syncIdentityCheck(TOKEN)).resolves.toEqual(SYNCED);
+
+    expect(seen).toHaveLength(3);
+    const [start, session, sync] = seen;
+
+    expect(start!.url).toBe(`${API_URL}/identity-check/sessions`);
+    expect(start!.init.method).toBe("POST");
+    expect(start!.init.body).toBe('{"firstName":"Test","lastName":"Person","returnPath":"/start"}');
+    expect(headersOf(start!).get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(headersOf(start!).get("content-type")).toBe("application/json");
+
+    expect(session!.url).toBe(`${API_URL}/identity-check/session`);
+    expect(session!.init.method).toBe("GET");
+    expect(session!.init.body).toBeUndefined();
+    expect(headersOf(session!).get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(headersOf(session!).get("content-type")).toBeNull();
+
+    expect(sync!.url).toBe(`${API_URL}/identity-check/sync`);
+    expect(sync!.init.method).toBe("POST");
+    expect(sync!.init.body).toBe("{}");
+    expect(headersOf(sync!).get("authorization")).toBe(`Bearer ${TOKEN}`);
+    expect(headersOf(sync!).get("content-type")).toBe("application/json");
+  });
+
+  test("the start sends the two names and the return path, and nothing else a caller holds", async () => {
+    const { calls } = await load();
+    const seen = stubFetch(() => json(201, STARTED));
+    const wider = { ...INPUT, email: "test.person@example.test" };
+    await calls.startIdentityCheck(TOKEN, wider);
+    expect(seen[0]!.init.body).toBe('{"firstName":"Test","lastName":"Person","returnPath":"/start"}');
+  });
+
+  test("a refusal of the start is an ApiError with its code", async () => {
+    const { calls, ApiError } = await load();
+    stubFetch(() =>
+      json(409, { error: { code: "identity_under_review", message: "A review is under way." } }),
+    );
+    const err = await calls.startIdentityCheck(TOKEN, INPUT).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as InstanceType<typeof ApiError>).code).toBe("identity_under_review");
+    expect((err as InstanceType<typeof ApiError>).status).toBe(409);
+  });
+});
+
 describe("the query keys", () => {
   test("the order, agreement and binding keys are scoped to the session's token", () => {
     const keys = [
@@ -574,6 +647,15 @@ describe("the query keys", () => {
     }
   });
 
+  test("the session key is scoped by the token", () => {
+    expect(apiKeys.identityCheckSession("a")).not.toEqual(apiKeys.identityCheckSession("b"));
+    expect(apiKeys.identityCheckSession("token-a")).toEqual([
+      "api",
+      "identityCheckSession",
+      "token-a",
+    ]);
+  });
+
   test("the two public reads carry no token, and each key names one thing", () => {
     expect(apiKeys.legalBodyByAgent(AGENT)).toEqual(["api", "legalBodyByAgent", AGENT]);
     expect(apiKeys.transparency()).toEqual(["api", "transparency"]);
@@ -584,6 +666,8 @@ describe("the query keys", () => {
       apiKeys.legalBodyBinding(TOKEN, "ord_1"),
       apiKeys.legalBodyByAgent(AGENT),
       apiKeys.transparency(),
+      apiKeys.identityCheckSession(TOKEN),
+      apiKeys.worldIdMe(TOKEN),
     ].map((k) => k[1]);
     expect(new Set(all).size).toBe(all.length);
   });

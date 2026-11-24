@@ -138,6 +138,21 @@ test("no-store covers every legal-body order door and the customer company doors
   expect(isNoStorePath("legal-bodies/by-agent/1")).toBe(false);
 });
 
+test("no-store covers the identity check and the World ID record", () => {
+  // The start carries the two names a person typed, and from the identity check on the World ID
+  // record carries the name of record: an intermediary must never hold either.
+  for (const p of [
+    "identity-check/sessions",
+    "identity-check/session",
+    "identity-check/sync",
+    "world-id/me",
+  ])
+    expect(isNoStorePath(p), p).toBe(true);
+  // Near misses keep the ordinary policy.
+  for (const p of ["identity-checks", "world-id/request", "world-id"])
+    expect(isNoStorePath(p), p).toBe(false);
+});
+
 test("no-store covers founding applications and leaves the public config cacheable", () => {
   expect(isNoStorePath("founding/applications")).toBe(true);
   expect(isNoStorePath("founding/applications.csv")).toBe(true);

@@ -659,19 +659,33 @@ export type WorldIdMe = {
   identity?: GuardianIdentityView;
 };
 
+// ---------------------------------------------------------------------------------------------
+// The guardian's identity record and the identity check. World ID proves one real person; the
+// identity check says who. Copied from the backend's own types, and held to them like the legal
+// bodies' copies below: the backend's drift guard (`test/api/legalBodyInterfaceTypes.test.ts`)
+// reads each list here as text, so keep each list's `export const NAME = [` opening and the
+// `] as const` that closes it.
+// ---------------------------------------------------------------------------------------------
+
 /** The guardian identity record's state, as `GET /world-id/me` serves it. */
-export type GuardianIdentityState =
-  | "none"
-  | "pending"
-  | "needs_review"
-  | "failed"
-  | "verified"
-  | "expired"
-  | "revoked";
+export const GUARDIAN_IDENTITY_STATES = [
+  "none",
+  "pending",
+  "needs_review",
+  "failed",
+  "verified",
+  "expired",
+  "revoked",
+] as const;
+export type GuardianIdentityState = (typeof GUARDIAN_IDENTITY_STATES)[number];
 
 /** `GET /world-id/me`'s `identity` block. No provider, document, or country. */
 export interface GuardianIdentityView {
   required: boolean;
+  /** Whether the identity check runs automatically on this deployment, so the browser offers it
+   *  rather than waiting for an operator. Absent (a backend from before the automatic check)
+   *  reads false. */
+  automatic?: boolean;
   state: GuardianIdentityState;
   firstName?: string;
   lastName?: string;
@@ -680,6 +694,56 @@ export interface GuardianIdentityView {
   /** Unix milliseconds. Present only when `verified`. */
   expiresAt?: number;
 }
+export const GUARDIAN_IDENTITY_VIEW_KEYS = [
+  "required",
+  "automatic",
+  "state",
+  "firstName",
+  "lastName",
+  "verifiedAt",
+  "expiresAt",
+] as const satisfies readonly (keyof GuardianIdentityView)[];
+
+/** Who a verified session waits on: `system` while the server's own screen has given no verdict
+ *  (it reads again by itself), `operator` once the result waits for a person. The words say who
+ *  acts, never why. */
+export const IDENTITY_SESSION_HOLDS = ["system", "operator"] as const;
+export type IdentitySessionHold = (typeof IDENTITY_SESSION_HOLDS)[number];
+
+/** The tenant's open identity check session, ids and counts only. */
+export type IdentitySessionOpen = {
+  status: "open";
+  /** Ours, never the provider's. */
+  sessionId: string;
+  /** Unix milliseconds. */
+  startedAt: number;
+  attemptsLeft: number;
+  /** The provider's error code of the last read, never its reason text; or null. */
+  lastErrorCode: string | null;
+  /** The provider is processing the person's attempt. Never true while the session is held. */
+  reading: boolean;
+  /** Who a verified session waits on; null unless the provider verified it. */
+  held: IdentitySessionHold | null;
+};
+/** `GET /identity-check/session`: the open session, or `{ status: "none" }`. */
+export type IdentitySessionView = { status: "none" } | IdentitySessionOpen;
+export const IDENTITY_SESSION_VIEW_KEYS = [
+  "status",
+  "sessionId",
+  "startedAt",
+  "attemptsLeft",
+  "lastErrorCode",
+  "reading",
+  "held",
+] as const satisfies readonly (keyof IdentitySessionOpen)[];
+
+/** `POST /identity-check/sessions`'s 201: our session id, the provider's page the person is sent
+ *  to, and when that page stops taking them (Unix milliseconds). */
+export type IdentityCheckStarted = { sessionId: string; url: string; expiresAt: number };
+
+/** `POST /identity-check/sync`: what the read did, and the identity state as `/world-id/me` shows
+ *  it. The card decides from the two reads, never from `outcome`. */
+export type IdentityCheckSync = { outcome: string; state: GuardianIdentityState };
 
 /** Params for the identity-attestation widget (the step-up uses its own World action). */
 export type WorldIdAttestContext = {
@@ -1695,4 +1759,6 @@ export type LegalBodyKeyListsAreExhaustive = [
   Exhaustive<Exclude<keyof LegalBodyAgreement, (typeof LEGAL_BODY_AGREEMENT_KEYS)[number]>>,
   Exhaustive<Exclude<keyof LinkMessageResult, (typeof LINK_MESSAGE_RESULT_KEYS)[number]>>,
   Exhaustive<Exclude<keyof TransparencyLegalBody, (typeof TRANSPARENCY_LEGAL_BODY_KEYS)[number]>>,
+  Exhaustive<Exclude<keyof GuardianIdentityView, (typeof GUARDIAN_IDENTITY_VIEW_KEYS)[number]>>,
+  Exhaustive<Exclude<keyof IdentitySessionOpen, (typeof IDENTITY_SESSION_VIEW_KEYS)[number]>>,
 ];
