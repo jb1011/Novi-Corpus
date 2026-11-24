@@ -729,6 +729,11 @@ document's country and type, and the names of record, encrypted.
 
 ## 8. First run against Stripe's test mode
 
+The run can be done without the Stripe CLI. Without `stripe listen`, set
+`STRIPE_IDENTITY_WEBHOOK_SECRET` to any local `whsec_` value. The job then reads each open session
+every `IDENTITY_SYNC_EVERY_MS`. Only the webhook delivery itself is not exercised. If another local
+API already uses port 8789, set `PORT` in the run's env file and use that port in every command.
+
 A one-off run on a builder's machine, before the testnet box gets the block. It needs the
 test-mode restricted key and flow (0.1, 0.2), the Stripe CLI signed in to the account
 (`stripe login`; `stripe listen` stays in test mode unless told otherwise), and a test wallet. It
@@ -831,13 +836,13 @@ holds when the read shows `"status": "canceled"` beside its `redaction`. The
 `identity.verification_session.redacted`); its read writes no row, and `identity:session` shows
 `redactedAt` once Stripe says `redacted`.
 
-**6. "Document expired", three times.** Start again with the same command: the redacted session
+**6. "Verification failure", three times.** Start again with the same command: the redacted session
 closes as abandoned (`identity_session_closed`, `reasonCode` `abandoned`) and a new one opens
-(`identity_session_started`). Open the answer's `url` and choose "Document expired" on the test
-page. Then:
+(`identity_session_started`). Open the answer's `url` and choose "Verification failure" on the
+test page ("Complete with test data"). Then:
 
 ```bash
-cli identity:session <tenantId>     # open, lastErrorCode: document_expired, failedAttempts: 1
+cli identity:session <tenantId>     # open, lastErrorCode: document_unverified_other, failedAttempts: 1
 curl -s -X POST "$API/identity-check/sync" -H "Authorization: Bearer $TOKEN"
                                     # {"outcome":"attempt_failed","state":"pending"}
 ```
@@ -847,7 +852,7 @@ more. Fact 5 holds when each fresh `url` opens Stripe's page again; fact 4 when 
 moves by one at each failure, never more and never less (each failure its own `vr_` report, which
 `stripe get /v1/identity/verification_sessions/<vs_…>` shows as `last_verification_report`). The
 third failure closes the session: `identity_session_closed` with `reasonCode`
-`document_expired`. `identity:session` then shows `newest_closed`, `failedAttempts` 3, a
+`document_unverified`. `identity:session` then shows `newest_closed`, `failedAttempts` 3, a
 `completedCheckId` and a `redactDueAt`, and `/world-id/me` reads `"state": "failed"` in its
 `identity` block:
 
@@ -855,13 +860,18 @@ third failure closes the session: `identity_session_closed` with `reasonCode`
 curl -s "$API/world-id/me" -H "Authorization: Bearer $TOKEN"
 ```
 
+The test page offers five outcomes: "Verification success", "Verification failure", "Verification
+success async", "Verification failure async" and "Consent declined". "Consent declined" closes the
+session at once (a final code). The async variants pass through `processing` first.
+
 **7. "Verification success" (facts 1, 3, 7 and 8).** Start again, with any test name, and choose
 "Verification success". The `processing` and `verified` events arrive, then
 `identity_session_completed` with `status` `passed`: the testnet does not compare the typed name
 with the sample's (0.2), so a name that differs from it passes too, recorded as typed. Fact 7 holds
 when the dashboard's verified outputs for this session are a sample name you did not type, the
 check passed all the same, and any other verified test session of the account shows the same
-sample. Say only whether it holds, never the names. Then:
+sample. Say only whether it holds, never the names. The job (every `IDENTITY_SYNC_EVERY_MS`) completed the session on its own before the guardian's
+sync, so the sync answers `unchanged`. Then:
 
 - `identity:session`: `newest_closed`, `lastStatus` `verified`, `dobUnavailable` `false`,
   `typedNamesHeld` `false`, and a `redactDueAt` seven days after `closedAt`;
