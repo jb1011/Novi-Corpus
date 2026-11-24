@@ -86,6 +86,19 @@ describe("which state the card is in", () => {
     expect(view({ session: open(), startRefused: "identity_under_review" }).kind).toBe("continue");
   });
 
+  test("a state this site does not know, or none, reads as unreadable, never as nothing", () => {
+    const unknown = { required: true, automatic: true, state: "suspended" } as unknown as GuardianIdentityView;
+    const missing = { required: true, automatic: true } as unknown as GuardianIdentityView;
+    for (const identity of [unknown, missing]) {
+      expect(view({ identity })).toMatchObject({ kind: "unreadable", counts: false });
+      expect(view({ identity, session: open() }).kind).toBe("unreadable");
+      expect(view({ identity, session: open({ held: "system" }) }).kind).toBe("unreadable");
+      expect(view({ identity, worldAccepted: false }).kind).toBe("unreadable");
+      expect(identityCardText(view({ identity }) as AutomaticCardView, { longWait: false, formatDate: () => "" }))
+        .toEqual({ record: null, status: A.unreadable, notes: [A.required], form: null });
+    }
+  });
+
   test("the operator's card keeps today's state and the record's date", () => {
     expect(view({ identity: { ...due(200), required: true, automatic: false } })).toEqual({
       kind: "operator",

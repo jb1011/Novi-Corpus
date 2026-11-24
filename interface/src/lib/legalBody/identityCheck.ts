@@ -1,5 +1,6 @@
 import {
   ApiError,
+  GUARDIAN_IDENTITY_STATES,
   type GuardianIdentityState,
   type GuardianIdentityView,
   type IdentitySessionView,
@@ -87,6 +88,7 @@ export type IdentityCardView =
  * The card's state, first match wins:
  *  1. no identity block, or neither required nor offered automatically: no card;
  *  2. required, and not automatic: the operator's card, as today;
+ *     a state this build does not know, or none: unreadable, whatever the other inputs say;
  *  3. World ID not accepted: locked;
  *  4. the session not read yet, or unreadable;
  *  5. a record under review, whatever the session says;
@@ -129,6 +131,10 @@ export function identityCardView(p: {
     kind,
   });
 
+  // `/world-id/me` is cast, not parsed: a state this build does not know, or none at all, reads
+  // as unreadable before any other input is looked at, never as no card at all.
+  if (!(GUARDIAN_IDENTITY_STATES as readonly unknown[]).includes(identity.state))
+    return card("unreadable");
   if (!p.worldAccepted) return card("locked");
   const session = p.session;
   if (session === "loading" || session === "unreadable") return card(session);
