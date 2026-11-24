@@ -1,10 +1,12 @@
 import type Database from "better-sqlite3";
 import { getAddress } from "viem";
 import {
+  DECISION_EVENT_KINDS,
   type DocumentType,
   type IdentityProvider,
   type IdentityRowStatus,
   type Liveness,
+  PASS_ENDING_REVIEW_REASONS,
   REVIEW_REASON_CODES,
   type ReviewReasonCode,
   type Watchlist,
@@ -104,13 +106,25 @@ export interface IdentityRepository {
   append(check: NewGuardianIdentityCheck, event: NewIdentityEvent): GuardianIdentityCheck;
   /** The tenant's row with the highest check id. */
   latest(tenantId: string): GuardianIdentityCheck | undefined;
+  /** The tenant's passed row with the highest check id, whatever rows came after it: the pass a
+   *  renewal under way may keep counting (`identity/state.ts` holds the rule). */
+  latestPassed(tenantId: string): GuardianIdentityCheck | undefined;
   /** Oldest first. */
   list(tenantId: string): GuardianIdentityCheck[];
   /** Oldest first. */
   events(checkId: number): IdentityEvent[];
   findById(checkId: number): GuardianIdentityCheck | undefined;
-  /** Check ids, oldest first, of OTHER tenants whose LATEST row passed with this hmac and country. */
-  passedElsewhere(nameHmac: string, documentCountry: string, exceptTenantId: string): number[];
+  /**
+   * Check ids, oldest first, of OTHER tenants' passes with this hmac and country that still hold
+   * the identity at `nowMs`: the tenant's LATEST row, or the pass the renewal rule still counts
+   * under a new attempt (`COUNTED_BY_RENEWAL`), so a renewal begun does not hide its pass.
+   */
+  passedElsewhere(
+    nameHmac: string,
+    documentCountry: string,
+    exceptTenantId: string,
+    nowMs: number,
+  ): number[];
   /**
    * The erasure of a row's names and its `names_erased` event, in one transaction. False, writing
    * nothing, when there is no such row or its names were erased already.
@@ -446,6 +460,35 @@ const NO_LIVE_COMPANY = `NOT EXISTS (SELECT 1 FROM companies co
                       WHERE d.tenant_id = g.tenant_id AND d.pii_erased_at IS NULL)`;
 const IS_LATEST = `g.check_id = (SELECT MAX(l.check_id) FROM guardian_identity_checks l
                                   WHERE l.tenant_id = g.tenant_id)`;
+/** The review reasons that end an earlier pass, as SQL text: constants, never a caller's value. */
+const PASS_ENDING_SQL = PASS_ENDING_REVIEW_REASONS.map((code) => `'${code}'`).join(", ");
+/** The events of an operator's decision, as SQL text: constants, never a caller's value. */
+const DECISION_EVENTS_SQL = DECISION_EVENT_KINDS.map((kind) => `'${kind}'`).join(", ");
+/**
+ * The pass the renewal rule still counts (`identity/state.ts`): the tenant's latest passed row, in
+ * date (`@now_ms`), with no revocation, no review that found a sanctions hit or a blocked country,
+ * and no row an operator's decision wrote (`DECISION_EVENT_KINDS`) since it. Its tenant's latest
+ * row, when not the pass itself, is then a new attempt begun, failed, or under another review.
+ * Read as the deployment that wrote that latest row reads it: on a production one a test pass
+ * (written on a sandbox, or synthetic) counts for nothing. Its names are kept as a latest pass's
+ * are (the names held are checked by the caller).
+ */
+const COUNTED_BY_RENEWAL = `(g.status = 'passed'
+     AND g.check_id = (SELECT MAX(p.check_id) FROM guardian_identity_checks p
+                        WHERE p.tenant_id = g.tenant_id AND p.status = 'passed')
+     AND g.expires_at > @now_ms
+     AND NOT EXISTS (SELECT 1 FROM guardian_identity_checks x
+                      WHERE x.tenant_id = g.tenant_id AND x.check_id > g.check_id
+                        AND (x.status = 'revoked'
+                             OR (x.status = 'needs_review'
+                                 AND EXISTS (SELECT 1 FROM json_each(x.review_reasons) r
+                                              WHERE r.value IN (${PASS_ENDING_SQL})))
+                             OR EXISTS (SELECT 1 FROM identity_check_events e
+                                         WHERE e.check_id = x.check_id
+                                           AND e.kind IN (${DECISION_EVENTS_SQL}))))
+     AND ((g.environment = 'production' AND g.synthetic = 0)
+          OR (SELECT l.environment FROM guardian_identity_checks l
+               WHERE l.tenant_id = g.tenant_id ORDER BY l.check_id DESC LIMIT 1) = 'sandbox'))`;
 
 export class SqliteIdentityRepository implements IdentityRepository {
   private readonly stmts;
@@ -477,6 +520,10 @@ export class SqliteIdentityRepository implements IdentityRepository {
       latest: db.prepare(
         "SELECT * FROM guardian_identity_checks WHERE tenant_id = ? ORDER BY check_id DESC LIMIT 1",
       ),
+      latestPassed: db.prepare(
+        `SELECT * FROM guardian_identity_checks WHERE tenant_id = ? AND status = 'passed'
+          ORDER BY check_id DESC LIMIT 1`,
+      ),
       list: db.prepare(
         "SELECT * FROM guardian_identity_checks WHERE tenant_id = ? ORDER BY check_id",
       ),
@@ -484,15 +531,16 @@ export class SqliteIdentityRepository implements IdentityRepository {
         "SELECT * FROM identity_check_events WHERE check_id = ? ORDER BY event_id",
       ),
       findById: db.prepare("SELECT * FROM guardian_identity_checks WHERE check_id = ?"),
-      // A tenant counts only while the passed row carrying the hmac is its latest: one revoked,
-      // corrected or re-verified since does not hold the identity any more.
+      // A tenant counts while the passed row carrying the hmac is its latest, or the pass a
+      // renewal under way still counts (a `started` row on top of it hides nothing): one revoked,
+      // corrected, decided or re-verified since does not hold the identity any more.
       passedElsewhere: db.prepare(
         `SELECT g.check_id AS check_id FROM guardian_identity_checks g
           WHERE g.name_hmac = @name_hmac
             AND g.document_country = @document_country
             AND g.status = 'passed'
             AND g.tenant_id <> @except_tenant_id
-            AND ${IS_LATEST}
+            AND (${IS_LATEST} OR ${COUNTED_BY_RENEWAL})
           ORDER BY g.check_id`,
       ),
       // The erase-only trigger allows exactly this update, once: `names_erased_at IS NULL` makes a
@@ -504,18 +552,20 @@ export class SqliteIdentityRepository implements IdentityRepository {
           WHERE check_id = @check_id AND names_erased_at IS NULL`,
       ),
       // Identity design 9, over the rows whose names are not erased yet:
-      //  - superseded: not its tenant's latest, still holding names, written (`created_at`) before
-      //    the failed window;
+      //  - superseded: not its tenant's latest, nor the pass a renewal under way still counts
+      //    (`COUNTED_BY_RENEWAL`), still holding names, written (`created_at`) before the failed
+      //    window;
       //  - abandoned: the latest, `started`, still holding names, begun (`started_at`) before the
       //    failed window; an attempt that never held names has nothing to erase, and no event;
-      //  - unused: the latest, `passed`, holding names, completed before the unused window.
+      //  - unused: the latest, or the pass a renewal under way still counts, `passed`, holding
+      //    names, completed before the unused window.
       // Over all three, the rule that outranks them: no row of a tenant with a live company. A
       // needs_review row is never a candidate: it waits for the operator, whose refusal appends a
       // failed row and makes it superseded. `created_at` is SQLite UTC text, so its bound is too
       // (`sqliteUtcTimestamp`); the other times are ms.
       erasureCandidates: db.prepare(
         `SELECT g.check_id AS check_id, 'superseded' AS rule FROM guardian_identity_checks g
-          WHERE NOT (${IS_LATEST})
+          WHERE NOT (${IS_LATEST}) AND NOT ${COUNTED_BY_RENEWAL}
             AND g.names_erased_at IS NULL AND ${HOLDS_NAMES}
             AND g.created_at < @failed_before_utc
             AND ${NO_LIVE_COMPANY}
@@ -527,7 +577,7 @@ export class SqliteIdentityRepository implements IdentityRepository {
             AND ${NO_LIVE_COMPANY}
          UNION ALL
          SELECT g.check_id, 'unused' FROM guardian_identity_checks g
-          WHERE ${IS_LATEST}
+          WHERE (${IS_LATEST} OR ${COUNTED_BY_RENEWAL})
             AND g.status = 'passed' AND g.names_erased_at IS NULL AND ${HOLDS_NAMES}
             AND g.completed_at < @unused_before_ms
             AND ${NO_LIVE_COMPANY}
@@ -579,6 +629,11 @@ export class SqliteIdentityRepository implements IdentityRepository {
     return r ? toCheck(r) : undefined;
   }
 
+  latestPassed(tenantId: string): GuardianIdentityCheck | undefined {
+    const r = this.stmts.latestPassed.get(tenantIdShape("tenantId", tenantId)) as Row | undefined;
+    return r ? toCheck(r) : undefined;
+  }
+
   list(tenantId: string): GuardianIdentityCheck[] {
     return (this.stmts.list.all(tenantIdShape("tenantId", tenantId)) as Row[]).map(toCheck);
   }
@@ -592,12 +647,18 @@ export class SqliteIdentityRepository implements IdentityRepository {
     return r ? toCheck(r) : undefined;
   }
 
-  passedElsewhere(nameHmac: string, documentCountry: string, exceptTenantId: string): number[] {
+  passedElsewhere(
+    nameHmac: string,
+    documentCountry: string,
+    exceptTenantId: string,
+    nowMs: number,
+  ): number[] {
     return (
       this.stmts.passedElsewhere.all({
         name_hmac: nameHmac,
         document_country: documentCountry,
         except_tenant_id: tenantIdShape("exceptTenantId", exceptTenantId),
+        now_ms: unixMs("nowMs", nowMs),
       }) as { check_id: number }[]
     ).map((r) => r.check_id);
   }
@@ -631,6 +692,7 @@ export class SqliteIdentityRepository implements IdentityRepository {
         );
     return (
       this.stmts.erasureCandidates.all({
+        now_ms: now,
         failed_before_utc: sqliteUtcTimestamp(now - failedAfterMs),
         failed_before_ms: now - failedAfterMs,
         unused_before_ms: now - unusedAfterMs,

@@ -175,6 +175,7 @@ export function everyGuardianVerified(
   return identityOver(
     {
       latest,
+      latestPassed: unused,
       append: unused,
       list: unused,
       events: unused,

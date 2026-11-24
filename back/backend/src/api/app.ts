@@ -7,6 +7,7 @@ import { DEFAULT_FORMATION_FILING_WORKING_DAYS } from "../config/env";
 import { COMPANY_REUSE_DISCLOSURE, PARK_COPY, SSN_COPY } from "../formation";
 import { formedCapReached, formedDoorEnvironment } from "../formation/formedDoor";
 import type { FoundingDeps } from "../founding/config";
+import type { IdentitySessionDeps } from "../identity/sessions";
 import type { IdentityDeps } from "../identity/state";
 import type { CustomerCompanyDeps } from "../legalBody/customerCompany";
 import type { EvidenceDeps } from "../legalBody/evidence";
@@ -33,6 +34,7 @@ import { mountEnsGatewayRoutes } from "./routes/ensGateway";
 import { type ExternalRecordDeps, mountExternalRecordRoutes } from "./routes/externalRecord";
 import { mountFormationRulesRoutes } from "./routes/formationRules";
 import { mountFoundingRoutes } from "./routes/founding";
+import { mountIdentityCheckRoutes } from "./routes/identityCheck";
 import { mountJobRoutes } from "./routes/jobs";
 import { mountLegalBodyRoutes } from "./routes/legalBodies";
 import { mountLegalBodyOrderRoutes } from "./routes/legalBodyOrders";
@@ -47,6 +49,10 @@ import { mountProfileRoutes } from "./routes/profile";
 import { mountReputationRoutes } from "./routes/reputation";
 import { mountRunsRoutes } from "./routes/runs";
 import { mountSchemaRoutes } from "./routes/schema";
+import {
+  type StripeIdentityWebhookDeps,
+  mountStripeIdentityWebhookRoutes,
+} from "./routes/stripeIdentityWebhook";
 import { mountTransparencyRoutes } from "./routes/transparency";
 import { mountTreasuryRoutes } from "./routes/treasury";
 import { mountTrustPolicyRoutes } from "./routes/trustPolicy";
@@ -326,6 +332,21 @@ export interface ApiDeps extends EntityViewDeps {
    */
   identity?: IdentityDeps;
   /**
+   * The automatic identity check (the guardian's identity step in the browser): the session
+   * service, its provider and its screener. Present only where the provider's block is configured.
+   * Its `identity` must be the record above, the same object, so that a check it completes is the
+   * one `/world-id/me` and the gate read. Absent, the three `/identity-check` routes answer 404
+   * `identity_check_not_offered`, `/config.legalBodies.identityCheckAutomatic` is false, and the
+   * record is written by the operator's commands alone.
+   */
+  identityCheck?: IdentitySessionDeps;
+  /**
+   * The Stripe Identity webhook's signing secrets (`cfg.stripeIdentity`) and this deployment's
+   * environment, which must be the identity check's. The route is mounted only where this and
+   * `identityCheck` are both set; the secrets are revealed only for the HMAC.
+   */
+  stripeIdentity?: StripeIdentityWebhookDeps;
+  /**
    * The beta's invite codes (trust-and-access PR 2b), with `required`, the BETA_INVITES_REQUIRED
    * switch. Not wired yet: PR 2b adds the repository and wires the object. Absent, a production
    * deployment never offers the formed door (`/config.legalBodies.formedDoor` reads `hidden`), so
@@ -426,6 +447,13 @@ export type LegalBodyConfig =
       /** The guardian must pass the identity check before a door files: on production only. */
       identityRequired: boolean;
       /**
+       * The identity check runs automatically on this deployment (its provider is configured): the
+       * web app offers the identity step rather than leaving the record to an operator. Required on
+       * production (`identityRequired`); on a sandbox it is offered as a test, and the gate stays
+       * skipped.
+       */
+      identityCheckAutomatic: boolean;
+      /**
        * Whether the web app shows the door that forms a company through doola: `offered`;
        * `cap_reached`, when the deployment has taken all the formed companies it takes and every
        * other gate holds; `hidden` otherwise. See `formedDoorOf`.
@@ -485,7 +513,11 @@ function formedDoorOf(
 export function legalBodyConfigOf(
   deps: Pick<
     ApiDeps,
-    "legalBodyOrders" | "customerCompanies" | "legalBodyStatements" | "legalBodyGasSeed"
+    | "legalBodyOrders"
+    | "customerCompanies"
+    | "legalBodyStatements"
+    | "legalBodyGasSeed"
+    | "identityCheck"
   > &
     FormedDoorDeps,
 ): LegalBodyConfig {
@@ -502,6 +534,7 @@ export function legalBodyConfigOf(
     gasSeedOffered: (deps.legalBodyGasSeed?.amountWei ?? 0n) > 0n,
     paymentRequired: deps.customerCompanies?.paymentRequired ?? false,
     identityRequired: orders.environment === "production",
+    identityCheckAutomatic: deps.identityCheck !== undefined,
     formedDoor: formedDoorOf(deps, orders.environment, orders.texts),
     filingWorkingDays: deps.formation?.filingWorkingDays ?? DEFAULT_FORMATION_FILING_WORKING_DAYS,
     linkTtl: {
@@ -623,6 +656,13 @@ export function buildApiApp(deps: ApiDeps) {
   // Mounted BEFORE the /entities auth middleware for the same reason every other public route is,
   // and gated on the credentials that make verification possible at all.
   if (deps.doola) mountDoolaWebhookRoutes(app, { ...deps, doola: deps.doola });
+  // PUBLIC for the same reason: Stripe authenticates with an HMAC over the body. Mounted only where
+  // the identity check runs and the webhook's secrets are set.
+  if (deps.identityCheck && deps.stripeIdentity)
+    mountStripeIdentityWebhookRoutes(app, {
+      identityCheck: deps.identityCheck,
+      stripeIdentity: deps.stripeIdentity,
+    });
   mountMetadataRoutes(app, deps);
   // The HCS-11 profile beside the metadata it cross-links, public for the same reason: it is what
   // a Hedera account's `hcs-11:` memo points at, read by agents holding no key of ours (task 11).
@@ -675,6 +715,10 @@ export function buildApiApp(deps: ApiDeps) {
   protect("/api-keys");
   protect("/connection-package");
   protect("/bootstrap-connection");
+  // The identity check's routes: mounted on every deployment, so one that does not run the check
+  // answers its own 404 `identity_check_not_offered`, and only to a signed-in caller.
+  protect("/identity-check");
+  mountIdentityCheckRoutes(app, deps);
   mountWorldIdRoutes(app, deps); // routes carry their own requireAuth (like /passkey)
   // AgentBook session/register/status. Mounted only where `agentBook` is wired, which is the same
   // boolean `/config` advertises above.

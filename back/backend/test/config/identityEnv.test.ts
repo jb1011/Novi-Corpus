@@ -88,6 +88,12 @@ test("the identity settings are overridable", () => {
     unusedRetentionDays: 30,
     failedRetentionDays: 1,
     blockedCountries: new Set(["SYR", "CUB"]),
+    // The automatic check's session limits, at their defaults (stripeIdentityEnv.test.ts).
+    sessionDays: 14,
+    sessionMaxPerDay: 3,
+    attemptsPerSession: 3,
+    redactAfterDays: 7,
+    syncEveryMs: 600_000,
   });
 });
 
@@ -183,5 +189,10 @@ test("redact() hides the top-level keyring and the fingerprint key, keeps the ke
     failedRetentionDays: 30,
     blockedCountries: ["CUB", "IRN", "PRK"],
     nameHmacKey: "REDACTED",
+    sessionDays: 14,
+    sessionMaxPerDay: 3,
+    attemptsPerSession: 3,
+    redactAfterDays: 7,
+    syncEveryMs: 600_000,
   });
 });

@@ -537,6 +537,7 @@ describe("on a sandbox nothing changes, and the identity record is never read", 
     const repo: IdentityRepository = {
       append: refuse,
       latest: refuse,
+      latestPassed: refuse,
       list: refuse,
       events: refuse,
       findById: refuse,

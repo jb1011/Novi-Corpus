@@ -422,8 +422,9 @@ export function mountWorldIdRoutes(app: Hono<{ Variables: AuthVars }>, deps: Api
     // own predicate on those doors' environment, so a browser can tell before it spends a door.
     // Absent where neither of those doors is mounted: the predicate then guards nothing.
     // `identity`: where the guardian's identity check stands, under the same condition. Only the
-    // state, whether it is required and, once verified, the first and last names and the dates:
-    // never the full name, the provider or the country (`identityView`).
+    // state, whether it is required, whether it runs automatically here and, once verified, the
+    // first and last names and the dates: never the full name, the provider or the country
+    // (`identityView`).
     const environment = deps.legalBodyOrders?.environment ?? deps.customerCompanies?.environment;
     const gate =
       environment === undefined

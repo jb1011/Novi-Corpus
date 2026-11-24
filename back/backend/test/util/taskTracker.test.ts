@@ -5,7 +5,7 @@
  * and by tests, which must join on it instead of sleeping.
  */
 import { expect, test } from "vitest";
-import { TaskTracker } from "../../src/util/taskTracker";
+import { TaskTracker, settledAll } from "../../src/util/taskTracker";
 
 const tick = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -64,6 +64,29 @@ test("settled(timeoutMs) gives up rather than hanging a deploy on a wedged task"
 
 test("settled() on an empty tracker resolves immediately", async () => {
   expect(await new TaskTracker().settled(0)).toBe(true);
+});
+
+test("settledAll drains every tracker under one bound, and reports false when any is left", async () => {
+  // SIGTERM drains the doola receiver's tracker and the identity check's together, one bound for
+  // both: the deploy waits for the slower, never for the sum.
+  const doola = new TaskTracker("a_task");
+  const identity = new TaskTracker("b_task");
+  let done = 0;
+  doola.track(async () => {
+    await tick(20);
+    done += 1;
+  });
+  identity.track(async () => {
+    await tick(20);
+    done += 1;
+  });
+  expect(await settledAll([doola, identity]).settled(1000)).toBe(true);
+  expect(done).toBe(2);
+  identity.track(() => new Promise(() => undefined)); // never settles
+  const started = Date.now();
+  expect(await settledAll([doola, identity]).settled(30)).toBe(false);
+  expect(Date.now() - started).toBeLessThan(2000);
+  expect(await settledAll([]).settled(0)).toBe(true);
 });
 
 // ── M5: coalescing a burst of wake-ups for one company ────────────────────────────────────

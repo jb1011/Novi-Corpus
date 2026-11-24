@@ -205,6 +205,7 @@ describe("on a sandbox nothing changes, and the identity record is never read", 
     const repo: IdentityRepository = {
       append: refuse,
       latest: refuse,
+      latestPassed: refuse,
       list: refuse,
       events: refuse,
       findById: refuse,
@@ -242,5 +243,9 @@ test("the composition root hands the order doors the identity record", () => {
   expect(at, "the order deps were not found").toBeGreaterThan(0);
   const orders = main.slice(at, main.indexOf(": undefined;", at));
   expect(orders).toMatch(/^ {10}identity,$/m);
-  expect(main.indexOf("const identity: IdentityDeps | undefined = cfg.pii")).toBeLessThan(at);
+  const builtAt = main.indexOf(
+    "const { identity, identityCheck, stripeIdentity } = identityWiringOf(",
+  );
+  expect(builtAt, "the identity record was not found").toBeGreaterThan(0);
+  expect(builtAt).toBeLessThan(at);
 });

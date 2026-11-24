@@ -321,7 +321,8 @@ test("main.ts builds the job list, starts the scheduler after serve() and the sw
   const sweeperAt = main.indexOf("legalBodySweeper.start()");
   const startAt = main.indexOf("scheduler.start()");
   expect(serveAt, "serve() call not found: this guard has stopped guarding").toBeGreaterThan(0);
-  expect(main).toContain("buildScheduledJobs(db, cfg)");
+  // With the identity check's session service, where the Stripe block built one.
+  expect(main).toContain("buildScheduledJobs(db, cfg, { identitySessions: identityCheck })");
   expect(main).toMatch(/scheduledJobs\.length > 0\s*\?\s*new Scheduler\(/);
   expect(startAt).toBeGreaterThan(serveAt);
   expect(startAt).toBeGreaterThan(sweeperAt);

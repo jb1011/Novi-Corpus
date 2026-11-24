@@ -1342,6 +1342,63 @@ const IDENTITY_CHECK_EVENTS_DDL = `
 `;
 
 /**
+ * THE PROVIDER SESSIONS of the automatic identity check: one row per session opened at the
+ * provider (Stripe Identity), updated as it moves. Operational state, not the record: a session
+ * points at its `started` row and, once closed, at its completion row of
+ * `guardian_identity_checks`, which is what a guardian's state is read from.
+ *
+ * `session_id` is our opaque id (32 lower-case hex), the provider's `client_reference_id`. The
+ * typed names (the name the person typed, sealed under the PII keyring) are kept only while the
+ * session is open: the close nulls the five typed columns and sets `typed_erased_at` in the same
+ * UPDATE. `last_error_code` is the provider's code, never its reason text. The redaction columns
+ * follow the request to the provider to erase its copy (seven days after the completion, or after
+ * the operator's decision on a review). The one-open-session rule of a tenant is held by the
+ * repository, inside its IMMEDIATE transaction. Times are unix ms.
+ */
+const IDENTITY_SESSIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS identity_sessions (
+    session_id             TEXT PRIMARY KEY,  -- our id, 32 lower-case hex: the client_reference_id
+    tenant_id              TEXT NOT NULL,
+    nullifier              TEXT,
+    provider               TEXT NOT NULL CHECK (provider IN ('stripe')),
+    provider_ref           TEXT NOT NULL UNIQUE,  -- vs_ id
+    environment            TEXT NOT NULL CHECK (environment IN ('sandbox', 'production')),
+    livemode               INTEGER NOT NULL CHECK (livemode IN (0, 1)),
+    return_path            TEXT NOT NULL,
+    created_at             INTEGER NOT NULL,
+    started_check_id       INTEGER NOT NULL,  -- the started row of guardian_identity_checks
+    completed_check_id     INTEGER,  -- the passed, failed or needs_review row; NULL while open
+    closed_at              INTEGER,  -- set with completed_check_id, or on abandon
+    last_status            TEXT CHECK (last_status IS NULL
+      OR last_status IN ('requires_input', 'processing', 'verified', 'canceled')),
+    last_error_code        TEXT,
+    last_read_at           INTEGER,
+    failed_attempts        INTEGER NOT NULL DEFAULT 0,
+    report_id              TEXT,  -- vr_ id: the last read's while open, the close's once closed
+    screen_pending_since   INTEGER,  -- a verified session whose screen errored
+    dob_unavailable        INTEGER NOT NULL DEFAULT 0,
+    typed_first_ciphertext BLOB,
+    typed_first_iv         BLOB,
+    typed_last_ciphertext  BLOB,
+    typed_last_iv          BLOB,
+    typed_key_id           TEXT,
+    typed_erased_at        INTEGER,
+    redact_due_at          INTEGER,
+    redaction_requested_at INTEGER,
+    redacted_at            INTEGER,
+    updated_at             INTEGER NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_identity_sessions_tenant_open
+    ON identity_sessions(tenant_id, created_at) WHERE closed_at IS NULL;
+  -- One open session per tenant, held by the database whatever writes the row; the repository's
+  -- own check stays before it, for its message (decided 24 November).
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_sessions_one_open
+    ON identity_sessions(tenant_id) WHERE closed_at IS NULL;
+  CREATE INDEX IF NOT EXISTS idx_identity_sessions_redact
+    ON identity_sessions(redact_due_at) WHERE redact_due_at IS NOT NULL AND redacted_at IS NULL;
+`;
+
+/**
  * An agentId in the one spelling `legal_bodies` stores it (whose CHECK writes the same rule
  * inline): TEXT with no hidden bytes, decimal digits only, no leading zero except '0' itself, at
  * most 78 digits (the width of a uint256).
@@ -2106,6 +2163,8 @@ export function migrate(db: Database.Database): void {
     -- The guardian's identity checks, and the trail of everything done to them.
     ${GUARDIAN_IDENTITY_CHECKS_DDL}
     ${IDENTITY_CHECK_EVENTS_DDL}
+    -- The provider sessions of the automatic identity check.
+    ${IDENTITY_SESSIONS_DDL}
 
     -- Anchor cycles: one row PER MANIFEST VERSION. Deliberately NOT keyed like bridge_legs
     -- (entity, step) — a bridge has exactly one of each leg, whereas an entity accumulates

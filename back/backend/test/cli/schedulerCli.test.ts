@@ -54,6 +54,12 @@ beforeEach(() => {
     "FORMATION_PII_KEY_PREVIOUS",
     "IDENTITY_UNUSED_RETENTION_DAYS",
     "IDENTITY_FAILED_RETENTION_DAYS",
+    "IDENTITY_SYNC_EVERY_MS",
+    "STRIPE_IDENTITY_KEY",
+    "STRIPE_IDENTITY_FLOW_ID",
+    "STRIPE_IDENTITY_WEBHOOK_SECRET",
+    "STRIPE_IDENTITY_WEBHOOK_SECRET_PREVIOUS",
+    "WEB_ORIGIN",
   ])
     Reflect.deleteProperty(process.env, name);
   db = openDatabase(join(dir, "legalbody.db"));
@@ -132,6 +138,17 @@ function supersededReview(): number {
   );
   return review.checkId;
 }
+
+/** The Stripe Identity block, in test mode, as a sandbox box holds it: placeholder keys. */
+function withStripe(): void {
+  process.env.STRIPE_IDENTITY_KEY = `rk_test_${"x".repeat(24)}`;
+  process.env.STRIPE_IDENTITY_FLOW_ID = `vf_${"x".repeat(24)}`;
+  process.env.STRIPE_IDENTITY_WEBHOOK_SECRET = `whsec_${"x".repeat(32)}`;
+  process.env.WEB_ORIGIN = "https://testnet.example.com";
+}
+
+const API_ONLY =
+  "refusing: identity_sessions_sync runs in the API process only, registered there because the Stripe Identity block is configured: it reads the open check sessions back from the provider with the API's provider client and screener, so scheduler:run cannot run it; its runs are in the ops log (job_ran, job_failed)";
 
 const noChain = () => {
   throw new Error("this command must not build a chain context");
@@ -223,6 +240,35 @@ describe("scheduler:list", () => {
     expect(ops).toEqual([]);
   });
 
+  test("with the Stripe block it names identity_sessions_sync too, as a job of the API process only", async () => {
+    withStripe();
+    const { output, ops } = await run<{ jobs: Record<string, unknown>[] }>(["scheduler:list"]);
+    expect(output).toEqual({
+      jobs: [
+        {
+          name: "identity_sweep",
+          everyMs: DAY,
+          schedule: "first run 30 s after boot, then every 24 h",
+        },
+        {
+          name: "identity_sessions_sync",
+          everyMs: 600_000,
+          schedule: "first run 30 s after boot, then every 10 min",
+          note: "runs in the API process only, registered there because the Stripe Identity block is configured: it reads the open check sessions back from the provider with the API's provider client and screener, so scheduler:run cannot run it",
+        },
+      ],
+      history: "the run history is in the ops log: job_ran, job_failed",
+    });
+    expect(ops).toEqual([]);
+
+    process.env.IDENTITY_SYNC_EVERY_MS = "120000";
+    const shorter = await run<{ jobs: Record<string, unknown>[] }>(["scheduler:list"]);
+    expect(shorter.output.jobs[1]).toMatchObject({
+      everyMs: 120_000,
+      schedule: "first run 30 s after boot, then every 2 min",
+    });
+  });
+
   test("without the PII key there is no job, and it says the API starts no scheduler", async () => {
     Reflect.deleteProperty(process.env, "FORMATION_PII_KEY");
     const { output } = await run(["scheduler:list"]);
@@ -300,6 +346,25 @@ describe("scheduler:run", () => {
     Reflect.deleteProperty(process.env, "FORMATION_PII_KEY");
     expect(await refusal(["scheduler:run", "identity_sweep", "--yes"])).toBe(
       "refusing: no scheduled job named identity_sweep",
+    );
+  });
+
+  test("identity_sessions_sync is refused here, with --yes and without: it runs in the API process", async () => {
+    withStripe();
+    expect(await refusal(["scheduler:run", "identity_sessions_sync", "--yes"])).toBe(API_ONLY);
+    expect(await refusal(["scheduler:run", "identity_sessions_sync"])).toBe(API_ONLY);
+    // The other jobs run as before beside it.
+    const { output } = await run(["scheduler:run", "identity_sweep", "--yes"]);
+    expect(output).toMatchObject({ name: "identity_sweep", ran: true });
+    // Without the Stripe block it is not a job of this deployment at all.
+    for (const name of [
+      "STRIPE_IDENTITY_KEY",
+      "STRIPE_IDENTITY_FLOW_ID",
+      "STRIPE_IDENTITY_WEBHOOK_SECRET",
+    ])
+      Reflect.deleteProperty(process.env, name);
+    expect(await refusal(["scheduler:run", "identity_sessions_sync", "--yes"])).toBe(
+      "refusing: no scheduled job named identity_sessions_sync",
     );
   });
 

@@ -74,6 +74,11 @@ function makeConfig(): Config {
       unusedRetentionDays: 365,
       failedRetentionDays: 30,
       blockedCountries: new Set(["CUB", "IRN", "PRK"]),
+      sessionDays: 14,
+      sessionMaxPerDay: 3,
+      attemptsPerSession: 3,
+      redactAfterDays: 7,
+      syncEveryMs: 600_000,
     },
   };
 }

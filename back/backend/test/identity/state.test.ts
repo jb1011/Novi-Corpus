@@ -401,6 +401,7 @@ describe("identityView", () => {
     const view = identityView(identity, world, tenant(1), "production");
     expect(Object.keys(view)).toEqual([
       "required",
+      "automatic",
       "state",
       "firstName",
       "lastName",
@@ -409,6 +410,7 @@ describe("identityView", () => {
     ]);
     expect(view).toEqual({
       required: true,
+      automatic: false,
       state: "verified",
       firstName: FIRST,
       lastName: LAST,
@@ -421,10 +423,10 @@ describe("identityView", () => {
       expect(text, never).not.toContain(never);
   });
 
-  test("no record: only required and the state", () => {
+  test("no record: only required, automatic and the state", () => {
     const view = identityView(identity, world, tenant(1), "production");
-    expect(Object.keys(view)).toEqual(["required", "state"]);
-    expect(view).toEqual({ required: true, state: "none" });
+    expect(Object.keys(view)).toEqual(["required", "automatic", "state"]);
+    expect(view).toEqual({ required: true, automatic: false, state: "none" });
   });
 
   test("a state other than verified carries no name and no date", () => {
@@ -434,14 +436,17 @@ describe("identityView", () => {
     erasedUnused(tenant(3));
     expect(identityView(identity, world, tenant(1), "production")).toEqual({
       required: true,
+      automatic: false,
       state: "needs_review",
     });
     expect(identityView(identity, world, tenant(2), "production")).toEqual({
       required: true,
+      automatic: false,
       state: "expired",
     });
     expect(identityView(identity, world, tenant(3), "production")).toEqual({
       required: true,
+      automatic: false,
       state: "expired",
     });
   });
@@ -455,6 +460,7 @@ describe("identityView", () => {
     for (const n of [1, 2])
       expect(identityView(identity, world, tenant(n), "production"), `${n}`).toEqual({
         required: true,
+        automatic: false,
         state: "none",
       });
     // A record without a nullifier reads its own state.
@@ -472,10 +478,12 @@ describe("identityView", () => {
     for (const n of [1, 2])
       expect(identityView(identity, world, tenant(n), "production"), `${n}`).toEqual({
         required: true,
+        automatic: false,
         state: "none",
       });
     expect(identityView(identity, world, tenant(1), "sandbox")).toMatchObject({
       required: false,
+      automatic: false,
       state: "verified",
     });
   });
@@ -483,14 +491,17 @@ describe("identityView", () => {
   test("required only on production; no identity record wired reads none", () => {
     expect(identityView(identity, world, tenant(1), "sandbox")).toEqual({
       required: false,
+      automatic: false,
       state: "none",
     });
     expect(identityView(undefined, world, tenant(1), "production")).toEqual({
       required: true,
+      automatic: false,
       state: "none",
     });
     expect(identityView(undefined, undefined, tenant(1), "sandbox")).toEqual({
       required: false,
+      automatic: false,
       state: "none",
     });
   });

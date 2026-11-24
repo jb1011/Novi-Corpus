@@ -77,6 +77,26 @@ export const REVIEW_REASON_CODES: readonly string[] = [
   "name_rule_failed",
   "name_mismatch",
 ] satisfies readonly ReviewReasonCode[];
+/** The review reasons that end the pass a renewal renews (decided 6 November): a sanctions hit and
+ *  a blocked country. A review for any other reason leaves the earlier pass counting
+ *  (`identity/state.ts`). */
+export const PASS_ENDING_REVIEW_REASONS: readonly ReviewReasonCode[] = [
+  "watchlist_hit",
+  "country_blocked",
+];
+/**
+ * The events an operator's decision writes its row with (`identity:accept`, `identity:refuse`,
+ * `identity:revoke`, `identity:correct-name`). A row written with any other event is an attempt:
+ * the adapter's `started` row and its session's completion, or an operator's `identity:record`,
+ * all `recorded`. A decision written since a pass ends it (the renewal rule, `identity/state.ts`,
+ * and its SQL mirror `COUNTED_BY_RENEWAL` in `persistence/identityRepository.ts`).
+ */
+export const DECISION_EVENT_KINDS: readonly string[] = [
+  "accepted",
+  "refused",
+  "revoked",
+  "name_corrected",
+];
 /** The decision codes of an acceptance: what the operator found that clears the review. */
 export const ACCEPT_DECISION_CODES: readonly string[] = [
   "provider_flag_cleared",

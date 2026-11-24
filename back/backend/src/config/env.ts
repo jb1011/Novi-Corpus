@@ -3,7 +3,13 @@ import { privateKeyToAccount } from "viem/accounts";
 import { z } from "zod";
 import type { DoolaEnvironment } from "../adapters/doola/types";
 import { arcTestnet } from "../chains";
-import { type PiiKeyring, parseNameHmacKey, parsePiiKey } from "../formation/pii";
+import {
+  type PiiKeyring,
+  type Secret,
+  parseNameHmacKey,
+  parsePiiKey,
+  toSecret,
+} from "../formation/pii";
 import { usdToUnits } from "../policy/units";
 import type { Address, Hex } from "../types";
 
@@ -459,6 +465,10 @@ const EnvSchema = z.object({
    * REQUIRED when `DOOLA_ENVIRONMENT=production` — that is the only deployment that collects one.
    * Generate with `openssl rand -base64 32`. See `docs/runbooks/doola-deploy.md` for rotation and
    * for what is lost if the key is lost.
+   *
+   * On a sandbox doola box it is refused, unless the Stripe Identity block is set: the identity
+   * check then seals names under it, and formation is handed no keyring there (`cfg.formation.pii`
+   * stays absent), since a sandbox never collects an SSN.
    */
   FORMATION_PII_KEY: z.string().optional(),
   /** The PREVIOUS key, during a rotation window only. Rows name the key they were written with,
@@ -484,6 +494,103 @@ const EnvSchema = z.object({
    *  (`SCREENING_BLOCKED_COUNTRIES=` with nothing after it) is refused on purpose, so the list
    *  cannot be cleared by accident. */
   SCREENING_BLOCKED_COUNTRIES: z.string().default("CUB,IRN,PRK"),
+
+  // --- THE AUTOMATIC IDENTITY CHECK (the Stripe Identity adapter). The key, the flow id and the
+  // webhook secret are ALL-OR-NOTHING (`cfg.stripeIdentity`, the doola twin), and the block needs
+  // FORMATION_PII_KEY: the names of record are sealed under it. A blank value is unset. ---------
+  /** A secret or restricted key: sk_test_ or rk_test_ (test mode, a sandbox deployment only),
+   *  sk_live_ or rk_live_ (live mode, a production deployment only). The prefix decides the mode.
+   *  A secret: masked by redact(). */
+  STRIPE_IDENTITY_KEY: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9]+$/, {
+        message:
+          "must be a Stripe secret or restricted key (sk_test_, rk_test_, sk_live_ or rk_live_)",
+      })
+      .optional(),
+  ),
+  /** The verification flow every session is created from, made in the Stripe dashboard. */
+  STRIPE_IDENTITY_FLOW_ID: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .regex(/^vf_[A-Za-z0-9]+$/, {
+        message: "must be a verification flow id (vf_ and letters or digits)",
+      })
+      .optional(),
+  ),
+  /** The webhook endpoint's signing secret. A secret: masked by redact(). */
+  STRIPE_IDENTITY_WEBHOOK_SECRET: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .regex(/^whsec_\S+$/, {
+        message: "must be a Stripe webhook signing secret (whsec_ and the secret)",
+      })
+      .optional(),
+  ),
+  /** The secret being retired, during a rotation window only; verified beside the current one. */
+  STRIPE_IDENTITY_WEBHOOK_SECRET_PREVIOUS: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .regex(/^whsec_\S+$/, {
+        message: "must be a Stripe webhook signing secret (whsec_ and the secret)",
+      })
+      .optional(),
+  ),
+  /** The sanctions and PEP search's key. Required on a production deployment with the Stripe
+   *  block; a sandbox without it screens nothing. A secret: masked by redact(). */
+  OPENSANCTIONS_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
+  /** The collection searched. It is a path segment of the request, so letters, digits, `_`, `-`. */
+  OPENSANCTIONS_DATASET: z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .regex(/^[a-z0-9_-]+$/, {
+        message: "must be a dataset name (lower-case letters, digits, '_' or '-')",
+      })
+      .default("default"),
+  ),
+  /** The score from which a result is a match, from 0.5 to 1. */
+  OPENSANCTIONS_THRESHOLD: z.preprocess(
+    blankAsUnset,
+    z.coerce.number().min(0.5).max(1).default(0.8),
+  ),
+  /** Days a check session stays open without a result before it is closed as failed. */
+  IDENTITY_SESSION_DAYS: z.preprocess(
+    blankAsUnset,
+    z.coerce.number().int().min(1).max(60).default(14),
+  ),
+  /** Check sessions one tenant may start in 24 hours. */
+  IDENTITY_SESSION_MAX_PER_DAY: z.preprocess(
+    blankAsUnset,
+    z.coerce.number().int().min(1).max(10).default(3),
+  ),
+  /** Document or selfie attempts one session takes before it is closed as failed. */
+  IDENTITY_ATTEMPTS_PER_SESSION: z.preprocess(
+    blankAsUnset,
+    z.coerce.number().int().min(1).max(5).default(3),
+  ),
+  /** Days after a session's result (or the operator's decision on a review) it is redacted at
+   *  Stripe. */
+  IDENTITY_REDACT_AFTER_DAYS: z.preprocess(
+    blankAsUnset,
+    z.coerce.number().int().min(1).max(30).default(7),
+  ),
+  /** Milliseconds between two passes of the job that reads open sessions back from Stripe: at
+   *  least one minute, and no more than a timer can hold. */
+  IDENTITY_SYNC_EVERY_MS: z.preprocess(
+    blankAsUnset,
+    z.coerce
+      .number()
+      .int()
+      .min(60_000)
+      .max(MAX_TIMER_MS, { message: `must be at most ${MAX_TIMER_MS} milliseconds` })
+      .default(600_000),
+  ),
 
   // --- FORMATION PAYMENTS (2026-08-26 §6; B1). Built now, shipped OFF. -----------------------
   /**
@@ -1104,7 +1211,8 @@ export interface Config {
     /** Sandbox files with a labeled synthetic identity instead of a real natural person. */
     sandboxSyntheticPii: boolean;
     /**
-     * The SSN encryption keyring (§4.2), absent when no key is configured.
+     * The SSN encryption keyring (§4.2), absent when no key is configured, and on a sandbox doola
+     * box, which holds the key for the identity check's names only and never collects an SSN.
      *
      * It lives here, beside the policy knobs, because the design says so in as many words: "keys
      * land in `config/env.ts` (so does `FORMATION_PII_KEY`)". It is the PARSED keyring rather
@@ -1142,8 +1250,9 @@ export interface Config {
   };
   /**
    * The PII keyring, parsed ONCE from FORMATION_PII_KEY and FORMATION_PII_KEY_PREVIOUS; absent
-   * when no key is configured. `formation.pii` is this same object. The guardian identity record
-   * encrypts names under it, so it is not formation's alone.
+   * when no key is configured. `formation.pii` is this same object, except on a sandbox doola box
+   * (allowed the key only with the Stripe Identity block), where formation holds none. The
+   * guardian identity record encrypts names under it, so it is not formation's alone.
    */
   pii?: PiiKeyring;
   /** The guardian identity record's settings. */
@@ -1156,7 +1265,33 @@ export interface Config {
     /** The name fingerprint's secret, parsed ONCE from IDENTITY_NAME_HMAC_KEY (32 bytes); absent
      *  when it is not set, which the boot refuses whenever the PII key is set. */
     nameHmacKey?: Buffer;
+    /** IDENTITY_SESSION_DAYS: days a check session stays open without a result. */
+    sessionDays: number;
+    /** IDENTITY_SESSION_MAX_PER_DAY: check sessions one tenant may start in 24 hours. */
+    sessionMaxPerDay: number;
+    /** IDENTITY_ATTEMPTS_PER_SESSION: document or selfie attempts one session takes. */
+    attemptsPerSession: number;
+    /** IDENTITY_REDACT_AFTER_DAYS: days after a session's result it is redacted at Stripe. */
+    redactAfterDays: number;
+    /** IDENTITY_SYNC_EVERY_MS: milliseconds between two read-backs of the open sessions. */
+    syncEveryMs: number;
   };
+  /**
+   * The automatic identity check (the Stripe Identity adapter): all-or-nothing over the key, the
+   * flow id and the webhook secret; absent when none is set. `mode` is read from the key's prefix
+   * and agrees with the deployment (a boot rule): `test` on a sandbox, `live` on production.
+   */
+  stripeIdentity?: {
+    key: Secret;
+    mode: "test" | "live";
+    flowId: string;
+    webhookSecret: Secret;
+    /** During a webhook secret rotation only. */
+    webhookSecretPrevious?: Secret;
+  };
+  /** The person screen's provider: the OpenSanctions match API. Absent, `openSanctions` and all,
+   *  without OPENSANCTIONS_API_KEY. */
+  screening?: { openSanctions?: { apiKey: Secret; dataset: string; threshold: number } };
 }
 
 /** Hedera rail (design 2026-09-10), narrowed to present-and-whole. */
@@ -1248,6 +1383,17 @@ function parseCountryList(raw: string, varName: string): Set<string> {
       return s;
     }),
   );
+}
+
+/** Whether `value` is exactly an http or https origin: a scheme and a host, a port when it has
+ *  one, and nothing after it (no path, no query, no trailing slash). */
+function isExplicitOrigin(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (url.protocol === "https:" || url.protocol === "http:") && url.origin === value;
+  } catch {
+    return false;
+  }
 }
 
 /** The one definition of "this deployment can provision Turnkey vaults": core turnkey config plus
@@ -1418,7 +1564,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
 
   // The PII keyring (§4.2), PARSED once here, so a malformed key names its variable at boot
   // rather than throwing at the first filing. `cfg.pii` and `cfg.formation.pii` are this one
-  // object. `_PREVIOUS` alone is refused below: it would be a rotation with nothing to rotate to.
+  // object, except on a sandbox doola box (`formationPii` below). `_PREVIOUS` alone is refused
+  // below: it would be a rotation with nothing to rotate to.
   const pii = e.FORMATION_PII_KEY
     ? {
         current: parsePiiKey(e.FORMATION_PII_KEY, "FORMATION_PII_KEY"),
@@ -1427,6 +1574,29 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
           : undefined,
       }
     : undefined;
+  // Formation's copy of it, which seals and opens the SSN. A sandbox doola box never collects an
+  // SSN, and it holds the key only for the identity check's names (allowed with the Stripe block,
+  // below), so formation is handed none there: every SSN path on that box then refuses at its
+  // last line exactly as it does on a box with no key, and never seals or sends one.
+  const formationPii = doola && doola.environment !== "production" ? undefined : pii;
+
+  // The automatic identity check (Stripe Identity). All-or-nothing over the key, the flow id and
+  // the webhook secret, refused below when half set; the PREVIOUS secret only exists during a
+  // rotation. The schema has already refused a key of any other shape, so the prefix is a mode.
+  const stripeIdentity =
+    e.STRIPE_IDENTITY_KEY && e.STRIPE_IDENTITY_FLOW_ID && e.STRIPE_IDENTITY_WEBHOOK_SECRET
+      ? {
+          key: toSecret(e.STRIPE_IDENTITY_KEY),
+          mode: /^(?:sk|rk)_live_/.test(e.STRIPE_IDENTITY_KEY)
+            ? ("live" as const)
+            : ("test" as const),
+          flowId: e.STRIPE_IDENTITY_FLOW_ID,
+          webhookSecret: toSecret(e.STRIPE_IDENTITY_WEBHOOK_SECRET),
+          webhookSecretPrevious: e.STRIPE_IDENTITY_WEBHOOK_SECRET_PREVIOUS
+            ? toSecret(e.STRIPE_IDENTITY_WEBHOOK_SECRET_PREVIOUS)
+            : undefined,
+        }
+      : undefined;
 
   const cfg = {
     rpcUrl: e.ARC_TESTNET_RPC_URL,
@@ -1632,8 +1802,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
         e.DOOLA_ENVIRONMENT === "sandbox",
         "FORMATION_SANDBOX_SYNTHETIC_PII",
       ),
-      // The keyring parsed above: the same object as `cfg.pii`.
-      pii,
+      // The keyring parsed above: the same object as `cfg.pii`, or none on a sandbox doola box.
+      pii: formationPii,
       payment: {
         // FALSE unless explicitly set — unlike `required`/`sandboxSyntheticPii`, nothing derives
         // it. Charging for something is a decision an operator makes in as many words.
@@ -1670,7 +1840,22 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       nameHmacKey: e.IDENTITY_NAME_HMAC_KEY
         ? parseNameHmacKey(e.IDENTITY_NAME_HMAC_KEY, "IDENTITY_NAME_HMAC_KEY")
         : undefined,
+      sessionDays: e.IDENTITY_SESSION_DAYS,
+      sessionMaxPerDay: e.IDENTITY_SESSION_MAX_PER_DAY,
+      attemptsPerSession: e.IDENTITY_ATTEMPTS_PER_SESSION,
+      redactAfterDays: e.IDENTITY_REDACT_AFTER_DAYS,
+      syncEveryMs: e.IDENTITY_SYNC_EVERY_MS,
     },
+    stripeIdentity,
+    screening: e.OPENSANCTIONS_API_KEY
+      ? {
+          openSanctions: {
+            apiKey: toSecret(e.OPENSANCTIONS_API_KEY),
+            dataset: e.OPENSANCTIONS_DATASET,
+            threshold: e.OPENSANCTIONS_THRESHOLD,
+          },
+        }
+      : undefined,
   };
 
   // Formation (design §2), Circle twin: a half-configured doola block must fail at boot, not at
@@ -2016,8 +2201,9 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       "Invalid config: FORMATION_PII_KEY_PREVIOUS is set but FORMATION_PII_KEY is missing — the previous key exists only to READ rows written before a rotation, and there is nothing to rotate to",
     );
   // The same key in both slots is not a rotation; it is a rotation somebody believes they have
-  // done. Refused, because the belief is the dangerous part.
-  if (cfg.formation.pii?.previous && cfg.formation.pii.previous.id === cfg.formation.pii.current.id)
+  // done. Refused, because the belief is the dangerous part. Read on `cfg.pii`, the keyring every
+  // deployment with the key holds (formation's copy is withheld on a sandbox doola box).
+  if (cfg.pii?.previous && cfg.pii.previous.id === cfg.pii.current.id)
     throw new Error(
       "Invalid config: FORMATION_PII_KEY and FORMATION_PII_KEY_PREVIOUS are the SAME key — that is not a rotation. Set _PREVIOUS to the key being retired, or unset it",
     );
@@ -2051,16 +2237,49 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       );
   }
 
-  // A sandbox deployment never sees a real SSN (§4.1 — the door refuses the field outright), so a
-  // key here is at best dead weight and at worst a production key pasted into a sandbox box's
-  // `.env`. Refused with the reason, not warned about.
+  // ── THE AUTOMATIC IDENTITY CHECK (the Stripe Identity adapter) ──────────────────────────────
+  //
+  // Six rules, in this order, all AFTER the mainnet block so a mainnet box missing its provider
+  // hears about that first. 1: the three Stripe settings come as a set (the doola twin): a half
+  // block would fail at the first session instead of at boot.
+  const stripeVars: Array<[string, string | undefined]> = [
+    ["STRIPE_IDENTITY_KEY", e.STRIPE_IDENTITY_KEY],
+    ["STRIPE_IDENTITY_FLOW_ID", e.STRIPE_IDENTITY_FLOW_ID],
+    ["STRIPE_IDENTITY_WEBHOOK_SECRET", e.STRIPE_IDENTITY_WEBHOOK_SECRET],
+  ];
+  const stripeSet = stripeVars.filter(([, value]) => value).map(([name]) => name);
+  const stripeMissing = stripeVars.filter(([, value]) => !value).map(([name]) => name);
+  if (stripeSet.length > 0 && stripeMissing.length > 0)
+    throw new Error(
+      `Invalid config: ${stripeSet.join(" and ")} ${stripeSet.length === 1 ? "is" : "are"} set but ${stripeMissing.join(" and ")} ${stripeMissing.length === 1 ? "is" : "are"} missing (all-or-nothing)`,
+    );
+  // 2: the key's mode agrees with the deployment. A live check on a sandbox would verify real
+  // people on a box held to nothing; a test check on production would pass anyone.
+  if (cfg.stripeIdentity?.mode === "live" && legalBodyEnvironment(cfg) === "sandbox")
+    throw new Error(
+      "Invalid config: STRIPE_IDENTITY_KEY is a live key on a sandbox deployment: a sandbox runs the identity check in Stripe's test mode only (use an sk_test_ or rk_test_ key)",
+    );
+  if (cfg.stripeIdentity?.mode === "test" && legalBodyEnvironment(cfg) === "production")
+    throw new Error(
+      "Invalid config: STRIPE_IDENTITY_KEY is a test key on a production deployment (ARC_NETWORK=mainnet): a test-mode check says nothing about a real person (use an sk_live_ or rk_live_ key)",
+    );
+  // 3: the names of record are sealed under the PII keyring, so the check needs one.
+  if (cfg.stripeIdentity && !cfg.pii)
+    throw new Error(
+      "Invalid config: the Stripe Identity block requires FORMATION_PII_KEY: the identity check seals the names of record under it",
+    );
+  // 4: a sandbox deployment never sees a real SSN (§4.1, the door refuses the field outright), so
+  // a key here is at best dead weight and at worst a production key pasted into a sandbox box's
+  // `.env`. Refused with the reason, not warned about, UNLESS the Stripe block is set: the
+  // identity check then has names to seal. Formation is handed no keyring on that box
+  // (`formationPii` above), so the SSN stays refused there either way.
   //
   // AFTER the mainnet block, deliberately: a mainnet box pointed at doola sandbox is a much more
-  // fundamental misconfiguration than a stray key, and an operator must hear about THAT first —
+  // fundamental misconfiguration than a stray key, and an operator must hear about THAT first:
   // the same ordering rule the chain-id checks below follow.
-  if (cfg.formation.pii && cfg.doola && cfg.doola.environment !== "production")
+  if (cfg.pii && cfg.doola && cfg.doola.environment !== "production" && !cfg.stripeIdentity)
     throw new Error(
-      "Invalid config: FORMATION_PII_KEY is set with DOOLA_ENVIRONMENT=sandbox — a sandbox deployment refuses the SSN field outright and has nothing to encrypt (unset it, or set DOOLA_ENVIRONMENT=production if this box really files for real people)",
+      "Invalid config: FORMATION_PII_KEY is set with DOOLA_ENVIRONMENT=sandbox: a sandbox deployment refuses the SSN field outright and has nothing to encrypt (unset it, or set DOOLA_ENVIRONMENT=production if this box really files for real people) (or configure the identity check, which seals names under it)",
     );
   // A box with the PII key can hold identity records, and their duplicate check compares the
   // name's fingerprint under its own secret. AFTER the sandbox check above, deliberately: a PII
@@ -2068,6 +2287,22 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (cfg.pii && cfg.identity.nameHmacKey === undefined)
     throw new Error(
       "Invalid config: IDENTITY_NAME_HMAC_KEY is required with FORMATION_PII_KEY: the identity record's duplicate check uses it",
+    );
+  // 5: a production pass needs the sanctions and PEP search; without it no check could complete.
+  if (
+    cfg.stripeIdentity &&
+    legalBodyEnvironment(cfg) === "production" &&
+    !cfg.screening?.openSanctions
+  )
+    throw new Error(
+      "Invalid config: the Stripe Identity block on a production deployment (ARC_NETWORK=mainnet) requires OPENSANCTIONS_API_KEY: a production pass needs the sanctions search",
+    );
+  // 6: the check's return URL is `${WEB_ORIGIN}${path}`, so WEB_ORIGIN must be exactly a scheme
+  // and a host (a port when it has one), on any environment: '*', a path or a trailing slash
+  // would build a URL that leads nowhere, at the first session instead of at boot.
+  if (cfg.stripeIdentity && !isExplicitOrigin(cfg.webOrigin))
+    throw new Error(
+      "Invalid config: WEB_ORIGIN must be an explicit origin (scheme and host, not '*') when the Stripe Identity block is set: the identity check's return URL is built on it",
     );
 
   // ARC_NETWORK vs ARC_CHAIN_ID (design §2). Two knobs describe ONE network, and nothing else
@@ -2390,8 +2625,8 @@ export function redact(cfg: Config): Record<string, unknown> {
         : undefined,
       pii: redactKeyring(cfg.formation?.pii),
     },
-    // The same keyring at the top level (`cfg.pii` is the object `formation.pii` points at), so
-    // the same rule: the ids survive, the key material never does.
+    // The same keyring at the top level (`cfg.pii` is the object `formation.pii` points at, where
+    // formation holds one), so the same rule: the ids survive, the key material never does.
     pii: redactKeyring(cfg.pii),
     // A `Set` serializes to `{}`: printed as a sorted array, so the boot log shows the list.
     // Guarded because test fixtures cast partial Config literals.
@@ -2401,6 +2636,26 @@ export function redact(cfg: Config): Record<string, unknown> {
           ...cfg.identity,
           blockedCountries: [...cfg.identity.blockedCountries].sort(),
           nameHmacKey: cfg.identity.nameHmacKey ? "REDACTED" : undefined,
+        }
+      : undefined,
+    // The Stripe key and the webhook secrets are bearer credentials (a `Secret` already prints as
+    // "[redacted]"; masked here by name all the same). The flow id is not a credential, but the
+    // boot line never prints it and no log needs it (the runbook keeps it out of what is sent
+    // back): masked too. The mode is what an operator checks, and stays.
+    stripeIdentity: cfg.stripeIdentity
+      ? {
+          ...cfg.stripeIdentity,
+          key: "REDACTED",
+          flowId: "REDACTED",
+          webhookSecret: "REDACTED",
+          webhookSecretPrevious: cfg.stripeIdentity.webhookSecretPrevious ? "REDACTED" : undefined,
+        }
+      : undefined,
+    screening: cfg.screening
+      ? {
+          openSanctions: cfg.screening.openSanctions
+            ? { ...cfg.screening.openSanctions, apiKey: "REDACTED" }
+            : undefined,
         }
       : undefined,
     // The salt is key material; the excluded accounts are the founders' wallets, which no log line

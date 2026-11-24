@@ -1,7 +1,7 @@
 /**
  * The operator's commands over the guardian's identity record: `identity:record`, `identity:accept`,
- * `identity:refuse`, `identity:revoke`, `identity:correct-name`, `identity:show` and
- * `identity:sweep`.
+ * `identity:refuse`, `identity:revoke`, `identity:correct-name`, `identity:show`, `identity:sweep`
+ * and `identity:session` (the automatic check's session, read only).
  *
  * Each command opens the database through the configuration, so every test works in a temporary
  * data directory and writes its World rows through its own connection over the same file. With
@@ -25,13 +25,19 @@ import {
 } from "../../src/cli/identity";
 import { buildCli } from "../../src/cli/index";
 import { type Config, loadConfig } from "../../src/config/env";
-import { nameHmac, parsePiiKey } from "../../src/formation/pii";
+import { encryptText, nameHmac, parsePiiKey } from "../../src/formation/pii";
+import { IDENTITY_SESSION_AAD } from "../../src/identity/sessions";
 import { sweepIdentityNames } from "../../src/identity/sweep";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import {
   type GuardianIdentityCheck,
+  type NewGuardianIdentityCheck,
   SqliteIdentityRepository,
 } from "../../src/persistence/identityRepository";
+import {
+  SqliteIdentitySessionRepository,
+  type TypedNames,
+} from "../../src/persistence/identitySessionRepository";
 import { SqliteWorldStore } from "../../src/persistence/worldStore";
 import {
   ANVIL_ACCOUNT_2,
@@ -285,6 +291,50 @@ function latestOf(tenantId: string): GuardianIdentityCheck {
 /** A recorded check, through the command; returns its check id. */
 async function recorded(tenantId: string, over: Options = {}): Promise<Recorded> {
   return (await run<Recorded>(recordLine(tenantId, over))).output;
+}
+
+/** The automatic check's renewal attempt, begun as it writes one when a session opens: no names
+ *  and no result yet. `over` replaces any field, the status among them. */
+function renewalBegun(
+  tenantId: `0x${string}`,
+  nullifier: string,
+  over: Partial<NewGuardianIdentityCheck> = {},
+): GuardianIdentityCheck {
+  return repo.append(
+    {
+      nullifier,
+      tenantId,
+      provider: "stripe",
+      providerRef: "vs_test_0002",
+      subject: "session-example",
+      status: "started",
+      supersedesCheckId: null,
+      startedAt: Date.now(),
+      completedAt: null,
+      expiresAt: null,
+      names: null,
+      nameHmac: null,
+      documentCountry: null,
+      documentType: null,
+      documentExpired: null,
+      liveness: null,
+      watchlist: null,
+      reviewReasons: [],
+      environment: "sandbox",
+      synthetic: true,
+      operator: null,
+      operatorOsUser: null,
+      ...over,
+    },
+    {
+      kind: "recorded",
+      at: Date.now(),
+      actor: "system",
+      actorOsUser: null,
+      reasonCode: "session_started",
+      reason: null,
+    },
+  );
 }
 
 // ── identity:record ───────────────────────────────────────────────────────────────────────────
@@ -683,6 +733,26 @@ describe("identity:record", () => {
       ),
     ).toBe(VERIFIED);
     expect(repo.list(guardian)).toHaveLength(1);
+  });
+
+  test("while a renewal is under way the guardian is still verified, and the refusal names the pass's expiry", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2026, 10, 10, 13) });
+    human(guardian, "1001");
+    await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
+    const begun = renewalBegun(guardian, "1001");
+
+    expect(
+      await refusal(
+        recordLine(guardian, {
+          "--provider-ref": "vs_test_0003",
+          "--result": "needs_review",
+          "--expect-latest": String(begun.checkId),
+        }),
+      ),
+    ).toBe(
+      "refusing: the guardian is verified until 2029-11-10; a renewal records --result passed; use identity:correct-name for a name, or identity:revoke first for a failed check or a review",
+    );
+    expect(repo.list(guardian)).toHaveLength(2);
   });
 
   test("record failed with --name-first refuses", async () => {
@@ -1101,8 +1171,73 @@ describe("the decisions", () => {
     expect(
       await refusal(decisionLine("identity:revoke", guardian, passed.checkId + 1, "fraud")),
     ).toBe(
-      `refusing: the latest identity check of ${guardian} is revoked: only a passed check is revoked`,
+      `refusing: the latest identity check of ${guardian} is revoked: only a passed check, or the pass a renewal under way still counts, is revoked`,
     );
+  });
+
+  test("revoke during a renewal under way revokes the pass the renewal rule still counts: the state reads revoked", async () => {
+    human(guardian, "1001");
+    const passed = await recorded(guardian);
+    const begun = renewalBegun(guardian, "1001");
+    expect((await run<Shown>(["identity:show", guardian])).output.state).toBe("verified");
+
+    // --expect-latest still names the latest row, the attempt: the pass's id is a stale view.
+    expect(
+      await refusal(decisionLine("identity:revoke", guardian, passed.checkId, "fraud")),
+    ).toMatch(/^refusing: the latest identity check of .* is \d+, not \d+/);
+    const { output, ops } = await run<Recorded>(
+      decisionLine("identity:revoke", guardian, begun.checkId, "fraud"),
+    );
+
+    expect(output).toMatchObject({ status: "revoked", supersedesCheckId: passed.checkId });
+    expect(latestOf(guardian)).toMatchObject({
+      status: "revoked",
+      supersedesCheckId: passed.checkId,
+      providerRef: "vs_test_0001",
+      names: null,
+    });
+    expect(ops).toEqual([
+      expect.objectContaining({
+        opslog: "identity_revoked",
+        supersedes: passed.checkId,
+        reasonCode: "fraud",
+      }),
+    ]);
+    expect((await run<Shown>(["identity:show", guardian])).output.state).toBe("revoked");
+  });
+
+  test("revoke during a renewal refuses when no pass counts: the pass expired, or the review found a sanctions hit", async () => {
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.UTC(2026, 10, 10, 13) });
+    human(guardian, "1001");
+    human(second, "1002");
+    await recorded(guardian, { "--completed-at": "2026-11-10T12:00Z" });
+    await recorded(second, {
+      "--name-first": "Ana",
+      "--name-last": "Example",
+      "--completed-at": "2026-11-10T12:00Z",
+    });
+    // The second guardian's renewal went to review for a sanctions hit: it decides.
+    const hit = renewalBegun(second, "1002", {
+      status: "needs_review",
+      completedAt: Date.now(),
+      watchlist: "hit",
+      reviewReasons: ["watchlist_hit"],
+    });
+    expect(
+      await refusal(decisionLine("identity:revoke", second, hit.checkId, "watchlist_confirmed")),
+    ).toBe(
+      `refusing: the latest identity check of ${second} is needs_review: only a passed check, or the pass a renewal under way still counts, is revoked`,
+    );
+
+    // The first guardian's pass expires while an attempt is open.
+    vi.setSystemTime(Date.UTC(2029, 10, 10, 13));
+    const begun = renewalBegun(guardian, "1001");
+    expect((await run<Shown>(["identity:show", guardian])).output.state).toBe("pending");
+    expect(await refusal(decisionLine("identity:revoke", guardian, begun.checkId, "fraud"))).toBe(
+      `refusing: the latest identity check of ${guardian} is started: only a passed check, or the pass a renewal under way still counts, is revoked`,
+    );
+    expect(repo.list(guardian)).toHaveLength(2);
+    expect(repo.list(second)).toHaveLength(2);
   });
 
   test("a decision without --yes writes nothing", async () => {
@@ -1191,6 +1326,39 @@ describe("identity:correct-name", () => {
     );
 
     expect(output).toMatchObject({ status: "needs_review", reviewReasons: ["duplicate_identity"] });
+  });
+
+  test("a correction of a valid pass that lands in review ends the pass: show reads needs_review, and the refusal of that review reads failed", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    await recorded(guardian);
+    const pass = await recorded(second, {
+      "--name-last": "Dupond",
+      "--provider-ref": "vs_test_0002",
+    });
+    expect((await run<Shown>(["identity:show", second])).output.state).toBe("verified");
+
+    const { output } = await run<Recorded>(
+      decisionLine("identity:correct-name", second, pass.checkId, "transliteration", {
+        "--name-first": FIRST,
+        "--name-last": LAST,
+      }),
+    );
+    expect(output).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["duplicate_identity"],
+      supersedesCheckId: pass.checkId,
+    });
+    expect((await run<Shown>(["identity:show", second])).output).toMatchObject({
+      state: "needs_review",
+      countsAtTheDoors: false,
+    });
+
+    await run(decisionLine("identity:refuse", second, output.checkId, "duplicate_identity"));
+    expect((await run<Shown>(["identity:show", second])).output).toMatchObject({
+      state: "failed",
+      countsAtTheDoors: false,
+    });
   });
 
   test("correct-name after a key rotation finds a pass sealed under the old key as a duplicate, the old key no longer configured", async () => {
@@ -1417,6 +1585,7 @@ describe("a name that differs from the document's", () => {
       yes: true,
       nameFirst: FIRST,
       nameLast: "DUPONT-EXAMPLE",
+      watchlist: "clear",
     });
 
     expect(latestOf(guardian)).toMatchObject({
@@ -1509,6 +1678,98 @@ describe("a name that differs from the document's", () => {
       }),
     );
     expect(kept.output).toMatchObject({ status: "needs_review", reviewReasons: ["watchlist_hit"] });
+  });
+
+  test("on production identity:correct-name needs the sanctions search on the corrected name, --watchlist clear or hit; without it nothing is written", () => {
+    human(guardian, "1001");
+    const cfg = config({ arcNetwork: "mainnet" });
+    recordIdentity(db, cfg, guardian, recordOpts({ nameMismatch: true }));
+    const review = latestOf(guardian);
+    const correction = (over: Record<string, unknown>) => ({
+      operator: OPERATOR,
+      expectLatest: String(review.checkId),
+      reasonCode: "other",
+      reason: REASON,
+      yes: true,
+      nameFirst: FIRST,
+      nameLast: "DUPONT-EXAMPLE",
+      ...over,
+    });
+
+    expect(thrownBy(() => correctIdentityName(db, cfg, guardian, correction({})))).toBe(
+      "refusing: on production identity:correct-name needs the sanctions search on the corrected name: --watchlist clear or hit",
+    );
+    expect(
+      thrownBy(() => correctIdentityName(db, cfg, guardian, correction({ watchlist: "not_run" }))),
+    ).toBe("refusing: --watchlist must be one of clear, hit");
+    expect(repo.list(guardian)).toHaveLength(1);
+
+    correctIdentityName(db, cfg, guardian, correction({ watchlist: "clear" }));
+    expect(latestOf(guardian)).toMatchObject({
+      status: "passed",
+      watchlist: "clear",
+      reviewReasons: [],
+    });
+  });
+
+  test("a hit on the corrected name lands the correction in review with watchlist_hit, the search written", () => {
+    human(guardian, "1001");
+    const cfg = config({ arcNetwork: "mainnet" });
+    recordIdentity(db, cfg, guardian, recordOpts({ nameMismatch: true, result: "needs_review" }));
+    const review = latestOf(guardian);
+    expect(review).toMatchObject({ reviewReasons: ["provider_flag", "name_mismatch"] });
+
+    correctIdentityName(db, cfg, guardian, {
+      operator: OPERATOR,
+      expectLatest: String(review.checkId),
+      reasonCode: "other",
+      reason: REASON,
+      yes: true,
+      nameFirst: FIRST,
+      nameLast: "DUPONT-EXAMPLE",
+      watchlist: "hit",
+    });
+    expect(latestOf(guardian)).toMatchObject({
+      status: "needs_review",
+      watchlist: "hit",
+      reviewReasons: ["provider_flag", "watchlist_hit"],
+    });
+  });
+
+  test("on a sandbox --watchlist is optional: without it the check's search is carried over, with it the search is written", async () => {
+    human(guardian, "1001");
+    human(second, "1002");
+    const carried = await recorded(guardian, { "--watchlist": "not_run" });
+    const settled = await run<Recorded>(
+      decisionLine("identity:correct-name", guardian, carried.checkId, "transliteration", {
+        "--name-first": FIRST,
+        "--name-last": "Dupont-Example",
+      }),
+    );
+    expect(latestOf(guardian)).toMatchObject({ status: "passed", watchlist: "not_run" });
+    expect(settled.output.status).toBe("passed");
+
+    const passed = await recorded(second, { "--name-first": "Ana" });
+    await run(
+      decisionLine("identity:correct-name", second, passed.checkId, "transliteration", {
+        "--name-first": "Ana",
+        "--name-last": "Dupont-Example",
+        "--watchlist": "hit",
+      }),
+    );
+    expect(latestOf(second)).toMatchObject({
+      status: "needs_review",
+      watchlist: "hit",
+      reviewReasons: ["watchlist_hit"],
+    });
+  });
+
+  test("identity:correct-name's --watchlist says it is the search on the corrected name, required on production", () => {
+    const program = buildCli(noChain);
+    const options = program.commands.find((c) => c.name() === "identity:correct-name")?.options;
+    const help = options?.find((o) => o.long === "--watchlist")?.description ?? "";
+    expect(help).toContain("the sanctions search on the corrected name");
+    expect(help).toContain("required on production");
   });
 
   test("the name flags say the name is the guardian's, confirmed against the document", () => {
@@ -1778,6 +2039,7 @@ describe("on production a passed row needs the face match, the sanctions search 
       ...decided(review.checkId, "other_script"),
       nameFirst: "Wei",
       nameLast: "WANG",
+      watchlist: "clear",
     });
     const corrected = latestOf(guardian);
     expect(corrected).toMatchObject({ status: "needs_review", reviewReasons: ["watchlist_hit"] });
@@ -1824,6 +2086,7 @@ describe("on production a passed row needs the face match, the sanctions search 
           ...decided(review.checkId, "other_script"),
           nameFirst: "Wei",
           nameLast: "Wang",
+          watchlist: "clear",
         }),
       ),
     ).toBe(NO_FACE_MATCH);
@@ -1891,6 +2154,31 @@ test("identity:show says whether the record counts at the doors: after a second 
 
   expect(output).toMatchObject({ state: "verified", countsAtTheDoors: false });
   expect(ops).toEqual([]);
+});
+
+test("identity:show reads the record the doors read: a pass under a renewal begun counts at the doors, a review that found a sanctions hit does not", async () => {
+  human(guardian, "1001");
+  const passed = await recorded(guardian);
+  const begun = renewalBegun(guardian, "1001");
+  expect((await run<Shown>(["identity:show", guardian])).output).toMatchObject({
+    state: "verified",
+    countsAtTheDoors: true,
+    latestCheckId: begun.checkId,
+    latest: { checkId: begun.checkId, status: "started" },
+  });
+  expect(passed.checkId).toBeLessThan(begun.checkId);
+
+  // The renewal's review found a sanctions hit: nothing counts at the doors.
+  renewalBegun(guardian, "1001", {
+    status: "needs_review",
+    completedAt: Date.now(),
+    watchlist: "hit",
+    reviewReasons: ["watchlist_hit"],
+  });
+  expect((await run<Shown>(["identity:show", guardian])).output).toMatchObject({
+    state: "needs_review",
+    countsAtTheDoors: false,
+  });
 });
 
 test("identity:show reads the state as the deployment does: on production a record written on a sandbox reads none", async () => {
@@ -1984,6 +2272,165 @@ describe("identity:sweep", () => {
       sweepIdentityNames(db, config(), { yes: true, nowMs: Date.now() + 31 * DAY }),
     ).toMatchObject({ erased: true, count: 1, rules: { superseded: 1 } });
     expect(repo.findById(review.checkId)?.names).toBeNull();
+  });
+});
+
+// ── identity:session ──────────────────────────────────────────────────────────────────────────
+
+describe("identity:session", () => {
+  /** A nullifier no timestamp or id could contain, so a match in the output is a leak. */
+  const NULLIFIER = "0x5eed00d4";
+  /** Our session ids: 32 lower-case hex digits. */
+  const FIRST_SESSION = "ab".repeat(16);
+  const SECOND_SESSION = "cd".repeat(16);
+
+  /** The typed names as the automatic check seals them: the fixture's, under the PII key. */
+  function typedNames(sessionId: string): TypedNames {
+    const ring = { current: parsePiiKey(PII_KEY, "FORMATION_PII_KEY") };
+    const seal = (field: "first" | "last", value: string) => {
+      const { ciphertext, iv } = encryptText(ring, value, IDENTITY_SESSION_AAD(sessionId, field));
+      return { ciphertext, iv };
+    };
+    return { first: seal("first", FIRST), last: seal("last", LAST), keyId: ring.current.id };
+  }
+
+  /** A session opened for the guardian as the automatic check opens one, beside its started row. */
+  function opened(sessionId: string, providerRef: string, createdAt: number): TypedNames {
+    const started = renewalBegun(guardian, NULLIFIER, { providerRef, subject: sessionId });
+    const typed = typedNames(sessionId);
+    new SqliteIdentitySessionRepository(db).insert({
+      sessionId,
+      tenantId: guardian,
+      nullifier: NULLIFIER,
+      provider: "stripe",
+      providerRef,
+      environment: "sandbox",
+      livemode: false,
+      returnPath: "/legal-body",
+      createdAt,
+      startedCheckId: started.checkId,
+      typedNames: typed,
+    });
+    return typed;
+  }
+
+  /** Neither a name, the nullifier nor a byte of the sealed names, in any spelling. */
+  function holdsNothingSealed(output: unknown, typed: TypedNames): void {
+    const text = JSON.stringify(output);
+    expect(text).not.toMatch(SURNAME);
+    expect(text).not.toMatch(new RegExp(FIRST, "i"));
+    expect(text).not.toContain(NULLIFIER);
+    expect(text).not.toMatch(/ciphertext|"iv"|Buffer/);
+    for (const name of [typed.first, typed.last])
+      for (const bytes of [name.ciphertext, name.iv])
+        for (const spelling of [bytes.toString("base64"), bytes.toString("hex")])
+          expect(text).not.toContain(spelling);
+  }
+
+  test("prints the open session's ids, dates, status, attempts and redaction fields; never a name or a ciphertext; writes no ops line", async () => {
+    const createdAt = Date.now() - DAY;
+    const typed = opened(FIRST_SESSION, "vs_test_0011", createdAt);
+    const started = latestOf(guardian);
+    const sessions = new SqliteIdentitySessionRepository(db);
+    sessions.recordRead(FIRST_SESSION, {
+      at: createdAt + 60_000,
+      status: "requires_input",
+      lastErrorCode: "document_unverified_other",
+      failedAttempts: 1,
+      reportId: "vr_test_0011",
+      dobUnavailable: true,
+      screenPendingSince: createdAt + 30_000,
+    });
+
+    const { output, ops } = await run(["identity:session", guardian.toLowerCase()]);
+
+    expect(ops).toEqual([]);
+    expect(output).toEqual({
+      tenantId: guardian,
+      shown: "open",
+      session: {
+        sessionId: FIRST_SESSION,
+        provider: "stripe",
+        providerRef: "vs_test_0011",
+        reportId: "vr_test_0011",
+        startedCheckId: started.checkId,
+        completedCheckId: null,
+        environment: "sandbox",
+        livemode: false,
+        returnPath: "/legal-body",
+        createdAt,
+        lastReadAt: createdAt + 60_000,
+        closedAt: null,
+        updatedAt: createdAt + 60_000,
+        lastStatus: "requires_input",
+        lastErrorCode: "document_unverified_other",
+        failedAttempts: 1,
+        attemptsPerSession: 3,
+        dobUnavailable: true,
+        screenPendingSince: createdAt + 30_000,
+        typedNamesHeld: true,
+        typedErasedAt: null,
+        redactDueAt: null,
+        redactionRequestedAt: null,
+        redactedAt: null,
+      },
+    });
+    holdsNothingSealed(output, typed);
+  });
+
+  test("with no open session it prints the newest closed one and says so; with none at all, none", async () => {
+    const empty = await run(["identity:session", guardian]);
+    expect(empty.output).toEqual({ tenantId: guardian, shown: "none", session: null });
+
+    const sessions = new SqliteIdentitySessionRepository(db);
+    const createdAt = Date.now() - 3 * DAY;
+    opened(FIRST_SESSION, "vs_test_0011", createdAt);
+    sessions.close(FIRST_SESSION, {
+      at: createdAt + DAY,
+      completedCheckId: null,
+      reportId: null,
+      redactDueAt: createdAt + 8 * DAY,
+    });
+    const typed = opened(SECOND_SESSION, "vs_test_0012", createdAt + DAY);
+    sessions.close(SECOND_SESSION, {
+      at: createdAt + 2 * DAY,
+      completedCheckId: null,
+      reportId: "vr_test_0012",
+      redactDueAt: createdAt + 9 * DAY,
+    });
+    sessions.markRedactionRequested(SECOND_SESSION, createdAt + 2 * DAY + 1);
+
+    const closed = await run(["identity:session", guardian]);
+    expect(closed.ops).toEqual([]);
+    expect(closed.output).toMatchObject({
+      tenantId: guardian,
+      shown: "newest_closed",
+      session: {
+        sessionId: SECOND_SESSION,
+        providerRef: "vs_test_0012",
+        reportId: "vr_test_0012",
+        closedAt: createdAt + 2 * DAY,
+        typedNamesHeld: false,
+        typedErasedAt: createdAt + 2 * DAY,
+        redactDueAt: createdAt + 9 * DAY,
+        redactionRequestedAt: createdAt + 2 * DAY + 1,
+        redactedAt: null,
+      },
+    });
+    holdsNothingSealed(closed.output, typed);
+
+    // Another tenant's sessions are not this one's.
+    expect((await run(["identity:session", second])).output).toEqual({
+      tenantId: second,
+      shown: "none",
+      session: null,
+    });
+  });
+
+  test("a tenant that is not a wallet address is refused", async () => {
+    expect(await refusal(["identity:session", "not-a-wallet"])).toBe(
+      "refusing: <tenantId> must be a wallet address",
+    );
   });
 });
 

@@ -1254,6 +1254,10 @@ export type LegalBodyConfig =
       /** The guardian must pass the identity check first (production). Absent from a backend
        *  before PR 1, read as false. */
       identityRequired?: boolean;
+      /** The identity check runs automatically on this deployment: the card offers it rather than
+       *  leaving the record to an operator. Absent from a backend before the automatic identity
+       *  check, read as false. */
+      identityCheckAutomatic?: boolean;
       /** Whether to show the door that forms a company through doola: `cap_reached` when every
        *  gate holds but the deployment has taken all the formed companies it takes. Absent from a
        *  backend before F-A-1, read as "hidden". */
@@ -1276,6 +1280,7 @@ export const LEGAL_BODY_CONFIG_KEYS = [
   "gasSeedOffered",
   "paymentRequired",
   "identityRequired",
+  "identityCheckAutomatic",
   "formedDoor",
   "filingWorkingDays",
   "linkTtl",
