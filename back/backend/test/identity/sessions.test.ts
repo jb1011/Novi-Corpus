@@ -700,6 +700,66 @@ describe("startSession", () => {
     expect(repo.list(GUARDIAN)).toHaveLength(1);
     expect(sessions.countCreatedSince(GUARDIAN, T0 - DAY)).toBe(1);
   });
+
+  /** The provider's create, with `write` run while it answers: an operator's row landing then. */
+  function writeDuringCreate(write: () => void): void {
+    const create = provider.createSession.bind(provider);
+    provider.createSession = async (input) => {
+      const answer = await create(input);
+      write();
+      return answer;
+    };
+  }
+
+  test.each<[string, "needs_review" | "passed", string]>([
+    ["an operator's review", "needs_review", "identity_under_review"],
+    ["an operator's pass", "passed", "identity_already_verified"],
+  ])(
+    "%s written while the provider creates the session is not buried: no started row, the provider session canceled, and the start answers its rule (%s, 409 %s)",
+    async (_who, status, code) => {
+      writeDuringCreate(() =>
+        appended({
+          ...passedIdentityRow(GUARDIAN, { at: now, expiresAt: now + 1000 * DAY }),
+          environment: "sandbox",
+          synthetic: true,
+          status,
+          reviewReasons: status === "needs_review" ? ["watchlist_hit"] : [],
+        }),
+      );
+
+      const refused = await refusal(startSession(deps(), GUARDIAN, TYPED));
+
+      expect([refused.code, refused.status]).toEqual([code, 409]);
+      expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual([status]);
+      expect(provider.created).toHaveLength(1);
+      expect(provider.canceled).toEqual(["vs_test1"]);
+      expect(sessions.openForTenant(GUARDIAN)).toBeUndefined();
+      expect(sessions.countCreatedSince(GUARDIAN, T0 - DAY)).toBe(0);
+      expect(opsLines("identity_session_started")).toEqual([]);
+    },
+  );
+
+  test("a row written during the provider call twice in a row answers 503: each provider session canceled, nothing opened", async () => {
+    // An operator's failed row stands in no start's way, so the start tries once more.
+    writeDuringCreate(() =>
+      appended({
+        ...passedIdentityRow(GUARDIAN, { at: now, expiresAt: now + 1000 * DAY }),
+        environment: "sandbox",
+        synthetic: true,
+        status: "failed",
+        expiresAt: null,
+        names: null,
+        nameHmac: null,
+      }),
+    );
+
+    const refused = await refusal(startSession(deps(), GUARDIAN, TYPED));
+
+    expect([refused.code, refused.status]).toEqual(["identity_provider_unavailable", 503]);
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["failed", "failed"]);
+    expect(provider.canceled).toEqual(["vs_test1", "vs_test2"]);
+    expect(sessions.openForTenant(GUARDIAN)).toBeUndefined();
+  });
 });
 
 // ── sync ────────────────────────────────────────────────────────────────────────────────────

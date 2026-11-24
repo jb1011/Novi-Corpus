@@ -403,8 +403,10 @@ function sameSealed(a: TypedNames | null, b: TypedNames | null): boolean {
  * 6. The provider session, created under our session id (its reference and idempotency key): a
  *    mode that is not the deployment's, an unavailable provider or a refused key answer 503.
  * 7. In one transaction, the `started` row by the system and the session, the typed names sealed
- *    to it. A session another start opened meanwhile is reused instead, and the provider session
- *    just created is canceled.
+ *    to it, held to the tenant's latest row as read just before the provider call. A session
+ *    another start opened meanwhile, or a row written meanwhile (an operator's), cancels the
+ *    provider session just created, and the start runs once more, every rule read again: the open
+ *    session is reused, the row refuses the start or lets it go on. A second change answers 503.
  * 8. Our session id, the provider's URL and its expiry 48 hours on.
  */
 export function startSession(
@@ -444,6 +446,10 @@ async function start(
       "too many identity checks were started on this account today: try again tomorrow",
     );
 
+  const { repo } = deps.identity;
+  // The row every guard above was read against, read after the last write before the provider
+  // call (the reuse and the cap may close a session with a row of its own).
+  const latestRead = repo.latest(tenantId)?.checkId ?? null;
   const sessionId = randomBytes(16).toString("hex");
   const origin = deps.webOrigin.replace(/\/+$/, "");
   const created = await createAtProvider(
@@ -453,10 +459,12 @@ async function start(
     `${origin}${returnPath}?identityCheck=returned`,
   );
 
-  const { repo } = deps.identity;
   const opened = repo.transaction(() => {
-    // Another start of this tenant may have opened a session while the provider answered.
+    // Another start of this tenant may have opened a session while the provider answered, or an
+    // operator written a row (a review with a sanctions hit, a pass): a `started` row over it would
+    // bury it, so the start reads its rules again (decided 24 November).
     if (deps.sessions.openForTenant(tenantId) !== undefined) return false;
+    if ((repo.latest(tenantId)?.checkId ?? null) !== latestRead) return false;
     const startedRow = repo.append(
       {
         nullifier,
