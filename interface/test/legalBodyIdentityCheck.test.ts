@@ -16,6 +16,7 @@ import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
   READ_SYNC_EVERY_MS,
   SYNC_MIN_INTERVAL_MS,
+  arrivalOf,
   attemptSentence,
   identityCardText,
   identityCardView,
@@ -224,6 +225,15 @@ describe("the wait and the return", () => {
     expect(readingStep({ elapsedMs: 20_000, sinceSyncMs: 20_000 })).toBe("sync");
     expect(readingStep({ elapsedMs: 179_999, sinceSyncMs: 0 })).toBe("poll");
     expect(readingStep({ elapsedMs: 180_000, sinceSyncMs: 20_000 })).toBe("stop");
+  });
+
+  test("the read-back on arrival: done on an answer or on a read made a moment ago, failed otherwise", () => {
+    expect(arrivalOf({ ok: true })).toBe("done");
+    const refused = (code: string, status: number) =>
+      arrivalOf({ ok: false, error: new ApiError(status, { code, message: "m" }) });
+    expect(refused("identity_sync_too_soon", 429)).toBe("done");
+    expect(refused("identity_provider_unavailable", 503)).toBe("failed");
+    expect(arrivalOf({ ok: false, error: new Error("network") })).toBe("failed");
   });
 
   test("a sync the card asks for is never inside the server's throttle", () => {

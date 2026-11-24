@@ -112,6 +112,7 @@ export function HumanStep({
           <GuardianIdentityCard
             view={identityCard}
             busy={identityCheck.busy}
+            leaving={identityCheck.leaving}
             problem={identityCheck.problem}
             longWait={identityCheck.longWait}
             canCheckAgain={identityCheck.canCheckAgain}

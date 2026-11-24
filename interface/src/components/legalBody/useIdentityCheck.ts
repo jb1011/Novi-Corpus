@@ -13,11 +13,9 @@ import {
 import type { GuardianIdentityView } from "@/lib/api/types";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
-  READ_POLL_MS,
-  SYNC_MIN_INTERVAL_MS,
+  arrivalOf,
   identityCardView,
   providerPageUrl,
-  readingStep,
   shouldReadBack,
   startRefusal,
   syncRefusal,
@@ -27,21 +25,22 @@ import {
   type IdentityReturnPath,
   type SessionRead,
 } from "@/lib/legalBody/identityCheck";
+import {
+  SYSTEM_TIMERS,
+  createReadingWait,
+  createSyncGate,
+  type ReadingWait,
+  type SyncGate,
+} from "@/lib/legalBody/identityCheckTimers";
 
 const A = LEGAL_BODY_COPY.human.guardianIdentity.automatic;
-
-/** A read at the provider, as it settled. */
-type SyncResult = { ok: true } | { ok: false; error: unknown };
-
-/** The read-back is done on an answer, and on a refusal that counts as one (a read a moment
- *  ago); any other refusal leaves the check unread. */
-const arrivalOf = (result: SyncResult): Arrival =>
-  result.ok || syncRefusal(result.error).counted ? "done" : "failed";
 
 /**
  * The identity check card's state and its three clicks. The card's state is `identityCardView`'s,
  * over the two reads (`/world-id/me`'s identity block, passed in, and the open session, read
- * here); every timing is `readingStep`'s and the constants beside it.
+ * here). The timed rules are two plain objects (`identityCheckTimers.ts`), made on first use and
+ * kept for the mount: the gate in front of the reads at the provider, and the bounded wait while
+ * the provider is processing. This hook only tells them when to run.
  *
  * One write is not a click: the read-back. When the session first reads open and not held, the
  * hook reads it back from the provider once per mount (`POST /identity-check/sync`). It continues
@@ -49,9 +48,9 @@ const arrivalOf = (result: SyncResult): Arrival =>
  * one row at most. Until it settles the card says it is reading the check, never the continue
  * form. A session with nothing to read back is `"done"` from the first render.
  *
- * While the provider is processing, a timer does what `readingStep` says every `READ_POLL_MS`,
- * for a bounded window; then the card offers Check again. A read at the provider is never sent
- * while one is in flight, nor within `SYNC_MIN_INTERVAL_MS` of the last for a click.
+ * Check again and Try again wait on the gate's cooling: a click within the server's interval
+ * would be refused as too soon, and a refusal that reads as "read a moment ago" must not stand
+ * for a read that never worked.
  *
  * The typed names pass through `start` into the one request body: never stored, never in a key.
  * The browser goes to the provider only by `window.location.assign` of the `https:` address the
@@ -64,6 +63,8 @@ export function useIdentityCheck(p: {
 }): {
   view: IdentityCardView;
   busy: boolean;
+  /** The start answered an address and the browser is leaving for it. */
+  leaving: boolean;
   problem: string | null;
   longWait: boolean;
   canCheckAgain: boolean;
@@ -87,41 +88,36 @@ export function useIdentityCheck(p: {
   const session: SessionRead =
     sessionQuery.data ?? (sessionQuery.error ? "unreadable" : "loading");
 
-  /* ── The reads at the provider ───────────────────────────────────────────────────────────── */
+  /* ── The gate and the wait, once per mount ───────────────────────────────────────────────── */
 
-  // One read in flight at most: a second caller shares it. `cooling` is true from the send until
-  // `SYNC_MIN_INTERVAL_MS` after it settled, which is when the server takes the next one.
-  const inFlight = useRef<Promise<SyncResult> | null>(null);
-  const lastSyncAt = useRef<number | null>(null);
-  const coolTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The latest send and poll, for the two objects below, which outlive a render.
+  const calls = useRef({ send: syncCheck, poll: invalidate });
+  useEffect(() => {
+    calls.current = { send: syncCheck, poll: invalidate };
+  }, [syncCheck, invalidate]);
+
   const [cooling, setCooling] = useState(false);
-
-  const runSync = useCallback((): Promise<SyncResult> => {
-    if (inFlight.current) return inFlight.current;
-    setCooling(true);
-    const sent = syncCheck()
-      .then(
-        (): SyncResult => ({ ok: true }),
-        (error: unknown): SyncResult => ({ ok: false, error }),
-      )
-      .then((result) => {
-        inFlight.current = null;
-        lastSyncAt.current = Date.now();
-        if (coolTimer.current !== null) clearTimeout(coolTimer.current);
-        coolTimer.current = setTimeout(() => setCooling(false), SYNC_MIN_INTERVAL_MS);
-        return result;
+  const [longWait, setLongWait] = useState(false);
+  // Made on first use, from an effect or a click, never during a render, and kept for the mount.
+  const timed = useRef<{ gate: SyncGate; wait: ReadingWait } | null>(null);
+  const timedRules = useCallback(() => {
+    if (timed.current === null) {
+      const gate = createSyncGate({
+        send: () => calls.current.send(),
+        onCoolingChange: setCooling,
+        timers: SYSTEM_TIMERS,
       });
-    inFlight.current = sent;
-    return sent;
-  }, [syncCheck]);
-
-  // A cleanup only: the cooling timer goes with the card.
-  useEffect(
-    () => () => {
-      if (coolTimer.current !== null) clearTimeout(coolTimer.current);
-    },
-    [],
-  );
+      const wait = createReadingWait({
+        sync: () => void gate.run(),
+        lastSyncAt: gate.lastSyncAt,
+        poll: () => void calls.current.poll(),
+        onLongWait: () => setLongWait(true),
+        timers: SYSTEM_TIMERS,
+      });
+      timed.current = { gate, wait };
+    }
+    return timed.current;
+  }, []);
 
   /* ── The read-back on arrival ────────────────────────────────────────────────────────────── */
 
@@ -138,8 +134,10 @@ export function useIdentityCheck(p: {
   useEffect(() => {
     if (firstRead !== "read_back" || readBackSent.current) return;
     readBackSent.current = true;
-    void runSync().then((result) => setReadBack(arrivalOf(result)));
-  }, [firstRead, runSync]);
+    void timedRules()
+      .gate.run()
+      .then((result) => setReadBack(arrivalOf(result)));
+  }, [firstRead, timedRules]);
 
   /* ── The card's state ────────────────────────────────────────────────────────────────────── */
 
@@ -150,7 +148,6 @@ export function useIdentityCheck(p: {
   /* ── The wait while the provider is processing ───────────────────────────────────────────── */
 
   const reading = view.kind === "reading";
-  const [longWait, setLongWait] = useState(false);
   // Leaving `reading` ends the wait, and its long-wait flag with it.
   const [wasReading, setWasReading] = useState(reading);
   if (wasReading !== reading) {
@@ -158,21 +155,13 @@ export function useIdentityCheck(p: {
     if (!reading) setLongWait(false);
   }
 
+  // The wait keeps its own start: this effect only says when it runs.
   useEffect(() => {
     if (!reading || longWait) return;
-    const waitStartedAt = Date.now();
-    const timer = setInterval(() => {
-      const now = Date.now();
-      const step = readingStep({
-        elapsedMs: now - waitStartedAt,
-        sinceSyncMs: now - (lastSyncAt.current ?? waitStartedAt),
-      });
-      if (step === "stop") setLongWait(true);
-      else if (step === "sync") void runSync();
-      else void invalidate();
-    }, READ_POLL_MS);
-    return () => clearInterval(timer);
-  }, [reading, longWait, runSync, invalidate]);
+    const { wait } = timedRules();
+    wait.start();
+    return () => wait.stop();
+  }, [reading, longWait, timedRules]);
 
   /* ── The start ───────────────────────────────────────────────────────────────────────────── */
 
@@ -230,8 +219,9 @@ export function useIdentityCheck(p: {
   /* ── Check again, and the retry of a failed read ─────────────────────────────────────────── */
 
   function checkAgain() {
-    if (cooling) return;
-    void runSync().then((result) => {
+    const { gate } = timedRules();
+    if (gate.cooling()) return;
+    void gate.run().then((result) => {
       setProblem(result.ok ? null : syncRefusal(result.error).sentence);
       // The wait starts again while the provider is still processing.
       setLongWait(false);
@@ -240,14 +230,16 @@ export function useIdentityCheck(p: {
 
   function retryRead() {
     void sessionQuery.refetch();
-    if (arrival !== "failed") return;
+    const { gate } = timedRules();
+    if (arrival !== "failed" || gate.cooling()) return;
     setReadBack("pending");
-    void runSync().then((result) => setReadBack(arrivalOf(result)));
+    void gate.run().then((result) => setReadBack(arrivalOf(result)));
   }
 
   return {
     view,
     busy: starting || leaving,
+    leaving,
     problem,
     longWait,
     canCheckAgain: !cooling,

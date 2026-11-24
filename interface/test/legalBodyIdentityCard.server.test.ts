@@ -4,6 +4,8 @@
  * must not read (the provider, the screen, a dash), and no button where the guardian has nothing
  * to do. The operator's card reads as it did before the automatic check.
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { describe, expect, test } from "vitest";
@@ -25,6 +27,9 @@ const NOW = Date.UTC(2026, 10, 24);
 
 /** A button's label as React renders it, so a sentence that contains the word does not count. */
 const button = (label: string) => new RegExp(`<button[^>]*>(?:(?!</button>).)*${label}`, "s");
+/** The same, disabled. */
+const disabledButton = (label: string) =>
+  new RegExp(`<button[^>]*disabled=""[^>]*>(?:(?!</button>).)*${label}`, "s");
 
 const KINDS: IdentityCardKind[] = [
   "locked",
@@ -59,6 +64,7 @@ const card = (view: Exclude<IdentityCardView, { kind: "hidden" }>, over: Partial
     createElement(GuardianIdentityCard, {
       view,
       busy: false,
+      leaving: false,
       problem: null,
       longWait: false,
       canCheckAgain: true,
@@ -115,7 +121,29 @@ describe("GuardianIdentityCard, automatic", () => {
   // Review Focus 5.
   test("busy: the start button is disabled and says the check is opening", () => {
     const out = card(automatic("start", true), { busy: true });
-    expect(out).toMatch(new RegExp(`<button[^>]*disabled=""[^>]*>(?:(?!</button>).)*Opening the check`, "s"));
+    expect(out).toMatch(disabledButton("Opening the check"));
+  });
+
+  test("leaving for the provider: the button stays disabled on its opening sentence", () => {
+    expect(card(automatic("start", true), { busy: true, leaving: true })).toMatch(
+      disabledButton("Opening the check"),
+    );
+  });
+
+  // Plan decision 8: a continue or a retry asks for the name again, in an empty form.
+  test("the name form is a new, empty one in each form state, and once the browser leaves", () => {
+    const code = readFileSync(
+      fileURLToPath(new URL("../src/components/legalBody/GuardianIdentityCard.tsx", import.meta.url)),
+      "utf8",
+    );
+    expect(code).toMatch(/<NameForm\s+key=\{leaving \? "left" : view\.kind\}/);
+  });
+
+  test("Try again waits, like Check again, until the server takes a new read", () => {
+    const unreadable = automatic("unreadable", true);
+    expect(card(unreadable, { canCheckAgain: false })).toMatch(disabledButton(A.retryRead));
+    expect(card(unreadable)).toMatch(button(A.retryRead));
+    expect(card(unreadable)).not.toMatch(disabledButton(A.retryRead));
   });
 
   test("a long wait offers Check again; a refusal is shown as the card's own sentence", () => {

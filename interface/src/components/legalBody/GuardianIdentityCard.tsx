@@ -31,6 +31,8 @@ type Names = { firstName: string; lastName: string };
 type CardProps = {
   view: Exclude<IdentityCardView, { kind: "hidden" }>;
   busy: boolean;
+  /** The start answered an address and the browser is leaving for it. */
+  leaving: boolean;
   problem: string | null;
   longWait: boolean;
   canCheckAgain: boolean;
@@ -115,6 +117,7 @@ const WARN_KINDS: readonly IdentityCardKind[] = [
 function AutomaticCard({
   view,
   busy,
+  leaving,
   problem,
   longWait,
   canCheckAgain,
@@ -154,9 +157,10 @@ function AutomaticCard({
             ))}
         </div>
 
+        {/* Both reads at the provider wait for the server to take a new one. */}
         {view.kind === "unreadable" && (
           <div>
-            <Button variant="ghost" onClick={onRetryRead}>
+            <Button variant="ghost" onClick={onRetryRead} disabled={!canCheckAgain}>
               {A.retryRead}
             </Button>
           </div>
@@ -177,8 +181,11 @@ function AutomaticCard({
           </div>
         )}
 
+        {/* A new, empty form in each form state (a continue or a retry asks for the name again),
+            and once the browser is leaving: the name is not left in the page. */}
         {text.form && (
           <NameForm
+            key={leaving ? "left" : view.kind}
             lines={text.form.lines}
             button={text.form.button}
             busy={busy}

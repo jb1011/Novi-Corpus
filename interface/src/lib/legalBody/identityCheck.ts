@@ -379,6 +379,15 @@ export function syncRefusal(error: unknown): {
   }
 }
 
+/** A read at the provider, as it settled: answered, or refused with this error. */
+export type SyncResult = { ok: true } | { ok: false; error: unknown };
+
+/** The read-back on arrival, once it settled: done on an answer, and on a refusal that counts as
+ *  one (a read made a moment ago); any other refusal leaves the check unread. */
+export function arrivalOf(result: SyncResult): Arrival {
+  return result.ok || syncRefusal(result.error).counted ? "done" : "failed";
+}
+
 /* ── The return ────────────────────────────────────────────────────────────────────────────── */
 
 /** Whether this page was opened by the provider sending the person back. */
