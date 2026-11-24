@@ -119,6 +119,37 @@ export function legalBodyGate(p: {
   return "flow";
 }
 
+/**
+ * The view a session starts on: the sign-in step when the person signed in on this page, else the
+ * human step when they come back from the identity check. The provider sends the person back to
+ * the page the check was started from (`?identityCheck=returned`); the human step holds the card
+ * with the result, so it stays on screen until its Continue even where nothing else holds it.
+ */
+export function arrivalGateView(p: { engaged: boolean; returned: boolean }): GateView {
+  if (p.engaged) return "signin";
+  return p.returned ? "human" : null;
+}
+
+/** The view after the sign-in step's Continue: the human step when the person came back from the
+ *  check, so a person who had to sign in first still reads the result. */
+export function gateViewAfterSignIn(returned: boolean): GateView {
+  return returned ? "human" : null;
+}
+
+/**
+ * Whether the return flag may leave the address now: once the human step is on screen for a
+ * session the server answered (its record read). Until then the flag stays, so a session that is
+ * refused or cleared a moment later never spends it, and a reload of the sign-in step in front of
+ * it still lands on the result.
+ */
+export function returnTaken(p: {
+  returned: boolean;
+  gate: LegalBodyGate;
+  recordRead: boolean;
+}): boolean {
+  return p.returned && p.gate === "human" && p.recordRead;
+}
+
 /* ── 3. The person ─────────────────────────────────────────────────────────────────────────── */
 
 export type HumanStepView = {

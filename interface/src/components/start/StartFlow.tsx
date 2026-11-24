@@ -16,12 +16,16 @@ import type { AuthSession, PublicConfig } from "@/lib/api/types";
 import { arcTestnet } from "@/lib/chain";
 import {
   anySignInRequired,
+  arrivalGateView,
+  gateViewAfterSignIn,
   identityBlocksGate,
   legalBodyGate,
+  returnTaken,
   signInStepState,
   type CodeRead,
   type GateView,
 } from "@/lib/legalBody/gates";
+import { returnedFromCheck, stripReturnedFlag } from "@/lib/legalBody/identityCheck";
 import { readLegalBodyMemory, writeLegalBodyMemory } from "@/lib/legalBody/storage";
 import { worldIdGateState, worldIdMeStatus } from "@/lib/legalBody/worldIdGate";
 import { readPersistedOnboarding } from "@/lib/onboarding/storage";
@@ -53,6 +57,13 @@ import { PathChoice } from "./PathChoice";
  * memory (`newCompanyHandover`, which knows the companies there are at the click) and opens
  * `/legal-body`; the full product opens the wizard. `?path=` only picks which card opens
  * selected, among the cards there are. Nothing here writes to the server.
+ *
+ * The identity check's provider sends the person back here (`?identityCheck=returned`) when the
+ * check was started from this page: the session reads the flag as it mounts and holds the human
+ * step, with the card's result, until its Continue (`arrivalGateView`), after the sign-in step
+ * when the person had to sign in first (`gateViewAfterSignIn`). The flag then leaves the address
+ * in place, with no navigation, once a session the server answered holds the human step
+ * (`returnTaken`), so a reload does not apply it again.
  */
 
 const NO_CODE: CodeRead = { status: "pending", data: undefined };
@@ -170,8 +181,13 @@ function StartSession({
 }) {
   const tenant = session.address;
   const router = useRouter();
-  const wanted = parsePathParam(useSearchParams().get("path"));
-  const [view, setView] = useState<GateView>(engaged ? "signin" : null);
+  const searchParams = useSearchParams();
+  const wanted = parsePathParam(searchParams.get("path"));
+  // Whether the provider sent the person back here from the identity check: read once, as this
+  // session mounts, which is after sign-in, so a tab that had no session still has it. Spent on
+  // the human step's Continue, so a later sign-in (a session that ended) goes back to the choice.
+  const [returned, setReturned] = useState(() => returnedFromCheck(searchParams));
+  const [view, setView] = useState<GateView>(() => arrivalGateView({ engaged, returned }));
 
   // Reads only.
   const code = useBytecode({ address: tenant, chainId: arcTestnet.id });
@@ -201,6 +217,15 @@ function StartSession({
     window.scrollTo({ top: 0, behavior: "smooth" });
   }, [gate]);
 
+  // The flag leaves the address in place, with no navigation and no new history entry, once a
+  // session the server answered holds the human step: the return is in this session's state, and
+  // a reload must not apply it again. A session refused or cleared before then leaves it there.
+  const takeReturn = returnTaken({ returned, gate, recordRead: me !== null });
+  useEffect(() => {
+    if (!takeReturn) return;
+    window.history.replaceState(null, "", stripReturnedFlag("/start", window.location.search));
+  }, [takeReturn]);
+
   const companies = companiesQuery.data?.companies;
 
   /** Continue: `startContinue` decides. A legal-body path is handed over through the memory, with
@@ -227,7 +252,7 @@ function StartSession({
           code={codeRead}
           expired={expired}
           onEngage={() => setView("signin")}
-          onContinue={() => setView(null)}
+          onContinue={() => setView(gateViewAfterSignIn(returned))}
           onRetryCheck={() => void code.refetch()}
         />
         {escape && <EscapeLink />}
@@ -238,7 +263,10 @@ function StartSession({
       <>
         <HumanStep
           onEngage={() => setView("human")}
-          onContinue={() => setView(null)}
+          onContinue={() => {
+            setReturned(false);
+            setView(null);
+          }}
           onBack={() => setView("signin")}
           returnPath="/start"
         />

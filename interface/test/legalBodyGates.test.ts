@@ -18,13 +18,16 @@ import { ApiError, type LegalBodyConfig, type PublicConfig } from "@/lib/api/typ
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
   anySignInRequired,
+  arrivalGateView,
   bannerLines,
+  gateViewAfterSignIn,
   humanErrorSentence,
   humanStepView,
   identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
   legalBodyGate,
+  returnTaken,
   signInStepState,
   type CodeRead,
   type SignInStepState,
@@ -198,6 +201,45 @@ describe("legalBodyGate", () => {
 
   test("going back to the human gate never skips sign-in", () => {
     expect(legalBodyGate({ signIn: "expired", human: accepted, view: "human" })).toBe("signin");
+  });
+});
+
+describe("the return from the identity check", () => {
+  // Review Focus 2: a person comes back to a tab with no session, or to a session that ended.
+  test("back from the check: the human step is held on screen, after the sign-in step when there was one", () => {
+    expect(arrivalGateView({ engaged: false, returned: true })).toBe("human");
+    expect(arrivalGateView({ engaged: true, returned: true })).toBe("signin");
+    expect(arrivalGateView({ engaged: false, returned: false })).toBeNull();
+    expect(gateViewAfterSignIn(true)).toBe("human");
+    expect(gateViewAfterSignIn(false)).toBeNull();
+    const human: WorldIdGateState = { kind: "accepted", credential: "orb" };
+    expect(
+      legalBodyGate({
+        signIn: "ready",
+        human,
+        view: arrivalGateView({ engaged: false, returned: true }),
+        identityBlocks: false,
+      }),
+    ).toBe("human");
+    expect(legalBodyGate({ signIn: "expired", human, view: "human", identityBlocks: false })).toBe(
+      "signin",
+    );
+  });
+
+  test("a person who signed in on this page and did not come back from the check: the sign-in step, as before", () => {
+    expect(arrivalGateView({ engaged: true, returned: false })).toBe("signin");
+  });
+
+  test("the flag leaves the address only once the human step is on screen for a session the server answered", () => {
+    expect(returnTaken({ returned: true, gate: "human", recordRead: true })).toBe(true);
+    // A session still being checked, or refused: the sign-in step, and the flag stays for a reload.
+    expect(returnTaken({ returned: true, gate: "signin", recordRead: true })).toBe(false);
+    expect(returnTaken({ returned: true, gate: "signin", recordRead: false })).toBe(false);
+    // The human step before the server answered for the session: not yet.
+    expect(returnTaken({ returned: true, gate: "human", recordRead: false })).toBe(false);
+    // No return, or one already spent on the human step's Continue: nothing to take.
+    expect(returnTaken({ returned: false, gate: "human", recordRead: true })).toBe(false);
+    expect(returnTaken({ returned: false, gate: "flow", recordRead: true })).toBe(false);
   });
 });
 

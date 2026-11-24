@@ -395,6 +395,15 @@ export function returnedFromCheck(params: { get(name: string): string | null }):
   return params.get(IDENTITY_RETURN_PARAM) === IDENTITY_RETURN_VALUE;
 }
 
+/** The page's address once the flag is read: its own path, with the rest of the query kept and the
+ *  flag gone, whatever its value, so a reload or a shared link never applies the return again. */
+export function stripReturnedFlag(path: IdentityReturnPath, search: string): string {
+  const params = new URLSearchParams(search);
+  params.delete(IDENTITY_RETURN_PARAM);
+  const rest = params.toString();
+  return rest ? `${path}?${rest}` : path;
+}
+
 /** The provider's page the start answered, when it is an `https:` address; else null, and the
  *  browser goes nowhere. */
 export function providerPageUrl(url: unknown): string | null {

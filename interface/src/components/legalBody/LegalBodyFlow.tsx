@@ -54,16 +54,20 @@ import {
 } from "@/lib/legalBody/flow";
 import {
   anySignInRequired,
+  arrivalGateView,
   bannerLines,
+  gateViewAfterSignIn,
   identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
   legalBodyGate,
+  returnTaken,
   signInStepState,
   type CodeRead,
   type GateView,
   type LegalBodyDoor,
 } from "@/lib/legalBody/gates";
+import { returnedFromCheck, stripReturnedFlag } from "@/lib/legalBody/identityCheck";
 import { afterOrderRefused, linkScreen, type LinkSendBack } from "@/lib/legalBody/link";
 import { closedSentence, noticeSentence } from "@/lib/legalBody/notice";
 import { pointerScreen } from "@/lib/legalBody/paste";
@@ -136,11 +140,19 @@ import { ThreadChooser } from "./ThreadChooser";
  * draft's identity (`getAgentWallet`): no link is offered before the agent has a wallet of its
  * own.
  *
- * Nothing here writes to the server on its own: every write is a click's. The effects are three:
+ * Nothing here writes to the server on its own: every write is a click's. The effects are four:
  * an address that names an order or a company (`?order=`, `?company=`, the agents page's links)
  * is taken once the gates are passed (`arrivalAction`), the memory it hands the flow
- * (`arrivalMemory`) written to the store, and the address cleaned; the memory's write once a
- * thread is on screen; and the scroll to the top when the screen changes.
+ * (`arrivalMemory`) written to the store, and the address cleaned; the identity check's return
+ * flag taken out of the address once a session the server answered holds the human step
+ * (`returnTaken`); the memory's write once a thread is on screen; and the scroll to the top when
+ * the screen changes.
+ *
+ * The identity check's provider sends the person back here (`?identityCheck=returned`) when the
+ * check was started from this page: the session reads the flag as it mounts and holds the human
+ * step, with the card's result, until its Continue (`arrivalGateView`), after the sign-in step
+ * when the person had to sign in first (`gateViewAfterSignIn`); never the chooser or the thread
+ * before it.
  *
  * Three facts live in this visit's memory only, never in the store: that a draft's agreement was
  * read (so the draft moves on to the identity step, and a reload shows the agreement again); a
@@ -280,7 +292,12 @@ function LegalBodySession({
   // facts from it.
   const { data: publicConfig } = usePublicConfigQuery();
 
-  const [view, setView] = useState<GateView>(engaged ? "signin" : null);
+  // Whether the provider sent the person back here from the identity check: read once, as this
+  // session mounts, which is after sign-in, so a tab that had no session still has it. Spent on
+  // the human step's Continue, so a later sign-in (a step's refusal that means sign in) goes back
+  // to the thread, not to the human step.
+  const [returned, setReturned] = useState(() => returnedFromCheck(searchParams));
+  const [view, setView] = useState<GateView>(() => arrivalGateView({ engaged, returned }));
   // The token a step's request was refused under: that session is over, whatever it still says.
   const [refusedToken, setRefusedToken] = useState<string | null>(null);
   // An order or a company named in the address, read as this session mounts: the memory it hands
@@ -424,6 +441,17 @@ function LegalBodySession({
     if (action.write) writeLegalBodyMemory(action.write);
     if (action.replace) router.replace("/legal-body");
   }, [gate, named, fromAddress, router]);
+
+  // The return flag leaves the address in place, with no navigation and no new history entry, once
+  // a session the server answered holds the human step: the return is in this session's state,
+  // and a reload must not apply it again. A session refused or cleared before then leaves it
+  // there, like the arrival above. Only the flag goes: an order or a company the address names is
+  // the arrival's, taken once the gates are passed.
+  const takeReturn = returnTaken({ returned, gate, recordRead: me !== null });
+  useEffect(() => {
+    if (!takeReturn) return;
+    window.history.replaceState(null, "", stripReturnedFlag("/legal-body", window.location.search));
+  }, [takeReturn]);
 
   // The intent stays in the store while it is live; once what it started exists, the thread on
   // screen is the store's and the intent leaves it.
@@ -571,7 +599,7 @@ function LegalBodySession({
           code={codeRead}
           expired={expired}
           onEngage={() => setView("signin")}
-          onContinue={() => setView(null)}
+          onContinue={() => setView(gateViewAfterSignIn(returned))}
           onRetryCheck={() => void code.refetch()}
         />
       );
@@ -579,7 +607,10 @@ function LegalBodySession({
       return (
         <HumanStep
           onEngage={() => setView("human")}
-          onContinue={() => setView(null)}
+          onContinue={() => {
+            setReturned(false);
+            setView(null);
+          }}
           onBack={() => setView("signin")}
           returnPath="/legal-body"
         />

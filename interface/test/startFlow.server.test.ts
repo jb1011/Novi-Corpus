@@ -7,6 +7,8 @@
  * the two legal-body gates, then the choice of paths; and where the full product is offered, the
  * gate that stops a legal body shows one link past it to the full product.
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -305,6 +307,71 @@ describe("the gates", () => {
     const html = render(StartDestination);
     expect(html).toContain(S.expiredTitle);
     expect(html).not.toContain(START_COPY.title);
+  });
+});
+
+describe("the return from the identity check", () => {
+  const read = (file: string) =>
+    readFileSync(fileURLToPath(new URL(`../src/components/${file}`, import.meta.url)), "utf8");
+  const PAGES = [
+    ["start/StartFlow.tsx", "/start"],
+    ["legalBody/LegalBodyFlow.tsx", "/legal-body"],
+  ] as const;
+
+  test("back from the check on the testnet: the human step with its Continue, not the choice of paths", () => {
+    given({ search: "identityCheck=returned" });
+    const html = render(StartDestination);
+    expect(html).toContain(H.titleAccepted);
+    expect(html).not.toContain(START_COPY.title);
+    given({});
+    expect(render(StartDestination)).toContain(START_COPY.title);
+  });
+
+  test("back from the check to a session that ended while the person was away: sign-in first", () => {
+    given({
+      search: "identityCheck=returned",
+      companies: undefined,
+      companiesError: new ApiError(401, { code: "unauthorized", message: "session expired" }),
+    });
+    const html = render(StartDestination);
+    expect(html).toContain(S.expiredTitle);
+    expect(html).not.toContain(H.titleAccepted);
+    expect(html).not.toContain(START_COPY.title);
+  });
+
+  test("back from the check to a tab with no session: the sign-in step, never the choice", () => {
+    given({ session: null, search: "identityCheck=returned" });
+    const html = render(StartDestination);
+    expect(html).toContain(S.title);
+    expect(html).not.toContain(START_COPY.title);
+  });
+
+  test("both pages read the return and name their own path", () => {
+    for (const [file, path] of PAGES) {
+      const code = read(file);
+      expect(code).toContain("returnedFromCheck(");
+      expect(code).toContain("arrivalGateView(");
+      expect(code).toContain("gateViewAfterSignIn(");
+      expect(code).toContain(`returnPath="${path}"`);
+    }
+  });
+
+  test("both pages take the flag out of the address in place, with no navigation, once the return is taken, and spend it on the human step's Continue", () => {
+    for (const [file, path] of PAGES) {
+      const code = read(file);
+      expect(code, file).toContain(
+        "const takeReturn = returnTaken({ returned, gate, recordRead: me !== null });",
+      );
+      expect(code, file).toMatch(
+        new RegExp(
+          String.raw`useEffect\(\(\) => \{\s*if \(!takeReturn\) return;\s*` +
+            String.raw`window\.history\.replaceState\(null, "", stripReturnedFlag\("${path}", window\.location\.search\)\);\s*` +
+            String.raw`\}, \[takeReturn\]\);`,
+        ),
+      );
+      expect(code, file).not.toMatch(/router\.(replace|push)\([^)]*identityCheck/);
+      expect(code, file).toContain("setReturned(false);");
+    }
   });
 });
 

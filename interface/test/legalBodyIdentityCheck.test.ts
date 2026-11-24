@@ -24,6 +24,7 @@ import {
   readingStep,
   returnedFromCheck,
   shouldReadBack,
+  stripReturnedFlag,
   startRefusal,
   syncRefusal,
   typedNames,
@@ -245,5 +246,17 @@ describe("the wait and the return", () => {
     for (const q of ["", "identityCheck=1", "identitycheck=returned"]) expect(returnedFromCheck(new URLSearchParams(q))).toBe(false);
     expect(providerPageUrl("https://verify.example.test/start/abc")).toBe("https://verify.example.test/start/abc");
     for (const bad of ["http://verify.example.test/x", "javascript:alert(1)", "/relative", "", 5, null]) expect(providerPageUrl(bad)).toBeNull();
+  });
+
+  test("the address once the flag is read: the page's own path, every other part of the query kept", () => {
+    expect(stripReturnedFlag("/start", "?identityCheck=returned")).toBe("/start");
+    expect(stripReturnedFlag("/legal-body", "identityCheck=returned")).toBe("/legal-body");
+    expect(stripReturnedFlag("/start", "")).toBe("/start");
+    expect(stripReturnedFlag("/legal-body", "?order=o_1&identityCheck=returned")).toBe(
+      "/legal-body?order=o_1",
+    );
+    expect(stripReturnedFlag("/start", "?path=declare")).toBe("/start?path=declare");
+    // Any value of the flag leaves: the address never keeps a half-read return.
+    expect(stripReturnedFlag("/start", "?identityCheck=1&path=form")).toBe("/start?path=form");
   });
 });
