@@ -38,6 +38,7 @@ import {
   SAFE_PROXY_RUNTIME_CODE_HASH,
   SAFE_SENTINEL,
   allowanceModuleAbi,
+  takeCalldata,
 } from "../../src/legalBody/safePot";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { type StatementOutcome, statementForAgent } from "../../src/legalBody/statements";
@@ -46,7 +47,9 @@ import {
   SqliteLegalBodyPotRepository,
 } from "../../src/persistence/legalBodyPotRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
+import { CHAIN_ID, FACTORY } from "../helpers/customerCompanyFixtures";
 import { A as GRANT_A } from "../helpers/grantFixtures";
+import { customerCompany } from "../helpers/legalBodyFixtures";
 import {
   CLOCK_S,
   FakeStatementChain,
@@ -1673,8 +1676,8 @@ describe("the lookup by a pot's address (statementForPotAddress)", () => {
 // ---------------------------------------------------------------------------------------------
 
 /** The Safe the real run of 24 Nov created: V7's pot. Its birth details are the run's (a
- *  five-minute period, which no note door takes), so here its note is written straight into the
- *  record. */
+ *  five-minute period, which no note door takes and the server's recompute never gives): a note of
+ *  it is one the server did not recompute, so it is never read. */
 const REAL_SAFE: Address = "0x0bbBa174c1D6b6Edd2F1A86ff5af435B645b77EF";
 const REAL_SAFE_BIRTH: PotBirthNote = {
   saltNonce: "72231338869903870587851170785833461215",
@@ -1685,16 +1688,24 @@ const REAL_SAFE_BIRTH: PotBirthNote = {
  *  empty signature). */
 const V7_HASH = "0xdfe8f8bded62c4439e5dc86fdb9f39258afb89a2a0c10a65383c15ae626c24ec";
 const MODULE: Address = "0xAA46724893dedD72658219405185Fb0Fc91e091C";
+/** The take of 1 USDC to P from V3, for the agent A: the bytes the encoder pinned to V7 builds. */
+const V3_TAKE = takeCalldata({
+  pot: V3_ADDRESS,
+  token: T.usdc,
+  to: P,
+  amountUnits: 1_000_000n,
+  agentWallet: A,
+});
 
 describe("the agent's pot: what is left (potForAgent) and a take to send (prepareTake)", () => {
-  /** A linked body of G whose registry names A, with `address` (the real Safe unless told) noted
-   *  an hour ago. */
+  /** A linked body of G whose registry names A, with `address` (V3 unless told) noted an hour
+   *  ago, with `birth` (V3's unless told). */
   function withPot(o: { address?: Address; birth?: PotBirthNote } = {}): LegalBodyRecord {
     const row = linked();
     notePot(pots, row, {
       at: NOW_S - 3_600,
-      address: o.address ?? REAL_SAFE,
-      birth: o.birth ?? (o.address === undefined ? REAL_SAFE_BIRTH : BIRTH_V3),
+      address: o.address ?? V3_ADDRESS,
+      birth: o.birth ?? BIRTH_V3,
     });
     return row;
   }
@@ -1709,21 +1720,33 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
     events: s.repo.listEvents(row.legalBodyId),
   });
 
-  test("prepares the take the real run mined (V7): to the module, value 0, gas 200000, an empty signature", async () => {
-    // The pot is the real Safe, reading HEALTHY (a ceiling of 50, 10 taken), the agent A, the
-    // payee P, 1000000 units.
+  test("prepares the take with the encoder the real run's mined take (V7) pins: to the module, value 0, gas 200000, an empty signature", async () => {
+    // The encoder gives V7's mined bytes for the real Safe (pinned at its own level, safePot.test.ts).
+    expect(
+      keccak256(
+        takeCalldata({
+          pot: REAL_SAFE,
+          token: T.usdc,
+          to: P,
+          amountUnits: 1_000_000n,
+          agentWallet: A,
+        }),
+      ),
+    ).toBe(V7_HASH);
+    // The pot here is V3, which the server recomputes: the thirty-day initializer, salt 1. It reads
+    // HEALTHY (a ceiling of 50, 10 taken); the agent A, the payee P, 1000000 units.
     const row = withPot();
     answer(HEALTHY);
     const before = written(row);
     const t = await take(row, { to: P, amountUnits: "1000000" });
-    expect(keccak256(t.data)).toBe(V7_HASH);
+    expect(t.data).toBe(V3_TAKE);
     expect(size(t.data)).toBe(292);
     expect(t).toEqual({
       chainId: 5_042_002,
       from: A,
       to: MODULE,
       value: "0",
-      data: t.data,
+      data: V3_TAKE,
       gas: "200000",
       leftAfterUnits: "39000000",
       how: LEGAL_BODY_SENTENCES.pot_take_how,
@@ -1740,19 +1763,115 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
       "how",
       "warning",
     ]);
-    // The take of the module: the pot, USDC, the payee, the amount, no payment, the agent's own
-    // key as the delegate, and an empty signature: the module takes the sender as the signer.
+    // The take of the module: the pot, USDC, the payee, the amount, no payment token and no
+    // payment, the agent's own key as the delegate, and an empty signature: the module takes the
+    // sender as the signer.
     const { functionName, args } = decodeFunctionData({ abi: allowanceModuleAbi, data: t.data });
     expect(functionName).toBe("executeAllowanceTransfer");
-    expect(args).toEqual([REAL_SAFE, T.usdc, P, 1_000_000n, zeroAddress, 0n, A, "0x"]);
+    expect(args).toEqual([V3_ADDRESS, T.usdc, P, 1_000_000n, zeroAddress, 0n, A, "0x"]);
     // The payee in lower case gives the same bytes.
     expect((await take(row, { to: P.toLowerCase(), amountUnits: "1000000" })).data).toBe(t.data);
     // One registry read for the body's agent, then one read of the pot against that wallet: the
     // port reads all of it at one fresh block, as no block is asked. No code read, nothing written.
     expect(registry.getAgentWallet.mock.calls[0]).toEqual([BigInt(row.agentId as string)]);
-    expect(chain.port.readPot.mock.calls[0]).toEqual([{ pot: REAL_SAFE, agentWallet: A }]);
+    expect(chain.port.readPot.mock.calls[0]).toEqual([{ pot: V3_ADDRESS, agentWallet: A }]);
     expect(chain.port.codeHash).not.toHaveBeenCalled();
     expect(written(row)).toEqual(before);
+  });
+
+  test("a note whose birth details do not give its address is never read: 500 internal_error for both, after one error line (Ruling R18)", async () => {
+    answer(HEALTHY);
+    // The real Safe, noted with the run's birth details: a five-minute period, which the server's
+    // recompute never gives. And V3's address noted with another salt.
+    const real = withPot({ address: REAL_SAFE, birth: REAL_SAFE_BIRTH });
+    const salted = withPot({ birth: { ...BIRTH_V3, saltNonce: "2" } });
+    for (const row of [real, salted]) {
+      for (const run of [() => read(row), () => take(row, { to: P, amountUnits: "1000000" })])
+        expect(await refusalOf(run)).toMatchObject(refused("internal_error", 500));
+    }
+    expectNoChainRead();
+    expect(linesOf("legal_body_pot_note_unrecomputable")).toEqual([
+      { level: "error", legalBodyId: real.legalBodyId },
+      { level: "error", legalBodyId: real.legalBodyId },
+      { level: "error", legalBodyId: salted.legalBodyId },
+      { level: "error", legalBodyId: salted.legalBodyId },
+    ]);
+    // The address V3's birth details give for another guardian, noted on G's body: recomputed with
+    // the body's own guardian, it does not come out either.
+    const other = withPot({ address: potAddressOf({ guardian: P, ceilingUnits: 50_000_000n }) });
+    expect(await refusalOf(() => read(other))).toMatchObject(refused("internal_error", 500));
+    expectNoChainRead();
+  });
+
+  test("refuses pot_take_body_not_in_force for a revoked body and a body not linked, before any chain read; get_pot still answers for them (Ruling R17)", async () => {
+    answer(HEALTHY);
+    const revoked = withPot();
+    s.repo.recordEvent(revoked.legalBodyId, "revoked", "operator:ops.example", null, {
+      reason: "Recorded for a test.",
+    });
+    const broken = withPot();
+    expect(s.repo.markBroken(broken.legalBodyId, { reason: "a test" })).toBe(true);
+    const superseded = withPot();
+    expect(s.repo.markBroken(superseded.legalBodyId, { reason: "a test" })).toBe(true);
+    expect(s.repo.supersede(superseded.legalBodyId, revoked.legalBodyId)).toBe(true);
+    const deployed = potBody(s, { nowMs: clock, state: "deployed" });
+    registry.wallets.set(deployed.agentId as string, A);
+    notePot(pots, deployed, { at: NOW_S - 3_600 });
+    // A draft abandoned, with a note written straight into the record: no door makes one.
+    const companyId = customerCompany(s, G, { filingNumber: "TEST-P9001" });
+    const draft = s.repo.create({
+      tenantId: G,
+      companyId,
+      chainId: CHAIN_ID,
+      factory: FACTORY,
+      amendmentDelay: 172_800,
+    });
+    expect(s.repo.abandon(draft.legalBodyId, "a test")).toBe(true);
+    notePot(pots, draft, { at: NOW_S - 3_600 });
+
+    const states: [LegalBodyRecord, string][] = [
+      [revoked, "linked"],
+      [broken, "broken"],
+      [superseded, "superseded"],
+      [deployed, "deployed"],
+      [draft, "abandoned"],
+    ];
+    for (const [row, state] of states) {
+      expect(s.repo.findById(row.legalBodyId)?.bindingState, state).toBe(state);
+      expect(
+        await refusalOf(() => take(row, { to: P, amountUnits: "1000000" })),
+        state,
+      ).toMatchObject(refused("pot_take_body_not_in_force", 409));
+    }
+    expectNoChainRead();
+    // The read answers for a body in any state that has its agent.
+    for (const row of [revoked, broken, superseded, deployed])
+      expect(await read(row)).toMatchObject({ pot: V3_ADDRESS, state: "ceiling_read" });
+    // A linked body that was not revoked: the take is prepared.
+    expect(await take(withPot(), { to: P, amountUnits: "1000000" })).toMatchObject({
+      data: V3_TAKE,
+    });
+  });
+
+  test("refuses pot_take_bad_payee for the pot itself, the USDC token and the AllowanceModule, in any letter case, before any chain read", async () => {
+    answer(HEALTHY);
+    const row = withPot();
+    for (const payee of [
+      V3_ADDRESS,
+      V3_ADDRESS.toLowerCase(),
+      T.usdc,
+      MODULE,
+      MODULE.toLowerCase(),
+    ])
+      expect(
+        await refusalOf(() => take(row, { to: payee, amountUnits: "1" })),
+        payee,
+      ).toMatchObject(refused("pot_take_bad_payee", 409));
+    expectNoChainRead();
+    // The agent's own address is a payee like any other.
+    expect(await take(row, { to: A, amountUnits: "1" })).toMatchObject({
+      leftAfterUnits: "39999999",
+    });
   });
 
   test("refuses pot_take_over_ceiling for 40000001 units when 40000000 are left, and accepts exactly 40000000", async () => {
@@ -1815,6 +1934,8 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
       expect(await refusalOf(() => take(row, input)), JSON.stringify(input)).toMatchObject(
         refused("pot_take_invalid", 400),
       );
+    // Judged before the registry and the pot are read: an invalid take costs no chain read.
+    expectNoChainRead();
     // The largest amount the module takes is a valid amount: here it is above the ceiling.
     expect(
       await refusalOf(() => take(row, { to: P, amountUnits: (2n ** 96n - 1n).toString() })),
@@ -1853,7 +1974,7 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
     answer(HEALTHY);
     registry.wallets.set(row.agentId as string, P);
     expect(await read(row)).toMatchObject({ state: "limits_not_read", agentWallet: P });
-    expect(chain.port.readPot.mock.calls.at(-1)).toEqual([{ pot: REAL_SAFE, agentWallet: P }]);
+    expect(chain.port.readPot.mock.calls.at(-1)).toEqual([{ pot: V3_ADDRESS, agentWallet: P }]);
     expect(await refusalOf(() => take(row, { to: P, amountUnits: "1" }))).toMatchObject(
       refused("pot_not_readable", 409),
     );
@@ -1882,7 +2003,7 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
       answer({ ...HEALTHY, agentBalanceWei });
       const t = await take(row, { to: P, amountUnits: "1000000" });
       expect(t.warning, String(agentBalanceWei)).toBe(warning);
-      expect(keccak256(t.data)).toBe(V7_HASH);
+      expect(t.data).toBe(V3_TAKE);
       expect(await read(row)).toMatchObject({ agentKeyBalanceWei: agentBalanceWei.toString() });
     }
   });

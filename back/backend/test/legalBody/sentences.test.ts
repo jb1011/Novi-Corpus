@@ -119,6 +119,8 @@ const NAMED_CODES = [
   "pot_take_over_balance",
   "pot_take_how",
   "pot_take_low_fee_money",
+  "pot_take_body_not_in_force",
+  "pot_take_bad_payee",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";
@@ -267,6 +269,12 @@ describe("what the sentences say", () => {
     expect(LEGAL_BODY_SENTENCES.pot_take_low_fee_money).toBe(
       "The agent's key holds very little USDC for fees, so the network may refuse this transaction: send the key a little USDC first.",
     );
+    expect(LEGAL_BODY_SENTENCES.pot_take_body_not_in_force).toBe(
+      "This legal body is not in force, so no take is prepared for its agent.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_take_bad_payee).toBe(
+      "A take cannot pay the pot itself, the token's own contract or the allowance feature's contract. Nothing was prepared.",
+    );
     const pot = [
       "pot_not_offered",
       "pot_invalid",
@@ -285,6 +293,8 @@ describe("what the sentences say", () => {
       "pot_take_over_balance",
       "pot_take_how",
       "pot_take_low_fee_money",
+      "pot_take_body_not_in_force",
+      "pot_take_bad_payee",
     ];
     for (const code of pot) {
       const sentence = LEGAL_BODY_SENTENCES[code] as string;

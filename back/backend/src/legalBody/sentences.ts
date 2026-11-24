@@ -207,6 +207,12 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
     "This take is above what is left of the ceiling in the current thirty-day period. Nothing was prepared.",
   // …an amount above what the pot holds.
   pot_take_over_balance: "This take is above what the pot holds. Nothing was prepared.",
+  // …a body that is not linked, or that the operator revoked (Ruling R17).
+  pot_take_body_not_in_force:
+    "This legal body is not in force, so no take is prepared for its agent.",
+  // …a payee that is the pot itself, the token's contract or the AllowanceModule.
+  pot_take_bad_payee:
+    "A take cannot pay the pot itself, the token's own contract or the allowance feature's contract. Nothing was prepared.",
   // Not refusals: the two sentences a prepared take carries, how to send it and, when the agent's
   // key holds under the low fee-money mark, the warning.
   pot_take_how:

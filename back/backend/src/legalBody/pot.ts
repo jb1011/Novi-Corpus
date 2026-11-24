@@ -99,8 +99,10 @@ export type {
  * the take as one transaction its own key sends to the AllowanceModule itself, with an empty
  * signature: the module takes the sender as the signer. The server builds the bytes and reads the
  * chain; it holds no key, signs nothing and sends nothing. The pot read is the address of the
- * body's latest note, which only the note door writes, once it has recomputed it; on or off the
- * record, a take does not depend on it.
+ * body's latest note, on or off the record, and only once the server has recomputed it again from
+ * the note's birth details and the body's guardian (Ruling R18), as the public record does. A take
+ * is prepared only for a body in force, linked and not revoked (Ruling R17); the read answers for
+ * a body in any state.
  *
  * Ops lines carry the body's id only.
  */
@@ -333,9 +335,11 @@ function grantOfBody(
   return readOrderGrant(deps, row.legalBodyId, verified);
 }
 
-/** The view of the body's notes for the address of `latest`: the birth details and time of the
- *  latest declared note of that address. */
-function viewOf(notes: readonly PotNote[], latest: PotNote): OrderPotView {
+/** The latest declared note of the address of `latest`, with its birth details. */
+function declaredNoteOf(
+  notes: readonly PotNote[],
+  latest: PotNote,
+): PotNote & { birth: PotBirthNote } {
   for (let i = notes.length - 1; i >= 0; i -= 1) {
     const note = notes[i];
     if (
@@ -343,15 +347,22 @@ function viewOf(notes: readonly PotNote[], latest: PotNote): OrderPotView {
       note.birth !== null &&
       sameAddress(note.address, latest.address)
     )
-      return {
-        address: latest.address,
-        onRecord: latest.act === "declared",
-        declaredAt: note.declaredAt,
-        birth: note.birth,
-      };
+      return { ...note, birth: note.birth };
   }
   // A removal is only ever of the address on the record: a body's notes are written so.
   throw new Error(`the pot notes of ${latest.legalBodyId} remove an address never declared`);
+}
+
+/** The view of the body's notes for the address of `latest`: the birth details and time of the
+ *  latest declared note of that address. */
+function viewOf(notes: readonly PotNote[], latest: PotNote): OrderPotView {
+  const declared = declaredNoteOf(notes, latest);
+  return {
+    address: latest.address,
+    onRecord: latest.act === "declared",
+    declaredAt: declared.declaredAt,
+    birth: declared.birth,
+  };
 }
 
 /** The body's own row, linked and not revoked, with its agent; else the refusal. One 404 for
@@ -600,12 +611,22 @@ export function orderPot(
   tenantId: string,
   legalBodyId: string,
 ): { pot: OrderPotView | null } {
+  const owned = ownedPot(deps, tenantId, legalBodyId);
+  return { pot: owned.latest === undefined ? null : viewOf(owned.notes, owned.latest) };
+}
+
+/** `orderPot`'s reads, kept for the agent's tools: the flag first, one 404, the body's row and its
+ *  notes. No chain read. */
+function ownedPot(
+  deps: LegalBodyPotDeps,
+  tenantId: string,
+  legalBodyId: string,
+): { row: LegalBodyRecord; notes: readonly PotNote[]; latest: PotNote | undefined } {
   assertPotOffered(deps);
   const row = deps.bodies.findOwned(tenantId, legalBodyId);
   if (row === undefined) throw refusal("not_found", 404);
   const notes = deps.repo.list(row.legalBodyId);
-  const latest = notes.at(-1);
-  return { pot: latest === undefined ? null : viewOf(notes, latest) };
+  return { row, notes, latest: notes.at(-1) };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -915,6 +936,7 @@ export interface PotForAgent {
   chainId: number;
   /** The address of the body's latest note, on the record or not. */
   pot: Address;
+  /** Whether the guardian's note puts it on the public record. */
   onRecord: boolean;
   /** The agent's wallet as the registry names it now: the key the pot is read against, and the
    *  one a take is sent from. */
@@ -957,10 +979,17 @@ export interface PreparedTake {
   warning: string | null;
 }
 
+/** The pot of the tenant's body as the agent's tools find it, before any chain read: the body's
+ *  row, the view of its latest note, and the declared note whose birth details give its address. */
+interface NotedPot {
+  row: LegalBodyRecord;
+  view: OrderPotView;
+  declared: PotNote;
+}
+
 /** What one read of the agent's pot gave: the answer, and the facts a take is judged on. */
 interface AgentPotRead {
   view: PotForAgent;
-  table: PotAddresses;
   reading: PotReading;
   raw: PotRaw;
 }
@@ -970,43 +999,48 @@ interface AgentPotRead {
 const leftOf = (r: { ceilingUnits: bigint; spentUnits: bigint }): bigint =>
   r.ceilingUnits > r.spentUnits ? r.ceilingUnits - r.spentUnits : 0n;
 
+/** The tenant's body and its pot, with no chain read: while the pot is not offered, 409
+ *  `pot_not_offered` before anything is read; one 404 for unknown and not yours (one read of the
+ *  row); no note: 409 `pot_not_declared`. The address is the latest note's, on the record or not. */
+function notedPot(deps: LegalBodyPotDeps, tenantId: string, legalBodyId: string): NotedPot {
+  const { row, notes, latest } = ownedPot(deps, tenantId, legalBodyId);
+  if (latest === undefined) throw refusal("pot_not_declared", 409);
+  return { row, view: viewOf(notes, latest), declared: declaredNoteOf(notes, latest) };
+}
+
 /**
- * The tenant's body and its pot, read for the agent, in this order:
- *  1. `orderPot`: while the pot is not offered, 409 `pot_not_offered` before anything is read; one
- *     404 for unknown and not yours; no note: 409 `pot_not_declared`. The address is the latest
- *     note's, whether it is on the record or not: only the note door writes one, once it has
- *     recomputed it from the birth details and the body's guardian;
- *  2. the deployment's chain has a pot table: else 409 `pot_chain_unsupported`;
- *  3. the registry's wallet of the body's agent, read now through `chainCall`;
- *  4. one read of the pot against that wallet and the body's guardian (`readPot`, which reads
- *     everything at one fresh block), and the reading rules, through `chainCall`.
- * A failed read of the registry or of the chain is 503 `chain_unavailable`. Writes nothing.
+ * The pot's table, once the noted address is recomputed, with no chain read: a chain with no pot
+ * table is 409 `pot_chain_unsupported`; a note whose birth details, with the body's own guardian,
+ * do not give its address is never read: 500 `internal_error`, after the error line `birthOf`
+ * writes. Only an address the server recomputed itself is read as a pot, as on the public record.
  */
-async function readAgentPot(
+function recomputedTable(deps: LegalBodyPotDeps, noted: NotedPot): PotAddresses {
+  const table = potAddresses(deps.chainId);
+  if (table === null) throw refusal("pot_chain_unsupported", 409);
+  if (birthOf(table, noted.row, noted.declared) === null) throw refusal("internal_error", 500);
+  return table;
+}
+
+/**
+ * The reads, in this order: the registry's wallet of the body's agent, read now through
+ * `chainCall`; then one read of the pot against that wallet and the body's guardian (`readPot`,
+ * which reads everything at one fresh block) and the reading rules, through `chainCall`. A failed
+ * read of the registry or of the chain is 503 `chain_unavailable`. Writes nothing.
+ */
+async function readNotedPot(
   deps: LegalBodyPotDeps,
-  tenantId: string,
-  legalBodyId: string,
+  noted: NotedPot,
+  table: PotAddresses,
 ): Promise<AgentPotRead> {
-  // 1.
-  const { pot } = orderPot(deps, tenantId, legalBodyId);
-  if (pot === null) throw refusal("pot_not_declared", 409);
-  const row = deps.bodies.findOwned(tenantId, legalBodyId);
-  if (row === undefined) throw refusal("not_found", 404);
+  const { row, view: pot } = noted;
   const id = row.legalBodyId;
   const agentId = row.agentId;
   // A body is linked, so holds its agent, before its first note (`declarePot`).
   if (agentId === null) throw new Error(`legal body ${id} has a pot and no agent`);
 
-  // 2.
-  const table = potAddresses(deps.chainId);
-  if (table === null) throw refusal("pot_chain_unsupported", 409);
-
-  // 3.
   const agentWallet = await chainCall(id, "pot_agent_wallet", async () =>
     getAddress(await deps.registry.getAgentWallet(BigInt(agentId))),
   );
-
-  // 4.
   const { raw, reading } = await chainCall(id, "pot_read", async () => {
     const read = await deps.chain.readPot({ pot: pot.address, agentWallet });
     return {
@@ -1049,32 +1083,43 @@ async function readAgentPot(
     default:
       view = { ...facts, state: reading.state, agentKeyBalanceWei };
   }
-  return { view, table, reading, raw };
+  return { view, reading, raw };
 }
 
 /**
- * The company's pot as the agent's tool `get_pot` answers it (`PotForAgent`): the tenant's body,
- * its pot (`orderPot`; no note: 409 `pot_not_declared`), the registry's wallet, and one read of
- * the pot at the latest block. A failed chain read is 503 `chain_unavailable`. Writes nothing.
+ * The company's pot as the agent's tool `get_pot` answers it (`PotForAgent`), in this order: the
+ * tenant's body and its pot (`pot_not_offered`, one 404, `pot_not_declared`); the pot's table and
+ * its address recomputed (`pot_chain_unsupported`, a 500 for a note that does not recompute); the
+ * registry's wallet; one read of the pot at the latest block. A failed chain read is 503
+ * `chain_unavailable`. A read: it answers for a body in any state. Writes nothing.
  */
 export async function potForAgent(
   deps: LegalBodyPotDeps,
   tenantId: string,
   legalBodyId: string,
 ): Promise<PotForAgent> {
-  return (await readAgentPot(deps, tenantId, legalBodyId)).view;
+  const noted = notedPot(deps, tenantId, legalBodyId);
+  const table = recomputedTable(deps, noted);
+  return (await readNotedPot(deps, noted, table)).view;
 }
 
 /**
  * A take from the company's pot, for the agent's own key to send itself, in this order:
- *  1. the pot as `potForAgent` reads it, with its refusals;
+ *  1. the tenant's body and its pot, with `potForAgent`'s first refusals: `pot_not_offered`, one
+ *     404, `pot_not_declared`;
  *  2. `to` an address in EIP-55 or lower case, never zero, and `amountUnits` a canonical decimal
- *     string above 0 and at most 2^96 - 1: else 400 `pot_take_invalid`;
- *  3. a reading that is not `ceiling_read`: 409 `pot_not_readable`;
- *  4. an amount above the ceiling less what was taken in the current period: 409
+ *     string above 0 and at most 2^96 - 1: else 400 `pot_take_invalid`, before any chain read;
+ *  3. Ruling R17: a body that is not `linked`, or that the operator revoked, is not in force: 409
+ *     `pot_take_body_not_in_force`, before any chain read;
+ *  4. the pot's table and its address recomputed, as `potForAgent` does;
+ *  5. a payee that is the pot itself, the token's contract or the AllowanceModule (the money would
+ *     go back to the pot, or to a contract that cannot spend it): 409 `pot_take_bad_payee`;
+ *  6. the registry's wallet and one read of the pot, as `potForAgent` reads them;
+ *  7. a reading that is not `ceiling_read`: 409 `pot_not_readable`;
+ *  8. an amount above the ceiling less what was taken in the current period: 409
  *     `pot_take_over_ceiling`;
- *  5. an amount above what the pot holds: 409 `pot_take_over_balance`;
- *  6. the transaction: from the agent's wallet, to the AllowanceModule, value 0, the take's bytes
+ *  9. an amount above what the pot holds: 409 `pot_take_over_balance`;
+ * 10. the transaction: from the agent's wallet, to the AllowanceModule, value 0, the take's bytes
  *     (`takeCalldata`, an empty signature), the fixed gas limit, what is left after it, how to
  *     send it, and the low fee-money warning when the agent's key holds under `POT_FEE_LOW_WEI`.
  * It writes nothing and sends nothing: the agent's key sends it, or nobody does. The record does
@@ -1087,7 +1132,7 @@ export async function prepareTake(
   input: { to: unknown; amountUnits: unknown },
 ): Promise<PreparedTake> {
   // 1.
-  const { view, table, reading, raw } = await readAgentPot(deps, tenantId, legalBodyId);
+  const noted = notedPot(deps, tenantId, legalBodyId);
 
   // 2.
   const to = takenAddress(input?.to);
@@ -1095,17 +1140,31 @@ export async function prepareTake(
   if (to === undefined || amount === undefined || amount === 0n || amount > UINT96_MAX)
     throw refusal("pot_take_invalid", 400);
 
-  // 3.
-  if (reading.state !== "ceiling_read") throw refusal("pot_not_readable", 409);
+  // 3. A revocation is an event, and leaves the row linked.
+  if (noted.row.bindingState !== "linked" || deps.bodies.isRevoked(noted.row.legalBodyId))
+    throw refusal("pot_take_body_not_in_force", 409);
 
   // 4.
+  const table = recomputedTable(deps, noted);
+
+  // 5.
+  if ([noted.view.address, table.usdc, table.allowanceModule].some((a) => sameAddress(a, to)))
+    throw refusal("pot_take_bad_payee", 409);
+
+  // 6.
+  const { view, reading, raw } = await readNotedPot(deps, noted, table);
+
+  // 7.
+  if (reading.state !== "ceiling_read") throw refusal("pot_not_readable", 409);
+
+  // 8.
   const left = leftOf(reading);
   if (amount > left) throw refusal("pot_take_over_ceiling", 409);
 
-  // 5.
+  // 9.
   if (amount > reading.balanceUnits) throw refusal("pot_take_over_balance", 409);
 
-  // 6.
+  // 10.
   return {
     chainId: view.chainId,
     from: view.agentWallet,

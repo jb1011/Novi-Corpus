@@ -505,11 +505,12 @@ const GET_BINDING_DESCRIPTION = [
  * this server prepares the transaction, and holds no key, signs nothing and sends nothing.
  */
 const GET_POT_DESCRIPTION = [
-  "Read the company's pot of an order's legal body: the Safe its guardian created in the web app, whether it is on the public record, the ceiling the agent's own key may take in each thirty-day period, what was taken in the current period, what is left, when the period ends, what the pot holds, and what the agent's key holds for fees.",
+  "Read the company's pot of an order's legal body: the Safe its guardian created in the web app, whether the guardian's note puts it on the public record (onRecord), the ceiling the agent's own key may take in each thirty-day period, what was taken in the current period, what is left, when the period ends, what the pot holds, and what the agent's key holds for fees.",
   "orderId is the order of that legal body, placed by your tenant in the browser.",
   "The periods are fixed, one after the other.",
   "Amounts are in millionths of a USDC, as decimal strings: 1 USDC is 1000000.",
   "periodEndsAt is in unix seconds, and agentKeyBalanceWei, the key's fee money, in wei of the chain's native balance: 1 USDC is 1000000000000000000 wei.",
+  "agentKeyBalanceWei is null when it was not read: when no pot's code is at the pot's address, nothing past the code is read.",
   "state is ceiling_read when the ceiling was read from the chain: only then are the ceiling's amounts given, and only then does prepare_pot_take prepare a take.",
   "When it is stopped, the agent's key cannot take from it: its allowance is switched off.",
   "limits_not_read means the pot holds something the reading does not read past, or names another key than the agent's wallet; absent, that no pot is at its address yet; not_the_guardians, that what is there is not a pot of the guardian's alone.",
@@ -521,7 +522,9 @@ const PREPARE_POT_TAKE_DESCRIPTION = [
   "Prepare a take from the company's pot, for the agent's own key to send.",
   "orderId is the order of the pot's legal body, as for get_pot.",
   "to is who is paid: the agent's own address or a payee.",
+  "It is never the pot itself, the USDC token's contract or the allowance feature's contract.",
   "amountUnits is the amount in millionths of a USDC, as a decimal string.",
+  "No take is prepared for a legal body that is not in force.",
   "The answer is one transaction: send it from the agent's wallet exactly as given (from, to, value 0, data, gas), and add no signature: the feature takes the sender as the signer.",
   "The agent's key pays a small fee in USDC.",
   "So it needs a little USDC of its own: under 0.01 USDC, the answer carries a warning.",

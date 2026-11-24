@@ -919,6 +919,23 @@ describe("the pot's two tools: get_pot and prepare_pot_take", () => {
     expect(await take({ to: P, amountUnits: "2" })).toEqual(answerFor("pot_take_over_balance"));
     potChain.port.readPot.mockResolvedValue(REAL_STOPPED);
     expect(await take({ to: P, amountUnits: "1" })).toEqual(answerFor("pot_not_readable"));
+    // A payee that would lose the money, and a body that is not in force: refused before any read.
+    potChain.port.readPot.mockClear();
+    registry.getAgentWallet.mockClear();
+    expect(await take({ to: V3_ADDRESS, amountUnits: "1" })).toEqual(
+      answerFor("pot_take_bad_payee"),
+    );
+    w.s.repo.recordEvent(row.legalBodyId, "revoked", "operator:ops.example", null, {
+      reason: "Recorded for a test.",
+    });
+    expect(await take({ to: P, amountUnits: "1" })).toEqual(
+      answerFor("pot_take_body_not_in_force"),
+    );
+    expectNoPotRead();
+    // The read still answers for the revoked body.
+    expect((await callTool(w, key, "get_pot", { orderId: row.legalBodyId })).body).toMatchObject({
+      state: "stopped",
+    });
   });
 
   test("while the pot is not offered, both answer pot_not_offered before the real-human check, the token and any read", async () => {
@@ -1029,11 +1046,12 @@ describe("the pot's two tools: get_pot and prepare_pot_take", () => {
     const prepare = byName.get("prepare_pot_take")?.description ?? "";
 
     for (const sentence of [
-      "Read the company's pot of an order's legal body: the Safe its guardian created in the web app, whether it is on the public record, the ceiling the agent's own key may take in each thirty-day period, what was taken in the current period, what is left, when the period ends, what the pot holds, and what the agent's key holds for fees.",
+      "Read the company's pot of an order's legal body: the Safe its guardian created in the web app, whether the guardian's note puts it on the public record (onRecord), the ceiling the agent's own key may take in each thirty-day period, what was taken in the current period, what is left, when the period ends, what the pot holds, and what the agent's key holds for fees.",
       "The periods are fixed, one after the other.",
       "Amounts are in millionths of a USDC, as decimal strings: 1 USDC is 1000000.",
       "It reads the chain and writes nothing.",
       "No tool creates a pot.",
+      "agentKeyBalanceWei is null when it was not read: when no pot's code is at the pot's address, nothing past the code is read.",
     ])
       expect(getPot).toContain(sentence);
     // The stopped state in the record's own words.
@@ -1048,6 +1066,8 @@ describe("the pot's two tools: get_pot and prepare_pot_take", () => {
       "The agent's key pays a small fee in USDC.",
       "A take above what is left in the current period, or above what the pot holds, is refused here before anything is sent.",
       "This server holds no key and no money, and sends nothing.",
+      "It is never the pot itself, the USDC token's contract or the allowance feature's contract.",
+      "No take is prepared for a legal body that is not in force.",
     ])
       expect(prepare).toContain(sentence);
     for (const [name, description] of [
