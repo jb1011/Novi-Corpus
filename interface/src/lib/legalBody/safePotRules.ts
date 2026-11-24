@@ -1,7 +1,7 @@
 /**
  * The company's pot, as read: when the record and the screens may say "the agent's key may take
- * up to X in each thirty-day period", when "no key may take from it", when "its limits were not
- * read", and when nothing at all.
+ * up to X in each thirty-day period", when "The agent's key cannot take from it: its allowance is
+ * switched off.", when "its limits were not read", and when nothing at all.
  *
  * Here: the reading rules (`potReading`), each pure; the browser's read of a pot's raw facts from
  * the chain, all at one block (`readPotRaw`), through a client handed in; and the most the ceiling
@@ -77,10 +77,11 @@ export type PotLimitsProblem =
 
 /**
  * absent: no code at the address. not_the_guardians: code that is not a pot of the guardian's
- * alone; the screens say nothing of it. stopped: no key may take from it. limits_not_read: a pot
- * of the guardian's alone with something the rules do not read past. ceiling_read: the agent's key
- * may take up to `ceilingUnits` in each thirty-day period; `spentUnits` were taken in the current
- * one, which ends at `periodEndsAt` (unix seconds).
+ * alone; the screens say nothing of it. stopped: "The agent's key cannot take from it: its
+ * allowance is switched off." (never more than that: no read can prove that no key at all can move
+ * the pot's money). limits_not_read: a pot of the guardian's alone with something the rules do not
+ * read past. ceiling_read: the agent's key may take up to `ceilingUnits` in each thirty-day period;
+ * `spentUnits` were taken in the current one, which ends at `periodEndsAt` (unix seconds).
  */
 export type PotReading =
   | { state: "absent" }
@@ -122,25 +123,29 @@ const sameHex = (a: unknown, b: Hex): boolean =>
  *  5. `fallbackHandler` is not `addresses.fallbackHandler`: `other_handler`.
  *  6. `usdcAllowanceToAgent` is not 0: `usdc_approved`.
  *  7. `modules.list` is empty: `stopped`, `why: "module_off"`.
- *  8. `delegates.list` is empty: `stopped`, `why: "no_delegate"`.
- *  9. `delegates.list` is not exactly `[agentWallet]`, or `delegates.next` is not 0:
- *     `other_delegate`.
+ *  8. `delegates.list` is empty and `delegates.next` is 0: `stopped`, `why: "no_delegate"`.
+ *  9. `delegates.list` is not exactly `[agentWallet]`, or `delegates.next` is not 0, or
+ *     `agentWallet` is the guardian: `other_delegate` (the guardian's key, as the Safe's only
+ *     owner, can take everything: no ceiling is read for it).
  * 10. `tokens` is not exactly `[addresses.usdc]`: `other_token` (this closes an allowance on the
  *     native coin, token zero).
  * 11. `allowance[2]` is not 43200: `other_period`.
- * 12. Otherwise `ceiling_read`: `ceilingUnits = allowance[0]`, `spentUnits = allowance[1]`,
+ * 12. Any of the five fields of `allowance` (amount, spent, resetTimeMin, lastResetMin, nonce) is
+ *     not a bigint: `other_period` (the allowance was not read as five numbers; a resetTimeMin of
+ *     another kind has already broken rule 11). Otherwise `ceiling_read`:
+ *     `ceilingUnits = allowance[0]`, `spentUnits = allowance[1]`,
  *     `periodEndsAt = Number((allowance[3] + 43200) * 60)` in unix seconds,
  *     `nonce = allowance[4]`.
  *
  * The module's own answers are never enough: after `disableModule` it still returns the delegate
  * and a live-looking allowance, and after `removeDelegate` it still lists the token (both seen in
  * the proof). Rules 3 and 7 come before the module's answers are read for that reason. "Stopped"
- * is reached only after rules 3 to 6, so "no key may take from it" is said only when no other
- * add-on, guard, handler or approval could.
+ * is reached only after rules 3 to 6, so "The agent's key cannot take from it: its allowance is
+ * switched off." is said only when no other add-on, guard, handler or approval was found.
  *
  * Every rule asks for the expected fact and nothing else: a value of another kind (a number where
  * a bigint belongs, a string where a list belongs) breaks the rule it is read by, and only a pot
- * that passes rules 1 to 11 reads a ceiling.
+ * that passes rules 1 to 12 reads a ceiling.
  */
 export function potReading(
   raw: PotRaw,
@@ -180,9 +185,14 @@ export function potReading(
   // 7.
   if (moduleOff) return { state: "stopped", why: "module_off", balanceUnits };
   // 8.
-  if (isEmptyList(raw.delegates.list)) return { state: "stopped", why: "no_delegate", balanceUnits };
+  if (isEmptyList(raw.delegates.list) && raw.delegates.next === 0)
+    return { state: "stopped", why: "no_delegate", balanceUnits };
   // 9.
-  if (!isExactly(raw.delegates.list, expect.agentWallet) || raw.delegates.next !== 0)
+  if (
+    !isExactly(raw.delegates.list, expect.agentWallet) ||
+    raw.delegates.next !== 0 ||
+    sameAddress(expect.agentWallet, expect.guardian)
+  )
     return notRead("other_delegate");
   // 10.
   if (!isExactly(raw.tokens, a.usdc)) return notRead("other_token");
@@ -190,6 +200,14 @@ export function potReading(
   const [amount, spent, resetTimeMin, lastResetMin, nonce] = raw.allowance;
   if (resetTimeMin !== PERIOD) return notRead("other_period");
   // 12.
+  if (
+    typeof amount !== "bigint" ||
+    typeof spent !== "bigint" ||
+    typeof resetTimeMin !== "bigint" ||
+    typeof lastResetMin !== "bigint" ||
+    typeof nonce !== "bigint"
+  )
+    return notRead("other_period");
   return {
     state: "ceiling_read",
     ceilingUnits: amount,
@@ -250,12 +268,12 @@ const nothingElse = (codeHash: Hex | null): PotRaw => ({
 });
 
 /**
- * The reads, all at one block number read first: `getCode(pot)`; then, only when its hash is the
- * proxy's, one `client.multicall` with `multicallAddress: a.multicall3` and `allowFailure: false`,
- * plus `getBalance` of the pot and of the agent's wallet and `getCode` of the agent's wallet. No
- * code: `codeHash: null`; a code hash that is not the proxy's: that hash; in both cases no other
- * read, and the other fields hold empty lists, the zero address, zeros and false. Any failed read
- * throws: a failure is never an answer.
+ * The reads, all at one block number read first, fresh (`getBlockNumber({ cacheTime: 0 })`):
+ * `getCode(pot)`; then, only when its hash is the proxy's, one `client.multicall` with
+ * `multicallAddress: a.multicall3` and `allowFailure: false`, plus `getBalance` of the pot and of
+ * the agent's wallet and `getCode` of the agent's wallet. No code: `codeHash: null`; a code hash
+ * that is not the proxy's: that hash; in both cases no other read, and the other fields hold empty
+ * lists, the zero address, zeros and false. Any failed read throws: a failure is never an answer.
  *
  * The multicall reads, as the real run read them: the Safe's `masterCopy()` (the proxy answers it
  * itself), `getOwners()`, `getThreshold()`, `getModulesPaginated(sentinel, 10)`, and its guard and
@@ -272,7 +290,9 @@ export async function readPotRaw(
   const pot = checksummed(p.pot);
   const agentWallet = checksummed(p.agentWallet);
   const usdc = checksummed(a.usdc);
-  const blockNumber = await client.getBlockNumber();
+  // Read fresh: viem otherwise serves a cached head for its polling interval, and a read right
+  // after the guardian's own transaction could see an older block.
+  const blockNumber = await client.getBlockNumber({ cacheTime: 0 });
   const potCode = await client.getCode({ address: pot, blockNumber });
   if (!hasCode(potCode)) return nothingElse(null);
   const codeHash = keccak256(potCode);
@@ -353,6 +373,9 @@ export type PotCeilingCap =
   | { kind: "no_spending" }
   | { kind: "capped"; maxUsdc: number; endsOn: string | null };
 
+/** A value that is an object and not null. */
+const isObject = (v: unknown): v is object => typeof v === "object" && v !== null;
+
 /** The grant's largest amount, in whole US dollars (the server's GRANT_AMOUNT_MAX). */
 const GRANT_AMOUNT_MAX = 1_000_000_000;
 
@@ -361,7 +384,7 @@ const GRANT_AMOUNT_MAX = 1_000_000_000;
  *  server checks every grant so; anything else could only be a broken answer) adds nothing: a
  *  broken setting may lower the cap, never raise it. */
 function per30DaysOf(setting: GrantSpend): number {
-  if (typeof setting !== "object" || setting === null || setting.allowed !== true) return 0;
+  if (!isObject(setting) || setting.allowed !== true) return 0;
   const amount: unknown = setting.per30Days;
   return typeof amount === "number" &&
     Number.isSafeInteger(amount) &&
@@ -373,8 +396,9 @@ function per30DaysOf(setting: GrantSpend): number {
 
 /**
  * The sum of `per30Days` of buy, pay and engageContractor where allowed: the most the field takes.
- * No grant is `none`; a grant whose three kinds add nothing is `no_spending`; otherwise `capped`,
- * with the grant's last day (`endsOn`, or null: until revoked). Three kinds at the grant's largest
+ * No grant is `none`, and so is a grant without its `choices` or its `acts` (a broken answer):
+ * never a throw. A grant whose three kinds add nothing is `no_spending`; otherwise `capped`, with
+ * the grant's last day (`endsOn`, or null: until revoked). Three kinds at the grant's largest
  * amount add up to POT_CEILING_MAX_USDC, so a cap is never above the field's own maximum.
  */
 export function potCeilingCapFromGrant(
@@ -385,7 +409,8 @@ export function potCeilingCapFromGrant(
     };
   } | null,
 ): PotCeilingCap {
-  if (grant === null) return { kind: "none" };
+  if (!isObject(grant) || !isObject(grant.choices) || !isObject(grant.choices.acts))
+    return { kind: "none" };
   const { acts, endsOn } = grant.choices;
   const maxUsdc =
     per30DaysOf(acts.buy) + per30DaysOf(acts.pay) + per30DaysOf(acts.engageContractor);

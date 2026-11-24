@@ -236,6 +236,11 @@ describe("potReading: what a pot's raw facts let the record say", () => {
     expect(read(removed)).toEqual({ state: "stopped", why: "no_delegate", balanceUnits: HEALTHY.balanceUnits });
   });
 
+  test("an empty delegates page that says more follow is never stopped: other_delegate", () => {
+    // The pinned module cannot answer this; the rule refuses it all the same.
+    expect(read({ ...HEALTHY, delegates: { list: [], next: 3 } })).toEqual(limitsNotRead("other_delegate"));
+  });
+
   // Rule 9.
   test("a second delegate, another delegate, a delegates page that says more follow: other_delegate", () => {
     const otherDelegate = limitsNotRead("other_delegate");
@@ -245,6 +250,25 @@ describe("potReading: what a pot's raw facts let the record say", () => {
     expect(read({ ...HEALTHY, delegates: { list: [A], next: 12 } })).toEqual(otherDelegate);
     // The guardian as the delegate is another delegate too.
     expect(read({ ...HEALTHY, delegates: { list: [G], next: 0 } })).toEqual(otherDelegate);
+  });
+
+  // Rule 9, Ruling R4.
+  test("the agent's key that is the guardian's own: other_delegate, never a ceiling, in any letter case", () => {
+    // That key, as the Safe's only owner, can take everything: no ceiling is read for it.
+    const guardianAsAgent = { ...HEALTHY, delegates: { list: [G], next: 0 } };
+    const reading = potReading(guardianAsAgent, { ...EXPECT, agentWallet: G });
+    expect(reading.state).not.toBe("ceiling_read");
+    expect(reading).toEqual(limitsNotRead("other_delegate"));
+    const lowerG = G.toLowerCase() as Address;
+    expect(potReading(guardianAsAgent, { ...EXPECT, agentWallet: lowerG })).toEqual(
+      limitsNotRead("other_delegate"),
+    );
+    expect(
+      potReading({ ...HEALTHY, owners: [lowerG], delegates: { list: [lowerG], next: 0 } }, { ...EXPECT, agentWallet: G }),
+    ).toEqual(limitsNotRead("other_delegate"));
+    expect(
+      potReading(guardianAsAgent, { ...EXPECT, guardian: `0x${G.slice(2).toUpperCase()}` as Address, agentWallet: lowerG }),
+    ).toEqual(limitsNotRead("other_delegate"));
   });
 
   // Rule 10.
@@ -341,6 +365,23 @@ describe("potReading: what a pot's raw facts let the record say", () => {
     expect(
       read(asRaw({ ...HEALTHY, allowance: [BigInt(1), BigInt(0), 43200, BigInt(1), BigInt(1)] })),
     ).toEqual(limitsNotRead("other_period"));
+    // Rule 12 reads the allowance's five facts as bigints, or reads no ceiling.
+    const [amount, spent, resetTimeMin, lastResetMin, nonce] = HEALTHY.allowance;
+    expect(read(asRaw({ ...HEALTHY, allowance: [50_000_000, spent, resetTimeMin, lastResetMin, nonce] }))).toEqual(
+      limitsNotRead("other_period"),
+    );
+    expect(read(asRaw({ ...HEALTHY, allowance: [amount, spent, resetTimeMin, 29919864, nonce] }))).toEqual(
+      limitsNotRead("other_period"),
+    );
+    expect(read(asRaw({ ...HEALTHY, allowance: [amount, 10_000_000, resetTimeMin, lastResetMin, nonce] }))).toEqual(
+      limitsNotRead("other_period"),
+    );
+    expect(read(asRaw({ ...HEALTHY, allowance: [amount, spent, resetTimeMin, lastResetMin, 2] }))).toEqual(
+      limitsNotRead("other_period"),
+    );
+    expect(read(asRaw({ ...HEALTHY, allowance: [amount, spent, resetTimeMin, lastResetMin] }))).toEqual(
+      limitsNotRead("other_period"),
+    );
     // An empty string is not an empty list: never "stopped".
     expect(read(asRaw({ ...HEALTHY, modules: { list: "", next: SAFE_SENTINEL } }))).toEqual(
       limitsNotRead("other_module"),
@@ -425,6 +466,11 @@ describe("potCeilingCapFromGrant: the most the ceiling field takes", () => {
         maxUsdc: 250,
         endsOn: null,
       });
+    // A grant without its choices or its acts is no grant: none, never a throw.
+    const broken = (g: unknown) => g as Parameters<typeof potCeilingCapFromGrant>[0];
+    for (const g of [{}, { choices: null }, { choices: {} }, { choices: { acts: null, endsOn: null } }, { choices: { endsOn: "2027-01-31" } }, "grant", 7])
+      expect(potCeilingCapFromGrant(broken(g))).toEqual({ kind: "none" });
+    expect(potCeilingCapFromGrant(broken(undefined))).toEqual({ kind: "none" });
     // Nothing left that allows spending: no spending.
     expect(potCeilingCapFromGrant(grant({ buy: odd(cases[0]), pay: NO, engageContractor: NO }))).toEqual({
       kind: "no_spending",
@@ -486,7 +532,9 @@ function fakeClient(over: {
   const answer = over.answer ?? realAnswer;
   const fail = (name: string) => over.reject === name;
   const client = {
-    getBlockNumber: vi.fn(async () => {
+    // The options are recorded by the spy: the test pins `cacheTime: 0`.
+    getBlockNumber: vi.fn(async (options?: { cacheTime?: number }) => {
+      void options;
       if (fail("getBlockNumber")) throw new Error("no head");
       return REAL_BLOCK;
     }),
@@ -557,6 +605,9 @@ describe("readPotRaw: the browser's read of a pot, at one block", () => {
     expect(raw).toEqual(REAL_STOPPED);
     expect(potReading(raw, EXPECT)).toEqual({ state: "stopped", why: "module_off", balanceUnits: BigInt(0) });
     expect(client.getBlockNumber).toHaveBeenCalledTimes(1);
+    // The head read fresh: viem otherwise serves a cached block number for its polling interval,
+    // and a read right after the guardian's own transaction could see an older block.
+    expect(client.getBlockNumber).toHaveBeenCalledWith({ cacheTime: 0 });
     expect(client.multicall).toHaveBeenCalledTimes(1);
     expect(client.getCode).toHaveBeenCalledTimes(2);
     expect(client.getBalance).toHaveBeenCalledTimes(2);
