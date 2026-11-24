@@ -581,6 +581,7 @@ function LegalBodySession({
           onEngage={() => setView("human")}
           onContinue={() => setView(null)}
           onBack={() => setView("signin")}
+          returnPath="/legal-body"
         />
       );
 

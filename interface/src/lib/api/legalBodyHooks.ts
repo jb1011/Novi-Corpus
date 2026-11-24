@@ -11,7 +11,8 @@
  *
  * No hook here writes on mount. Every write is a mutation a click calls; the two decisions a hook
  * makes about time, the poll interval and whether the orders list is asked again after a failure,
- * are `orderPollInterval`'s and `retryRead`'s, pure functions with tests.
+ * are `orderPollInterval`'s and `retryRead`'s, pure functions with tests. The one exception is
+ * outside this file: `useIdentityCheck` reads an open identity check back when its card mounts.
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
@@ -287,7 +288,7 @@ export function useIdentityCheckSessionQuery(options: { enabled: boolean }) {
 
 /** Reads again the two things a check can move: the World ID record, with its identity block, and
  *  the open session. */
-function useInvalidateIdentity() {
+export function useInvalidateIdentity() {
   const queryClient = useQueryClient();
   const token = useAuthToken();
   return useCallback(async () => {

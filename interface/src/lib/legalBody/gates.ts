@@ -132,28 +132,25 @@ export type HumanStepView = {
   verify: boolean;
   continue: boolean;
   retry: boolean;
-  /** The identity card's state, or null when this deployment does not require the record. */
-  guardianIdentity: GuardianIdentityView["state"] | null;
 };
 
 /**
  * The human gate's screen under this product's rule (`requireRealHuman`, `forceRequired`): a
  * record the real-human check refuses offers Verify and never Continue; a deployment without World
- * ID says so and offers no button at all.
+ * ID says so and offers no button at all. An accepted person's Continue waits, like the gate, on
+ * an identity record that production requires and that is not verified (`identityBlocksGate`).
+ * The identity card itself is `identityCardView`'s.
  */
 export function humanStepView(
   state: WorldIdGateState,
   identity?: GuardianIdentityView | null,
 ): HumanStepView {
-  const guardianIdentity = identity?.required === true ? identity.state : null;
-  const identityOpen = guardianIdentity === null || guardianIdentity === "verified";
   const none = {
     title: "ask" as const,
     points: false,
     verify: false,
     continue: false,
     retry: false,
-    guardianIdentity,
   };
   switch (state.kind) {
     case "loading":
@@ -169,7 +166,12 @@ export function humanStepView(
     case "not_accepted":
       return { ...none, line: "record", points: true, verify: true };
     case "accepted":
-      return { ...none, title: "accepted", line: "record", continue: identityOpen };
+      return {
+        ...none,
+        title: "accepted",
+        line: "record",
+        continue: !identityBlocksGate(identity),
+      };
   }
 }
 

@@ -21,6 +21,7 @@ import {
   bannerLines,
   humanErrorSentence,
   humanStepView,
+  identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
   legalBodyGate,
@@ -209,7 +210,6 @@ describe("humanStepView", () => {
       verify: false,
       continue: false,
       retry: false,
-      guardianIdentity: null,
     });
   });
 
@@ -222,8 +222,7 @@ describe("humanStepView", () => {
         verify: false,
         continue: false,
         retry: false,
-        guardianIdentity: null,
-      });
+        });
     }
   });
 
@@ -239,7 +238,6 @@ describe("humanStepView", () => {
       verify: true,
       continue: false,
       retry: false,
-      guardianIdentity: null,
     });
   });
 
@@ -251,7 +249,6 @@ describe("humanStepView", () => {
       verify: true,
       continue: false,
       retry: false,
-      guardianIdentity: null,
     });
   });
 
@@ -263,8 +260,17 @@ describe("humanStepView", () => {
       verify: false,
       continue: true,
       retry: false,
-      guardianIdentity: null,
     });
+  });
+
+  test("the identity check: optional on the testnet, and on mainnet no Continue until it counts", () => {
+    const accepted: WorldIdGateState = { kind: "accepted", credential: "orb" };
+    expect(humanStepView(accepted, { required: false, automatic: true, state: "none" }).continue).toBe(true);
+    expect(humanStepView(accepted, { required: true, automatic: true, state: "pending" }).continue).toBe(false);
+    expect(humanStepView(accepted, { required: true, automatic: true, state: "verified" }).continue).toBe(true);
+    expect(identityBlocksGate({ required: false, automatic: true, state: "none" })).toBe(false);
+    expect(identityBlocksGate({ required: true, automatic: true, state: "needs_review" })).toBe(true);
+    expect(identityBlocksGate({ required: true, automatic: true, state: "verified" })).toBe(false);
   });
 });
 

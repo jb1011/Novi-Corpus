@@ -240,6 +240,7 @@ function StartSession({
           onEngage={() => setView("human")}
           onContinue={() => setView(null)}
           onBack={() => setView("signin")}
+          returnPath="/start"
         />
         {escape && <EscapeLink />}
       </>

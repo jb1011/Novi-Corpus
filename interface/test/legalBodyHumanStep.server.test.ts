@@ -13,11 +13,15 @@ import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, test, vi } from "vitest";
-import { ApiError, type WorldIdMe } from "@/lib/api/types";
+import { ApiError, type GuardianIdentityView, type IdentitySessionView, type WorldIdMe } from "@/lib/api/types";
 import type { WorldIdGateState } from "@/lib/legalBody/worldIdGate";
 
 const me = vi.hoisted(() => ({
   current: { data: undefined as unknown, error: null as unknown },
+}));
+/** The open identity check session the card reads. */
+const session = vi.hoisted(() => ({
+  current: { status: "none" } as unknown,
 }));
 
 vi.mock("@/components/onboarding/AuthProvider", () => ({
@@ -33,12 +37,21 @@ vi.mock("@/lib/api/hooks", async (importOriginal) => ({
   useWorldIdMeQuery: () => ({ data: me.current.data, error: me.current.error, refetch: async () => undefined }),
 }));
 
+vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/api/legalBodyHooks")>()),
+  useIdentityCheckSessionQuery: () => ({ data: session.current, error: null, refetch: async () => undefined }),
+  useStartIdentityCheckMutation: () => ({ mutate() {}, mutateAsync: async () => ({}), isPending: false }),
+  useSyncIdentityCheckMutation: () => ({ mutate() {}, mutateAsync: async () => ({}), isPending: false }),
+}));
+
 import { GetWorldIdHelp } from "@/components/guardian/GetWorldIdHelp";
 import { WorldIdStatusRow } from "@/components/guardian/WorldIdGate";
 import { HumanStep } from "@/components/legalBody/HumanStep";
 import { LEGAL_BODY_COPY, PERSON_SENTENCES, fillCopy } from "@/lib/legalBody/copy";
 
 const H = LEGAL_BODY_COPY.human;
+const G = H.guardianIdentity;
+const A = G.automatic;
 
 const record = (over: Partial<WorldIdMe> = {}): WorldIdMe => ({
   verified: true,
@@ -54,7 +67,12 @@ function step(data: WorldIdMe | undefined, error: unknown = null): string {
     createElement(
       QueryClientProvider,
       { client: new QueryClient() },
-      createElement(HumanStep, { onEngage: () => {}, onContinue: () => {}, onBack: () => {} }),
+      createElement(HumanStep, {
+        onEngage: () => {},
+        onContinue: () => {},
+        onBack: () => {},
+        returnPath: "/legal-body",
+      }),
     ),
   );
 }
@@ -125,6 +143,71 @@ describe("HumanStep", () => {
     expect(out).toContain(H.unavailable);
     expect(out).not.toMatch(button(H.verify));
     expect(out).not.toMatch(button(H.continue));
+  });
+});
+
+describe("HumanStep: the identity check card", () => {
+  const withIdentity = (identity: GuardianIdentityView, over: Partial<WorldIdMe> = {}) =>
+    record({ identity, ...over });
+
+  test("no identity block: no card", () => expect(step(record())).not.toContain(G.title));
+
+  test("required, not automatic: the operator's sentence, no form, no Continue", () => {
+    const out = step(withIdentity({ required: true, automatic: false, state: "none" }));
+    expect(out).toContain(G.none);
+    expect(out).not.toContain("<input");
+    expect(out).not.toMatch(button(H.continue));
+  });
+
+  test("testnet: the check is offered as a test, and Continue is there without it", () => {
+    session.current = { status: "none" } satisfies IdentitySessionView;
+    const out = step(withIdentity({ required: false, automatic: true, state: "none" }));
+    expect(out).toContain(A.optional);
+    expect(out).toMatch(button(A.buttons.start));
+    expect(out).toMatch(button(H.continue));
+  });
+
+  test("mainnet: the check is required, and there is no Continue until it counts", () => {
+    session.current = { status: "none" } satisfies IdentitySessionView;
+    const before = step(withIdentity({ required: true, automatic: true, state: "none" }));
+    expect(before).toContain(A.required);
+    expect(before).toMatch(button(A.buttons.start));
+    expect(before).not.toMatch(button(H.continue));
+    const after = step(
+      withIdentity({
+        required: true,
+        automatic: true,
+        state: "verified",
+        verifiedAt: Date.UTC(2026, 10, 24),
+        expiresAt: Date.UTC(2028, 10, 24),
+      }),
+    );
+    expect(after).toContain("Verified on");
+    expect(after).toMatch(button(H.continue));
+  });
+
+  test("World ID not accepted yet: the card waits for it and shows no form", () => {
+    session.current = { status: "none" } satisfies IdentitySessionView;
+    const out = step(
+      withIdentity({ required: true, automatic: true, state: "none" }, { credential: "waiver", realHuman: false }),
+    );
+    expect(out).toContain(A.locked);
+    expect(out).not.toContain("<input");
+  });
+
+  test("an open session, before the read-back: the card says it is reading the check, never the continue form", () => {
+    session.current = {
+      status: "open",
+      sessionId: "s",
+      startedAt: 0,
+      attemptsLeft: 3,
+      lastErrorCode: null,
+      reading: false,
+      held: null,
+    } satisfies IdentitySessionView;
+    const out = step(withIdentity({ required: true, automatic: true, state: "pending" }));
+    expect(out).toContain(A.loading);
+    expect(out).not.toContain("<input");
   });
 });
 
