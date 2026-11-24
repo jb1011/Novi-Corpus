@@ -132,7 +132,8 @@ export interface ApiDeps extends EntityViewDeps {
    * code verified, `potOffer.ts`). Its doors (the note, its read, and taking it off the record) are
    * mounted beside the order doors, and only with them; they answer `pot_not_offered` while it is
    * not offered. Absent (a chain with no pot table), the doors are a 404.
-   * `/config.legalBodies.pot` is whether they answer.
+   * `/config.legalBodies.pot` is whether they answer. The agent's two MCP tools (`get_pot`,
+   * `prepare_pot_take`) run over the same object, under the same flag.
    */
   legalBodyPot?: LegalBodyPotDeps;
   webOrigin: string;

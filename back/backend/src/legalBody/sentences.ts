@@ -194,6 +194,25 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // `POST /legal-body-orders/:id/pot/off-record`, for a body with no note, or whose latest note
   // already took the pot off the record.
   pot_not_on_record: "This legal body's pot is not on the public record, so nothing was taken off.",
+  // The agent's two pot tools (`get_pot`, `prepare_pot_take`), for a body with no note.
+  pot_not_declared: "No pot is noted for this legal body: its guardian creates one in the web app.",
+  // `prepare_pot_take`, for a pot whose reading is not `ceiling_read`.
+  pot_not_readable:
+    "The pot's ceiling cannot be read from the chain as it stands, so no take was prepared: the guardian checks the pot in the web app.",
+  // …a payee or an amount the tool cannot take as they were sent.
+  pot_take_invalid:
+    "A take names who is paid, as an address that is not zero, and an amount above zero in millionths of a USDC, as a decimal string.",
+  // …an amount above the ceiling less what was taken in the current period.
+  pot_take_over_ceiling:
+    "This take is above what is left of the ceiling in the current thirty-day period. Nothing was prepared.",
+  // …an amount above what the pot holds.
+  pot_take_over_balance: "This take is above what the pot holds. Nothing was prepared.",
+  // Not refusals: the two sentences a prepared take carries, how to send it and, when the agent's
+  // key holds under the low fee-money mark, the warning.
+  pot_take_how:
+    "Send this transaction from the agent's own key, exactly as given, with no signature added. The key pays the network fee in USDC.",
+  pot_take_low_fee_money:
+    "The agent's key holds very little USDC for fees, so the network may refuse this transaction: send the key a little USDC first.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */

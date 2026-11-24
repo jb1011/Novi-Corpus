@@ -17,8 +17,11 @@ import { readOrderGrant } from "./orderGrant";
 import { chainCall } from "./orders";
 import {
   POT_CEILING_MAX_USDC,
+  POT_FEE_LOW_WEI,
   POT_PERIOD_MINUTES,
+  POT_TAKE_GAS,
   type PotAddresses,
+  type PotRaw,
   type PotReading,
   SAFE_PROXY_RUNTIME_CODE_HASH,
   USDC_UNIT,
@@ -27,8 +30,9 @@ import {
   potInitializer,
   potReading,
   predictPotAddress,
+  takeCalldata,
 } from "./safePot";
-import { refusal } from "./sentences";
+import { refusal, sentenceFor } from "./sentences";
 import type { Standing } from "./standing";
 import {
   type LegalBodyStatementDeps,
@@ -89,6 +93,14 @@ export type {
  * not read." (Ruling R15 b): nothing is claimed from contracts that failed their check, and the
  * link to the company is never hidden. Every pot address a body declared leads back to the body
  * (`statementForPotAddress`): the one on the record, or a former one.
+ *
+ * FOR THE AGENT'S OWN KEY (`potForAgent`, `prepareTake`, the MCP tools `get_pot` and
+ * `prepare_pot_take`). The agent reads what is left of the ceiling in the current period, and gets
+ * the take as one transaction its own key sends to the AllowanceModule itself, with an empty
+ * signature: the module takes the sender as the signer. The server builds the bytes and reads the
+ * chain; it holds no key, signs nothing and sends nothing. The pot read is the address of the
+ * body's latest note, which only the note door writes, once it has recomputed it; on or off the
+ * record, a take does not depend on it.
  *
  * Ops lines carry the body's id only.
  */
@@ -885,4 +897,230 @@ export async function statementForPotAddress(
     kept[0] ??
     none
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The agent's two tools: what is left, and a take for the agent's own key to send
+// ---------------------------------------------------------------------------------------------
+
+/** The most one take may be: the module's amounts are uint96. */
+const UINT96_MAX = 2n ** 96n - 1n;
+
+/**
+ * The company's pot as the agent's tools read it. Units are USDC's 6 decimals, as decimal strings;
+ * times are unix seconds. The periods are fixed: each thirty-day period starts where the last one
+ * ended, and `periodEndsAt` is the end of the current one.
+ */
+export interface PotForAgent {
+  chainId: number;
+  /** The address of the body's latest note, on the record or not. */
+  pot: Address;
+  onRecord: boolean;
+  /** The agent's wallet as the registry names it now: the key the pot is read against, and the
+   *  one a take is sent from. */
+  agentWallet: Address;
+  /** The AllowanceModule a take is sent to. */
+  module: Address;
+  token: Address;
+  /** What the reading rules (`potReading`) let be said of the pot, read from the chain at one
+   *  block: `stopped` is "The agent's key cannot take from it: its allowance is switched off." */
+  state: "ceiling_read" | "stopped" | "limits_not_read" | "absent" | "not_the_guardians";
+  /** Present for `ceiling_read` only. `leftUnits` is the ceiling less what was taken in the
+   *  current period, and 0 when more was taken than a lowered ceiling allows. */
+  ceilingUnits?: string;
+  spentUnits?: string;
+  leftUnits?: string;
+  periodEndsAt?: number;
+  /** Present for `ceiling_read` and `stopped`. */
+  balanceUnits?: string;
+  /** The native balance of the agent's key, in wei, as a decimal string: its fee money. Null when
+   *  the address holds no pot's code: the read stops at the code, and nothing else was read. */
+  agentKeyBalanceWei: string | null;
+}
+
+/** A take for the agent's own key to send exactly as given, with no signature added. */
+export interface PreparedTake {
+  chainId: number;
+  /** The agent's wallet: the module takes the sender as the signer. */
+  from: Address;
+  /** The AllowanceModule. */
+  to: Address;
+  value: "0";
+  data: Hex;
+  /** The take's fixed gas limit, as a decimal string. */
+  gas: string;
+  /** What is left of the ceiling in the current period once this take is mined. */
+  leftAfterUnits: string;
+  /** How to send it (`pot_take_how`). */
+  how: string;
+  /** `pot_take_low_fee_money` when the agent's key holds under 0.01 USDC for fees, else null. */
+  warning: string | null;
+}
+
+/** What one read of the agent's pot gave: the answer, and the facts a take is judged on. */
+interface AgentPotRead {
+  view: PotForAgent;
+  table: PotAddresses;
+  reading: PotReading;
+  raw: PotRaw;
+}
+
+/** What is left of the ceiling in the current period: never below 0, as a guardian may lower the
+ *  ceiling under what was already taken. */
+const leftOf = (r: { ceilingUnits: bigint; spentUnits: bigint }): bigint =>
+  r.ceilingUnits > r.spentUnits ? r.ceilingUnits - r.spentUnits : 0n;
+
+/**
+ * The tenant's body and its pot, read for the agent, in this order:
+ *  1. `orderPot`: while the pot is not offered, 409 `pot_not_offered` before anything is read; one
+ *     404 for unknown and not yours; no note: 409 `pot_not_declared`. The address is the latest
+ *     note's, whether it is on the record or not: only the note door writes one, once it has
+ *     recomputed it from the birth details and the body's guardian;
+ *  2. the deployment's chain has a pot table: else 409 `pot_chain_unsupported`;
+ *  3. the registry's wallet of the body's agent, read now through `chainCall`;
+ *  4. one read of the pot against that wallet and the body's guardian (`readPot`, which reads
+ *     everything at one fresh block), and the reading rules, through `chainCall`.
+ * A failed read of the registry or of the chain is 503 `chain_unavailable`. Writes nothing.
+ */
+async function readAgentPot(
+  deps: LegalBodyPotDeps,
+  tenantId: string,
+  legalBodyId: string,
+): Promise<AgentPotRead> {
+  // 1.
+  const { pot } = orderPot(deps, tenantId, legalBodyId);
+  if (pot === null) throw refusal("pot_not_declared", 409);
+  const row = deps.bodies.findOwned(tenantId, legalBodyId);
+  if (row === undefined) throw refusal("not_found", 404);
+  const id = row.legalBodyId;
+  const agentId = row.agentId;
+  // A body is linked, so holds its agent, before its first note (`declarePot`).
+  if (agentId === null) throw new Error(`legal body ${id} has a pot and no agent`);
+
+  // 2.
+  const table = potAddresses(deps.chainId);
+  if (table === null) throw refusal("pot_chain_unsupported", 409);
+
+  // 3.
+  const agentWallet = await chainCall(id, "pot_agent_wallet", async () =>
+    getAddress(await deps.registry.getAgentWallet(BigInt(agentId))),
+  );
+
+  // 4.
+  const { raw, reading } = await chainCall(id, "pot_read", async () => {
+    const read = await deps.chain.readPot({ pot: pot.address, agentWallet });
+    return {
+      raw: read,
+      reading: potReading(read, { addresses: table, guardian: row.guardian, agentWallet }),
+    };
+  });
+
+  const facts = {
+    chainId: deps.chainId,
+    pot: pot.address,
+    onRecord: pot.onRecord,
+    agentWallet,
+    module: table.allowanceModule,
+    token: table.usdc,
+  };
+  const agentKeyBalanceWei = isPotCode(raw.codeHash) ? raw.agentBalanceWei.toString() : null;
+  let view: PotForAgent;
+  switch (reading.state) {
+    case "ceiling_read":
+      view = {
+        ...facts,
+        state: reading.state,
+        ceilingUnits: reading.ceilingUnits.toString(),
+        spentUnits: reading.spentUnits.toString(),
+        leftUnits: leftOf(reading).toString(),
+        periodEndsAt: reading.periodEndsAt,
+        balanceUnits: reading.balanceUnits.toString(),
+        agentKeyBalanceWei,
+      };
+      break;
+    case "stopped":
+      view = {
+        ...facts,
+        state: reading.state,
+        balanceUnits: reading.balanceUnits.toString(),
+        agentKeyBalanceWei,
+      };
+      break;
+    default:
+      view = { ...facts, state: reading.state, agentKeyBalanceWei };
+  }
+  return { view, table, reading, raw };
+}
+
+/**
+ * The company's pot as the agent's tool `get_pot` answers it (`PotForAgent`): the tenant's body,
+ * its pot (`orderPot`; no note: 409 `pot_not_declared`), the registry's wallet, and one read of
+ * the pot at the latest block. A failed chain read is 503 `chain_unavailable`. Writes nothing.
+ */
+export async function potForAgent(
+  deps: LegalBodyPotDeps,
+  tenantId: string,
+  legalBodyId: string,
+): Promise<PotForAgent> {
+  return (await readAgentPot(deps, tenantId, legalBodyId)).view;
+}
+
+/**
+ * A take from the company's pot, for the agent's own key to send itself, in this order:
+ *  1. the pot as `potForAgent` reads it, with its refusals;
+ *  2. `to` an address in EIP-55 or lower case, never zero, and `amountUnits` a canonical decimal
+ *     string above 0 and at most 2^96 - 1: else 400 `pot_take_invalid`;
+ *  3. a reading that is not `ceiling_read`: 409 `pot_not_readable`;
+ *  4. an amount above the ceiling less what was taken in the current period: 409
+ *     `pot_take_over_ceiling`;
+ *  5. an amount above what the pot holds: 409 `pot_take_over_balance`;
+ *  6. the transaction: from the agent's wallet, to the AllowanceModule, value 0, the take's bytes
+ *     (`takeCalldata`, an empty signature), the fixed gas limit, what is left after it, how to
+ *     send it, and the low fee-money warning when the agent's key holds under `POT_FEE_LOW_WEI`.
+ * It writes nothing and sends nothing: the agent's key sends it, or nobody does. The record does
+ * not matter to a take: a pot off the record still answers.
+ */
+export async function prepareTake(
+  deps: LegalBodyPotDeps,
+  tenantId: string,
+  legalBodyId: string,
+  input: { to: unknown; amountUnits: unknown },
+): Promise<PreparedTake> {
+  // 1.
+  const { view, table, reading, raw } = await readAgentPot(deps, tenantId, legalBodyId);
+
+  // 2.
+  const to = takenAddress(input?.to);
+  const amount = takenDecimal(input?.amountUnits);
+  if (to === undefined || amount === undefined || amount === 0n || amount > UINT96_MAX)
+    throw refusal("pot_take_invalid", 400);
+
+  // 3.
+  if (reading.state !== "ceiling_read") throw refusal("pot_not_readable", 409);
+
+  // 4.
+  const left = leftOf(reading);
+  if (amount > left) throw refusal("pot_take_over_ceiling", 409);
+
+  // 5.
+  if (amount > reading.balanceUnits) throw refusal("pot_take_over_balance", 409);
+
+  // 6.
+  return {
+    chainId: view.chainId,
+    from: view.agentWallet,
+    to: table.allowanceModule,
+    value: "0",
+    data: takeCalldata({
+      pot: view.pot,
+      token: table.usdc,
+      to,
+      amountUnits: amount,
+      agentWallet: view.agentWallet,
+    }),
+    gas: String(POT_TAKE_GAS),
+    leftAfterUnits: (left - amount).toString(),
+    how: sentenceFor("pot_take_how"),
+    warning: raw.agentBalanceWei < POT_FEE_LOW_WEI ? sentenceFor("pot_take_low_fee_money") : null,
+  };
 }

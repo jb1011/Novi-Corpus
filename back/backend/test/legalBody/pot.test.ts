@@ -16,7 +16,7 @@
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type Address, getAddress, zeroAddress } from "viem";
+import { type Address, decodeFunctionData, getAddress, keccak256, size, zeroAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError } from "../../src/errors";
 import type { GrantChoices } from "../../src/legalBody/grant";
@@ -25,18 +25,26 @@ import {
   POT_DECLARATION,
   declarePot,
   orderPot,
+  potForAgent,
   potOfStatement,
+  prepareTake,
   removePot,
   statementForPotAddress,
 } from "../../src/legalBody/pot";
 import {
   POT_CEILING_MAX_USDC,
+  POT_FEE_LOW_WEI,
   type PotRaw,
   SAFE_PROXY_RUNTIME_CODE_HASH,
+  SAFE_SENTINEL,
+  allowanceModuleAbi,
 } from "../../src/legalBody/safePot";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { type StatementOutcome, statementForAgent } from "../../src/legalBody/statements";
-import { SqliteLegalBodyPotRepository } from "../../src/persistence/legalBodyPotRepository";
+import {
+  type PotBirthNote,
+  SqliteLegalBodyPotRepository,
+} from "../../src/persistence/legalBodyPotRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import { A as GRANT_A } from "../helpers/grantFixtures";
 import {
@@ -1657,6 +1665,399 @@ describe("the lookup by a pot's address (statementForPotAddress)", () => {
     });
     expect(stChain.snapshots).toHaveLength(failAt);
     expect(chain.port.readPot).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The agent's two tools: what is left, and a take for the agent's own key to send
+// ---------------------------------------------------------------------------------------------
+
+/** The Safe the real run of 24 Nov created: V7's pot. Its birth details are the run's (a
+ *  five-minute period, which no note door takes), so here its note is written straight into the
+ *  record. */
+const REAL_SAFE: Address = "0x0bbBa174c1D6b6Edd2F1A86ff5af435B645b77EF";
+const REAL_SAFE_BIRTH: PotBirthNote = {
+  saltNonce: "72231338869903870587851170785833461215",
+  agentWallet: A,
+  ceilingUnits: "2000000",
+};
+/** keccak256 of V7: the agent's take the real run mined (the real Safe, USDC, P, 1 USDC, A, an
+ *  empty signature). */
+const V7_HASH = "0xdfe8f8bded62c4439e5dc86fdb9f39258afb89a2a0c10a65383c15ae626c24ec";
+const MODULE: Address = "0xAA46724893dedD72658219405185Fb0Fc91e091C";
+
+describe("the agent's pot: what is left (potForAgent) and a take to send (prepareTake)", () => {
+  /** A linked body of G whose registry names A, with `address` (the real Safe unless told) noted
+   *  an hour ago. */
+  function withPot(o: { address?: Address; birth?: PotBirthNote } = {}): LegalBodyRecord {
+    const row = linked();
+    notePot(pots, row, {
+      at: NOW_S - 3_600,
+      address: o.address ?? REAL_SAFE,
+      birth: o.birth ?? (o.address === undefined ? REAL_SAFE_BIRTH : BIRTH_V3),
+    });
+    return row;
+  }
+  const answer = (raw: PotRaw) => chain.port.readPot.mockResolvedValue(raw);
+  const take = (row: LegalBodyRecord, input: { to: unknown; amountUnits: unknown }) =>
+    prepareTake(deps(), G, row.legalBodyId, input);
+  const read = (row: LegalBodyRecord, d: LegalBodyPotDeps = deps()) =>
+    potForAgent(d, G, row.legalBodyId);
+  /** The pot's notes and the body's events, to show that a call wrote nothing. */
+  const written = (row: LegalBodyRecord) => ({
+    notes: rows(),
+    events: s.repo.listEvents(row.legalBodyId),
+  });
+
+  test("prepares the take the real run mined (V7): to the module, value 0, gas 200000, an empty signature", async () => {
+    // The pot is the real Safe, reading HEALTHY (a ceiling of 50, 10 taken), the agent A, the
+    // payee P, 1000000 units.
+    const row = withPot();
+    answer(HEALTHY);
+    const before = written(row);
+    const t = await take(row, { to: P, amountUnits: "1000000" });
+    expect(keccak256(t.data)).toBe(V7_HASH);
+    expect(size(t.data)).toBe(292);
+    expect(t).toEqual({
+      chainId: 5_042_002,
+      from: A,
+      to: MODULE,
+      value: "0",
+      data: t.data,
+      gas: "200000",
+      leftAfterUnits: "39000000",
+      how: LEGAL_BODY_SENTENCES.pot_take_how,
+      warning: null,
+    });
+    expect(Object.keys(t)).toEqual([
+      "chainId",
+      "from",
+      "to",
+      "value",
+      "data",
+      "gas",
+      "leftAfterUnits",
+      "how",
+      "warning",
+    ]);
+    // The take of the module: the pot, USDC, the payee, the amount, no payment, the agent's own
+    // key as the delegate, and an empty signature: the module takes the sender as the signer.
+    const { functionName, args } = decodeFunctionData({ abi: allowanceModuleAbi, data: t.data });
+    expect(functionName).toBe("executeAllowanceTransfer");
+    expect(args).toEqual([REAL_SAFE, T.usdc, P, 1_000_000n, zeroAddress, 0n, A, "0x"]);
+    // The payee in lower case gives the same bytes.
+    expect((await take(row, { to: P.toLowerCase(), amountUnits: "1000000" })).data).toBe(t.data);
+    // One registry read for the body's agent, then one read of the pot against that wallet: the
+    // port reads all of it at one fresh block, as no block is asked. No code read, nothing written.
+    expect(registry.getAgentWallet.mock.calls[0]).toEqual([BigInt(row.agentId as string)]);
+    expect(chain.port.readPot.mock.calls[0]).toEqual([{ pot: REAL_SAFE, agentWallet: A }]);
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(written(row)).toEqual(before);
+  });
+
+  test("refuses pot_take_over_ceiling for 40000001 units when 40000000 are left, and accepts exactly 40000000", async () => {
+    const row = withPot();
+    answer(HEALTHY);
+    expect(await refusalOf(() => take(row, { to: P, amountUnits: "40000001" }))).toMatchObject(
+      refused("pot_take_over_ceiling", 409),
+    );
+    expect(await take(row, { to: P, amountUnits: "40000000" })).toMatchObject({
+      leftAfterUnits: "0",
+      warning: null,
+    });
+    // A ceiling lowered under what was taken in the current period leaves nothing: one unit is
+    // over it, and the read says 0 are left.
+    answer({ ...HEALTHY, allowance: [5_000_000n, 10_000_000n, 43200n, 29919864n, 2n] });
+    expect(await refusalOf(() => take(row, { to: P, amountUnits: "1" }))).toMatchObject(
+      refused("pot_take_over_ceiling", 409),
+    );
+    expect(await read(row)).toMatchObject({ leftUnits: "0", spentUnits: "10000000" });
+  });
+
+  test("refuses pot_take_over_balance when the pot holds less than the amount; the ceiling is judged first", async () => {
+    const row = withPot();
+    answer({ ...HEALTHY, balanceUnits: 999_999n });
+    expect(await refusalOf(() => take(row, { to: P, amountUnits: "1000000" }))).toMatchObject(
+      refused("pot_take_over_balance", 409),
+    );
+    expect(await take(row, { to: P, amountUnits: "999999" })).toMatchObject({
+      leftAfterUnits: "39000001",
+    });
+    // Above both: the ceiling's refusal.
+    expect(await refusalOf(() => take(row, { to: P, amountUnits: "40000001" }))).toMatchObject(
+      refused("pot_take_over_ceiling", 409),
+    );
+  });
+
+  test("refuses pot_take_invalid for amount '0', '1.5', 1000000 as a number, to the zero address, to 'P' with a wrong checksum", async () => {
+    const row = withPot();
+    answer(HEALTHY);
+    // P with its first letter in the wrong case: mixed case that is not the checksum.
+    const wrongChecksum = `0xe${P.slice(3)}`;
+    expect(wrongChecksum.toLowerCase()).toBe(P.toLowerCase());
+    expect(wrongChecksum).not.toBe(P);
+    const inputs: { to: unknown; amountUnits: unknown }[] = [
+      { to: P, amountUnits: "0" },
+      { to: P, amountUnits: "1.5" },
+      { to: P, amountUnits: 1_000_000 },
+      { to: zeroAddress, amountUnits: "1000000" },
+      { to: wrongChecksum, amountUnits: "1000000" },
+      { to: "P", amountUnits: "1000000" },
+      { to: P, amountUnits: "01000000" },
+      { to: P, amountUnits: "-1" },
+      { to: P, amountUnits: " 1000000" },
+      { to: P, amountUnits: (2n ** 96n).toString() },
+      { to: P, amountUnits: undefined },
+      { to: undefined, amountUnits: "1000000" },
+      { to: P.slice(0, 41), amountUnits: "1000000" },
+    ];
+    for (const input of inputs)
+      expect(await refusalOf(() => take(row, input)), JSON.stringify(input)).toMatchObject(
+        refused("pot_take_invalid", 400),
+      );
+    // The largest amount the module takes is a valid amount: here it is above the ceiling.
+    expect(
+      await refusalOf(() => take(row, { to: P, amountUnits: (2n ** 96n - 1n).toString() })),
+    ).toMatchObject(refused("pot_take_over_ceiling", 409));
+    // An address in lower case is taken.
+    expect(await take(row, { to: P.toLowerCase(), amountUnits: "1" })).toMatchObject({
+      leftAfterUnits: "39999999",
+    });
+  });
+
+  test("refuses pot_not_readable when the pot is stopped, though the module still shows an allowance", async () => {
+    const row = withPot();
+    const states: [PotRaw, string][] = [
+      // The module switched off: the module's own answers still show the key and a live-looking
+      // allowance (seen in the proof).
+      [{ ...HEALTHY, modules: { list: [], next: SAFE_SENTINEL } }, "stopped"],
+      // The key removed while the add-on is on.
+      [{ ...HEALTHY, delegates: { list: [], next: 0 } }, "stopped"],
+      // Something the reading does not read past: another fallback handler.
+      [{ ...HEALTHY, fallbackHandler: P }, "limits_not_read"],
+      // No code at the address: the Safe was noted, never created.
+      [{ ...HEALTHY, codeHash: null }, "absent"],
+      // A second owner.
+      [{ ...HEALTHY, owners: [G, P] }, "not_the_guardians"],
+    ];
+    for (const [raw, state] of states) {
+      answer(raw);
+      expect((await read(row)).state, state).toBe(state);
+      expect(
+        await refusalOf(() => take(row, { to: P, amountUnits: "1000000" })),
+        state,
+      ).toMatchObject(refused("pot_not_readable", 409));
+    }
+    // The registry names a new key, which the pot's allowance does not name yet: its limits are
+    // not read for that key, and no take is prepared for it.
+    answer(HEALTHY);
+    registry.wallets.set(row.agentId as string, P);
+    expect(await read(row)).toMatchObject({ state: "limits_not_read", agentWallet: P });
+    expect(chain.port.readPot.mock.calls.at(-1)).toEqual([{ pot: REAL_SAFE, agentWallet: P }]);
+    expect(await refusalOf(() => take(row, { to: P, amountUnits: "1" }))).toMatchObject(
+      refused("pot_not_readable", 409),
+    );
+  });
+
+  test("refuses pot_not_declared with no note, before any chain read, whatever the take", async () => {
+    const row = linked();
+    for (const run of [
+      () => read(row),
+      () => take(row, { to: P, amountUnits: "1000000" }),
+      () => take(row, { to: zeroAddress, amountUnits: "0" }),
+    ])
+      expect(await refusalOf(run)).toMatchObject(refused("pot_not_declared", 409));
+    expectNoChainRead();
+  });
+
+  test("warns pot_take_low_fee_money when the agent's key holds 0 wei, and when it holds 9999999999999999; not at 10000000000000000; still prepares the take", async () => {
+    expect(POT_FEE_LOW_WEI).toBe(10_000_000_000_000_000n);
+    const row = withPot();
+    const cases: [bigint, string | null][] = [
+      [0n, LEGAL_BODY_SENTENCES.pot_take_low_fee_money as string],
+      [9_999_999_999_999_999n, LEGAL_BODY_SENTENCES.pot_take_low_fee_money as string],
+      [10_000_000_000_000_000n, null],
+    ];
+    for (const [agentBalanceWei, warning] of cases) {
+      answer({ ...HEALTHY, agentBalanceWei });
+      const t = await take(row, { to: P, amountUnits: "1000000" });
+      expect(t.warning, String(agentBalanceWei)).toBe(warning);
+      expect(keccak256(t.data)).toBe(V7_HASH);
+      expect(await read(row)).toMatchObject({ agentKeyBalanceWei: agentBalanceWei.toString() });
+    }
+  });
+
+  test("potForAgent: leftUnits is the ceiling less what was taken; amounts are absent unless ceiling_read; a stopped pot carries its balance; onRecord follows the latest note", async () => {
+    const row = withPot({ address: V3_ADDRESS });
+    const facts = {
+      chainId: 5_042_002,
+      pot: V3_ADDRESS,
+      onRecord: true,
+      agentWallet: A,
+      module: MODULE,
+      token: T.usdc,
+    };
+    answer(HEALTHY);
+    const ceiling = await read(row);
+    expect(ceiling).toEqual({
+      ...facts,
+      state: "ceiling_read",
+      ceilingUnits: "50000000",
+      spentUnits: "10000000",
+      leftUnits: "40000000",
+      periodEndsAt: (29919864 + 43200) * 60,
+      balanceUnits: "190000000",
+      agentKeyBalanceWei: "100000000000000000",
+    });
+    expect(Object.keys(ceiling)).toEqual([
+      "chainId",
+      "pot",
+      "onRecord",
+      "agentWallet",
+      "module",
+      "token",
+      "state",
+      "ceilingUnits",
+      "spentUnits",
+      "leftUnits",
+      "periodEndsAt",
+      "balanceUnits",
+      "agentKeyBalanceWei",
+    ]);
+
+    // The real Safe after its stop: stopped, with its balance and the key's fee money only.
+    answer(REAL_STOPPED);
+    expect(await read(row)).toEqual({
+      ...facts,
+      state: "stopped",
+      balanceUnits: "0",
+      agentKeyBalanceWei: "294000000000000",
+    });
+    // Limits not read, and a Safe not the guardian's alone: no amount at all.
+    answer({ ...HEALTHY, fallbackHandler: P });
+    expect(await read(row)).toEqual({
+      ...facts,
+      state: "limits_not_read",
+      agentKeyBalanceWei: "100000000000000000",
+    });
+    answer({ ...HEALTHY, threshold: 2n });
+    expect(await read(row)).toEqual({
+      ...facts,
+      state: "not_the_guardians",
+      agentKeyBalanceWei: "100000000000000000",
+    });
+    // No pot's code at the address: the read stops at the code, so the key's fee money was not
+    // read, and none is stated.
+    answer({ ...HEALTHY, codeHash: null });
+    expect(await read(row)).toEqual({ ...facts, state: "absent", agentKeyBalanceWei: null });
+    answer({ ...HEALTHY, codeHash: SOME_CODE });
+    expect(await read(row)).toEqual({
+      ...facts,
+      state: "not_the_guardians",
+      agentKeyBalanceWei: null,
+    });
+
+    // Taken off the public record, the pot still answers, and a take is still prepared: the record
+    // does not matter to a take.
+    answer(HEALTHY);
+    clock += 60_000;
+    removePot(deps(), G, row.legalBodyId);
+    expect(await read(row)).toEqual({ ...ceiling, onRecord: false });
+    expect(await take(row, { to: P, amountUnits: "1000000" })).toMatchObject({
+      leftAfterUnits: "39000000",
+    });
+    // Put back, it is on the record again.
+    clock += 60_000;
+    await declare(row, V3_INPUT);
+    expect(await read(row)).toEqual(ceiling);
+  });
+
+  test("the pot read is the latest note's address, replaced or not", async () => {
+    const row = withPot({ address: V3_ADDRESS });
+    const second = potOf(60n);
+    notePot(pots, row, { at: NOW_S, address: second.address, birth: second.birth });
+    answer({ ...HEALTHY, allowance: [60_000_000n, 0n, 43200n, 29919864n, 0n] });
+    expect(await read(row)).toMatchObject({
+      pot: second.address,
+      state: "ceiling_read",
+      leftUnits: "60000000",
+    });
+    expect(chain.port.readPot.mock.calls).toEqual([[{ pot: second.address, agentWallet: A }]]);
+  });
+
+  test("while the pot is not offered: pot_not_offered for both, before anything is read", async () => {
+    const row = withPot();
+    answer(HEALTHY);
+    offered = false;
+    for (const run of [() => read(row), () => take(row, { to: P, amountUnits: "1000000" })])
+      expect(await refusalOf(run)).toMatchObject(refused("pot_not_offered", 409));
+    expectNoChainRead();
+    offered = true;
+    expect(await read(row)).toMatchObject({ state: "ceiling_read" });
+  });
+
+  test("one 404 for another tenant's body and for an unknown id, and no chain read", async () => {
+    const row = withPot();
+    answer(HEALTHY);
+    for (const [tenant, id] of [
+      [STRANGER, row.legalBodyId],
+      [G, `lb_${"0".repeat(36)}`],
+    ] as const) {
+      expect(await refusalOf(() => potForAgent(deps(), tenant, id))).toMatchObject(
+        refused("not_found", 404),
+      );
+      expect(
+        await refusalOf(() => prepareTake(deps(), tenant, id, { to: P, amountUnits: "1" })),
+      ).toMatchObject(refused("not_found", 404));
+    }
+    expectNoChainRead();
+  });
+
+  test("a chain without a pot table is pot_chain_unsupported, before any chain read", async () => {
+    const row = withPot();
+    expect(await refusalOf(() => read(row, deps({ chainId: 1 })))).toMatchObject(
+      refused("pot_chain_unsupported", 409),
+    );
+    expectNoChainRead();
+  });
+
+  test("a failed read of the registry or of the pot is 503 chain_unavailable, with no node text in the log, and nothing is written", async () => {
+    const row = withPot();
+    answer(HEALTHY);
+    const before = written(row);
+    registry.getAgentWallet.mockRejectedValueOnce(nodeError());
+    expect(await refusalOf(() => take(row, { to: P, amountUnits: "1" }))).toMatchObject(
+      refused("chain_unavailable", 503),
+    );
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    chain.port.readPot.mockRejectedValueOnce(nodeError());
+    expect(await refusalOf(() => read(row))).toMatchObject(refused("chain_unavailable", 503));
+    expect(linesOf("legal_body_chain_unavailable")).toEqual([
+      {
+        level: "warn",
+        orderId: row.legalBodyId,
+        stage: "pot_agent_wallet",
+        errorName: "HttpRequestError",
+      },
+      {
+        level: "warn",
+        orderId: row.legalBodyId,
+        stage: "pot_read",
+        errorName: "HttpRequestError",
+      },
+    ]);
+    expect(printed.join("\n")).not.toContain("rpc.example");
+    expect(written(row)).toEqual(before);
+  });
+
+  test("nothing here holds a key, signs or sends: the module only builds bytes and reads", () => {
+    const text = readFileSync(
+      join(import.meta.dirname, "..", "..", "src", "legalBody", "pot.ts"),
+      "utf8",
+    );
+    expect(text).not.toMatch(
+      /sendTransaction|sendRawTransaction|signTransaction|signMessage|signTypedData|writeContract|privateKeyToAccount|WalletClient|mnemonic/,
+    );
   });
 });
 

@@ -112,6 +112,13 @@ const NAMED_CODES = [
   "pot_exists",
   "pot_taken",
   "pot_not_on_record",
+  "pot_not_declared",
+  "pot_not_readable",
+  "pot_take_invalid",
+  "pot_take_over_ceiling",
+  "pot_take_over_balance",
+  "pot_take_how",
+  "pot_take_low_fee_money",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";
@@ -238,6 +245,28 @@ describe("what the sentences say", () => {
     expect(LEGAL_BODY_SENTENCES.pot_not_on_record).toBe(
       "This legal body's pot is not on the public record, so nothing was taken off.",
     );
+    // The agent's two tools.
+    expect(LEGAL_BODY_SENTENCES.pot_not_declared).toBe(
+      "No pot is noted for this legal body: its guardian creates one in the web app.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_not_readable).toBe(
+      "The pot's ceiling cannot be read from the chain as it stands, so no take was prepared: the guardian checks the pot in the web app.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_take_invalid).toBe(
+      "A take names who is paid, as an address that is not zero, and an amount above zero in millionths of a USDC, as a decimal string.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_take_over_ceiling).toBe(
+      "This take is above what is left of the ceiling in the current thirty-day period. Nothing was prepared.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_take_over_balance).toBe(
+      "This take is above what the pot holds. Nothing was prepared.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_take_how).toBe(
+      "Send this transaction from the agent's own key, exactly as given, with no signature added. The key pays the network fee in USDC.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_take_low_fee_money).toBe(
+      "The agent's key holds very little USDC for fees, so the network may refuse this transaction: send the key a little USDC first.",
+    );
     const pot = [
       "pot_not_offered",
       "pot_invalid",
@@ -249,6 +278,13 @@ describe("what the sentences say", () => {
       "pot_exists",
       "pot_taken",
       "pot_not_on_record",
+      "pot_not_declared",
+      "pot_not_readable",
+      "pot_take_invalid",
+      "pot_take_over_ceiling",
+      "pot_take_over_balance",
+      "pot_take_how",
+      "pot_take_low_fee_money",
     ];
     for (const code of pot) {
       const sentence = LEGAL_BODY_SENTENCES[code] as string;
@@ -259,6 +295,7 @@ describe("what the sentences say", () => {
     // The two that speak of the ceiling count fixed periods.
     for (const code of ["ceiling_above_grant", "grant_allows_no_spending"])
       expect(LEGAL_BODY_SENTENCES[code], code).toContain("in each thirty-day period");
+    expect(LEGAL_BODY_SENTENCES.pot_take_over_ceiling).toContain("the current thirty-day period");
   });
 
   test("a sentence that can be followed by order_lapsed sends nobody back to the order it ends", () => {
