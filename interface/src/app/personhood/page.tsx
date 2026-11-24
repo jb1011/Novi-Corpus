@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { GET_STARTED_CTA } from "@/components/landing/copy";
 import { SectionLabel } from "@/components/landing/SectionLabel";
 import { Nav } from "@/components/landing/Nav";
 import { Footer } from "@/components/landing/Footer";
@@ -91,10 +92,10 @@ export default function PersonhoodPage() {
             </p>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link
-                href="/onboarding"
+                href="/start"
                 className="inline-flex items-center gap-2 rounded-full bg-ink px-5 py-3 text-[14px] font-medium text-paper hover:bg-ink-hover transition-colors"
               >
-                Start onboarding
+                {GET_STARTED_CTA}
               </Link>
               <Link
                 href="/guardian"

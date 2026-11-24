@@ -1,29 +1,41 @@
 /**
  * Resuming the legal-body flow from the server's state: what the local memory holds after a thread
  * is shown, which local choices count for which order, what a "start another" click overrides,
- * where a rail jump sends the derivation, the flow's clock, and the chooser's rows.
+ * where a rail jump sends the derivation, the flow's clock, the chooser's rows, and whether a new
+ * company opens on the choice of paths.
  */
 import { describe, expect, test } from "vitest";
 import type { Address, CompanyView, LegalBodyOrderView } from "@/lib/api/types";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
-import type { LegalBodyThread } from "@/lib/legalBody/flow";
+import { selectLegalBodyThread, type LegalBodyThread } from "@/lib/legalBody/flow";
 import { LEGAL_BODY_PHASES } from "@/lib/legalBody/phases";
 import type { LegalBodyMemory } from "@/lib/legalBody/storage";
 import {
+  arrivalAction,
+  arrivalMemory,
   chooserRows,
+  companyStepScreen,
   draftChoices,
   flowNowMs,
   identitySuggestionAfter,
+  intentSpent,
   jumpMemoryPatch,
+  liveIntent,
+  memoryAfterClick,
   memoryAfterThread,
   mergeLegalBodyMemory,
+  newCompanyHandover,
   patchEndsIntent,
+  startAnotherPatch,
+  threadDoor,
   threadRefsOf,
   threadWithIntent,
 } from "@/lib/legalBody/resume";
+import { pathCards } from "@/lib/start/paths";
 
 /** Anvil's first published test account, and the public testnet factory. */
 const TENANT = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266" as Address;
+const OTHER = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as Address;
 const FACTORY = "0x069f4ADEabcBEd3ffFe2cB6Aaf9e7a66E8731456" as Address;
 const OTHER_FACTORY = "0x00000000000000000000000000000000000fac70" as Address;
 const CHAIN = 5042002;
@@ -40,9 +52,7 @@ const memory = (over: Partial<LegalBodyMemory> = {}): LegalBodyMemory => ({
   ownerChoice: null,
   agentId: null,
   door: null,
-  identityChoice: null,
-  signer: null,
-  suggestedAgentId: null,
+  startAnother: null,
   ...over,
 });
 
@@ -104,7 +114,7 @@ describe("threadRefsOf", () => {
 
 describe("memoryAfterThread", () => {
   const after = (stored: LegalBodyMemory | null, thread: LegalBodyThread) =>
-    memoryAfterThread({ tenant: TENANT, stored, thread });
+    memoryAfterThread({ tenant: TENANT, stored, thread, intent: null });
 
   test("an order thread is remembered with its company", () => {
     expect(after(null, { kind: "order", companyId: "c1", orderId: "o1" })).toEqual(
@@ -153,6 +163,30 @@ describe("memoryAfterThread", () => {
   });
 });
 
+describe("memoryAfterThread: the start-another intent", () => {
+  test("the stored thread keeps a live intent and drops a spent one", () => {
+    const stored = memory({ companyId: null, orderId: null, startAnother: { kind: "another-company", known: [] } });
+    expect(memoryAfterThread({ tenant: TENANT, stored, thread: { kind: "new-company" }, intent: stored.startAnother })).toBeNull();
+    expect(memoryAfterThread({ tenant: TENANT, stored, thread: { kind: "new-company" }, intent: null })?.startAnother).toBeNull();
+  });
+
+  test("an intent that differs from the stored one is a change, and is written", () => {
+    const intent = { kind: "another-agent" as const, companyId: "c1", known: ["o1"] };
+    const stored = memory({ companyId: "c1" });
+    expect(memoryAfterThread({ tenant: TENANT, stored, thread: { kind: "company", companyId: "c1" }, intent })).toEqual(
+      memory({ companyId: "c1", startAnother: intent }),
+    );
+    // The same intent read back from the store is another object with the same values: no change.
+    const reread = memory({ companyId: "c1", startAnother: { ...intent, known: [...intent.known] } });
+    expect(memoryAfterThread({ tenant: TENANT, stored: reread, thread: { kind: "company", companyId: "c1" }, intent })).toBeNull();
+    // An intent known with other ids is another intent.
+    const older = memory({ companyId: "c1", startAnother: { ...intent, known: [] } });
+    expect(
+      memoryAfterThread({ tenant: TENANT, stored: older, thread: { kind: "company", companyId: "c1" }, intent })?.startAnother,
+    ).toEqual(intent);
+  });
+});
+
 describe("draftChoices", () => {
   const stored = memory({ companyId: "c1", orderId: "o1", ownerChoice: "this-wallet", agentId: "42" });
 
@@ -191,6 +225,290 @@ describe("mergeLegalBodyMemory", () => {
   test("the base's tenant never wins over the session's", () => {
     const other = memory({ tenant: "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as Address, companyId: "c1" });
     expect(mergeLegalBodyMemory(TENANT, other, {}).tenant).toBe(TENANT);
+  });
+
+  test("the start-another intent is carried, and a patch replaces it", () => {
+    const intent = { kind: "another-company" as const, known: ["c1"] };
+    expect(mergeLegalBodyMemory(TENANT, memory({ startAnother: intent }), { agentId: "42" }).startAnother).toEqual(intent);
+    expect(mergeLegalBodyMemory(TENANT, memory({ startAnother: intent }), { startAnother: null }).startAnother).toBeNull();
+  });
+});
+
+describe("newCompanyHandover", () => {
+  test("a handover for another account starts from nothing of the first", () => {
+    const m = newCompanyHandover(OTHER, null, "form", [{ companyId: "co_9" }]);
+    expect(m).toMatchObject({ tenant: OTHER, door: "form", companyId: null, orderId: null,
+      startAnother: { kind: "another-company", known: ["co_9"] } });
+  });
+
+  test("over this account's memory: the door and the companies there are, the rest kept", () => {
+    const stored = memory({ companyId: "co_1", ownerChoice: "elsewhere", startAnother: { kind: "another-agent", companyId: "co_1", known: [] } });
+    expect(newCompanyHandover(TENANT, stored, "declare", [{ companyId: "co_1" }, { companyId: "co_2" }])).toEqual(
+      memory({
+        companyId: "co_1",
+        ownerChoice: "elsewhere",
+        door: "declare",
+        startAnother: { kind: "another-company", known: ["co_1", "co_2"] },
+      }),
+    );
+  });
+});
+
+describe("arrivalMemory: an order or a company named in the address", () => {
+  test("an order named in the address becomes the remembered order, and ends any intent", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7",
+      startAnother: { kind: "another-company", known: [] } });
+    expect(arrivalMemory(TENANT, stored, { order: "ord_2", company: null }))
+      .toMatchObject({ tenant: TENANT, orderId: "ord_2", companyId: null, agentId: null, ownerChoice: null, startAnother: null });
+  });
+
+  test("a company named in the address becomes the remembered company, with no order and no draft choice", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "this-wallet", agentId: "7",
+      startAnother: { kind: "another-agent", companyId: "co_1", known: ["ord_1"] } });
+    expect(arrivalMemory(TENANT, stored, { order: null, company: "co_2" }))
+      .toMatchObject({ tenant: TENANT, companyId: "co_2", orderId: null, agentId: null, ownerChoice: null, startAnother: null });
+  });
+
+  test("an order wins over a company", () => {
+    expect(arrivalMemory(TENANT, null, { order: "ord_2", company: "co_2" }))
+      .toMatchObject({ orderId: "ord_2", companyId: null });
+  });
+
+  test("an order that is not a handle does not count: the company named with it does", () => {
+    expect(arrivalMemory(TENANT, null, { order: "<script>", company: "co_2" }))
+      .toMatchObject({ orderId: null, companyId: "co_2" });
+  });
+
+  test("the order already remembered keeps its draft choices: Continue comes back where the person was", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7",
+      startAnother: { kind: "another-company", known: [] } });
+    const m = arrivalMemory(TENANT, stored, { order: "ord_1", company: null });
+    expect(m).toEqual(memory({ orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7" }));
+    // The flow reads them for that order, and its write once the thread is on screen keeps them.
+    const thread = { kind: "order" as const, companyId: "co_1", orderId: "ord_1" };
+    expect(draftChoices(m, thread)).toEqual({ ownerChoice: "elsewhere", agentId: "7" });
+    expect(memoryAfterThread({ tenant: TENANT, stored: m, thread, intent: null })).toMatchObject({
+      orderId: "ord_1",
+      ownerChoice: "elsewhere",
+      agentId: "7",
+    });
+  });
+
+  test("another order still starts with no draft choice", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "this-wallet", agentId: "7" });
+    const m = arrivalMemory(TENANT, stored, { order: "ord_2", company: null });
+    expect(m).toMatchObject({ orderId: "ord_2", ownerChoice: null, agentId: null });
+    expect(draftChoices(m, { kind: "order", companyId: "co_1", orderId: "ord_2" })).toEqual({
+      ownerChoice: null,
+      agentId: null,
+    });
+  });
+
+  test("a company named in the address clears the draft choices, even the company of the order remembered", () => {
+    const stored = memory({ companyId: "co_1", orderId: "ord_1", ownerChoice: "elsewhere", agentId: "7" });
+    expect(arrivalMemory(TENANT, stored, { order: null, company: "co_1" }))
+      .toMatchObject({ companyId: "co_1", orderId: null, ownerChoice: null, agentId: null });
+  });
+
+  test("the rest of the memory is kept; with no memory, one for this tenant", () => {
+    const stored = memory({ door: "form" });
+    expect(arrivalMemory(TENANT, stored, { order: "ord_2", company: null })).toEqual(
+      memory({ orderId: "ord_2", door: "form" }),
+    );
+    expect(arrivalMemory(OTHER, null, { order: null, company: "co_2" })).toEqual(
+      memory({ tenant: OTHER, companyId: "co_2" }),
+    );
+  });
+
+  test("anything that is not a handle is ignored", () => {
+    for (const bad of ["<script>", "a b", "", "x".repeat(81), "../etc"])
+      expect(arrivalMemory(TENANT, null, { order: bad, company: bad })).toBeNull();
+    expect(arrivalMemory(TENANT, null, { order: null, company: null })).toBeNull();
+  });
+
+  test("another account's order is not opened", () => {
+    const m = arrivalMemory(TENANT, null, { order: "ord_theirs", company: null })!;
+    expect(selectLegalBodyThread({ companies: [], orders: [], stored: m, nowMs: 0 })).toEqual({ kind: "new-company" });
+  });
+
+  test("another account's order or company is not opened over the account's own thread", () => {
+    const companies = [company("co_1")];
+    const orders = [order("ord_1", "co_1")];
+    for (const params of [{ order: "ord_theirs", company: null }, { order: null, company: "co_theirs" }]) {
+      const m = arrivalMemory(TENANT, memory({ companyId: "co_1" }), params)!;
+      expect(selectLegalBodyThread({ companies, orders, stored: m, nowMs: NOW }))
+        .toEqual({ kind: "order", companyId: "co_1", orderId: "ord_1" });
+    }
+  });
+
+  test("the account's own order or company named in the address is the thread", () => {
+    const companies = [company("co_1"), company("co_2")];
+    const orders = [order("ord_1", "co_1")];
+    const byOrder = arrivalMemory(TENANT, null, { order: "ord_1", company: null })!;
+    expect(selectLegalBodyThread({ companies, orders, stored: byOrder, nowMs: NOW }))
+      .toEqual({ kind: "order", companyId: "co_1", orderId: "ord_1" });
+    const byCompany = arrivalMemory(TENANT, null, { order: null, company: "co_2" })!;
+    expect(selectLegalBodyThread({ companies, orders, stored: byCompany, nowMs: NOW }))
+      .toEqual({ kind: "company", companyId: "co_2" });
+  });
+});
+
+describe("arrivalAction: when the address's arrival is taken", () => {
+  const arrival = memory({ orderId: "ord_2" });
+  const NOTHING = { write: null, replace: false };
+
+  test("nothing before the gates are passed: the address waits for the session really used", () => {
+    for (const gate of ["signin", "human"] as const)
+      expect(arrivalAction({ gate, named: true, arrival, done: false })).toEqual(NOTHING);
+  });
+
+  test("past the gates, an address that names a handle is written, then cleaned", () => {
+    expect(arrivalAction({ gate: "flow", named: true, arrival, done: false })).toEqual({ write: arrival, replace: true });
+  });
+
+  test("past the gates, an address that names nothing usable is cleaned, and nothing is written", () => {
+    expect(arrivalAction({ gate: "flow", named: true, arrival: null, done: false })).toEqual({ write: null, replace: true });
+  });
+
+  test("once taken, never again on this mount", () => {
+    expect(arrivalAction({ gate: "flow", named: true, arrival, done: true })).toEqual(NOTHING);
+  });
+
+  test("an address that names no order and no company: nothing", () => {
+    expect(arrivalAction({ gate: "flow", named: false, arrival: null, done: false })).toEqual(NOTHING);
+  });
+});
+
+describe("threadDoor", () => {
+  test("a company decides its own door, whatever was chosen elsewhere", () => {
+    expect(threadDoor(company("co_d", { provider: "customer" }), "form")).toBe("declare");
+    expect(threadDoor(company("co_f", { provider: "doola", purpose: "legal_body" }), "declare")).toBe("form");
+    expect(threadDoor(null, "form")).toBe("form");
+    expect(threadDoor(null, null)).toBe("declare");
+  });
+
+  test("a company of the agent wizard is not a formed legal body: the declare door", () => {
+    expect(threadDoor(company("co_a", { provider: "doola", purpose: "agent" }), "form")).toBe("declare");
+  });
+});
+
+describe("companyStepScreen: the choice of paths in front of a new company, and a door that is closed", () => {
+  const three = pathCards({
+    fullProductAvailable: true,
+    legalBodies: { available: true, declarations: true, formedDoor: "offered" } as never,
+  });
+  /** A new company on a deployment that takes declarations, with the fields a case changes. */
+  const screen = (over: Partial<Parameters<typeof companyStepScreen>[0]>) =>
+    companyStepScreen({
+      companyId: null,
+      company: null,
+      companyStep: "form",
+      door: null,
+      cards: three,
+      declarations: true,
+      ...over,
+    });
+
+  test("nothing chosen and more than one way in: the choice, in place", () => {
+    expect(screen({})).toBe("choice");
+  });
+
+  test("a chosen door goes to its step; a door that closed since goes back to the choice", () => {
+    expect(screen({ door: "form" })).toBe("step");
+    const fullUp = pathCards({
+      legalBodies: { available: true, declarations: true, formedDoor: "cap_reached" } as never,
+    });
+    expect(screen({ door: "form", cards: fullUp })).toBe("choice");
+  });
+
+  test("the declared door alone needs no choice, and a deployment that takes no declaration says so", () => {
+    const only = pathCards({
+      legalBodies: { available: true, declarations: true, formedDoor: "hidden" } as never,
+    });
+    expect(screen({ cards: only })).toBe("step");
+    expect(screen({ door: "declare", cards: [], declarations: false })).toBe("closed");
+  });
+
+  test("an existing company is never asked again", () => {
+    expect(screen({ companyId: "co_1" })).toBe("step");
+  });
+
+  test("a company step past the form is the step, whatever the cards", () => {
+    expect(screen({ companyStep: "loading" })).toBe("step");
+    expect(screen({ companyStep: undefined, cards: [] })).toBe("step");
+  });
+
+  test("the declare door goes to its step while declarations are taken", () => {
+    expect(screen({ door: "declare" })).toBe("step");
+  });
+
+  test("the full product alone is still a choice: it is never opened from here unasked", () => {
+    const fullOnly = pathCards({ fullProductAvailable: true, legalBodies: { available: false } });
+    expect(screen({ cards: fullOnly, declarations: false })).toBe("choice");
+  });
+
+  test("no way in at all is the closed sentence, never an empty choice", () => {
+    expect(screen({ cards: [], declarations: false })).toBe("closed");
+    expect(screen({ door: "form", cards: [], declarations: false })).toBe("closed");
+  });
+
+  describe("where the deployment takes no declarations", () => {
+    const formOnly = pathCards({
+      legalBodies: { available: true, declarations: false, formedDoor: "offered" } as never,
+    });
+
+    test("a declared company of the account back on its form is closed", () => {
+      const declared = company("co_d", { provider: "customer", state: "abandoned" });
+      expect(
+        screen({ companyId: "co_d", company: declared, door: "form", cards: formOnly, declarations: false }),
+      ).toBe("closed");
+    });
+
+    test("a formed company of the account back on its form is its step: it never needed the declared door", () => {
+      const formed = company("co_f", { provider: "doola", purpose: "legal_body", state: "abandoned" });
+      expect(
+        screen({ companyId: "co_f", company: formed, door: null, cards: formOnly, declarations: false }),
+      ).toBe("step");
+    });
+
+    test("a new company on the form door is its step", () => {
+      expect(screen({ door: "form", cards: formOnly, declarations: false })).toBe("step");
+    });
+
+    test("an existing company on a step other than its form is that step", () => {
+      const declared = company("co_d", { provider: "customer" });
+      for (const companyStep of ["loading", "evidence", "waiting", "failed", "revoked"] as const)
+        expect(
+          screen({ companyId: "co_d", company: declared, companyStep, cards: formOnly, declarations: false }),
+        ).toBe("step");
+    });
+
+    test("a declared company back on its form where declarations are taken is its step", () => {
+      const declared = company("co_d", { provider: "customer", state: "abandoned" });
+      expect(screen({ companyId: "co_d", company: declared })).toBe("step");
+    });
+  });
+});
+
+describe("intentSpent", () => {
+  test("an intent is spent once what it started exists", () => {
+    const intent = { kind: "another-company", known: ["co_1"] } as const;
+    expect(intentSpent(intent, { companies: [company("co_1")], orders: [] })).toBe(false);
+    expect(intentSpent(intent, { companies: [company("co_1"), company("co_2")], orders: [] })).toBe(true);
+  });
+
+  test("another agent: spent once its company is gone", () => {
+    const intent = { kind: "another-agent", companyId: "co_1", known: ["o1"] } as const;
+    expect(intentSpent(intent, { companies: [company("co_1")], orders: [order("o1", "co_1")] })).toBe(false);
+    expect(intentSpent(intent, { companies: [company("co_2")], orders: [order("o1", "co_1")] })).toBe(true);
+  });
+
+  test("another agent: spent once an order of its company exists that was not there at the click", () => {
+    const intent = { kind: "another-agent", companyId: "co_1", known: ["o1"] } as const;
+    const companies = [company("co_1"), company("co_2")];
+    // An order of another company is not the one the click started.
+    expect(intentSpent(intent, { companies, orders: [order("o1", "co_1"), order("o2", "co_2")] })).toBe(false);
+    expect(intentSpent(intent, { companies, orders: [order("o1", "co_1"), order("o3", "co_1")] })).toBe(true);
   });
 });
 
@@ -274,6 +592,93 @@ describe("patchEndsIntent", () => {
     expect(patchEndsIntent({})).toBe(false);
     expect(patchEndsIntent({ ownerChoice: "this-wallet", agentId: "42" })).toBe(false);
     expect(patchEndsIntent({ agentId: null })).toBe(false);
+  });
+});
+
+describe("liveIntent: the intent the store keeps once a thread is on screen", () => {
+  test("no intent stays none", () => {
+    expect(liveIntent(null, { companies: [company("co_1")], orders: [] })).toBeNull();
+  });
+
+  test("a live intent is kept as it is", () => {
+    const intent = { kind: "another-company" as const, known: ["co_1"] };
+    expect(liveIntent(intent, { companies: [company("co_1")], orders: [] })).toBe(intent);
+    const agent = { kind: "another-agent" as const, companyId: "co_1", known: ["o1"] };
+    expect(liveIntent(agent, { companies: [company("co_1")], orders: [order("o1", "co_1")] })).toBe(agent);
+  });
+
+  test("a spent intent leaves: what it started exists", () => {
+    expect(
+      liveIntent({ kind: "another-company", known: ["co_1"] }, { companies: [company("co_1"), company("co_2")], orders: [] }),
+    ).toBeNull();
+    const agent = { kind: "another-agent" as const, companyId: "co_1", known: ["o1"] };
+    expect(liveIntent(agent, { companies: [company("co_1")], orders: [order("o1", "co_1"), order("o2", "co_1")] })).toBeNull();
+    expect(liveIntent(agent, { companies: [], orders: [] })).toBeNull();
+  });
+});
+
+describe("memoryAfterClick: a click's change to the memory", () => {
+  const intent = { kind: "another-company" as const, known: ["co_1"] };
+
+  test("a choice inside the thread is laid over the base, and the intent stays", () => {
+    const base = memory({ companyId: "co_1", orderId: "o1", startAnother: intent });
+    expect(memoryAfterClick(TENANT, base, { ownerChoice: "this-wallet", agentId: "42" })).toEqual(
+      memory({ companyId: "co_1", orderId: "o1", ownerChoice: "this-wallet", agentId: "42", startAnother: intent }),
+    );
+  });
+
+  test("a click that names the thread ends the intent", () => {
+    const base = memory({ startAnother: intent, door: "form" });
+    expect(memoryAfterClick(TENANT, base, { companyId: "co_2", orderId: null })).toEqual(
+      memory({ companyId: "co_2", door: "form" }),
+    );
+    expect(memoryAfterClick(TENANT, base, { orderId: "o2" }).startAnother).toBeNull();
+  });
+
+  test("the end of the intent has the last word over a patch that names the thread and an intent", () => {
+    expect(memoryAfterClick(TENANT, null, { companyId: "co_2", startAnother: intent }).startAnother).toBeNull();
+  });
+
+  test("a patch that starts an intent is written with it", () => {
+    expect(memoryAfterClick(TENANT, memory({ companyId: "co_1" }), { door: null, startAnother: intent })).toEqual(
+      memory({ companyId: "co_1", startAnother: intent }),
+    );
+  });
+
+  test("always for this tenant, from nothing when there is no base", () => {
+    expect(memoryAfterClick(TENANT, memory({ tenant: OTHER, companyId: "co_9" }), {}).tenant).toBe(TENANT);
+    expect(memoryAfterClick(TENANT, null, { agentId: "7" })).toEqual(memory({ agentId: "7" }));
+  });
+});
+
+describe("startAnotherPatch: what a start-another click remembers", () => {
+  const companies = [company("co_1"), company("co_2")];
+  const orders = [order("o1", "co_1"), order("o2", "co_2")];
+
+  test("a new company: no door chosen yet, and the companies there are at the click", () => {
+    expect(startAnotherPatch("new_company", { companyId: "co_1", companies, orders })).toEqual({
+      door: null,
+      startAnother: { kind: "another-company", known: ["co_1", "co_2"] },
+    });
+    expect(startAnotherPatch("new_company", { companyId: null, companies: [], orders: [] })).toEqual({
+      door: null,
+      startAnother: { kind: "another-company", known: [] },
+    });
+  });
+
+  test("a new order on this company: the orders there are at the click", () => {
+    expect(startAnotherPatch("new_order", { companyId: "co_1", companies, orders })).toEqual({
+      startAnother: { kind: "another-agent", companyId: "co_1", known: ["o1", "o2"] },
+    });
+  });
+
+  test("a new order with no company on screen remembers nothing", () => {
+    expect(startAnotherPatch("new_order", { companyId: null, companies, orders })).toEqual({});
+  });
+
+  test("neither patch names the thread, so neither ends itself", () => {
+    expect(patchEndsIntent(startAnotherPatch("new_company", { companyId: "co_1", companies, orders }))).toBe(false);
+    expect(patchEndsIntent(startAnotherPatch("new_order", { companyId: "co_1", companies, orders }))).toBe(false);
   });
 });
 
@@ -372,6 +777,8 @@ describe("flowNowMs", () => {
 
 describe("chooserRows", () => {
   const C = LEGAL_BODY_COPY.chooser;
+  /** A declared company's name option, as the backend stores the typed name. */
+  const typed = (name: string) => ({ name, entityTypeEnding: "", position: 1 });
 
   test("one row per thread, named by the declaration, with its state in words", () => {
     const companies = [company("c1"), company("c2", { declared: { companyName: "Second Test LLC", filingNumber: "TEST-0002", wordingVersion: "v1" } })];
@@ -403,15 +810,83 @@ describe("chooserRows", () => {
   });
 
   test("a draft with no identity yet, and a company whose declaration could not be read", () => {
+    // As the backend serves them: a declared company keeps the typed name as its first name option,
+    // and its declaration is null when the declaration row is missing.
     const rows = chooserRows(
       [
         { kind: "order", companyId: "c1", orderId: "o1" },
         { kind: "company", companyId: "c3" },
       ],
-      [company("c1"), company("c3", { declared: null })],
+      [
+        company("c1", { nameOptions: [typed("Example Test Holdings LLC")] }),
+        company("c3", { declared: null, nameOptions: [typed("Third Test LLC")] }),
+      ],
       [order("o1", "c1", { companyName: null })],
     );
     expect(rows[0]).toMatchObject({ title: "Example Test Holdings LLC", detail: C.orderStates.draft, identity: null });
-    expect(rows[1]).toMatchObject({ title: C.unnamed });
+    expect(rows[1]).toMatchObject({ title: "Third Test LLC" });
+  });
+
+  describe("the title, on companies and orders as the backend serves them", () => {
+    /** A company formed through doola: no declaration and no check, its name options as asked. */
+    const formed = (companyId: string, over: Partial<CompanyView> = {}) =>
+      company(companyId, {
+        provider: "doola",
+        purpose: "legal_body",
+        state: "in_progress",
+        declared: undefined,
+        verification: undefined,
+        nameOptions: [{ name: "First Choice Agent", entityTypeEnding: "LLC", position: 1 }],
+        ...over,
+      });
+
+    test("a declared company whose declaration is missing goes by the name it was declared with", () => {
+      const c = company("c1", { declared: null, nameOptions: [typed("Typed Name LLC")] });
+      // The order of such a company carries no name: the backend has no declaration to read it from.
+      const rows = chooserRows(
+        [
+          { kind: "company", companyId: "c1" },
+          { kind: "order", companyId: "c1", orderId: "o1" },
+        ],
+        [c],
+        [order("o1", "c1", { companyName: null })],
+      );
+      expect(rows.map((r) => r.title)).toEqual(["Typed Name LLC", "Typed Name LLC"]);
+    });
+
+    test("an order on a formed company while it files goes by the first name option, once filed by the filed name", () => {
+      const filing = chooserRows(
+        [{ kind: "order", companyId: "cf", orderId: "o1" }],
+        [formed("cf")],
+        [order("o1", "cf", { companyName: null })],
+      );
+      expect(filing[0].title).toBe("First Choice Agent");
+      // Filed: the backend serves the filed name as the order's company name.
+      const filed = chooserRows(
+        [{ kind: "order", companyId: "cf", orderId: "o1" }],
+        [formed("cf", { state: "filed", legalNameFiled: "First Choice Agent LLC" })],
+        [order("o1", "cf", { companyName: "First Choice Agent LLC" })],
+      );
+      expect(filed[0].title).toBe("First Choice Agent LLC");
+      // No name at all: the words for a company being formed, never those for a declared one.
+      const bare = chooserRows(
+        [{ kind: "order", companyId: "cf", orderId: "o1" }],
+        [formed("cf", { nameOptions: [] })],
+        [order("o1", "cf", { companyName: null })],
+      );
+      expect(bare[0].title).toBe(C.formedUnnamed);
+    });
+
+    test("an empty name counts as none: the next name is taken, never a blank title", () => {
+      const rows = chooserRows(
+        [
+          { kind: "order", companyId: "c1", orderId: "o1" },
+          { kind: "company", companyId: "cf" },
+        ],
+        [company("c1", { nameOptions: [typed("Example Test Holdings LLC")] }), formed("cf", { legalNameFiled: "" })],
+        [order("o1", "c1", { companyName: "" })],
+      );
+      expect(rows.map((r) => r.title)).toEqual(["Example Test Holdings LLC", "First Choice Agent"]);
+    });
   });
 });

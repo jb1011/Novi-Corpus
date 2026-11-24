@@ -21,8 +21,9 @@ import { CHECK_REASON_CODES, LAPSE_REASONS } from "@/lib/api/types";
 
 const YES =
   "a registered legal body stands behind this agent, and Novi states its standing as active";
-const BANNER =
-  "Arc testnet. The company is a test declaration, its check is automatic, and the wording is a draft; nothing here is a filing.";
+const BANNER = "Arc testnet. The company is a test, the wording is a draft, and nothing here is a filing.";
+const SANDBOX_STATEMENT =
+  "sandbox: this statement is a test about a test company, and nothing in it is a filing";
 const MONEY = "There is no payment step on this testnet deployment.";
 const NEVER_APPROVE = "Never approve or transfer anything to Novi Corpus.";
 
@@ -130,6 +131,7 @@ describe("the sentences carried verbatim", () => {
   test.each([
     ["the yes sentence", YES],
     ["the sandbox banner", BANNER],
+    ["the done page's sandbox statement line", SANDBOX_STATEMENT],
     ["the money sentence", MONEY],
     ["the never-approve sentence", NEVER_APPROVE],
     ["the deployment gate", "This deployment does not offer legal bodies on your own identity."],
@@ -142,13 +144,24 @@ describe("the sentences carried verbatim", () => {
       "the smart-account sentence",
       "This wallet is a smart account. The declaration needs a plain wallet signature, so a smart account cannot be the guardian here.",
     ],
-    ["the entry button", "Get a legal body for an agent you already run"],
     [
       "the rail's footer",
       "Two signatures and one or two transactions from your wallet. Never an approval or a transfer.",
     ],
   ])("%s", (_name, sentence) => {
     expect(ALL).toContain(sentence);
+  });
+
+  test("the testnet banner and the statement line are true on both doors: a formed company is no declaration", () => {
+    // The banner shows above the choice of paths and on both doors; the statement line on both
+    // doors' done page. Neither may name one door's kind of company, nor the declared door's check.
+    for (const s of [LEGAL_BODY_COPY.sandbox.banner, LEGAL_BODY_COPY.done.sandboxStatement]) {
+      expect(s.toLowerCase()).not.toContain("declaration");
+      expect(s.toLowerCase()).not.toContain("check");
+      expect(s).toContain("filing");
+    }
+    expect(LEGAL_BODY_COPY.sandbox.banner).toBe(BANNER);
+    expect(LEGAL_BODY_COPY.done.sandboxStatement).toBe(SANDBOX_STATEMENT);
   });
 
   test("registering says it moves no funds, never that it transfers nothing: it mints a token and spends gas", () => {

@@ -266,12 +266,10 @@ describe("the section as rendered", () => {
 
 describe("the way in from the agents page", () => {
   const code = readFileSync(fileURLToPath(new URL("../src/app/agents/page.tsx", import.meta.url)), "utf8");
-  /** A link to the flow whose words are the entry button's copy. */
-  const ENTRY_LINK = /<Link\s+href="\/legal-body"[^>]*>\s*\{LEGAL_BODY_COPY\.entry\.button\}\s*<\/Link>/g;
 
-  test("both places link to /legal-body with the entry button's words, and nowhere else", () => {
-    expect(code.match(ENTRY_LINK)?.length).toBe(2);
-    expect(code.split('href="/legal-body"').length - 1).toBe(2);
-    expect(LEGAL_BODY_COPY.entry.button).toBe("Get a legal body for an agent you already run");
+  test("the agents page opens the start, never the flow or the wizard directly", () => {
+    expect(code).toContain('href="/start"');
+    expect(code).not.toContain('href="/legal-body"');
+    expect(code).not.toContain('href="/onboarding');
   });
 });
