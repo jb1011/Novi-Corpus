@@ -53,6 +53,7 @@ const LINK_REFUSAL_CODES: Record<LinkRefusalCode, true> = {
   delay_mismatch: true,
   deadline_out_of_window: true,
   identity_not_found: true,
+  agent_wallet_required: true,
   unsupported_signer: true,
   bad_signature: true,
   already_created: true,

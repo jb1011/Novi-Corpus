@@ -1,3 +1,5 @@
+import type { AgentWalletRead } from "@/lib/legalBody/agentWallet";
+import { agentWalletLineText } from "@/lib/legalBody/agentWalletStep";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 
 /**
@@ -15,4 +17,14 @@ export function IdentityLine({ agentId }: { agentId: string | null }) {
       <span className="break-all font-mono text-[13.5px] text-ink">{agentId}</span>
     </p>
   );
+}
+
+/**
+ * "This agent's wallet: {address}", under the identity's line on the link screens, once the
+ * registry names a wallet for the agent. Nothing for none, a read that failed, or no read yet.
+ */
+export function AgentWalletLine({ wallet }: { wallet: AgentWalletRead | null }) {
+  const line = agentWalletLineText(wallet);
+  if (line === null) return null;
+  return <p className="-mt-4 mb-6 break-all font-mono text-[12.5px] text-muted">{line}</p>;
 }

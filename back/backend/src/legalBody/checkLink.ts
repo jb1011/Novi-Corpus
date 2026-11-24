@@ -1,6 +1,7 @@
 import { type Address, type Hex, isAddressEqual } from "viem";
 import { LegalBodyGasTooHighError } from "../adapters/arc/legalBodyChain";
 import { ContractRevertError } from "../adapters/arc/relay";
+import { ownAgentWallet } from "./agentWalletRule";
 import {
   type LegalBodyLink,
   canonicalLinkSignature,
@@ -19,6 +20,7 @@ export interface LinkChainPort {
   readonly factory: Address;
   head(): Promise<{ number: bigint; timestamp: bigint }>;
   identityOwner(agentId: bigint, blockNumber?: bigint): Promise<Address | undefined>;
+  agentWallet(agentId: bigint, blockNumber?: bigint): Promise<Address>;
   hasCode(address: Address, blockNumber?: bigint): Promise<boolean>;
   linkDigest(link: LegalBodyLink, blockNumber?: bigint): Promise<Hex>;
   predictLegalBody(linkDigest: Hex, blockNumber?: bigint): Promise<Address>;
@@ -34,6 +36,7 @@ export type LinkRefusalCode =
   | "delay_mismatch"
   | "deadline_out_of_window"
   | "identity_not_found"
+  | "agent_wallet_required"
   | "unsupported_signer"
   | "bad_signature"
   | "already_created"
@@ -48,6 +51,7 @@ export type LinkRefusalCode =
  * the create takes no gas figure from its caller, because it simulates again.
  *
  * Refused: an answer about the link at that block, with the facts established before the refusal.
+ * `agentWallet` is the wallet the registry names as the agent's, on `agent_wallet_required` only.
  * `createdFor` is the identity owner the factory recorded as the body's creator, present only when
  * the pinned read found the body: a refusal that comes from the simulation carries none.
  * `errorName` is the contract error behind a `create_would_revert`, and `gasEstimate` the node's
@@ -67,6 +71,7 @@ export type LinkCheck =
       ok: false;
       code: LinkRefusalCode;
       identityOwner?: Address;
+      agentWallet?: Address;
       linkDigest?: Hex;
       bodyAddress?: Address;
       createdFor?: Address;
@@ -86,7 +91,8 @@ const ECDSA_SIGNATURE_BYTES: ReadonlySet<number> = new Set([64, 65]);
  *     hash (whatever its letter case) and the delay are the ones on record;
  *  3. the chain's head: every read below is pinned to it, so the facts describe one state;
  *  4. the deadline, against the head's time;
- *  5. the identity exists;
+ *  5. the identity exists, and names a wallet of the agent's own: one that is set and is not the
+ *     guardian's (`ownAgentWallet`);
  *  6. the factory's digest is the one computed here, for the port's chain and factory; a
  *     difference is a deployment or configuration fault, and throws;
  *  7. no body exists at the address the digest predicts;
@@ -127,6 +133,9 @@ export async function checkLink(
 
   const identityOwner = await chain.identityOwner(link.agentId, at);
   if (identityOwner === undefined) return { ok: false, code: "identity_not_found" };
+  const agentWallet = await chain.agentWallet(link.agentId, at);
+  if (!ownAgentWallet(agentWallet, expected.tenant))
+    return { ok: false, code: "agent_wallet_required", identityOwner, agentWallet };
 
   const linkDigest = await chain.linkDigest(link, at);
   const computed = offChainLinkDigest({ chainId: chain.chainId, factory: chain.factory, link });

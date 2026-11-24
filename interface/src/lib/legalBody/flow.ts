@@ -10,7 +10,9 @@
  * phase is never stored, and no clock is read here: the time comes in as `nowMs`. The local memory
  * is a hint, never the truth: an id it holds that the server does not list for this tenant is
  * ignored, and the owner choice and the identity it holds count only while the order is a draft
- * (the server knows no identity before the link).
+ * (the server knows no identity before the link). So does the registry's answer for that identity
+ * (`agentWallet`): the agent's own wallet is asked for between the identity and the link, never
+ * once the body is reserved.
  */
 import type {
   Address,
@@ -21,12 +23,16 @@ import type {
   LegalBodyConfig,
   LegalBodyOrderView,
 } from "@/lib/api/types";
+// A type only: agentWallet.ts imports `sameAddress` from this file, so a value import back would
+// be a cycle at run time.
+import type { AgentWalletRead } from "@/lib/legalBody/agentWallet";
 import type { LegalBodyMemory, OwnerChoice } from "@/lib/legalBody/storage";
 
 export type LegalBodyPhase =
   | "company"
   | "agreement"
   | "identity"
+  | "wallet"
   | "link"
   | "pointer"
   | "payment"
@@ -37,6 +43,10 @@ export type LegalBodyPhase =
 /** The company step's own screens. On sandbox the check is written at the declaration, so only
  *  `form` is reached in normal use. */
 export type CompanyStep = "form" | "loading" | "evidence" | "waiting" | "failed" | "revoked";
+
+/** The agent's wallet step's own screens: the registry being read, a read that failed, or a
+ *  wallet of the agent's own still to be written on its identity. */
+export type WalletStep = "checking" | "unreadable" | "needed";
 
 /** Who signs and sends: the signed-in wallet in this browser, or another key elsewhere. */
 export type OwnerBranch = "browser" | "paste";
@@ -65,8 +75,10 @@ export type LegalBodyDerivation = {
   notice?: LegalBodyNotice;
   /** Only on `company`. */
   companyStep?: CompanyStep;
-  /** On `link` and `pointer`. While the order is a draft it comes from the owner choice; from
-   *  `reserved` on, from the identity owner the order recorded. */
+  /** Only on `wallet`. */
+  walletStep?: WalletStep;
+  /** On `wallet`, `link` and `pointer`. While the order is a draft it comes from the owner choice;
+   *  from `reserved` on, from the identity owner the order recorded. */
   branch?: OwnerBranch;
 };
 
@@ -87,6 +99,9 @@ export type LegalBodyFlowInput = {
   ownerChoice: OwnerChoice | null;
   /** Local, read only while the order is a draft: the identity picked or just registered. */
   agentId: string | null;
+  /** The registry's answer for `agentId` (`getAgentWallet`), read only while the order is a
+   *  draft: null while it is being read, or when there is no identity yet. */
+  agentWallet: AgentWalletRead | null;
 };
 
 /** A draft can be linked for 24 hours from its creation. */
@@ -358,9 +373,30 @@ function doneOrPayment(input: LegalBodyFlowInput, notice?: LegalBodyNotice): Leg
   return { phase: unpaid ? "payment" : "done" };
 }
 
+const WALLET_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const ZERO_WALLET = /^0x0{40}$/;
+
+/**
+ * The agent's wallet step a draft still needs before its link, or null when the registry names a
+ * wallet of the agent's own: any wallet but the guardian's (the signed-in wallet), whatever its
+ * letter case. The rule is `agentWalletStanding`'s "own", and the server's at the link.
+ *
+ * The link opens only for `0x` and 40 hex digits that are not the guardian's (ruling R9): the zero
+ * address names no wallet, and any value this page does not recognise reads as unreadable, never
+ * as the link.
+ */
+function walletStepOf(read: AgentWalletRead | null, guardian: Address): WalletStep | null {
+  if (read === null) return "checking";
+  if (read === "none") return "needed";
+  if (typeof read !== "string" || !WALLET_ADDRESS.test(read)) return "unreadable";
+  if (ZERO_WALLET.test(read) || sameAddress(read, guardian)) return "needed";
+  return null;
+}
+
 /**
  * Which screen the thread is on, and why. With no order it is the company step; with one, the
- * order's state decides, and the local choices count only while that state is `draft`.
+ * order's state decides, and the local choices and the registry's answer for the identity count
+ * only while that state is `draft`.
  */
 export function deriveLegalBodyPhase(input: LegalBodyFlowInput): LegalBodyDerivation {
   const { config, sessionAddress, nowMs, company, documents, orders, order } = input;
@@ -395,7 +431,11 @@ export function deriveLegalBodyPhase(input: LegalBodyFlowInput): LegalBodyDeriva
       if (input.agentId === null) return { phase: "identity" };
       if (identityHasBody(orders, input.agentId, config))
         return { phase: "identity", notice: { kind: "identity_taken", agentId: input.agentId } };
-      return { phase: "link", branch: input.ownerChoice === "this-wallet" ? "browser" : "paste" };
+      const draftBranch: OwnerBranch = input.ownerChoice === "this-wallet" ? "browser" : "paste";
+      // No legal body for an agent with no wallet of its own: the link door refuses it.
+      const walletStep = walletStepOf(input.agentWallet, sessionAddress);
+      if (walletStep !== null) return { phase: "wallet", walletStep, branch: draftBranch };
+      return { phase: "link", branch: draftBranch };
     }
     case "reserved":
       return { phase: "link", branch, notice: { kind: "creating" } };

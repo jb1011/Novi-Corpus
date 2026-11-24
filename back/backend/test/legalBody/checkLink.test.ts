@@ -7,6 +7,7 @@ import {
   serializeCompactSignature,
   serializeErc6492Signature,
   signatureToCompactSignature,
+  zeroAddress,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { expect, test, vi } from "vitest";
@@ -37,6 +38,8 @@ const TENANT = "0x00000000000000000000000000000000000A11cE" as Address;
 const BODY = "0x00000000000000000000000000000000000B0d1E" as Address;
 /** A placeholder owner that is a smart account. */
 const WALLET = "0x000000000000000000000000000000000005Afe1" as Address;
+/** A placeholder wallet of the agent's own: neither the owner nor the guardian. */
+const AGENT_WALLET = "0x00000000000000000000000000000000000000A1" as Address;
 const OA = `0x${"ab".repeat(32)}` as Hex;
 /** The head every check reads: its number pins the reads, its timestamp is chain time. */
 const HEAD = { number: 7_777n, timestamp: 1_800_000_000n };
@@ -74,13 +77,15 @@ function badSignature(): ContractRevertError {
   return new ContractRevertError("createLegalBody reverted: BadSignature()", "BadSignature");
 }
 
-/** A chain on which the link is valid, the identity owned by `owner` and no body created yet. */
+/** A chain on which the link is valid, the identity owned by `owner` and naming a wallet of the
+ *  agent's own, and no body created yet. */
 function fakeChain() {
   return {
     chainId: CHAIN_ID,
     factory: FACTORY,
     head: vi.fn<LinkChainPort["head"]>(async () => HEAD),
     identityOwner: vi.fn<LinkChainPort["identityOwner"]>(async () => owner.address),
+    agentWallet: vi.fn<LinkChainPort["agentWallet"]>(async () => AGENT_WALLET),
     hasCode: vi.fn<LinkChainPort["hasCode"]>(async () => false),
     linkDigest: vi.fn<LinkChainPort["linkDigest"]>(async (l) =>
       offChainLinkDigest({ chainId: CHAIN_ID, factory: FACTORY, link: l }),
@@ -95,6 +100,7 @@ type FakeChain = ReturnType<typeof fakeChain>;
 const CHAIN_METHODS = [
   "head",
   "identityOwner",
+  "agentWallet",
   "hasCode",
   "linkDigest",
   "predictLegalBody",
@@ -243,8 +249,63 @@ test("an identity that does not exist is refused before the factory is asked any
   chain.identityOwner.mockResolvedValue(undefined);
   const check = await checkLink(chain, { link, signature: await sign(), expected });
   expect(check).toStrictEqual({ ok: false, code: "identity_not_found" });
+  expect(chain.agentWallet).not.toHaveBeenCalled();
   expect(chain.linkDigest).not.toHaveBeenCalled();
   expect(chain.estimateCreate).not.toHaveBeenCalled();
+});
+
+test("refuses agent_wallet_required when the registry names no wallet", async () => {
+  const chain = fakeChain();
+  chain.agentWallet.mockResolvedValue(zeroAddress);
+  const check = await checkLink(chain, { link, signature: await sign(), expected });
+  expect(check).toStrictEqual({
+    ok: false,
+    code: "agent_wallet_required",
+    identityOwner: owner.address,
+    agentWallet: zeroAddress,
+  });
+  // Refused before the digest is read, so before anything about the body or the signature.
+  expect(chain.linkDigest).not.toHaveBeenCalled();
+  expect(chain.estimateCreate).not.toHaveBeenCalled();
+});
+
+test("refuses agent_wallet_required when the registry names the guardian's wallet, whatever its letter case", async () => {
+  for (const wallet of [expected.tenant, expected.tenant.toLowerCase() as Address]) {
+    const chain = fakeChain();
+    chain.agentWallet.mockResolvedValue(wallet);
+    const check = await checkLink(chain, { link, signature: await sign(), expected });
+    expect(check, wallet).toStrictEqual({
+      ok: false,
+      code: "agent_wallet_required",
+      identityOwner: owner.address,
+      agentWallet: wallet,
+    });
+    expect(chain.linkDigest, wallet).not.toHaveBeenCalled();
+    expect(chain.estimateCreate, wallet).not.toHaveBeenCalled();
+  }
+});
+
+test("reads the wallet at the head every other read is pinned to", async () => {
+  const chain = fakeChain();
+  const check = await checkLink(chain, { link, signature: await sign(), expected });
+  expect(check.ok).toBe(true);
+  expect(chain.agentWallet.mock.calls).toStrictEqual([[link.agentId, HEAD.number]]);
+});
+
+test("accepts the identity owner's own address as the wallet when the owner is not the guardian", async () => {
+  const chain = fakeChain();
+  chain.agentWallet.mockResolvedValue(owner.address);
+  const signature = await sign();
+  const check = await checkLink(chain, { link, signature, expected });
+  expect(check).toStrictEqual({
+    ok: true,
+    identityOwner: owner.address,
+    linkDigest: DIGEST,
+    bodyAddress: BODY,
+    signature,
+    observedAtBlock: 7_777,
+    gasLimit: GAS_LIMIT,
+  });
 });
 
 test("a factory digest that differs from the one computed here throws, before any verdict on the signature", async () => {
@@ -491,6 +552,7 @@ test("every chain read after head() is pinned to the head's block number", async
   await checkLink(chain, { link, signature: WALLET_SIGNATURE, expected });
   expect(chain.head).toHaveBeenCalledOnce();
   expect(chain.identityOwner.mock.calls).toStrictEqual([[link.agentId, HEAD.number]]);
+  expect(chain.agentWallet.mock.calls).toStrictEqual([[link.agentId, HEAD.number]]);
   expect(chain.linkDigest.mock.calls).toStrictEqual([[link, HEAD.number]]);
   expect(chain.predictLegalBody.mock.calls).toStrictEqual([[DIGEST, HEAD.number]]);
   expect(chain.bodyCreator.mock.calls).toStrictEqual([[BODY, HEAD.number]]);

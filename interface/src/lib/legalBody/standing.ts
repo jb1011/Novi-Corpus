@@ -65,6 +65,21 @@ function statedOf(read: PublicRead<LegalBodyByAgent> | null): StatedAnswer | nul
   return body.legalBody && body.statement !== null ? body : null;
 }
 
+/**
+ * The public record itself: the signed statement's message, when the by-agent answer carries one.
+ * Null for no answer yet, a read that could not be made, no legal body, a body whose statement
+ * could not be made just now, and an answer whose statement is not of the served shape (the answer
+ * is checked only shallowly on arrival): never a throw, never a guess.
+ */
+export function publicRecordOf(
+  read: PublicRead<LegalBodyByAgent> | null | undefined,
+): LegalBodyStatementJson | null {
+  const statement: unknown = statedOf(read ?? null)?.statement;
+  if (statement === null || typeof statement !== "object") return null;
+  const message: unknown = (statement as { message?: unknown }).message;
+  return message !== null && typeof message === "object" ? (message as LegalBodyStatementJson) : null;
+}
+
 /** The sandbox line: on a sandbox deployment, or for a statement that says sandbox. */
 function sandboxLines(environment: Environment, stated: StatedAnswer | null): string[] {
   const sandbox =

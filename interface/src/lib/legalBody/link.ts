@@ -212,7 +212,7 @@ export type LinkStepOutcome =
   | { kind: "rederive" }
   | { kind: "unreadable" }
   | { kind: "refused"; code: string; sentence: string; lapsed: boolean }
-  | { kind: "back"; to: "agreement" | "company" | "identity"; sentence: string }
+  | { kind: "back"; to: "agreement" | "company" | "identity" | "wallet"; sentence: string }
   | { kind: "wait" | "retry" | "new_message" | "sentence"; sentence: string }
   | { kind: "bug" }
   | { kind: "no_answer"; door: "message" | "submit" }
@@ -263,6 +263,8 @@ export function linkErrorOutcome(e: unknown, door: "message" | "submit"): LinkSt
       return { kind: "back", to: "company", sentence };
     case "identity":
       return { kind: "back", to: "identity", sentence };
+    case "wallet":
+      return { kind: "back", to: "wallet", sentence };
     case "wait":
       return { kind: "wait", sentence };
     case "retry":
@@ -339,7 +341,7 @@ export function linkClickPlan(p: {
 // ---------------------------------------------------------------------------------------------
 
 /** Where the flow goes with a door's sentence: an earlier step, or the order's closed screen. */
-export type LinkSendBack = "agreement" | "company" | "identity" | "closed";
+export type LinkSendBack = "agreement" | "company" | "identity" | "wallet" | "closed";
 
 export type LinkOutcomeView = {
   /** The sentences shown, the doors' as served. */
@@ -358,9 +360,10 @@ function networkOf(environment: AvailableConfig["environment"]): string {
 
 /**
  * What the step says after an outcome, and what it offers. A lapsed order offers its way out (a
- * new order) and carries the door's sentence to its closed screen; `agent_in_flight` adds that
- * the order is kept and Sign is the retry; a limit, nothing changed, or no answer offers Try
- * again, once per click and never by itself.
+ * new order) and carries the door's sentence to its closed screen; a draft refused because its
+ * identity names no wallet of the agent's own (`agent_wallet_required`) carries the sentence to
+ * the agent's wallet step; `agent_in_flight` adds that the order is kept and Sign is the retry; a
+ * limit, nothing changed, or no answer offers Try again, once per click and never by itself.
  */
 export function linkOutcomeView(
   outcome: LinkStepOutcome,
@@ -382,6 +385,12 @@ export function linkOutcomeView(
           lines: [outcome.sentence],
           action: "new_order",
           sendBack: { to: "closed", sentence: outcome.sentence },
+        };
+      if (linkDoorRoute(outcome.code, "browser") === "wallet")
+        return {
+          lines: [outcome.sentence],
+          action: "sign",
+          sendBack: { to: "wallet", sentence: outcome.sentence },
         };
       if (outcome.code === "agent_in_flight") return say([outcome.sentence, L.tryAgainSoon]);
       return say([outcome.sentence]);

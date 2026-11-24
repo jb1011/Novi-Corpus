@@ -49,6 +49,11 @@ function companyNeedsAttention(company: CompanyView): boolean {
     : company.verification?.state === "failed";
 }
 
+/** The key of an order's row: `rowGuardians` keys its map by the same one. */
+function orderRowKey(orderId: string): string {
+  return `order:${orderId}`;
+}
+
 /** For ordering only: a time that cannot be read sorts oldest. */
 function sortTime(ms: number): number {
   return Number.isFinite(ms) ? ms : Number.NEGATIVE_INFINITY;
@@ -106,7 +111,7 @@ export function accountLegalBodyRows(p: {
     }
     found.push({
       row: {
-        key: `order:${order.id}`,
+        key: orderRowKey(order.id),
         href: `/legal-body?order=${encodeURIComponent(order.id)}`,
         title: legalBodyTitle({ order, company: byId.get(order.companyId) ?? null }),
         agentId: order.agentId,
@@ -150,13 +155,28 @@ export function accountLegalBodyRows(p: {
   });
 }
 
+/**
+ * The guardian of each linked, not revoked order, by the key of its row (`orderRowKey`, as
+ * `accountLegalBodyRows` keys it): the order's own `guardian`, which the row's public record is
+ * measured against for "Agent's wallet not set" (`agentWalletOwed`). Kept beside the rows rather
+ * than on them, since the rows are built with no record to read. A revoked body has none: its done
+ * page offers no way to set the wallet, so its row says nothing of it.
+ */
+export function rowGuardians(orders: LegalBodyOrderView[]): ReadonlyMap<string, Address> {
+  const out = new Map<string, Address>();
+  for (const order of orders)
+    if (order.state === "linked" && !order.revoked) out.set(orderRowKey(order.id), order.guardian);
+  return out;
+}
+
 /** What the legal-body section shows: nothing, a loading line, one unreadable line with its
- *  retry, or the rows (none at all is no section either). */
+ *  retry, or the rows (none at all is no section either), always with the guardian of each linked
+ *  row whose wallet may be said (`rowGuardians`; a row with none says nothing of the wallet). */
 export type LegalBodiesView =
   | { kind: "loading" }
   | { kind: "hidden" }
   | { kind: "unreadable" }
-  | { kind: "rows"; rows: AccountRow[] };
+  | { kind: "rows"; rows: AccountRow[]; guardians: ReadonlyMap<string, Address> };
 
 /** A list query as the section reads it. */
 type ListRead<T> = { data: T | undefined; error: unknown };
@@ -189,6 +209,7 @@ export function legalBodiesView(p: {
         nowMs: p.nowMs,
         where: config && { chainId: config.chainId, factory: config.factory },
       }),
+      guardians: rowGuardians(p.orders.data.orders),
     };
   }
   if (p.orders.error || p.companies.error) return { kind: "unreadable" };

@@ -11,10 +11,12 @@ import {
   useLegalBodyConfig,
   useLegalBodyOrdersQuery,
 } from "@/lib/api/legalBodyHooks";
+import type { Address } from "@/lib/api/types";
 import { legalBodiesView, type AccountRow, type LegalBodiesView } from "@/lib/legalBody/accountRows";
+import { agentWalletOwed } from "@/lib/legalBody/agentWallet";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import { flowNowMs } from "@/lib/legalBody/resume";
-import { legalBodyRecordView } from "@/lib/legalBody/standing";
+import { legalBodyRecordView, publicRecordOf } from "@/lib/legalBody/standing";
 
 const A = LEGAL_BODY_COPY.account;
 
@@ -88,7 +90,7 @@ export function LegalBodiesSection({
         <ul className="flex flex-col gap-3">
           {view.rows.map((row) => (
             <li key={row.key}>
-              <LegalBodyRow row={row} />
+              <LegalBodyRow row={row} guardian={view.guardians.get(row.key) ?? null} />
             </li>
           ))}
         </ul>
@@ -97,7 +99,7 @@ export function LegalBodiesSection({
   );
 }
 
-function LegalBodyRow({ row }: { row: AccountRow }) {
+function LegalBodyRow({ row, guardian }: { row: AccountRow; guardian: Address | null }) {
   return (
     <Link
       href={row.href}
@@ -115,7 +117,9 @@ function LegalBodyRow({ row }: { row: AccountRow }) {
           </>
         )}
         <span className={STATE_CLASS[row.state]}>{A.states[row.state]}</span>
-        {row.standing && row.agentId !== null && <RowStanding agentId={row.agentId} />}
+        {row.standing && row.agentId !== null && (
+          <RowStanding agentId={row.agentId} guardian={guardian} />
+        )}
       </div>
     </Link>
   );
@@ -127,8 +131,12 @@ function LegalBodyRow({ row }: { row: AccountRow }) {
  * record shows it: the standing pill, and the sandbox pill wherever the record says sandbox (a
  * sandbox deployment, or a statement that says sandbox). Nothing shows until the read is back.
  * A config not read yet counts as production: the sandbox is then said only by a statement.
+ *
+ * Beside them, "Agent's wallet not set" when the record was read and still names the order's
+ * guardian's own wallet, or none (`agentWalletOwed`): a body linked before the rule. The row's link
+ * opens its done page, where the wallet can be set. Nothing for a row with no guardian given.
  */
-function RowStanding({ agentId }: { agentId: string }) {
+function RowStanding({ agentId, guardian }: { agentId: string; guardian: Address | null }) {
   const byAgent = useLegalBodyByAgentQuery(agentId, true);
   const { config } = useLegalBodyConfig();
   if (byAgent.isPending) return null;
@@ -138,10 +146,14 @@ function RowStanding({ agentId }: { agentId: string }) {
     environment: config?.available === true ? config.environment : "production",
     paymentRequired: config?.available === true && config.paymentRequired === true,
   });
+  const statement = publicRecordOf(byAgent.data);
+  const walletOwed =
+    guardian !== null && statement !== null && agentWalletOwed(statement.agentWallet, guardian);
   return (
     <>
       <StandingPill standing={record.standing} size="sm" />
       {record.sandbox && <SandboxPill />}
+      {walletOwed && <span className={STATE_CLASS.attention}>{A.walletOwed}</span>}
     </>
   );
 }

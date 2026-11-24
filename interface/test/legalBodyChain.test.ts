@@ -16,6 +16,7 @@ import {
 } from "viem";
 import {
   agentIdFromMint,
+  agentWalletCall,
   allowedCall,
   encodePointer,
   formatNative,
@@ -103,6 +104,47 @@ function goodPointer(): WriteRequest {
 
 const ctx: CallContext = { config, order: order() };
 
+/** The agent's wallet step: anvil's second account for the live identity, a deadline 270 seconds
+ *  after the chain's time, and a 65-byte signature (an invention: the allowlist reads its shape,
+ *  never whom it recovers to). */
+const NOW = 1_791_000_000;
+const DEADLINE = BigInt(NOW + 270);
+const SIGNATURE = `0x${"5a".repeat(65)}` as Hex;
+const ZERO = "0x0000000000000000000000000000000000000000" as const;
+const WALLET: NonNullable<CallContext["wallet"]> = { agentId: LIVE_AGENT, guardian: GUARDIAN, nowSeconds: NOW };
+
+/** A draft's context for the wallet step: no order, the identity and the chain's time. */
+const walletCtx = (over: Partial<NonNullable<CallContext["wallet"]>> = {}): CallContext => ({
+  config,
+  order: null,
+  wallet: { ...WALLET, ...over },
+});
+
+/** The agent's wallet request, written out as the registry takes it. */
+const goodWallet = (): WriteRequest => ({
+  chainId: CHAIN,
+  address: REGISTRY,
+  abi: identityRegistryAbi,
+  functionName: "setAgentWallet",
+  args: [BigInt(LIVE_AGENT), OTHER_WALLET, DEADLINE, SIGNATURE],
+});
+
+/** The same request with one of its four arguments changed. */
+const walletWith = (i: number, value: unknown): WriteRequest => {
+  const req = goodWallet();
+  const args = [...req.args];
+  args[i] = value;
+  return { ...req, args };
+};
+
+/** What the registry gets for the default wallet request, over the pinned ABI. */
+const walletData = () =>
+  encodeFunctionData({
+    abi: identityRegistryAbi,
+    functionName: "setAgentWallet",
+    args: [BigInt(LIVE_AGENT), OTHER_WALLET, DEADLINE, SIGNATURE],
+  });
+
 describe("the pinned values", () => {
   test("the pointer key, its version and Arc's native decimals", () => {
     expect(POINTER_KEY).toBe("legalBody");
@@ -121,24 +163,52 @@ describe("the pinned values", () => {
     expect(toEventSelector(transfer)).toBe(TRANSFER_TOPIC);
   });
 
-  test("the three writes carry the selectors the live run used", () => {
-    const fn = (name: string, inputs: number): AbiFunction => {
-      const item = identityRegistryAbi.find(
-        (i) => i.type === "function" && i.name === name && i.inputs.length === inputs,
-      );
-      if (!item || item.type !== "function") throw new Error(`no ${name}/${inputs} in the fragment`);
-      return item;
-    };
+  const fn = (name: string, inputs: number): AbiFunction => {
+    const item = identityRegistryAbi.find(
+      (i) => i.type === "function" && i.name === name && i.inputs.length === inputs,
+    );
+    if (!item || item.type !== "function") throw new Error(`no ${name}/${inputs} in the fragment`);
+    return item;
+  };
+
+  test("the four writes carry the registry's selectors", () => {
+    // The first three are the ones the live run used.
     expect(toFunctionSelector(fn("register", 0))).toBe("0x1aa3a008");
     expect(toFunctionSelector(fn("register", 1))).toBe("0xf2c298be");
     expect(toFunctionSelector(fn("setMetadata", 3))).toBe("0x466648da");
+    expect(toFunctionSelector(fn("setAgentWallet", 4))).toBe("0x2d1ef5ae");
+    expect(keccak256(toBytes("setAgentWallet(uint256,address,uint256,bytes)")).slice(0, 10)).toBe(
+      "0x2d1ef5ae",
+    );
+    expect(fn("setAgentWallet", 4).inputs.map((p) => p.name)).toEqual([
+      "agentId",
+      "newWallet",
+      "deadline",
+      "signature",
+    ]);
+    expect(fn("setAgentWallet", 4).outputs).toEqual([]);
   });
 
-  test("the registry fragment holds no write beyond the three the allowlist names", () => {
+  test("eip712Domain is ERC-5267's view: no input, the seven values of the domain", () => {
+    const domain = fn("eip712Domain", 0);
+    expect(toFunctionSelector(domain)).toBe("0x84b0196e");
+    expect(domain.stateMutability).toBe("view");
+    expect(domain.outputs.map((p) => `${p.type} ${p.name}`)).toEqual([
+      "bytes1 fields",
+      "string name",
+      "string version",
+      "uint256 chainId",
+      "address verifyingContract",
+      "bytes32 salt",
+      "uint256[] extensions",
+    ]);
+  });
+
+  test("the registry fragment holds no write beyond the four the allowlist names", () => {
     const writes = identityRegistryAbi
       .filter((i) => i.type === "function" && i.stateMutability !== "view")
       .map((i) => (i.type === "function" ? toFunctionSelector(i) : ""));
-    expect(writes.sort()).toEqual(["0x1aa3a008", "0x466648da", "0xf2c298be"]);
+    expect(writes.sort()).toEqual(["0x1aa3a008", "0x2d1ef5ae", "0x466648da", "0xf2c298be"]);
     const mutability = identityRegistryAbi.map((i) => (i.type === "function" ? i.stateMutability : "event"));
     expect(new Set(mutability)).toEqual(new Set(["nonpayable", "view", "event"]));
   });
@@ -239,6 +309,17 @@ describe("the request builders", () => {
   ])("pointerCall refuses an order with %s", (_name, over) => {
     expect(pointerCall(config, order(over))).toEqual({ ok: false, problem: "order_has_no_body" });
   });
+
+  test("agentWalletCall writes the agent's wallet on the identity, on the configured registry", () => {
+    const req = agentWalletCall(config, {
+      agentId: LIVE_AGENT,
+      newWallet: OTHER_WALLET,
+      deadline: DEADLINE,
+      signature: SIGNATURE,
+    });
+    expect(req).toEqual(goodWallet());
+    expect(req.abi).toBe(identityRegistryAbi);
+  });
 });
 
 describe("allowedCall accepts", () => {
@@ -293,11 +374,63 @@ describe("allowedCall accepts", () => {
   test("a zero value", () => {
     expect(allowedCall({ ...registerCall(config, null), value: BigInt(0) }, ctx).ok).toBe(true);
   });
+
+  test("setAgentWallet: the calldata is the pinned ABI's encoding of the four arguments", () => {
+    const out = allowedCall(goodWallet(), walletCtx());
+    if (!out.ok) throw new Error(out.problem);
+    expect(out.data).toBe(walletData());
+    expect(out.data.slice(0, 10)).toBe("0x2d1ef5ae");
+    const decoded = decodeFunctionData({ abi: identityRegistryAbi, data: out.data });
+    expect(decoded.functionName).toBe("setAgentWallet");
+    expect(decoded.args).toEqual([BigInt(LIVE_AGENT), OTHER_WALLET, DEADLINE, SIGNATURE]);
+  });
+
+  test("setAgentWallet needs no order, and an order selected changes nothing", () => {
+    expect(allowedCall(goodWallet(), { ...walletCtx(), order: order() })).toEqual({
+      ok: true,
+      data: walletData(),
+    });
+    expect(allowedCall(goodWallet(), { ...walletCtx(), order: order({ state: "draft" }) }).ok).toBe(true);
+  });
+
+  test("setAgentWallet at both ends of the window: the chain's time, and 300 seconds after", () => {
+    expect(allowedCall(walletWith(2, BigInt(NOW)), walletCtx()).ok).toBe(true);
+    expect(allowedCall(walletWith(2, BigInt(NOW + 300)), walletCtx()).ok).toBe(true);
+  });
+
+  test("setAgentWallet with a chain time that has a fraction of a second", () => {
+    expect(allowedCall(goodWallet(), walletCtx({ nowSeconds: NOW + 0.5 })).ok).toBe(true);
+    expect(allowedCall(walletWith(2, BigInt(NOW + 1)), walletCtx({ nowSeconds: NOW + 0.5 })).ok).toBe(true);
+    expect(allowedCall(walletWith(2, BigInt(NOW + 300)), walletCtx({ nowSeconds: NOW + 0.5 })).ok).toBe(true);
+  });
+
+  test("setAgentWallet with a chain time of 0, the lowest a context may carry", () => {
+    expect(allowedCall(walletWith(2, BigInt(0)), walletCtx({ nowSeconds: 0 })).ok).toBe(true);
+  });
+
+  test("setAgentWallet for the highest identity a uint256 holds", () => {
+    const highest = BigInt(2) ** BigInt(256) - BigInt(1);
+    expect(allowedCall(walletWith(0, highest), walletCtx({ agentId: highest.toString() })).ok).toBe(true);
+  });
+
+  test("setAgentWallet with a signature of 2,048 bytes, and with one of a single byte", () => {
+    expect(allowedCall(walletWith(3, `0x${"5a".repeat(2048)}`), walletCtx()).ok).toBe(true);
+    expect(allowedCall(walletWith(3, "0x5a"), walletCtx()).ok).toBe(true);
+  });
+
+  test("setAgentWallet with the wallet and the signature in another case: the same calldata", () => {
+    const same = { ok: true, data: walletData() };
+    expect(allowedCall(walletWith(1, lower(OTHER_WALLET)), walletCtx())).toEqual(same);
+    expect(allowedCall(walletWith(1, upper(OTHER_WALLET)), walletCtx())).toEqual(same);
+    expect(allowedCall(walletWith(3, upper(SIGNATURE)), walletCtx())).toEqual(same);
+    expect(allowedCall(goodWallet(), walletCtx({ guardian: lower(GUARDIAN) }))).toEqual(same);
+  });
 });
 
 describe("allowedCall refuses", () => {
   const good = goodPointer();
   const reg = registerCall(config, "https://example.com/agent.json");
+  const wallet = goodWallet();
   const agent = BigInt(LIVE_AGENT);
   const cases: [string, WriteRequest, CallContext, string][] = [
     ["a call that sends value", { ...good, value: BigInt(1) }, ctx, "sends_value"],
@@ -399,10 +532,127 @@ describe("allowedCall refuses", () => {
       "other_body",
     ],
     ["a pointer value that is not a string", { ...good, args: [agent, "legalBody", BigInt(1)] }, ctx, "other_body"],
+    ["setAgentWallet that sends value", { ...wallet, value: BigInt(1) }, walletCtx(), "sends_value"],
+    ["setAgentWallet on another chain", { ...wallet, chainId: OTHER_CHAIN }, walletCtx(), "wrong_chain"],
+    ["setAgentWallet to another contract", { ...wallet, address: ANOTHER_CONTRACT }, walletCtx(), "not_the_registry"],
+    [
+      "setAgentWallet over an ABI equal to the pinned one but not it",
+      { ...wallet, abi: [...identityRegistryAbi] as unknown as typeof identityRegistryAbi },
+      walletCtx(),
+      "not_the_pinned_abi",
+    ],
+    ["setAgentWallet with no wallet context", wallet, { config, order: null }, "no_wallet_context"],
+    ["setAgentWallet with an order but no wallet context", wallet, ctx, "no_wallet_context"],
+    [
+      "setAgentWallet with a context that names no guardian",
+      wallet,
+      walletCtx({ guardian: undefined as unknown as Address }),
+      "no_wallet_context",
+    ],
+    ["setAgentWallet with a null guardian", wallet, walletCtx({ guardian: null as unknown as Address }), "no_wallet_context"],
+    ["setAgentWallet with an empty guardian", wallet, walletCtx({ guardian: "" as Address }), "no_wallet_context"],
+    [
+      "setAgentWallet with a guardian that is not an address",
+      wallet,
+      walletCtx({ guardian: "0x1234" as Address }),
+      "no_wallet_context",
+    ],
+    [
+      "setAgentWallet with a context that names no identity",
+      wallet,
+      walletCtx({ agentId: undefined as unknown as string }),
+      "no_wallet_context",
+    ],
+    [
+      "setAgentWallet with a context identity as a number",
+      wallet,
+      walletCtx({ agentId: Number(LIVE_AGENT) as unknown as string }),
+      "no_wallet_context",
+    ],
+    [
+      "setAgentWallet with a context that has no chain time",
+      wallet,
+      walletCtx({ nowSeconds: undefined as unknown as number }),
+      "no_wallet_context",
+    ],
+    ["a chain time that could not be read", wallet, walletCtx({ nowSeconds: Number.NaN }), "no_wallet_context"],
+    ["an infinite chain time", wallet, walletCtx({ nowSeconds: Number.POSITIVE_INFINITY }), "no_wallet_context"],
+    ["a chain time below 0", wallet, walletCtx({ nowSeconds: -1 }), "no_wallet_context"],
+    [
+      "a chain time as a string",
+      wallet,
+      walletCtx({ nowSeconds: String(NOW) as unknown as number }),
+      "no_wallet_context",
+    ],
+    ["setAgentWallet with three arguments", { ...wallet, args: wallet.args.slice(0, 3) }, walletCtx(), "set_agent_wallet_args"],
+    ["setAgentWallet with five arguments", { ...wallet, args: [...wallet.args, "0x"] }, walletCtx(), "set_agent_wallet_args"],
+    [
+      "setAgentWallet whose arguments are not a list",
+      { ...wallet, args: null as unknown as unknown[] },
+      walletCtx(),
+      "set_agent_wallet_args",
+    ],
+    ["setAgentWallet with the identity as a string", walletWith(0, LIVE_AGENT), walletCtx(), "set_agent_wallet_args"],
+    ["setAgentWallet with a wallet that is not an address", walletWith(1, "0x1234"), walletCtx(), "set_agent_wallet_args"],
+    ["setAgentWallet with a wallet that is not a string", walletWith(1, BigInt(1)), walletCtx(), "set_agent_wallet_args"],
+    ["setAgentWallet with the deadline as a number", walletWith(2, NOW + 270), walletCtx(), "set_agent_wallet_args"],
+    ["setAgentWallet with a signature that is not a string", walletWith(3, new Uint8Array(65)), walletCtx(), "set_agent_wallet_args"],
+    ["the wallet of another identity", walletWith(0, BigInt(1)), walletCtx(), "other_identity"],
+    [
+      "a context whose identity is the same number in hex",
+      wallet,
+      walletCtx({ agentId: `0x${BigInt(LIVE_AGENT).toString(16)}` }),
+      "other_identity",
+    ],
+    ["a context whose identity is not a number", wallet, walletCtx({ agentId: "agent" }), "other_identity"],
+    ["the zero address as the agent's wallet", walletWith(1, ZERO), walletCtx(), "wallet_is_zero"],
+    ["the guardian's own wallet as the agent's", walletWith(1, GUARDIAN), walletCtx(), "wallet_is_guardian"],
+    ["the guardian's own wallet in lower case", walletWith(1, lower(GUARDIAN)), walletCtx(), "wallet_is_guardian"],
+    [
+      "a deadline one second before the chain's time",
+      walletWith(2, BigInt(NOW - 1)),
+      walletCtx(),
+      "deadline_out_of_window",
+    ],
+    [
+      "a deadline 301 seconds after the chain's time",
+      walletWith(2, BigInt(NOW + 301)),
+      walletCtx(),
+      "deadline_out_of_window",
+    ],
+    [
+      "a deadline far past any uint256",
+      walletWith(2, BigInt(2) ** BigInt(256)),
+      walletCtx(),
+      "deadline_out_of_window",
+    ],
+    [
+      "a deadline at the chain's whole second, when the time is half a second past it",
+      walletWith(2, BigInt(NOW)),
+      walletCtx({ nowSeconds: NOW + 0.5 }),
+      "deadline_out_of_window",
+    ],
+    [
+      "a deadline 301 seconds after the chain's whole second, when the time is half a second past it",
+      walletWith(2, BigInt(NOW + 301)),
+      walletCtx({ nowSeconds: NOW + 0.5 }),
+      "deadline_out_of_window",
+    ],
+    ["an empty signature", walletWith(3, "0x"), walletCtx(), "signature_shape"],
+    ["a signature with an odd digit", walletWith(3, `${SIGNATURE}5`), walletCtx(), "signature_shape"],
+    ["a signature that is not hex", walletWith(3, `0x${"zz".repeat(65)}`), walletCtx(), "signature_shape"],
+    ["a signature with no 0x", walletWith(3, "5a".repeat(65)), walletCtx(), "signature_shape"],
+    ["a signature of 2,049 bytes", walletWith(3, `0x${"5a".repeat(2049)}`), walletCtx(), "signature_shape"],
     [
       "a function outside the list",
       { ...good, functionName: "transferFrom" as unknown as WriteRequest["functionName"] },
       ctx,
+      "not_allowed",
+    ],
+    [
+      "a view of the pinned fragment, sent as a write",
+      { ...wallet, functionName: "eip712Domain" as unknown as WriteRequest["functionName"], args: [] },
+      walletCtx(),
       "not_allowed",
     ],
   ];
@@ -427,6 +677,12 @@ describe("allowedCall refuses", () => {
         "other_identity",
         "other_key",
         "other_body",
+        "no_wallet_context",
+        "set_agent_wallet_args",
+        "wallet_is_zero",
+        "wallet_is_guardian",
+        "deadline_out_of_window",
+        "signature_shape",
         "not_allowed",
       ]),
     );
@@ -465,6 +721,55 @@ describe("allowedCall refuses", () => {
       [{ ...good, args: [agent, "legalBody", "0x"] }, ctx, "other_body"],
     ];
     for (const [req, c, problem] of steps) expect(allowedCall(req, c)).toEqual({ ok: false, problem });
+  });
+
+  test("setAgentWallet: the general rules first, then its own, in the order they are written", () => {
+    const early = BigInt(NOW - 1);
+    const everything: WriteRequest = {
+      ...wallet,
+      value: BigInt(1),
+      chainId: OTHER_CHAIN,
+      address: ANOTHER_CONTRACT,
+      abi: [...identityRegistryAbi] as unknown as typeof identityRegistryAbi,
+      args: [LIVE_AGENT],
+    };
+    const noWallet: CallContext = { config, order: null };
+    const steps: [WriteRequest, CallContext, string][] = [
+      [everything, noWallet, "sends_value"],
+      [{ ...everything, value: undefined }, noWallet, "wrong_chain"],
+      [{ ...everything, value: undefined, chainId: CHAIN }, noWallet, "not_the_registry"],
+      [{ ...everything, value: undefined, chainId: CHAIN, address: REGISTRY }, noWallet, "not_the_pinned_abi"],
+      [{ ...wallet, args: [LIVE_AGENT] }, noWallet, "no_wallet_context"],
+      [
+        { ...wallet, args: [LIVE_AGENT] },
+        walletCtx({ guardian: undefined as unknown as Address }),
+        "no_wallet_context",
+      ],
+      [{ ...wallet, args: [LIVE_AGENT] }, walletCtx(), "set_agent_wallet_args"],
+      [{ ...wallet, args: [BigInt(1), ZERO, early, "0x"] }, walletCtx(), "other_identity"],
+      [{ ...wallet, args: [agent, ZERO, early, "0x"] }, walletCtx(), "wallet_is_zero"],
+      // A zero guardian makes the zero address both: the zero rule comes first.
+      [{ ...wallet, args: [agent, ZERO, early, "0x"] }, walletCtx({ guardian: ZERO }), "wallet_is_zero"],
+      [{ ...wallet, args: [agent, GUARDIAN, early, "0x"] }, walletCtx(), "wallet_is_guardian"],
+      [{ ...wallet, args: [agent, OTHER_WALLET, early, "0x"] }, walletCtx(), "deadline_out_of_window"],
+      [{ ...wallet, args: [agent, OTHER_WALLET, DEADLINE, "0x"] }, walletCtx(), "signature_shape"],
+    ];
+    for (const [req, c, problem] of steps) expect(allowedCall(req, c)).toEqual({ ok: false, problem });
+  });
+
+  test("setAgentWallet never throws on a number past a uint256: it refuses", () => {
+    const limit = BigInt(2) ** BigInt(256);
+    // A 78-digit context id at 2^256, repeated by the request: it passes the decimal pattern.
+    expect(limit.toString()).toHaveLength(78);
+    const high = walletWith(0, limit);
+    const highCtx = walletCtx({ agentId: limit.toString() });
+    expect(() => allowedCall(high, highCtx)).not.toThrow();
+    expect(allowedCall(high, highCtx)).toEqual({ ok: false, problem: "other_identity" });
+    // A huge but finite chain time: any deadline in its window is past a uint256.
+    const far = walletWith(2, BigInt(1e80));
+    const farCtx = walletCtx({ nowSeconds: 1e80 });
+    expect(() => allowedCall(far, farCtx)).not.toThrow();
+    expect(allowedCall(far, farCtx)).toEqual({ ok: false, problem: "deadline_out_of_window" });
   });
 });
 
@@ -565,6 +870,46 @@ describe("sendAllowedCall", () => {
     expect((await pending).ok).toBe(true);
     expect(seen).toEqual([BigInt(LIVE_AGENT), "legalBody", LIVE_POINTER]);
     expect(writeContract.mock.calls[0][0].args).not.toBe(args);
+  });
+
+  test("setAgentWallet: the wallet gets exactly the four arguments the allowlist checked", async () => {
+    let seen: readonly unknown[] = [];
+    const writeContract = vi.fn<(r: WriteRequest) => Promise<Hex>>(async (r) => {
+      await Promise.resolve();
+      seen = [...r.args];
+      return "0xabc";
+    });
+    // The wallet in lower case and the signature in upper: forwarded as checked, checksummed and
+    // in lower case.
+    const args: unknown[] = [BigInt(LIVE_AGENT), lower(OTHER_WALLET), DEADLINE, upper(SIGNATURE)];
+    const padded = { ...goodWallet(), args, dataSuffix: "0xdeadbeef" } as WriteRequest;
+    const pending = sendAllowedCall(padded, walletCtx(), {
+      walletChainId: CHAIN,
+      configuredChainIds: [CHAIN],
+      writeContract,
+    });
+    args[1] = ANOTHER_CONTRACT;
+    args.push("0x");
+    expect(await pending).toEqual({ ok: true, hash: "0xabc", data: walletData() });
+    expect(writeContract).toHaveBeenCalledTimes(1);
+    expect(writeContract).toHaveBeenCalledWith(goodWallet());
+    expect(seen).toEqual([BigInt(LIVE_AGENT), OTHER_WALLET, DEADLINE, SIGNATURE]);
+    expect(writeContract.mock.calls[0][0].args).not.toBe(args);
+    expect(Object.keys(writeContract.mock.calls[0][0]).sort()).toEqual(
+      ["abi", "address", "args", "chainId", "functionName"].sort(),
+    );
+  });
+
+  test("a refused setAgentWallet never reaches the wallet", async () => {
+    const writeContract = wallet();
+    expect(
+      await sendAllowedCall(walletWith(1, GUARDIAN), walletCtx(), {
+        walletChainId: CHAIN,
+        configuredChainIds: [CHAIN],
+        writeContract,
+      }),
+    ).toEqual({ ok: false, problem: "wallet_is_guardian" });
+    expect(writeContract).not.toHaveBeenCalled();
   });
 
   test("only the checked fields reach the wallet", async () => {

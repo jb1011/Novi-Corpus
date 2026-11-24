@@ -78,6 +78,8 @@ const SENTENCE = {
     "The link's deadline has passed, is too close to use, or is further ahead than the factory accepts: a link message with a new deadline is needed.",
   create_would_revert:
     "The factory would refuse to create a legal body from this link, and nothing was sent.",
+  agent_wallet_required:
+    "This agent has no wallet of its own yet: its identity must name a wallet that is not the guardian's wallet before a legal body is created.",
 } as const;
 
 const refusal = (
@@ -104,6 +106,7 @@ describe("linkDoorRoute", () => {
     ["agreement_unreadable", "retry", "retry"],
     ["link_already_used", "new_message", "new_message"],
     ["identity_not_found", "identity", "identity"],
+    ["agent_wallet_required", "wallet", "wallet"],
     ["malformed_link", "bug", "pasted_not_hex"],
     ["malformed_signature", "bug", "pasted_not_hex"],
   ];
@@ -177,6 +180,21 @@ describe("linkSubmitOutcome", () => {
       order,
       code: "deadline_out_of_window",
       sentence: SENTENCE.deadline_out_of_window,
+      lapsed: false,
+    });
+  });
+
+  test("a 422 agent_wallet_required, refused before the reserve, keeps the draft and shows the served sentence", () => {
+    const order = view();
+    const answer = refusal("agent_wallet_required", SENTENCE.agent_wallet_required, order, {
+      identityOwner: GUARDIAN,
+      agentWallet: GUARDIAN,
+    });
+    expect(linkSubmitOutcome(answer)).toStrictEqual({
+      next: "refused",
+      order,
+      code: "agent_wallet_required",
+      sentence: SENTENCE.agent_wallet_required,
       lapsed: false,
     });
   });

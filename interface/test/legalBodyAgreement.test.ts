@@ -677,6 +677,8 @@ describe("withAgreementRead: an agreement read on this visit moves its order on 
         order: draft,
         ownerChoice,
         agentId,
+        // A wallet of the agent's own (an invention), so the draft goes on to the link.
+        agentWallet: "0x00000000000000000000000000000000000a6e47",
       });
     const read = { order: draft, readFor: draft.id };
     expect(derive(null, null)).toEqual({ phase: "agreement" });
