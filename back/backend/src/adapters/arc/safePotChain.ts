@@ -35,9 +35,9 @@ export interface SafePotChainPort {
   /** Every read of the website's `readPotRaw` at `blockNumber` (the latest block, read first and
    *  fresh, when absent). Any failure throws. */
   readPot(p: { pot: Address; agentWallet: Address; blockNumber?: bigint }): Promise<PotRaw>;
-  /** keccak256 of the code at an address at the latest block, null for no code. Any failure
-   *  throws. */
-  codeHash(address: Address): Promise<Hex | null>;
+  /** keccak256 of the code at an address at `blockNumber` (the latest block when absent), null for
+   *  no code. Any failure throws. */
+  codeHash(address: Address, blockNumber?: bigint): Promise<Hex | null>;
 }
 
 /** The first page of the Safe's module list, and of the module's delegates: ten, as the real run
@@ -185,10 +185,14 @@ export class SafePotChain implements SafePotChainPort {
     };
   }
 
-  /** keccak256 of the code at `address` at the latest block; null for no code (`0x` or nothing).
-   *  One read, no other. A failed read throws. */
-  async codeHash(address: Address): Promise<Hex | null> {
-    const code = await this.d.publicClient.getCode({ address: checksummed(address) });
+  /** keccak256 of the code at `address`, at `blockNumber` when given (the public record reads a
+   *  pot at its statement's block) and at the latest block otherwise; null for no code (`0x` or
+   *  nothing). One read, no other. A failed read throws. */
+  async codeHash(address: Address, blockNumber?: bigint): Promise<Hex | null> {
+    const at = checksummed(address);
+    const code = await this.d.publicClient.getCode(
+      blockNumber === undefined ? { address: at } : { address: at, blockNumber },
+    );
     return hasCode(code) ? keccak256(code) : null;
   }
 }

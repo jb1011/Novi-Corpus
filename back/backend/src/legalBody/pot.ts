@@ -1,4 +1,4 @@
-import { type Address, getAddress, isAddress } from "viem";
+import { type Address, type Hex, getAddress, isAddress } from "viem";
 import type { SafePotChainPort } from "../adapters/arc/safePotChain";
 import { opsLog } from "../observability/opsLog";
 import type { CharterGrantRepository } from "../persistence/charterGrantRepository";
@@ -18,13 +18,23 @@ import { chainCall } from "./orders";
 import {
   POT_CEILING_MAX_USDC,
   POT_PERIOD_MINUTES,
+  type PotAddresses,
+  type PotReading,
+  SAFE_PROXY_RUNTIME_CODE_HASH,
   USDC_UNIT,
   potAddresses,
   potCeilingCapFromGrant,
   potInitializer,
+  potReading,
   predictPotAddress,
 } from "./safePot";
 import { refusal } from "./sentences";
+import type { Standing } from "./standing";
+import {
+  type LegalBodyStatementDeps,
+  type StatementOutcome,
+  statementForAgent,
+} from "./statements";
 
 export type {
   PotAct,
@@ -64,9 +74,21 @@ export type {
  * its allowance are untouched: Novi Corpus holds no key to them. The address stays the body's (an
  * address belongs to one legal body; one pot for life), and the note door puts it back.
  *
- * OFFERED ONLY WHILE VERIFIED (Rulings R1 and R11). The doors answer `pot_not_offered` while this
- * process has not verified the code of the pot's seven contracts (`potOffer.ts`), before anything
- * is read: the flag is `offered`.
+ * OFFERED ONLY WHILE VERIFIED (Rulings R1 and R11). The note door and the read answer
+ * `pot_not_offered` while this process has not verified the code of the pot's seven contracts
+ * (`potOffer.ts`), before anything is read: the flag is `offered`. Taking the pot off the record
+ * takes no flag (Ruling R15 a): a guardian may always withdraw a claim.
+ *
+ * IN THE PUBLIC RECORD (`potOfStatement`). Beside a signed statement, outside it and unsigned, the
+ * lookups serve the pot on the record: its address, its birth details (anyone recomputes the
+ * address from them) and what was read from the chain at the statement's own block, against the
+ * agent's wallet that statement signs and the body's guardian. The ceiling counts fixed periods:
+ * the agent's key may take up to it in each thirty-day period, each period starting where the last
+ * one ended. Only an address the server recomputed from its notes' birth details is ever read:
+ * never one a request named. While the flag is off, the pot is still named, with "Its limits were
+ * not read." (Ruling R15 b): nothing is claimed from contracts that failed their check, and the
+ * link to the company is never hidden. Every pot address a body declared leads back to the body
+ * (`statementForPotAddress`): the one on the record, or a former one.
  *
  * Ops lines carry the body's id only.
  */
@@ -107,6 +129,93 @@ export interface OrderPotView {
   declaredAt: number;
   birth: PotBirthNote;
 }
+
+/** What anyone needs to recompute the pot's address and see how it was born (the runbook's recipe,
+ *  Task 14): the guardian (the Safe's only owner), the agent's key it was set up for (its first
+ *  delegate), the token, the first ceiling in units, the period in minutes, the salt number, and the
+ *  five contracts the setup names. The address is CREATE2 of the factory over the initializer these
+ *  give and the salt number. Public facts: the pot's address and its birth are meant to be checked. */
+export type PotBirth = {
+  guardian: Address;
+  agentWallet: Address;
+  token: Address;
+  ceilingUnits: string;
+  periodMinutes: 43200;
+  saltNonce: string;
+  proxyFactory: Address;
+  singleton: Address;
+  fallbackHandler: Address;
+  multiSendCallOnly: Address;
+  allowanceModule: Address;
+};
+
+/**
+ * The pot on the record, served beside a signed statement, outside it and unsigned. Units are
+ * USDC's 6 decimals, as decimal strings; times are unix seconds. `readAtBlock` and `readAt` are the
+ * statement's own block and issue: what was read from the chain was read at that block. The
+ * periods are fixed: each thirty-day period starts where the last one ended, and `periodEndsAt` is
+ * the end of the current one.
+ *
+ * What each state lets a page say, and no more (the website's copy holds the sentences):
+ *  - `ceiling_read`: "The guardian declared this pot for the company: <address>. The agent's key may
+ *    take up to <amount> USDC from it in each thirty-day period; the current one ends on <date>. It
+ *    holds <amount> USDC. Read from the chain on <date>." `spentUnits` were taken in the current
+ *    period;
+ *  - `stopped`: "The guardian declared this pot for the company: <address>. The agent's key cannot
+ *    take from it: its allowance is switched off. It holds <amount> USDC. Read from the chain on
+ *    <date>." Never more than that: no read can show that no key at all can move the pot's money;
+ *  - `limits_not_read`: "The guardian declared this pot for the company: <address>. Its limits were
+ *    not read." A pot of the guardian's alone with something the reading rules do not read past, or
+ *    any pot while the pot is not offered (Ruling R15 b): no amount;
+ *  - `former`: a pot the body declared that is no longer the one on the record, from `declaredAt`
+ *    (its latest declaration) to `endedAt` (the note that followed it). Served only by a lookup by
+ *    that pot's own address;
+ *  - `unavailable`: the chain could not be read just now. No claim at all; never memoised.
+ */
+export type PotBlock =
+  | {
+      state: "ceiling_read";
+      address: Address;
+      token: Address;
+      ceilingUnits: string;
+      periodMinutes: 43200;
+      spentUnits: string;
+      periodEndsAt: number;
+      balanceUnits: string;
+      readAtBlock: string;
+      readAt: number;
+      declaredBy: "guardian";
+      declaredAt: number;
+      birth: PotBirth;
+    }
+  | {
+      state: "stopped";
+      address: Address;
+      balanceUnits: string;
+      readAtBlock: string;
+      readAt: number;
+      declaredBy: "guardian";
+      declaredAt: number;
+      birth: PotBirth;
+    }
+  | {
+      state: "limits_not_read";
+      address: Address;
+      readAtBlock: string;
+      readAt: number;
+      declaredBy: "guardian";
+      declaredAt: number;
+      birth: PotBirth;
+    }
+  | {
+      state: "former";
+      address: Address;
+      declaredBy: "guardian";
+      declaredAt: number;
+      endedAt: number;
+      birth: PotBirth;
+    }
+  | { state: "unavailable" };
 
 /** The fields the note door takes, and no other. */
 const INPUT_FIELDS: readonly string[] = [
@@ -420,7 +529,6 @@ export async function declarePot(
 
 /**
  * The guardian takes the company's pot off the public record, in this order:
- *  0. the pot is offered (`assertPotOffered`): else 409 `pot_not_offered`, before anything is read;
  *  1. the body is the tenant's: one 404 for unknown and not yours. Any state, revoked included: a
  *     guardian may always withdraw a claim;
  *  2. one transaction: the body's notes read; none, or a latest note that is `removed`, is 409
@@ -432,15 +540,15 @@ export async function declarePot(
  * false. No read of the chain or the registry: the pot itself, its money and its allowance are
  * untouched. The address stays the body's, so another body's note of it is still `pot_taken`, and
  * `declarePot` puts it back by its own rules. The real-human check is the door's, before this.
+ * Unlike the abandon door, no deployment check and no flag: a guardian may always withdraw a
+ * claim. While the pot is not offered (Ruling R15 a) it is taken off all the same: withdrawing a
+ * public claim needs no chain read, least of all when something looks wrong.
  */
 export function removePot(
   deps: LegalBodyPotDeps,
   tenantId: string,
   legalBodyId: string,
 ): OrderPotView {
-  // 0.
-  assertPotOffered(deps);
-
   // 1.
   const row = deps.bodies.findOwned(tenantId, legalBodyId);
   if (row === undefined) throw refusal("not_found", 404);
@@ -486,4 +594,295 @@ export function orderPot(
   const notes = deps.repo.list(row.legalBodyId);
   const latest = notes.at(-1);
   return { pot: latest === undefined ? null : viewOf(notes, latest) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pot in the public record
+// ---------------------------------------------------------------------------------------------
+
+/** The standings of a statement in force, as the treasury of record reads them (`active`, or
+ *  `pending` on its way): beside any other, no live claim about the pot is served. */
+const STANDINGS_IN_FORCE: readonly Standing[] = ["active", "pending"];
+/** The most legal bodies a pot's address is checked for. One address belongs to one legal body
+ *  (Ruling R13); more could only be notes written around the doors. */
+const POT_CANDIDATES = 3;
+
+type Stated = Extract<StatementOutcome, { kind: "statement" }>;
+
+/** The code is a pot's: a Safe proxy's runtime code, the same for every proxy. */
+const isPotCode = (code: Hex | null): boolean =>
+  code !== null && code.toLowerCase() === SAFE_PROXY_RUNTIME_CODE_HASH.toLowerCase();
+
+/** The one thing of an error an ops line carries: its message can quote a node's URL. */
+const nameOf = (e: unknown): string => (e instanceof Error ? e.name : "not_an_error");
+
+/** A chain read of the record that failed: one ops line, naming the body and the error's name
+ *  only, and the block that claims nothing. */
+function unavailableBlock(legalBodyId: string, e: unknown): PotBlock {
+  opsLog("legal_body_pot_unavailable", { legalBodyId, errorName: nameOf(e) });
+  return { state: "unavailable" };
+}
+
+/** The body's row, which a statement was just made from: a row that vanished is the database's
+ *  failure, and throws like one. */
+function rowOf(deps: Pick<LegalBodyPotDeps, "bodies">, legalBodyId: string): LegalBodyRecord {
+  const row = deps.bodies.findById(legalBodyId);
+  if (row === undefined) throw new Error("the legal body of a statement vanished from its table");
+  return row;
+}
+
+/**
+ * The birth details the record serves for a declared note of the body, once the address they
+ * predict, with the body's own guardian, is the note's address: anyone can recompute it from them.
+ * Else null, after one error line: such a note was not written by the doors, which note only an
+ * address the server recomputed, and the server never reads as a pot an address it did not
+ * recompute itself (the reading rules are sound only for the address an initializer fixes).
+ */
+function birthOf(table: PotAddresses, row: LegalBodyRecord, note: PotNote): PotBirth | null {
+  const b = note.birth;
+  const predicted =
+    b === null
+      ? null
+      : predictPotAddress(
+          table,
+          potInitializer(table, {
+            guardian: row.guardian,
+            agentWallet: b.agentWallet,
+            token: table.usdc,
+            ceilingUnits: BigInt(b.ceilingUnits),
+            periodMinutes: POT_PERIOD_MINUTES,
+          }),
+          BigInt(b.saltNonce),
+        );
+  if (b === null || predicted === null || !sameAddress(predicted, note.address)) {
+    opsLog("legal_body_pot_note_unrecomputable", { level: "error", legalBodyId: row.legalBodyId });
+    return null;
+  }
+  return {
+    guardian: getAddress(row.guardian),
+    agentWallet: getAddress(b.agentWallet),
+    token: table.usdc,
+    ceilingUnits: b.ceilingUnits,
+    periodMinutes: POT_PERIOD_MINUTES,
+    saltNonce: b.saltNonce,
+    proxyFactory: table.proxyFactory,
+    singleton: table.safeSingleton,
+    fallbackHandler: table.fallbackHandler,
+    multiSendCallOnly: table.multiSendCallOnly,
+    allowanceModule: table.allowanceModule,
+  };
+}
+
+/** Whether `address` holds a pot's code at the statement's own block: one code read, and nothing
+ *  else of the pot. A failed read is "unavailable", after its ops line. */
+async function holdsPotCode(
+  deps: Pick<LegalBodyPotDeps, "chain">,
+  legalBodyId: string,
+  address: Address,
+  stated: Stated,
+): Promise<boolean | "unavailable"> {
+  try {
+    const blockNumber = BigInt(stated.statement.message.observedAtBlock);
+    return isPotCode(await deps.chain.codeHash(address, blockNumber));
+  } catch (e) {
+    unavailableBlock(legalBodyId, e);
+    return "unavailable";
+  }
+}
+
+/**
+ * The block of the pot on the record (`latest`, the body's latest note, a declared one) beside a
+ * statement in force, read from the chain at the statement's block (`observedAtBlock`), against the
+ * agent's wallet the statement signs and the body's guardian from its row; `readAt` is the
+ * statement's `issuedAt`. While the pot is not offered (Ruling R15 b): only whether the address
+ * holds a pot's code, and the pot named with its limits not read; never a ceiling, never stopped.
+ */
+async function onRecordBlock(
+  deps: LegalBodyPotDeps,
+  stated: Stated,
+  latest: PotNote,
+): Promise<PotBlock | null> {
+  const table = potAddresses(deps.chainId);
+  if (table === null) return null;
+  const row = rowOf(deps, stated.legalBodyId);
+  const birth = birthOf(table, row, latest);
+  if (birth === null) return null;
+  const message = stated.statement.message;
+  const address = latest.address;
+  const read = { readAtBlock: message.observedAtBlock, readAt: Number(message.issuedAt) };
+  const declared = { declaredBy: "guardian" as const, declaredAt: latest.declaredAt, birth };
+
+  if (!deps.offered()) {
+    const holds = await holdsPotCode(deps, row.legalBodyId, address, stated);
+    if (holds === "unavailable") return { state: "unavailable" };
+    return holds ? { state: "limits_not_read", address, ...read, ...declared } : null;
+  }
+
+  let reading: PotReading;
+  try {
+    const raw = await deps.chain.readPot({
+      pot: address,
+      agentWallet: message.agentWallet,
+      blockNumber: BigInt(message.observedAtBlock),
+    });
+    reading = potReading(raw, {
+      addresses: table,
+      guardian: row.guardian,
+      agentWallet: message.agentWallet,
+    });
+  } catch (e) {
+    return unavailableBlock(row.legalBodyId, e);
+  }
+  switch (reading.state) {
+    case "absent":
+    case "not_the_guardians":
+      return null;
+    case "stopped":
+      return {
+        state: "stopped",
+        address,
+        balanceUnits: reading.balanceUnits.toString(),
+        ...read,
+        ...declared,
+      };
+    case "limits_not_read":
+      return { state: "limits_not_read", address, ...read, ...declared };
+    case "ceiling_read":
+      return {
+        state: "ceiling_read",
+        address,
+        token: table.usdc,
+        ceilingUnits: reading.ceilingUnits.toString(),
+        periodMinutes: POT_PERIOD_MINUTES,
+        spentUnits: reading.spentUnits.toString(),
+        periodEndsAt: reading.periodEndsAt,
+        balanceUnits: reading.balanceUnits.toString(),
+        ...read,
+        ...declared,
+      };
+  }
+}
+
+/**
+ * The body's pot ON THE RECORD, beside its signed statement, as read from the chain at the
+ * statement's block (`PotBlock`). Null: no deps; a statement not in force (`active` or `pending`),
+ * with no read at all; no note, or a latest note that is `removed`; a note whose birth details do
+ * not give its address; no code at the address (noted, never created); or a Safe that is not the
+ * guardian's alone. A failed CHAIN read is `unavailable`; a failed DATABASE read throws, and the
+ * lookups answer it with their 503. `declaredAt` and `birth` are those of the note on the record.
+ * The expected delegate is the agent's wallet the statement signs, so a key replaced in the
+ * registry after the setup reads `limits_not_read` until the guardian moves the pot to it. One
+ * read of the pot per statement (its code, then its state at that same block), none for a body
+ * without a pot on the record. The signed statement is untouched.
+ */
+export async function potOfStatement(
+  deps: LegalBodyPotDeps | undefined,
+  stated: Stated,
+): Promise<PotBlock | null> {
+  if (deps === undefined) return null;
+  if (!STANDINGS_IN_FORCE.includes(stated.statement.message.standing)) return null;
+  const latest = deps.repo.latest(stated.legalBodyId);
+  if (latest === undefined || latest.act !== "declared") return null;
+  return onRecordBlock(deps, stated, latest);
+}
+
+/**
+ * The block of a body's pot for an address one of its notes declared, beside its statement, or
+ * undefined when the address does not lead to this body:
+ *  (a) the body's latest note is a declared note of this address: beside a statement in force, the
+ *      pot on the record (`onRecordBlock`; null leads nowhere); beside one not in force, `null`,
+ *      kept only when the address holds a pot's code, so a lookup by the pot of an inactive body
+ *      still leads to it with no live claim beside it;
+ *  (b) otherwise it is a FORMER pot of the body: kept only when the address holds a pot's code,
+ *      as `former`, from its latest declared note to the first note after that one.
+ * A code read that fails is `unavailable`, kept.
+ */
+async function potAtAddress(
+  deps: LegalBodyPotDeps,
+  table: PotAddresses,
+  row: LegalBodyRecord,
+  stated: Stated,
+  address: Address,
+): Promise<PotBlock | null | undefined> {
+  const notes = deps.repo.list(row.legalBodyId);
+  const latest = notes.at(-1);
+  if (latest?.act === "declared" && sameAddress(latest.address, address)) {
+    if (STANDINGS_IN_FORCE.includes(stated.statement.message.standing))
+      return (await onRecordBlock(deps, stated, latest)) ?? undefined;
+    if (birthOf(table, row, latest) === null) return undefined;
+    const holds = await holdsPotCode(deps, row.legalBodyId, latest.address, stated);
+    if (holds === "unavailable") return { state: "unavailable" };
+    return holds ? null : undefined;
+  }
+
+  let at = -1;
+  for (let i = notes.length - 1; i >= 0 && at === -1; i -= 1) {
+    const note = notes[i];
+    if (note?.act === "declared" && sameAddress(note.address, address)) at = i;
+  }
+  const declared = notes[at];
+  // The note that ended it: one always follows, since the latest note is not this declaration.
+  const ended = notes[at + 1];
+  if (at === -1 || declared === undefined || ended === undefined) return undefined;
+  const birth = birthOf(table, row, declared);
+  if (birth === null) return undefined;
+  const holds = await holdsPotCode(deps, row.legalBodyId, declared.address, stated);
+  if (holds === "unavailable") return { state: "unavailable" };
+  if (!holds) return undefined;
+  return {
+    state: "former",
+    address: declared.address,
+    declaredBy: "guardian",
+    declaredAt: declared.declaredAt,
+    endedAt: ended.declaredAt,
+    birth,
+  };
+}
+
+/**
+ * The statement for an address no agent's wallet answered, when it is a pot a legal body declared:
+ * the body's statement, read fresh, and the block of that pot. The notes only propose candidates;
+ * the chain confirms them.
+ *  1. The candidates: the bodies with a declared note of the address, newest note first, at most
+ *     3. None: `none`, with no chain read. A value that is not an address reads nothing at all.
+ *  2. For each, in order: its row's agent (none: skipped); the statement for that agent
+ *     (`statementForAgent`); an `unknown` is remembered and ends the loop; a statement about
+ *     another legal body than the candidate (the agent's newer body) is skipped. Then the block
+ *     for THIS address (`potAtAddress`): one that does not lead to the body is skipped.
+ *  3. The first kept whose standing is `active`; else the `unknown` met (with pot null); else the
+ *     first kept; else `none`.
+ * The block's address, when it has one, is the address asked. A database read that fails throws.
+ */
+export async function statementForPotAddress(
+  st: LegalBodyStatementDeps,
+  deps: LegalBodyPotDeps,
+  address: Address,
+): Promise<{ outcome: StatementOutcome; pot: PotBlock | null }> {
+  const none = { outcome: { kind: "none" } as const, pot: null };
+  if (typeof address !== "string" || !isAddress(address, { strict: false })) return none;
+  const candidates = deps.repo.legalBodyIdsByAddress(address, POT_CANDIDATES);
+  if (candidates.length === 0) return none;
+  const table = potAddresses(deps.chainId);
+  if (table === null) return none;
+
+  const kept: { outcome: Stated; pot: PotBlock | null }[] = [];
+  let unknown: Extract<StatementOutcome, { kind: "unknown" }> | undefined;
+  for (const legalBodyId of candidates) {
+    const row = deps.bodies.findById(legalBodyId);
+    if (row === undefined || row.agentId === null) continue;
+    const out = await statementForAgent(st, row.agentId);
+    if (out.kind === "unknown") {
+      unknown = out;
+      break;
+    }
+    if (out.kind !== "statement" || out.legalBodyId !== legalBodyId) continue;
+    const pot = await potAtAddress(deps, table, row, out, address);
+    if (pot !== undefined) kept.push({ outcome: out, pot });
+  }
+  return (
+    kept.find((k) => k.outcome.standing === "active") ??
+    (unknown === undefined ? undefined : { outcome: unknown, pot: null }) ??
+    kept[0] ??
+    none
+  );
 }

@@ -412,7 +412,23 @@ describe("SafePotChain.readPot: the server's read of a pot, at one block", () =>
   });
 });
 
-describe("SafePotChain.codeHash: keccak256 of the code at the latest block", () => {
+describe("SafePotChain.codeHash: keccak256 of the code at the latest block, or at the block asked", () => {
+  test("at a block asked: one read of the code at that block, and no other read", async () => {
+    const { client, chain } = fakeClient();
+    expect(await chain.codeHash(SAFE_CREATED.toLowerCase() as Address, 4_242n)).toBe(
+      SAFE_PROXY_RUNTIME_CODE_HASH,
+    );
+    expect(client.getCode.mock.calls).toEqual([[{ address: SAFE_CREATED, blockNumber: 4_242n }]]);
+    expect(client.getBlockNumber).not.toHaveBeenCalled();
+    expect(client.multicall).not.toHaveBeenCalled();
+    expect(client.getBalance).not.toHaveBeenCalled();
+    for (const potCode of [undefined, "0x" as Hex])
+      expect(await fakeClient({ potCode }).chain.codeHash(SAFE_CREATED, 4_242n)).toBeNull();
+    await expect(
+      fakeClient({ reject: "getCode" }).chain.codeHash(SAFE_CREATED, 4_242n),
+    ).rejects.toThrow();
+  });
+
   test("null for 0x and for undefined, and no other read", async () => {
     for (const potCode of [undefined, "0x" as Hex]) {
       const { client, chain } = fakeClient({ potCode });

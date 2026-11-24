@@ -3,24 +3,41 @@ import { type Mock, vi } from "vitest";
 import type { SafePotChainPort } from "../../src/adapters/arc/safePotChain";
 import type { GrantChoices } from "../../src/legalBody/grant";
 import { createOrder } from "../../src/legalBody/orders";
-import type { LegalBodyPotDeps } from "../../src/legalBody/pot";
+import type { LegalBodyPotDeps, PotBirth } from "../../src/legalBody/pot";
 import {
   POT_PERIOD_MINUTES,
+  type PotAddresses,
+  type PotRaw,
+  SAFE_PROXY_RUNTIME_CODE_HASH,
+  SAFE_SENTINEL,
   potAddresses,
   potInitializer,
   predictPotAddress,
 } from "../../src/legalBody/safePot";
 import { CHARTER_LEGAL_TEXTS, octoberLegalTexts } from "../../src/legalBody/texts/sets";
-import { SqliteLegalBodyPotRepository } from "../../src/persistence/legalBodyPotRepository";
+import {
+  type LegalBodyPotRepository,
+  type PotBirthNote,
+  SqliteLegalBodyPotRepository,
+} from "../../src/persistence/legalBodyPotRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import { ACTION, recordHuman } from "./customerCompanyFixtures";
 import { type LegalBodyStores, customerCompany, legalBodyOrderDeps } from "./legalBodyFixtures";
+import {
+  type FakeBody,
+  type FakeStatementChain,
+  type StatementStores,
+  bodyIn,
+  passedCheck,
+  readyCompany,
+} from "./legalBodyStatementFixtures";
 
 /**
  * The fixtures the tests of the company's pot share: the real run's guardian, agent and payee, the
  * pot V3 of the pinned vectors, a linked body of a guardian whose agreement is stored (so its grant
  * reads back), a fake registry and a fake chain port that record their calls, and the pot's deps
- * over all of them.
+ * over all of them. For the public record: the pot's raw answers of the proof and of the real Safe,
+ * a body of G that the statement service states, and a note written straight into the record.
  *
  * G, A and P are the addresses of the real run on Arc testnet of 24 Nov: public addresses, never a
  * key. Every other address is a placeholder, every name and filing number an invention.
@@ -174,11 +191,12 @@ export function fakeRegistry(): {
 }
 
 /** A chain port whose code reads answer `codes` (lower-case address -> its code hash; absent: no
- *  code), and whose pot reads throw: the note door never reads a pot. */
+ *  code), at any block, and whose pot reads throw unless a test answers them: the note door never
+ *  reads a pot. */
 export function fakePotChain(): {
   codes: Map<string, Hex>;
   port: SafePotChainPort & {
-    codeHash: Mock<(address: Address) => Promise<Hex | null>>;
+    codeHash: Mock<SafePotChainPort["codeHash"]>;
     readPot: Mock<SafePotChainPort["readPot"]>;
   };
 } {
@@ -186,7 +204,9 @@ export function fakePotChain(): {
   return {
     codes,
     port: {
-      codeHash: vi.fn(async (address: Address) => codes.get(address.toLowerCase()) ?? null),
+      codeHash: vi.fn<SafePotChainPort["codeHash"]>(
+        async (address) => codes.get(address.toLowerCase()) ?? null,
+      ),
       readPot: vi.fn<SafePotChainPort["readPot"]>(async () => {
         throw new Error("the note door read a pot");
       }),
@@ -196,6 +216,120 @@ export function fakePotChain(): {
 
 /** A code hash for a fake chain: any 32 bytes stand for "holds code". */
 export const SOME_CODE: Hex = `0x${"d7".repeat(32)}`;
+
+/** The pot's table on the test chain: the same seven addresses as on mainnet. */
+export const T: PotAddresses = (() => {
+  const table = potAddresses(POT_CHAIN_ID);
+  if (table === null) throw new Error("no pot table for the test chain");
+  return table;
+})();
+
+/** The proof's own answers (RESULTS.md, S6) for a pot of guardian G and agent A, right after its
+ *  first take: the website's HEALTHY, field for field. */
+export const HEALTHY: PotRaw = {
+  codeHash: SAFE_PROXY_RUNTIME_CODE_HASH,
+  singleton: T.safeSingleton,
+  owners: [G],
+  threshold: 1n,
+  modules: { list: [T.allowanceModule], next: SAFE_SENTINEL },
+  guard: zeroAddress,
+  fallbackHandler: T.fallbackHandler,
+  delegates: { list: [A], next: 0 },
+  tokens: [T.usdc],
+  allowance: [50_000_000n, 10_000_000n, 43200n, 29919864n, 2n],
+  usdcAllowanceToAgent: 0n,
+  balanceUnits: 190_000_000n,
+  balanceWei: 190_000_000_000_000_000_000n,
+  agentBalanceWei: 100_000_000_000_000_000n,
+  agentHasCode: false,
+};
+
+/** The real Safe of the 24 Nov run as it reads after the run's stop: modules [], delegates [],
+ *  tokens [USDC], allowance [0, 0, 0, 0, 3], balances 0. The website's REAL_STOPPED. */
+export const REAL_STOPPED: PotRaw = {
+  ...HEALTHY,
+  modules: { list: [], next: SAFE_SENTINEL },
+  delegates: { list: [], next: 0 },
+  allowance: [0n, 0n, 0n, 0n, 3n],
+  balanceUnits: 0n,
+  balanceWei: 0n,
+  agentBalanceWei: 294_000_000_000_000n,
+};
+
+/** V3's birth details, as a note holds them. */
+export const BIRTH_V3: PotBirthNote = { saltNonce: "1", agentWallet: A, ceilingUnits: "50000000" };
+
+/** The birth details the record serves for a note of `birth` on a body whose guardian is
+ *  `guardian`: the pinned contracts' addresses written out, in the served order. */
+export function servedBirth(birth: PotBirthNote = BIRTH_V3, guardian: Address = G): PotBirth {
+  return {
+    guardian,
+    agentWallet: birth.agentWallet,
+    token: "0x3600000000000000000000000000000000000000",
+    ceilingUnits: birth.ceilingUnits,
+    periodMinutes: 43200,
+    saltNonce: birth.saltNonce,
+    proxyFactory: "0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67",
+    singleton: "0x29fcB43b46531BcA003ddC8FCB67FFE91900C762",
+    fallbackHandler: "0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99",
+    multiSendCallOnly: "0xA83c336B20401Af773B6219BA5027174338D1836",
+    allowanceModule: "0xAA46724893dedD72658219405185Fb0Fc91e091C",
+  };
+}
+
+/**
+ * A body of G whose statement the statement service makes: a ready company of G whose check
+ * passed, a row linked for agent `agentId` (42 unless told) with A as its identity owner, linked on
+ * `chain` with the agent's wallet `wallet` (A unless told), the body `status` (Active unless told).
+ * Its statement reads `active`; `pending` with a company not paid for yet (`companyStatus` draft);
+ * `inactive` for a body that is not Active.
+ */
+export function statedPotBody(
+  s: StatementStores,
+  chain: FakeStatementChain,
+  o: {
+    agentId?: string;
+    wallet?: Address;
+    companyStatus?: "draft" | "ready";
+    status?: FakeBody["status"];
+  } = {},
+): LegalBodyRecord {
+  const companyId = readyCompany(s, { tenant: G, status: o.companyStatus });
+  s.checks.append(passedCheck(companyId));
+  const row = bodyIn("linked", s, companyId, { tenant: G, owner: A, agentId: o.agentId });
+  chain.link(row, {
+    wallet: o.wallet ?? A,
+    ...(o.status === undefined ? {} : { status: o.status }),
+  });
+  return row;
+}
+
+/** A note of the body's pot written straight into the record, as the doors write one: declared
+ *  (with `birth`, V3's unless told) or removed, of `address` (V3 unless told), at `at`. */
+export function notePot(
+  pots: LegalBodyPotRepository,
+  row: LegalBodyRecord,
+  o: { at: number; act?: "declared" | "removed"; address?: Address; birth?: PotBirthNote },
+): void {
+  const act = o.act ?? "declared";
+  pots.append({
+    legalBodyId: row.legalBodyId,
+    act,
+    address: o.address ?? V3_ADDRESS,
+    birth: act === "declared" ? (o.birth ?? BIRTH_V3) : null,
+    declarationVersion: act === "declared" ? "pot-declaration-1" : null,
+    at: o.at,
+  });
+}
+
+/** The birth details of a pot of G and agent A with `ceilingUsdc` and salt 1, and its address. */
+export function potOf(ceilingUsdc: bigint): { address: Address; birth: PotBirthNote } {
+  const ceilingUnits = ceilingUsdc * 1_000_000n;
+  return {
+    address: potAddressOf({ ceilingUnits }),
+    birth: { saltNonce: "1", agentWallet: A, ceilingUnits: ceilingUnits.toString() },
+  };
+}
 
 /** The pot's deps over the stores, the registry and the chain port given, on `POT_CHAIN_ID`. */
 export function potDeps(

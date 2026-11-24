@@ -393,19 +393,31 @@ describe("POST /legal-body-orders/:id/pot/off-record", () => {
     expect(acts()).toEqual(["declared"]);
   });
 
-  test("while the pot's contracts are not verified: 409 pot_not_offered, before any read, and taken off once they are", async () => {
+  test("while the pot's contracts are not verified it is taken off all the same, with no chain read: a guardian may always withdraw a claim (Ruling R15 a)", async () => {
     const row = linkedBody();
     const app = makeApp();
     await post(app, row.legalBodyId, V3_INPUT);
-    const findOwned = vi.spyOn(s.repo, "findOwned");
+    registry.getAgentWallet.mockClear();
     offered = false;
-    const off = await takeOff(app, row.legalBodyId);
-    expect(off).toMatchObject(refused(409, "pot_not_offered"));
-    expect(off.text).not.toMatch(/0x|mismatch|unreadable/i);
-    expect(findOwned).not.toHaveBeenCalled();
-    expect(acts()).toEqual(["declared"]);
-    offered = true;
-    expect((await takeOff(app, row.legalBodyId)).status).toBe(200);
+    expect(await takeOff(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { ...V3_VIEW, onRecord: false },
+    });
+    expect(acts()).toEqual(["declared", "removed"]);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // The real-human check still comes first, flag or not.
+    expect(await takeOff(app, row.legalBodyId, await sessionOf(ANVIL_ACCOUNT_4))).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+    // The note door and the read still answer pot_not_offered while it is off.
+    expect(await read(app, row.legalBodyId)).toMatchObject(refused(409, "pot_not_offered"));
+    expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject(
+      refused(409, "pot_not_offered"),
+    );
+    expect(acts()).toEqual(["declared", "removed"]);
   });
 
   test("a row of another factory is taken off all the same: a guardian may always withdraw a claim", async () => {

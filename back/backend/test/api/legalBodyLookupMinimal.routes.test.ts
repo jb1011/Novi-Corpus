@@ -11,8 +11,11 @@
 import { type Address, getAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { buildApiApp } from "../../src/api/app";
+import type { LegalBodyPotDeps } from "../../src/legalBody/pot";
 import { verifyPublicStatement } from "../../src/legalBody/publicStatement";
+import { SAFE_PROXY_RUNTIME_CODE_HASH } from "../../src/legalBody/safePot";
 import type { LegalBodyResolution, LegalBodyStanding } from "../../src/payments/legalBody";
+import { SqliteLegalBodyPotRepository } from "../../src/persistence/legalBodyPotRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import type { EntityRecord } from "../../src/types";
 import { CHAIN_ID } from "../helpers/customerCompanyFixtures";
@@ -29,6 +32,17 @@ import {
   readyCompany,
   statementDeps,
 } from "../helpers/legalBodyStatementFixtures";
+import {
+  A,
+  HEALTHY,
+  V3_ADDRESS,
+  fakePotChain,
+  fakeRegistry,
+  notePot,
+  potDeps,
+  servedBirth,
+  statedPotBody,
+} from "../helpers/potFixtures";
 
 /** The lookup's links, and the statement's own: distinct, so an answer shows which it used. */
 const TRANSPARENCY = "https://www.example.test/transparency";
@@ -122,6 +136,8 @@ interface AppOptions {
   readBudget?: { take(): boolean };
   /** The network the lookup names. */
   network?: "testnet" | "mainnet";
+  /** The company's pot: none unless given. */
+  pot?: LegalBodyPotDeps;
 }
 
 function makeApp(o: AppOptions = {}) {
@@ -130,6 +146,7 @@ function makeApp(o: AppOptions = {}) {
     webOrigin: "https://www.example.test",
     jwtSecret: "s",
     now: () => clock,
+    legalBodyPot: o.pot,
     legalBody: {
       resolver: { resolve: o.resolve ?? (async () => ({ kind: "none" })) },
       readBudget,
@@ -179,6 +196,7 @@ const MINIMAL_KEYS = [
   "checkedAt",
   "statement",
   "treasury",
+  "pot",
 ];
 
 test("a full-product answer is the same, byte for byte, with the statement wired or not, even for an address a Minimal body also has", async () => {
@@ -271,6 +289,7 @@ describe("the Minimal branch", () => {
       checkedAt: CHECKED_AT,
       statement: expect.any(Object),
       treasury: null,
+      pot: null,
     });
     expect(Object.keys(body.links)).toEqual(["transparency", "metadata", "statement"]);
     expect(body.statement.message).toMatchObject({
@@ -354,6 +373,7 @@ describe("the Minimal branch", () => {
         checkedAt: CHECKED_AT,
         statement: null,
         treasury: null,
+        pot: null,
       });
       expect(Object.keys(body)).toEqual(MINIMAL_KEYS);
       expect(text).not.toContain("rpc.example");
@@ -423,6 +443,174 @@ describe("the Minimal branch", () => {
     expect(budget.calls).toBe(10);
     const refused = await app.request(`/legal-bodies/${STRANGER}`, { headers: from });
     expect(refused.status).toBe(429);
+  });
+});
+
+describe("the company's pot", () => {
+  /** When the pot was declared: an hour before the clock. */
+  const DECLARED_AT = CLOCK_S - 3_600;
+  let potChain: ReturnType<typeof fakePotChain>;
+  beforeEach(() => {
+    potChain = fakePotChain();
+  });
+  const pot = (): LegalBodyPotDeps =>
+    potDeps(s, {
+      registry: { getAgentWallet: fakeRegistry().getAgentWallet },
+      chain: potChain.port,
+      now: () => clock,
+    });
+  const notes = () => new SqliteLegalBodyPotRepository(s.db);
+  /** A body of G for agent 42, its wallet A, with V3 noted for it. */
+  function withPot(): LegalBodyRecord {
+    const row = statedPotBody(s, chain);
+    notePot(notes(), row, { at: DECLARED_AT });
+    return row;
+  }
+  /** What a block naming V3 carries beside its reading, for a statement of `body`. */
+  const v3Facts = (body: { statement: { message: { observedAtBlock: string } } }) => ({
+    readAtBlock: body.statement.message.observedAtBlock,
+    readAt: CLOCK_S,
+    declaredBy: "guardian",
+    declaredAt: DECLARED_AT,
+    birth: servedBirth(),
+  });
+
+  test("by the agent's wallet: the pot after treasury, read from the chain at the statement's block", async () => {
+    withPot();
+    potChain.port.readPot.mockResolvedValue(HEALTHY);
+    const res = await get(makeApp({ pot: pot() }), A);
+    expect(res.headers.get("cache-control")).toBe(FRESH);
+    const body = await res.json();
+    expect(Object.keys(body)).toEqual(MINIMAL_KEYS);
+    expect(body).toMatchObject({ address: A, legalBody: true, standing: "active", agentId: "42" });
+    expect(body.pot).toMatchObject({
+      state: "ceiling_read",
+      address: V3_ADDRESS,
+      ceilingUnits: "50000000",
+      ...v3Facts(body),
+    });
+    expect(potChain.port.readPot.mock.calls).toEqual([
+      [
+        {
+          pot: V3_ADDRESS,
+          agentWallet: A,
+          blockNumber: BigInt(body.statement.message.observedAtBlock),
+        },
+      ],
+    ]);
+    expect(opsLines("legal_body_lookup")).toEqual([{ matchedBy: "statement", standing: "active" }]);
+  });
+
+  test("by the pot's own address: the body's signed statement, the address asked, and pot.address that same address; memoised", async () => {
+    const row = withPot();
+    potChain.port.readPot.mockResolvedValue(HEALTHY);
+    const budget = countingBudget();
+    const app = makeApp({ pot: pot(), readBudget: budget });
+    const res = await get(app, V3_ADDRESS.toLowerCase());
+    expect(res.status).toBe(200);
+    expect(res.headers.get("cache-control")).toBe(FRESH);
+    const body = await res.json();
+    expect(Object.keys(body)).toEqual(MINIMAL_KEYS);
+    expect(body).toMatchObject({
+      address: V3_ADDRESS,
+      legalBody: true,
+      standing: "active",
+      agentId: "42",
+      publicId: row.publicId,
+      links: { transparency: TRANSPARENCY, metadata: null, statement: `${STATEMENT_BASE}42` },
+      formation: null,
+    });
+    expect(body.pot).toEqual({
+      state: "ceiling_read",
+      address: V3_ADDRESS,
+      token: "0x3600000000000000000000000000000000000000",
+      ceilingUnits: "50000000",
+      periodMinutes: 43200,
+      spentUnits: "10000000",
+      periodEndsAt: (29919864 + 43200) * 60,
+      balanceUnits: "190000000",
+      ...v3Facts(body),
+    });
+    expect(body.pot.address).toBe(body.address);
+    // The statement is the agent's, unchanged: it names the agent's wallet, never the pot.
+    expect(body.statement.message.agentWallet).toBe(A);
+    await expect(
+      verifyPublicStatement(body.statement, {
+        attestor: TEST_ATTESTOR.address,
+        expectedChainId: CHAIN_ID,
+        nowSeconds: CLOCK_S,
+      }),
+    ).resolves.toBe(true);
+    expect(opsLines("legal_body_lookup")).toEqual([{ matchedBy: "pot", standing: "active" }]);
+    // Memoised: within the window no read and no token.
+    clock += 10_000;
+    expect(await (await get(app, V3_ADDRESS)).json()).toEqual(body);
+    expect(potChain.port.readPot).toHaveBeenCalledTimes(1);
+    expect(budget.calls).toBe(1);
+  });
+
+  test("by a former pot's address: the body's statement with the former pot, its declared and ended times", async () => {
+    const row = withPot();
+    notePot(notes(), row, { at: DECLARED_AT + 600, act: "removed" });
+    potChain.codes.set(V3_ADDRESS.toLowerCase(), SAFE_PROXY_RUNTIME_CODE_HASH);
+    const res = await get(makeApp({ pot: pot() }), V3_ADDRESS);
+    expect(res.headers.get("cache-control")).toBe(FRESH);
+    const body = await res.json();
+    expect(body).toMatchObject({ address: V3_ADDRESS, legalBody: true, agentId: "42" });
+    expect(body.pot).toEqual({
+      state: "former",
+      address: V3_ADDRESS,
+      declaredBy: "guardian",
+      declaredAt: DECLARED_AT,
+      endedAt: DECLARED_AT + 600,
+      birth: servedBirth(),
+    });
+    expect(body.pot.address).toBe(body.address);
+    expect(potChain.port.codeHash.mock.calls).toEqual([
+      [V3_ADDRESS, BigInt(body.statement.message.observedAtBlock)],
+    ]);
+    expect(potChain.port.readPot).not.toHaveBeenCalled();
+  });
+
+  test("an address nobody noted costs no chain read; without the pot's deps a pot's address is not found", async () => {
+    withPot();
+    potChain.port.readPot.mockResolvedValue(HEALTHY);
+    const res = await get(makeApp({ pot: pot() }), STRANGER);
+    expect(await res.json()).toEqual({
+      address: STRANGER,
+      legalBody: false,
+      standing: null,
+      checkedAt: CHECKED_AT,
+    });
+    expect(chain.snapshots).toEqual([]);
+    expect(potChain.port.readPot).not.toHaveBeenCalled();
+    expect(potChain.port.codeHash).not.toHaveBeenCalled();
+    expect(opsLines("legal_body_lookup")).toEqual([{ matchedBy: "none", standing: null }]);
+    // The statement wired, the pot not: the pot's address is no one's.
+    expect((await (await get(makeApp(), V3_ADDRESS)).json()).legalBody).toBe(false);
+    expect(potChain.port.readPot).not.toHaveBeenCalled();
+  });
+
+  test("an unavailable pot, by the pot's address: no-store, never memoised, no error text", async () => {
+    withPot();
+    potChain.port.readPot.mockRejectedValue(
+      Object.assign(new Error("HTTP request failed. URL: https://rpc.example/v2/key"), {
+        name: "HttpRequestError",
+      }),
+    );
+    const app = makeApp({ pot: pot() });
+    const res = await get(app, V3_ADDRESS);
+    expect(res.headers.get("cache-control")).toBe(NO_STORE);
+    const text = await res.text();
+    const body = JSON.parse(text);
+    expect(body).toMatchObject({ address: V3_ADDRESS, legalBody: true, agentId: "42" });
+    expect(body.pot).toEqual({ state: "unavailable" });
+    expect(text).not.toContain("rpc.example");
+    potChain.port.readPot.mockResolvedValue(HEALTHY);
+    const next = await get(app, V3_ADDRESS);
+    expect(next.headers.get("cache-control")).toBe(FRESH);
+    expect((await next.json()).pot).toMatchObject({ state: "ceiling_read", address: V3_ADDRESS });
+    expect(potChain.port.readPot).toHaveBeenCalledTimes(2);
   });
 });
 

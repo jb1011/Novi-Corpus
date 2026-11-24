@@ -4,13 +4,18 @@
  * from the birth details (the salt, the ceiling, the agent's key the registry names, the guardian),
  * with the guardian's declaration stored in the note and in the body's event log. One pot for life.
  * The guardian may take the pot off the public record at any time, with a note of its own: the pot
- * itself is untouched, and the address stays the body's.
+ * itself is untouched, and the address stays the body's. Beside a signed statement, the record
+ * serves the pot on the record as read from the chain at the statement's own block, and a lookup by
+ * any pot address a body declared leads to the body.
  *
  * The domain over a real in-memory database, a fake registry and a fake chain port, on a fixed
  * clock. Each body is placed through the order door's own domain function, so its agreement and
- * its grant read back as a real order's do. G, A and P are the real run's public addresses, never a
- * key; V3 is the pinned vector. Every other address is a placeholder.
+ * its grant read back as a real order's do; a body the statement service states is made by the
+ * statement's fixtures, over a fake chain of statement snapshots. G, A and P are the real run's
+ * public addresses, never a key; V3 is the pinned vector. Every other address is a placeholder.
  */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { type Address, getAddress, zeroAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError } from "../../src/errors";
@@ -20,29 +25,49 @@ import {
   POT_DECLARATION,
   declarePot,
   orderPot,
+  potOfStatement,
   removePot,
+  statementForPotAddress,
 } from "../../src/legalBody/pot";
-import { POT_CEILING_MAX_USDC } from "../../src/legalBody/safePot";
+import {
+  POT_CEILING_MAX_USDC,
+  type PotRaw,
+  SAFE_PROXY_RUNTIME_CODE_HASH,
+} from "../../src/legalBody/safePot";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
-import { migrate, openDatabase } from "../../src/persistence/db";
+import { type StatementOutcome, statementForAgent } from "../../src/legalBody/statements";
 import { SqliteLegalBodyPotRepository } from "../../src/persistence/legalBodyPotRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import { A as GRANT_A } from "../helpers/grantFixtures";
-import { type LegalBodyStores, openLegalBodyStores } from "../helpers/legalBodyFixtures";
+import {
+  CLOCK_S,
+  FakeStatementChain,
+  type StatementStores,
+  openStatementStores,
+  statementDeps,
+} from "../helpers/legalBodyStatementFixtures";
 import {
   A,
+  BIRTH_V3,
   G,
+  HEALTHY,
   NO_SPENDING,
   P,
+  REAL_STOPPED,
   SOME_CODE,
+  T,
   V3_ADDRESS,
   V3_INPUT,
   fakePotChain,
   fakeRegistry,
   inputFor,
+  notePot,
   potAddressOf,
   potBody,
   potDeps,
+  potOf,
+  servedBirth,
+  statedPotBody,
 } from "../helpers/potFixtures";
 
 /** The clock: 2026-11-24T12:00:00Z. */
@@ -51,7 +76,7 @@ const NOW_S = NOW_MS / 1000;
 /** anvil's published account #2's address: another tenant, never a real wallet. */
 const STRANGER: Address = "0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC";
 
-let s: LegalBodyStores;
+let s: StatementStores;
 let pots: SqliteLegalBodyPotRepository;
 let clock: number;
 let registry: ReturnType<typeof fakeRegistry>;
@@ -60,10 +85,9 @@ let offered: boolean;
 let printed: string[];
 
 beforeEach(() => {
-  const db = openDatabase(":memory:");
-  migrate(db);
-  s = openLegalBodyStores(db);
-  pots = new SqliteLegalBodyPotRepository(db);
+  // The legal-body stores and the statement log, over one new in-memory database.
+  s = openStatementStores();
+  pots = new SqliteLegalBodyPotRepository(s.db);
   clock = NOW_MS;
   registry = fakeRegistry();
   chain = fakePotChain();
@@ -133,8 +157,6 @@ function expectNoChainRead(): void {
   expect(chain.port.codeHash).not.toHaveBeenCalled();
   expect(chain.port.readPot).not.toHaveBeenCalled();
 }
-
-const BIRTH_V3 = { saltNonce: "1", agentWallet: A, ceilingUnits: "50000000" };
 
 describe("the declaration", () => {
   test("POT_DECLARATION is the pinned version and the guardian's sentence", () => {
@@ -571,6 +593,48 @@ describe("one pot for life", () => {
     ]);
   });
 
+  test("declared X, declared Y, Y taken off, then X gets its code: the put-back of Y, which holds none, is pot_exists, and the put-back of X stands", async () => {
+    const body = linked();
+    const x = V3_INPUT;
+    const y = inputFor(60n);
+    await declare(body, x);
+    clock += 60_000;
+    await declare(body, y);
+    clock += 60_000;
+    removePot(deps(), G, body.legalBodyId);
+    // X's setup, sent from a tab before Y replaced it, lands now.
+    chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
+    chain.port.codeHash.mockClear();
+    registry.getAgentWallet.mockClear();
+    clock += 60_000;
+    expect(await refusalOf(() => declare(body, y))).toMatchObject(refused("pot_exists", 409));
+    // X read (it holds code), then Y's own code: Y holds none.
+    expect(chain.port.codeHash.mock.calls).toEqual([[V3_ADDRESS], [y.address]]);
+    expect(pots.list(body.legalBodyId).map((n) => n.act)).toEqual([
+      "declared",
+      "declared",
+      "removed",
+    ]);
+    // X, which holds the code, comes back: Y is read and holds none; no registry read.
+    chain.port.codeHash.mockClear();
+    clock += 60_000;
+    expect(await declare(body, x)).toEqual({
+      address: V3_ADDRESS,
+      onRecord: true,
+      // X noted, Y noted a minute later, Y taken off, Y refused, X put back: four minutes on.
+      declaredAt: NOW_S + 240,
+      birth: BIRTH_V3,
+    });
+    expect(chain.port.codeHash.mock.calls).toEqual([[y.address]]);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(pots.list(body.legalBodyId).map((n) => [n.act, n.address])).toEqual([
+      ["declared", V3_ADDRESS],
+      ["declared", y.address],
+      ["removed", y.address],
+      ["declared", V3_ADDRESS],
+    ]);
+  });
+
   test("the code of the other noted addresses is read at once, not one after the other", async () => {
     const body = linked();
     await declare(body, V3_INPUT);
@@ -938,17 +1002,26 @@ describe("taking the pot off the public record", () => {
     expectNoChainRead();
   });
 
-  test("while the pot is not offered: pot_not_offered, before anything is read, and taken off once it is", async () => {
+  test("while the pot is not offered, it is taken off all the same: a guardian may always withdraw a claim (Ruling R15 a)", async () => {
     const body = linked();
     await declare(body, V3_INPUT);
+    registry.getAgentWallet.mockClear();
     offered = false;
-    const findOwned = vi.spyOn(s.repo, "findOwned");
     clock += 60_000;
-    expect(await refusalOf(() => takeOff(body))).toMatchObject(refused("pot_not_offered", 409));
-    expect(findOwned).not.toHaveBeenCalled();
-    expect(acts(body)).toEqual(["declared"]);
-    offered = true;
-    expect(takeOff(body).onRecord).toBe(false);
+    expect(takeOff(body)).toEqual({
+      address: V3_ADDRESS,
+      onRecord: false,
+      declaredAt: NOW_S,
+      birth: BIRTH_V3,
+    });
+    expect(acts(body)).toEqual(["declared", "removed"]);
+    expect(eventActs(body)).toEqual(["pot_declared", "pot_removed"]);
+    expect(removedLines()).toHaveLength(1);
+    expectNoChainRead();
+    // The note door and the read still answer pot_not_offered while the flag is off.
+    expect(await refusalOf(() => orderPot(deps(), G, body.legalBodyId))).toMatchObject(
+      refused("pot_not_offered", 409),
+    );
   });
 
   test("the removed note and its event are one transaction: an event that fails leaves the pot on the record", async () => {
@@ -1046,5 +1119,577 @@ describe("taking the pot off the public record", () => {
       refused("pot_exists", 409),
     );
     expect(acts(body)).toEqual(["declared", "removed"]);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The pot in the public record
+// ---------------------------------------------------------------------------------------------
+
+/** When the pot of the record's tests was declared: an hour before the statement's clock. */
+const DECLARED_AT = CLOCK_S - 3_600;
+/** The statement chain's head: every statement here is observed at it. */
+const BLOCK = 4_242n;
+/** What every block naming V3 on the record carries beside its reading: the statement's block and
+ *  issue, and the latest declaration of V3 with its birth details. */
+const V3_FACTS = {
+  readAtBlock: "4242",
+  readAt: CLOCK_S,
+  declaredBy: "guardian",
+  declaredAt: DECLARED_AT,
+  birth: servedBirth(),
+};
+/** A node failure as a client throws one, its message quoting the node's URL. */
+const nodeError = () =>
+  Object.assign(new Error("HTTP request failed. URL: https://rpc.example/v2/key-in-path"), {
+    name: "HttpRequestError",
+  });
+
+/** The fields of the ops lines printed for `event`, without `opslog` and `at`. */
+const linesOf = (event: string): Record<string, unknown>[] =>
+  printed.flatMap((line) => {
+    try {
+      const { opslog, at: _at, ...fields } = JSON.parse(line);
+      return opslog === event ? [fields] : [];
+    } catch {
+      return [];
+    }
+  });
+
+type Stated = Extract<StatementOutcome, { kind: "statement" }>;
+
+describe("the pot beside a signed statement (potOfStatement)", () => {
+  let stChain: FakeStatementChain;
+  beforeEach(() => {
+    stChain = new FakeStatementChain();
+  });
+
+  /** The statement the lookups serve for the body's agent, made now. */
+  async function statementOf(row: LegalBodyRecord): Promise<Stated> {
+    const out = await statementForAgent(statementDeps(s, stChain), row.agentId as string);
+    if (out.kind !== "statement") throw new Error(`expected a statement, got ${out.kind}`);
+    return out;
+  }
+  /** A body of G stated by the statement service, with V3 noted for it an hour before. */
+  function withV3(o: Parameters<typeof statedPotBody>[2] = {}): LegalBodyRecord {
+    const row = statedPotBody(s, stChain, o);
+    notePot(pots, row, { at: DECLARED_AT });
+    return row;
+  }
+  const recordOf = async (row: LegalBodyRecord, d: LegalBodyPotDeps = deps()) =>
+    potOfStatement(d, await statementOf(row));
+  const answer = (raw: PotRaw) => chain.port.readPot.mockResolvedValue(raw);
+
+  test("serves ceiling_read with the proof's numbers as decimal strings and the birth details, at the statement's block", async () => {
+    const row = withV3();
+    answer(HEALTHY);
+    const stated = await statementOf(row);
+    const block = await potOfStatement(deps(), stated);
+    expect(block).toEqual({
+      state: "ceiling_read",
+      address: V3_ADDRESS,
+      token: T.usdc,
+      ceilingUnits: "50000000",
+      periodMinutes: 43200,
+      spentUnits: "10000000",
+      periodEndsAt: (29919864 + 43200) * 60,
+      balanceUnits: "190000000",
+      ...V3_FACTS,
+    });
+    expect(Object.keys(block ?? {})).toEqual([
+      "state",
+      "address",
+      "token",
+      "ceilingUnits",
+      "periodMinutes",
+      "spentUnits",
+      "periodEndsAt",
+      "balanceUnits",
+      "readAtBlock",
+      "readAt",
+      "declaredBy",
+      "declaredAt",
+      "birth",
+    ]);
+    expect(Object.keys((block as { birth: object }).birth)).toEqual([
+      "guardian",
+      "agentWallet",
+      "token",
+      "ceilingUnits",
+      "periodMinutes",
+      "saltNonce",
+      "proxyFactory",
+      "singleton",
+      "fallbackHandler",
+      "multiSendCallOnly",
+      "allowanceModule",
+    ]);
+    // One read, at the statement's own block, against the agent's wallet the statement signs; the
+    // block and the time it states are the statement's.
+    expect(stated.statement.message.observedAtBlock).toBe("4242");
+    expect(stated.statement.message.issuedAt).toBe(String(CLOCK_S));
+    expect(chain.port.readPot.mock.calls).toEqual([
+      [{ pot: V3_ADDRESS, agentWallet: A, blockNumber: BLOCK }],
+    ]);
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    // Anyone recomputes the pot's address from the birth details served, and nothing else.
+    const b = servedBirth();
+    expect(
+      potAddressOf({
+        guardian: b.guardian,
+        agentWallet: b.agentWallet,
+        ceilingUnits: BigInt(b.ceilingUnits),
+        saltNonce: BigInt(b.saltNonce),
+      }),
+    ).toBe(V3_ADDRESS);
+    // A statement that is pending is in force too.
+    const pending = pendingWithPot();
+    expect((await statementOf(pending)).standing).toBe("pending");
+    expect(await recordOf(pending)).toMatchObject({
+      state: "ceiling_read",
+      address: potOf(60n).address,
+      ceilingUnits: "60000000",
+    });
+  });
+
+  /** A body whose company is not paid for yet, with its own pot of 60 USDC noted: stated
+   *  `pending`. */
+  function pendingWithPot(): LegalBodyRecord {
+    const row = statedPotBody(s, stChain, { agentId: "43", companyStatus: "draft" });
+    const its = potOf(60n);
+    notePot(pots, row, { at: DECLARED_AT, address: its.address, birth: its.birth });
+    chain.port.readPot.mockResolvedValue({
+      ...HEALTHY,
+      allowance: [60_000_000n, 0n, 43200n, 1n, 0n],
+    });
+    return row;
+  }
+
+  test("serves stopped, with the balance, for the real Safe's answers after its stop (REAL_STOPPED)", async () => {
+    const row = withV3();
+    answer(REAL_STOPPED);
+    const block = await recordOf(row);
+    expect(block).toEqual({
+      state: "stopped",
+      address: V3_ADDRESS,
+      balanceUnits: "0",
+      ...V3_FACTS,
+    });
+    expect(Object.keys(block ?? {})).toEqual([
+      "state",
+      "address",
+      "balanceUnits",
+      "readAtBlock",
+      "readAt",
+      "declaredBy",
+      "declaredAt",
+      "birth",
+    ]);
+    // With money left in it; and with the key removed while the add-on is still on.
+    answer({ ...REAL_STOPPED, balanceUnits: 3_000_000n });
+    expect(await recordOf(row)).toEqual({
+      state: "stopped",
+      address: V3_ADDRESS,
+      balanceUnits: "3000000",
+      ...V3_FACTS,
+    });
+    answer({ ...HEALTHY, delegates: { list: [], next: 0 } });
+    expect(await recordOf(row)).toEqual({
+      state: "stopped",
+      address: V3_ADDRESS,
+      balanceUnits: "190000000",
+      ...V3_FACTS,
+    });
+  });
+
+  test("serves limits_not_read, with no amount, for another fallback handler, and for an approval to the agent's key", async () => {
+    const row = withV3();
+    for (const raw of [
+      { ...HEALTHY, fallbackHandler: P },
+      { ...HEALTHY, usdcAllowanceToAgent: 1n },
+      // …and for a stopped pot with another add-on: never "stopped" past another add-on.
+      { ...REAL_STOPPED, modules: { list: [P], next: REAL_STOPPED.modules.next } },
+    ]) {
+      answer(raw);
+      const block = await recordOf(row);
+      expect(block).toEqual({ state: "limits_not_read", address: V3_ADDRESS, ...V3_FACTS });
+      expect(Object.keys(block ?? {})).toEqual([
+        "state",
+        "address",
+        "readAtBlock",
+        "readAt",
+        "declaredBy",
+        "declaredAt",
+        "birth",
+      ]);
+    }
+  });
+
+  test("serves limits_not_read when the registry's wallet is no longer the pot's delegate", async () => {
+    // The agent's key was replaced in the registry after the setup: the statement signs P, while
+    // the pot's delegate is still A, its birth key.
+    const row = withV3({ wallet: P });
+    answer(HEALTHY);
+    const stated = await statementOf(row);
+    expect(stated.statement.message.agentWallet).toBe(P);
+    expect(await potOfStatement(deps(), stated)).toEqual({
+      state: "limits_not_read",
+      address: V3_ADDRESS,
+      ...V3_FACTS,
+    });
+    expect(chain.port.readPot.mock.calls).toEqual([
+      [{ pot: V3_ADDRESS, agentWallet: P, blockNumber: BLOCK }],
+    ]);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+  });
+
+  test("serves null for a note whose address has no code (noted, never created), and after the pot was taken off the record", async () => {
+    const row = withV3();
+    answer({ ...HEALTHY, codeHash: null });
+    expect(await recordOf(row)).toBeNull();
+    expect(chain.port.readPot).toHaveBeenCalledTimes(1);
+    // Code that is not a pot's proxy is not named either.
+    answer({ ...HEALTHY, codeHash: SOME_CODE });
+    expect(await recordOf(row)).toBeNull();
+    // Taken off the record: null, and nothing read.
+    chain.port.readPot.mockClear();
+    notePot(pots, row, { at: DECLARED_AT + 60, act: "removed" });
+    answer(HEALTHY);
+    expect(await recordOf(row)).toBeNull();
+    // A body with no note at all.
+    expect(await recordOf(statedPotBody(s, stChain, { agentId: "43" }))).toBeNull();
+    expectNoChainRead();
+    // None of these is a note the doors did not write.
+    expect(linesOf("legal_body_pot_note_unrecomputable")).toEqual([]);
+  });
+
+  test("serves null when the Safe has a second owner", async () => {
+    const row = withV3();
+    for (const raw of [
+      { ...HEALTHY, owners: [G, P] },
+      { ...HEALTHY, owners: [P] },
+      { ...HEALTHY, threshold: 2n },
+    ]) {
+      answer(raw);
+      expect(await recordOf(row), JSON.stringify(raw.owners)).toBeNull();
+    }
+  });
+
+  test("serves null beside a statement whose standing is inactive, and reads no chain", async () => {
+    const row = withV3({ status: "winding_down" });
+    answer(HEALTHY);
+    const stated = await statementOf(row);
+    expect(stated.standing).toBe("inactive");
+    expect(await potOfStatement(deps(), stated)).toBeNull();
+    expectNoChainRead();
+  });
+
+  test("serves unavailable when the chain read throws, and lets a database error through", async () => {
+    const row = withV3();
+    chain.port.readPot.mockRejectedValue(nodeError());
+    expect(await recordOf(row)).toEqual({ state: "unavailable" });
+    expect(linesOf("legal_body_pot_unavailable")).toEqual([
+      { legalBodyId: row.legalBodyId, errorName: "HttpRequestError" },
+    ]);
+    expect(printed.join("\n")).not.toContain("rpc.example");
+    // A database read that fails throws: the routes answer it with their 503.
+    const d = deps();
+    vi.spyOn(d.repo, "latest").mockImplementation(() => {
+      throw Object.assign(new Error("SQLITE_BUSY: database is locked"), { name: "SqliteError" });
+    });
+    await expect(potOfStatement(d, await statementOf(row))).rejects.toThrow("SQLITE_BUSY");
+  });
+
+  test("while the pot is not offered (Ruling R15 b): the pot is named with its birth details and its limits were not read; its state is not read, never a ceiling, never stopped", async () => {
+    const row = withV3();
+    offered = false;
+    chain.codes.set(V3_ADDRESS.toLowerCase(), SAFE_PROXY_RUNTIME_CODE_HASH);
+    for (const raw of [HEALTHY, REAL_STOPPED]) {
+      answer(raw);
+      chain.port.codeHash.mockClear();
+      expect(await recordOf(row)).toEqual({
+        state: "limits_not_read",
+        address: V3_ADDRESS,
+        ...V3_FACTS,
+      });
+      // Only whether the address holds a pot's proxy, at the statement's block.
+      expect(chain.port.codeHash.mock.calls).toEqual([[V3_ADDRESS, BLOCK]]);
+    }
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // Noted and never created, or other code: not named.
+    chain.codes.delete(V3_ADDRESS.toLowerCase());
+    expect(await recordOf(row)).toBeNull();
+    chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
+    expect(await recordOf(row)).toBeNull();
+    // The code read fails: unavailable.
+    chain.port.codeHash.mockRejectedValueOnce(nodeError());
+    expect(await recordOf(row)).toEqual({ state: "unavailable" });
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // The flag on again: the pot is read in full, and its code is not read apart.
+    offered = true;
+    chain.port.codeHash.mockClear();
+    answer(HEALTHY);
+    expect(await recordOf(row)).toMatchObject({ state: "ceiling_read", ceilingUnits: "50000000" });
+    expect(chain.port.readPot).toHaveBeenCalledTimes(1);
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+  });
+
+  test("no deps: null; a note whose birth details do not give its address is never read (written around the door)", async () => {
+    const row = statedPotBody(s, stChain);
+    expect(await potOfStatement(undefined, await statementOf(row))).toBeNull();
+    // V3's address with another salt in its birth details.
+    notePot(pots, row, { at: DECLARED_AT, birth: { ...BIRTH_V3, saltNonce: "2" } });
+    answer(HEALTHY);
+    expect(await recordOf(row)).toBeNull();
+    // Another guardian's pot with V3's birth details, on G's body.
+    const other = statedPotBody(s, stChain, { agentId: "43" });
+    notePot(pots, other, {
+      at: DECLARED_AT,
+      address: potAddressOf({ guardian: P, ceilingUnits: 50_000_000n }),
+    });
+    expect(await recordOf(other)).toBeNull();
+    expectNoChainRead();
+    expect(linesOf("legal_body_pot_note_unrecomputable")).toEqual([
+      { level: "error", legalBodyId: row.legalBodyId },
+      { level: "error", legalBodyId: other.legalBodyId },
+    ]);
+  });
+});
+
+describe("the lookup by a pot's address (statementForPotAddress)", () => {
+  let stChain: FakeStatementChain;
+  beforeEach(() => {
+    stChain = new FakeStatementChain();
+  });
+
+  const lookup = (address: Address, d: LegalBodyPotDeps = deps()) =>
+    statementForPotAddress(statementDeps(s, stChain), d, address);
+  const NONE = { outcome: { kind: "none" }, pot: null };
+  const proxyAt = (address: Address) =>
+    chain.codes.set(address.toLowerCase(), SAFE_PROXY_RUNTIME_CODE_HASH);
+
+  test("finds the body by its current pot; refuses a candidate whose reading is not_the_guardians; reads nothing with no candidate", async () => {
+    const row = statedPotBody(s, stChain);
+    notePot(pots, row, { at: DECLARED_AT });
+    chain.port.readPot.mockResolvedValue(HEALTHY);
+    const found = await lookup(V3_ADDRESS.toLowerCase() as Address);
+    expect(found.outcome).toMatchObject({
+      kind: "statement",
+      legalBodyId: row.legalBodyId,
+      agentId: "42",
+      standing: "active",
+    });
+    expect(found.pot).toEqual({
+      state: "ceiling_read",
+      address: V3_ADDRESS,
+      token: T.usdc,
+      ceilingUnits: "50000000",
+      periodMinutes: 43200,
+      spentUnits: "10000000",
+      periodEndsAt: (29919864 + 43200) * 60,
+      balanceUnits: "190000000",
+      ...V3_FACTS,
+    });
+    // The pot's state read once, at the statement's block; its code not read apart.
+    expect(chain.port.readPot.mock.calls).toEqual([
+      [{ pot: V3_ADDRESS, agentWallet: A, blockNumber: BLOCK }],
+    ]);
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    // A Safe that is not the guardian's alone leads nowhere.
+    chain.port.readPot.mockResolvedValue({ ...HEALTHY, owners: [G, P] });
+    expect(await lookup(V3_ADDRESS)).toEqual(NONE);
+    // An address nobody noted: no chain read of any kind.
+    stChain.snapshots.length = 0;
+    stChain.codeReads.length = 0;
+    chain.port.readPot.mockClear();
+    expect(await lookup(potOf(70n).address)).toEqual(NONE);
+    expect(stChain.snapshots).toEqual([]);
+    expect(stChain.codeReads).toEqual([]);
+    expectNoChainRead();
+  });
+
+  test("a pot taken off the record, or replaced by a later note, is former with its declared and ended times, after one code read", async () => {
+    const row = statedPotBody(s, stChain);
+    notePot(pots, row, { at: DECLARED_AT });
+    notePot(pots, row, { at: DECLARED_AT + 600, act: "removed" });
+    proxyAt(V3_ADDRESS);
+    const off = await lookup(V3_ADDRESS);
+    expect(off.outcome).toMatchObject({ kind: "statement", legalBodyId: row.legalBodyId });
+    expect(off.pot).toEqual({
+      state: "former",
+      address: V3_ADDRESS,
+      declaredBy: "guardian",
+      declaredAt: DECLARED_AT,
+      endedAt: DECLARED_AT + 600,
+      birth: servedBirth(),
+    });
+    expect(Object.keys(off.pot ?? {})).toEqual([
+      "state",
+      "address",
+      "declaredBy",
+      "declaredAt",
+      "endedAt",
+      "birth",
+    ]);
+    expect(chain.port.codeHash.mock.calls).toEqual([[V3_ADDRESS, BLOCK]]);
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // Put back, then taken off again: the times of its latest declaration.
+    notePot(pots, row, { at: DECLARED_AT + 1_200 });
+    notePot(pots, row, { at: DECLARED_AT + 1_800, act: "removed" });
+    expect((await lookup(V3_ADDRESS)).pot).toMatchObject({
+      state: "former",
+      declaredAt: DECLARED_AT + 1_200,
+      endedAt: DECLARED_AT + 1_800,
+    });
+
+    // Another body's first pot X, replaced by Y: X is former, ended when Y was noted.
+    const other = statedPotBody(s, stChain, { agentId: "43" });
+    const x = potOf(60n);
+    const y = potOf(70n);
+    notePot(pots, other, { at: DECLARED_AT, address: x.address, birth: x.birth });
+    notePot(pots, other, { at: DECLARED_AT + 300, address: y.address, birth: y.birth });
+    proxyAt(x.address);
+    chain.port.codeHash.mockClear();
+    const replaced = await lookup(x.address);
+    expect(replaced.outcome).toMatchObject({
+      kind: "statement",
+      legalBodyId: other.legalBodyId,
+      agentId: "43",
+    });
+    expect(replaced.pot).toEqual({
+      state: "former",
+      address: x.address,
+      declaredBy: "guardian",
+      declaredAt: DECLARED_AT,
+      endedAt: DECLARED_AT + 300,
+      birth: servedBirth(x.birth),
+    });
+    expect(chain.port.codeHash.mock.calls).toEqual([[x.address, BLOCK]]);
+    // Y taken off since: X still ended when Y was noted, not at the latest note.
+    notePot(pots, other, { at: DECLARED_AT + 900, act: "removed", address: y.address });
+    expect((await lookup(x.address)).pot).toMatchObject({
+      state: "former",
+      declaredAt: DECLARED_AT,
+      endedAt: DECLARED_AT + 300,
+    });
+    // A former pot that never got its code leads nowhere.
+    chain.codes.delete(x.address.toLowerCase());
+    expect(await lookup(x.address)).toEqual(NONE);
+    // A failed code read: kept, unavailable.
+    chain.port.codeHash.mockRejectedValueOnce(nodeError());
+    expect(await lookup(x.address)).toMatchObject({
+      outcome: { kind: "statement", legalBodyId: other.legalBodyId },
+      pot: { state: "unavailable" },
+    });
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+  });
+
+  test("the pot of an inactive body leads to its statement with pot null; a statement about another body of the same agent is not kept", async () => {
+    const row = statedPotBody(s, stChain, { status: "winding_down" });
+    notePot(pots, row, { at: DECLARED_AT });
+    proxyAt(V3_ADDRESS);
+    const found = await lookup(V3_ADDRESS);
+    expect(found.outcome).toMatchObject({
+      kind: "statement",
+      legalBodyId: row.legalBodyId,
+      standing: "inactive",
+    });
+    expect(found.pot).toBeNull();
+    expect(chain.port.codeHash.mock.calls).toEqual([[V3_ADDRESS, BLOCK]]);
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // No pot's code at the address: it leads nowhere.
+    chain.codes.delete(V3_ADDRESS.toLowerCase());
+    expect(await lookup(V3_ADDRESS)).toEqual(NONE);
+    // A failed code read: kept, unavailable.
+    chain.port.codeHash.mockRejectedValueOnce(nodeError());
+    expect(await lookup(V3_ADDRESS)).toMatchObject({
+      outcome: { kind: "statement", legalBodyId: row.legalBodyId },
+      pot: { state: "unavailable" },
+    });
+
+    // The agent's older body noted X; the agent's current body is another: the statement made for
+    // the agent is about the current body, so it is not the older body's answer.
+    const older = statedPotBody(s, stChain, { agentId: "44" });
+    const x = potOf(60n);
+    notePot(pots, older, { at: DECLARED_AT, address: x.address, birth: x.birth });
+    const current = statedPotBody(s, stChain, { agentId: "44" });
+    expect(current.legalBodyId).not.toBe(older.legalBodyId);
+    proxyAt(x.address);
+    chain.port.codeHash.mockClear();
+    expect(await lookup(x.address)).toEqual(NONE);
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+  });
+
+  test("a statement that cannot be made just now ends the search: unknown, pot null; of two bodies holding the address, the active one is answered", async () => {
+    const row = statedPotBody(s, stChain);
+    notePot(pots, row, { at: DECLARED_AT });
+    chain.port.readPot.mockResolvedValue(HEALTHY);
+    stChain.beforeSnapshot = () => {
+      throw nodeError();
+    };
+    expect(await lookup(V3_ADDRESS)).toEqual({
+      outcome: { kind: "unknown", agentId: "42", stage: "snapshot", errorName: "HttpRequestError" },
+      pot: null,
+    });
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    stChain.beforeSnapshot = () => {};
+
+    // Two bodies noted the same address, written around the door: the newest note's body is
+    // inactive, the other active. The active one is answered.
+    const inactive = statedPotBody(s, stChain, { agentId: "43", status: "winding_down" });
+    notePot(pots, inactive, { at: DECLARED_AT + 60 });
+    proxyAt(V3_ADDRESS);
+    const found = await lookup(V3_ADDRESS);
+    expect(found.outcome).toMatchObject({ kind: "statement", legalBodyId: row.legalBodyId });
+    expect(found.pot).toMatchObject({ state: "ceiling_read", address: V3_ADDRESS });
+    // The newest note's body cannot be stated just now: the search ends there, and the other body
+    // is not read.
+    const failAt = stChain.snapshots.length + 1;
+    stChain.beforeSnapshot = (n) => {
+      if (n === failAt) throw nodeError();
+    };
+    chain.port.readPot.mockClear();
+    expect(await lookup(V3_ADDRESS)).toEqual({
+      outcome: { kind: "unknown", agentId: "43", stage: "snapshot", errorName: "HttpRequestError" },
+      pot: null,
+    });
+    expect(stChain.snapshots).toHaveLength(failAt);
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+  });
+});
+
+describe("the words of the record", () => {
+  const source = (...parts: string[]) =>
+    readFileSync(join(import.meta.dirname, "..", "..", "src", ...parts), "utf8");
+
+  test("the pot's record and its two routes never say enforced, guarantee or 'no key may take', and count the pot in fixed thirty-day periods", () => {
+    // Each file with its comments' line breaks joined, so a phrase split over two lines is read.
+    const unwrapped = (text: string) => text.replace(/\n\s*(?:\/\/|\*)\s*/g, " ");
+    const files = {
+      pot: unwrapped(source("legalBody", "pot.ts")),
+      byAgent: unwrapped(source("api", "routes", "legalBodyStatements.ts")),
+      byAddress: unwrapped(source("api", "routes", "legalBodies.ts")),
+      orders: unwrapped(source("api", "routes", "legalBodyOrders.ts")),
+    };
+    for (const [name, text] of Object.entries(files))
+      expect(text, name).not.toMatch(/enforced|guarantee|no key may take|per thirty days/i);
+    // The words the record's states stand for, and the comments' own.
+    expect(files.pot).toContain(
+      "The agent's key cannot take from it: its allowance is switched off.",
+    );
+    expect(files.pot).toContain("Its limits were not read.");
+    expect(files.pot).toContain("in each thirty-day period");
+    expect(files.pot).not.toContain("\u2014");
+    for (const name of ["pot", "byAgent", "byAddress"] as const) {
+      expect(files[name], name).toMatch(/read from the chain/);
+      expect(files[name], name).toMatch(/periods are fixed/);
+    }
+    // The off-record door's comment, and its domain function's, say why it takes no flag.
+    for (const name of ["orders", "pot"] as const)
+      expect(files[name], name).toContain(
+        "Unlike the abandon door, no deployment check and no flag: a guardian may always withdraw a claim.",
+      );
   });
 });

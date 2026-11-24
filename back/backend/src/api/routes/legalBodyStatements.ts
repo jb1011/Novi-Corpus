@@ -1,6 +1,7 @@
 import type { Context, Hono } from "hono";
 import type { AuthVars } from "../../auth/middleware";
 import { verifySession } from "../../auth/session";
+import { type PotBlock, potOfStatement } from "../../legalBody/pot";
 import type { SignedStatementJson } from "../../legalBody/publicStatement";
 import type { Standing } from "../../legalBody/standing";
 import {
@@ -80,6 +81,19 @@ import {
  * environments: the treasury of record its guardian declared (`legalBody/treasury.ts`), only while
  * its address is the agent's wallet the statement signs (Ruling 3) and that statement is in force
  * (`active` or `pending`); null otherwise, and null on the unsigned `unknown`.
+ *
+ * Every body answer carries `pot` after `treasury`, outside the statement and NOT SIGNED, on both
+ * environments: the company's pot its guardian declared (`legalBody/pot.ts`, `PotBlock`), as read
+ * from the chain at the statement's own block, against the agent's wallet the statement signs and
+ * the body's guardian, with the birth details anyone recomputes its address from. The agent's key
+ * may take up to the ceiling in each thirty-day period; the periods are fixed, each starting where
+ * the last one ended. Null without the pot's deps, beside a statement
+ * not in force, for no pot on the record (none noted, or taken off), for a noted address with no
+ * pot's code, and for a Safe that is not the guardian's alone; null on the unsigned `unknown`. While
+ * the pot is not offered it is still named, its limits not read. A former pot is never served here:
+ * the lookup by that pot's own address leads to the body. A pot the chain could not be read for is
+ * `{ state: "unavailable" }`: that answer is sent `no-store` and never memoised, like `unknown`.
+ * One read of the pot per statement, none for a body without one on the record.
  */
 
 /** The read rows the route may write, for all callers together: 600 at once, then 1 a second. */
@@ -191,6 +205,8 @@ export type ByAgentAnswer =
       /** Always served, null. Optional in the type only: an answer stored before this key existed
        *  (the pilot's filed records) has none. */
       treasury?: null;
+      /** Always served, null. Optional in the type only, as `treasury`. */
+      pot?: null;
     }
   | {
       agentId: string;
@@ -210,6 +226,10 @@ export type ByAgentAnswer =
        *  Always served; optional in the type only, for an answer stored before this key existed
        *  (the pilot's filed records). */
       treasury?: TreasuryBlock | null;
+      /** NOT SIGNED, both environments: the company's pot on the record, read from the chain at
+       *  the statement's block (`PotBlock`), or null. Always served; optional in the type only, as
+       *  `treasury`. */
+      pot?: PotBlock | null;
     };
 
 /** What the memo keeps for an agent: the answer, and the legal body it states when it states one,
@@ -340,12 +360,17 @@ export function mountLegalBodyStatementRoutes(
 
     let outcome: StatementOutcome;
     let treasury: TreasuryBlock | null = null;
+    let pot: PotBlock | null = null;
     try {
       outcome = await statementForAgent(st, agentId);
-      // The record, read only beside a statement, against the wallet that statement signs: no
-      // chain read of its own. A failed read is the database's, so the same 503.
-      if (outcome.kind === "statement")
+      if (outcome.kind === "statement") {
+        // The record, read only beside a statement, against the wallet that statement signs: no
+        // chain read of its own. A failed read is the database's, so the same 503.
         treasury = treasuryOfStatement(deps.legalBodyTreasury?.repo, outcome);
+        // The pot, read from the chain at the statement's block; a chain read that fails is its
+        // `unavailable`, and only a failed database read throws, to the same 503.
+        pot = await potOfStatement(deps.legalBodyPot, outcome);
+      }
     } catch (e) {
       // Only a DATABASE read throws out of the service: we cannot tell whether the agent has a
       // legal body at all, which no answer here has a value for.
@@ -367,6 +392,7 @@ export function mountLegalBodyStatementRoutes(
         checkedAt,
         statement: null,
         treasury: null,
+        pot: null,
       };
       c.header("Cache-Control", NO_STORE);
       return c.json(unknown);
@@ -391,11 +417,15 @@ export function mountLegalBodyStatementRoutes(
               : {}),
             statement: outcome.statement,
             treasury,
+            pot,
           };
     const legalBodyId = outcome.kind === "statement" ? outcome.legalBodyId : null;
-    memo.set(agentId, { answer, legalBodyId });
+    // A pot the chain could not be read for is not an answer anything may reuse, as `unknown`: the
+    // signed statement beside it is served, and recorded as a read, all the same.
+    const definitive = pot?.state !== "unavailable";
+    if (definitive) memo.set(agentId, { answer, legalBodyId });
     if (legalBodyId !== null) await recordRead(c, legalBodyId);
-    c.header("Cache-Control", FRESH_CACHE_CONTROL);
+    c.header("Cache-Control", definitive ? FRESH_CACHE_CONTROL : NO_STORE);
     return c.json(answer);
   });
 }

@@ -2,6 +2,7 @@ import type { Context, Hono } from "hono";
 import { getAddress, isAddress } from "viem";
 import type { AuthVars } from "../../auth/middleware";
 import type { FormationSummary } from "../../formation/status";
+import { type PotBlock, potOfStatement, statementForPotAddress } from "../../legalBody/pot";
 import type { SignedStatementJson } from "../../legalBody/publicStatement";
 import type { Standing } from "../../legalBody/standing";
 import { type StatementOutcome, statementForAddress } from "../../legalBody/statements";
@@ -46,9 +47,29 @@ import { TokenBucket } from "./agentBook";
  *
  * Beside that statement, outside it and unsigned, a Minimal answer carries `treasury`: the
  * treasury of record its guardian declared (`legalBody/treasury.ts`), only while its address is the
- * agent's wallet the statement signs, so always the address asked about, and only while that
- * statement is in force (`active` or `pending`); null otherwise, and null whenever there is no
- * statement.
+ * agent's wallet the statement signs (the address asked about, on an answer by that wallet), and
+ * only while that statement is in force (`active` or `pending`); null otherwise, and null whenever
+ * there is no statement.
+ *
+ * After `treasury`, a Minimal answer carries `pot`, outside the statement and NOT SIGNED: the
+ * company's pot its guardian declared (`legalBody/pot.ts`, `PotBlock`), as read from the chain at
+ * the statement's own block, with the birth details anyone recomputes its address from. The
+ * agent's key may take up to the ceiling in each thirty-day period; the periods are fixed, each
+ * starting where the last one ended. On an answer by the agent's
+ * wallet it is the pot on the record, or null (no pot's deps, a statement not in force, no pot on
+ * the record, no pot's code at its address, a Safe not the guardian's alone); null whenever there
+ * is no statement. While the pot is not offered it is still named, its limits not read.
+ *
+ * EVERY POT A BODY DECLARED LEADS TO IT. When neither the full product nor an agent's wallet
+ * answers the address, and the pot is wired, the address is looked up among the pots the bodies
+ * declared (`statementForPotAddress`): the answer is the body's own signed statement, about its
+ * agent, with `address` the address asked and `pot` that same address's block: the pot on the
+ * record, `former` for a pot the body declared that is no longer the one on the record, or null
+ * beside a statement not in force. The server reads only addresses it recomputed itself from its
+ * notes, never one a request named; an address nobody noted costs no chain read.
+ *
+ * An answer whose `pot` is `{ state: "unavailable" }` (the chain could not be read for it) is sent
+ * `no-store` and never memoised, like `unknown`.
  */
 
 /** The lookup's own dependencies. Optional on `ApiDeps` as a whole, so a deployment that never
@@ -210,6 +231,7 @@ type MinimalAnswer =
       checkedAt: string;
       statement: null;
       treasury: null;
+      pot: null;
     }
   | {
       address: string;
@@ -226,6 +248,9 @@ type MinimalAnswer =
       /** Not signed: the treasury of record, while the registry shows its address (Ruling 3) and
        *  the statement is in force. */
       treasury: TreasuryBlock | null;
+      /** Not signed: the company's pot, read from the chain at the statement's block; on an answer
+       *  by a pot's own address, that pot's block, whose address is the address asked. */
+      pot: PotBlock | null;
     };
 
 /**
@@ -383,8 +408,8 @@ export function formationOf(lb: LegalBodyLookupDeps, e: EntityRecord): Formation
 /**
  * The lookup's answer for a Minimal legal body, from what the statement service made of the
  * address. `network` and the transparency link are the lookup's, as on every answer of this
- * route; the statement link is the statement route's, for the agent stated. `treasury` is the
- * block served beside a statement (null without one).
+ * route; the statement link is the statement route's, for the agent stated. `treasury` and `pot`
+ * are the blocks served beside a statement (null without one).
  */
 function minimalAnswer(
   lb: LegalBodyLookupDeps,
@@ -393,6 +418,7 @@ function minimalAnswer(
   outcome: Exclude<StatementOutcome, { kind: "none" }>,
   checkedAt: string,
   treasury: TreasuryBlock | null,
+  pot: PotBlock | null,
 ): MinimalAnswer {
   if (outcome.kind === "unknown")
     return {
@@ -408,6 +434,7 @@ function minimalAnswer(
       checkedAt,
       statement: null,
       treasury: null,
+      pot: null,
     };
   return {
     address,
@@ -427,6 +454,7 @@ function minimalAnswer(
     checkedAt,
     statement: outcome.statement,
     treasury,
+    pot,
   };
 }
 
@@ -515,9 +543,22 @@ export function mountLegalBodyRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     const statements = deps.legalBodyStatements;
     let minimal: StatementOutcome = { kind: "none" };
     let treasury: TreasuryBlock | null = null;
+    let pot: PotBlock | null = null;
+    /** The address is a pot a body declared, not an agent's wallet. */
+    let byPot = false;
     if (resolved.kind === "none" && statements) {
       try {
         minimal = await statementForAddress(statements, address);
+        if (minimal.kind === "statement") {
+          // The pot on the record, read from the chain at the statement's block.
+          pot = await potOfStatement(deps.legalBodyPot, minimal);
+        } else if (minimal.kind === "none" && deps.legalBodyPot) {
+          // No agent's wallet: the pots the bodies declared. Its block is this address's.
+          const found = await statementForPotAddress(statements, deps.legalBodyPot, address);
+          minimal = found.outcome;
+          pot = found.pot;
+          byPot = minimal.kind !== "none";
+        }
         // The record, read only beside a statement, against the wallet that statement signs: no
         // chain read of its own. A failed read is the database's, so this route's 503.
         if (minimal.kind === "statement")
@@ -530,7 +571,15 @@ export function mountLegalBodyRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     const checkedAt = new Date(now()).toISOString();
     const answer: LookupAnswer =
       statements && minimal.kind !== "none"
-        ? minimalAnswer(lb, statements.links.statementBase, address, minimal, checkedAt, treasury)
+        ? minimalAnswer(
+            lb,
+            statements.links.statementBase,
+            address,
+            minimal,
+            checkedAt,
+            treasury,
+            pot,
+          )
         : resolved.kind === "none"
           ? { address, legalBody: false, standing: null, checkedAt }
           : {
@@ -558,22 +607,26 @@ export function mountLegalBodyRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
     // DEFINITIVE answers only (D8). "Not one of ours" is definitive too — it is a local read that
     // asked the chain nothing — so it is memoised like the rest; `unknown` never is. A Minimal
     // body's signed statement is definitive whatever standing it states: only the unsigned
-    // `unknown` of a failed chain read is not an answer.
+    // `unknown` of a failed chain read is not an answer, nor a pot the chain could not be read for.
     const definitive =
-      !(resolved.kind === "body" && resolved.standing === "unknown") && minimal.kind !== "unknown";
+      !(resolved.kind === "body" && resolved.standing === "unknown") &&
+      minimal.kind !== "unknown" &&
+      pot?.state !== "unavailable";
     if (definitive) memo.set(key, answer);
 
     // One line per MISS (a hit costs nothing and says nothing new). No address: this is a
     // high-volume public route and the two fields that matter for ops — which index matched and
     // what the chain said — keep the line short and greppable. A Minimal body is matched by its
-    // statement.
+    // statement, or by a pot it declared.
     opsLog("legal_body_lookup", {
       matchedBy:
         resolved.kind === "body"
           ? resolved.matchedBy
           : minimal.kind === "none"
             ? "none"
-            : "statement",
+            : byPot
+              ? "pot"
+              : "statement",
       standing: answer.standing,
     });
     // `unknown` is not an answer anything may reuse — it is the absence of one (D8).
