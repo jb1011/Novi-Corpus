@@ -222,6 +222,19 @@ function assertNoReviewStanding(deps: IdentitySessionDeps, tenantId: string): vo
   if (deps.identity.repo.latest(tenantId)?.status === "needs_review") underReview();
 }
 
+/**
+ * Start rule 2, as the tenant's rows read now: the latest row a review (`assertNoReviewStanding`),
+ * or a pass with more than 90 days left, refuses the start 409. Read at the start, and again once
+ * the reuse of an open session is done, before the provider session is made.
+ */
+function assertMayStart(deps: IdentitySessionDeps, tenantId: string, now: number): void {
+  assertNoReviewStanding(deps, tenantId);
+  const standing = standingAtStart(deps, tenantId, now);
+  if (standing.state === "verified" && (standing.expiresAt ?? 0) - now > RENEWAL_WINDOW_MS)
+    alreadyVerified();
+  if (standing.state === "needs_review") underReview();
+}
+
 function providerUnavailable(): never {
   throw new ApiError(
     "identity_provider_unavailable",
@@ -401,7 +414,8 @@ function sameSealed(a: TypedNames | null, b: TypedNames | null): boolean {
  *    `guardian_not_verified`.
  * 2. The latest row a review, whatever the state reads: 409 `identity_under_review`. Verified
  *    with more than 90 days left: 409 `identity_already_verified`; under review: 409
- *    `identity_under_review`; anything else goes on.
+ *    `identity_under_review`; anything else goes on. Read again once rule 3 is done, over the
+ *    latest row as it then stands (`assertMayStart`).
  * 3. An open session: past its days, or canceled or redacted at the provider, it is closed as
  *    abandoned and a new one opens; a result that has come is read first (409
  *    `identity_already_verified` on a pass, 409 `identity_under_review` on a review or a result
@@ -413,7 +427,7 @@ function sameSealed(a: TypedNames | null, b: TypedNames | null): boolean {
  * 6. The provider session, created under our session id (its reference and idempotency key): a
  *    mode that is not the deployment's, an unavailable provider or a refused key answer 503.
  * 7. In one transaction, the `started` row by the system and the session, the typed names sealed
- *    to it, held to the tenant's latest row as read just before the provider call. A session
+ *    to it, held to the tenant's latest row as read before rule 2's second read. A session
  *    another start opened meanwhile, or a row written meanwhile (an operator's), cancels the
  *    provider session just created, and the start runs once more, every rule read again: the open
  *    session is reused, the row refuses the start or lets it go on. A second change answers 503.
@@ -435,11 +449,7 @@ async function start(
 ): Promise<StartedSession> {
   const now = clockOf(deps);
   const nullifier = guardianNullifier(deps, tenantId);
-  assertNoReviewStanding(deps, tenantId);
-  const standing = standingAtStart(deps, tenantId, now);
-  if (standing.state === "verified" && (standing.expiresAt ?? 0) - now > RENEWAL_WINDOW_MS)
-    alreadyVerified();
-  if (standing.state === "needs_review") underReview();
+  assertMayStart(deps, tenantId, now);
   const typed = typedNamesOf(input);
   const returnPath = returnPathOf(input.returnPath);
 
@@ -449,6 +459,14 @@ async function start(
     if (reused !== undefined) return reused;
   }
 
+  const { repo } = deps.identity;
+  // The row the start holds itself to, then rule 2 read again over it: the reuse awaited the
+  // provider and may have closed the session, and an operator's row may land at any moment (its
+  // command is another process). A row written before this read, the guards see; one written
+  // after it, the opening transaction does (decided 24 November).
+  const latestRead = repo.latest(tenantId)?.checkId ?? null;
+  assertMayStart(deps, tenantId, now);
+
   if (deps.sessions.countCreatedSince(tenantId, now - DAILY_WINDOW_MS) >= deps.limits.maxPerDay)
     throw new ApiError(
       "identity_session_limit",
@@ -456,10 +474,6 @@ async function start(
       "too many identity checks were started on this account today: try again tomorrow",
     );
 
-  const { repo } = deps.identity;
-  // The row every guard above was read against, read after the last write before the provider
-  // call (the reuse and the cap may close a session with a row of its own).
-  const latestRead = repo.latest(tenantId)?.checkId ?? null;
   const sessionId = randomBytes(16).toString("hex");
   const origin = deps.webOrigin.replace(/\/+$/, "");
   const created = await createAtProvider(
@@ -1473,7 +1487,8 @@ export async function sweepSessions(
 
 /**
  * The alarm of an open session the sweep met, as the session stands after the sweep's read (or
- * its failure), at each sweep:
+ * its failure), at each sweep that meets it: a session read in the two minutes before a sweep (the
+ * guardian's return, the card's check) is not in that sweep's batch, and gets no line from it.
  *
  * - waiting for an operator (`waitsForOperator`): `identity_session_waiting_operator { sessionId,
  *   ageHours }`, CRITICAL on production and a warning on a sandbox (`parkedLevel`), until an

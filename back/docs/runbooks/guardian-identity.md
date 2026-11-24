@@ -240,15 +240,15 @@ journalctl -u legalbody-api --since '7 days ago' | grep <sessionId>
 | `identity_session_closed { tenant, sessionId, reasonCode }` | The session closed with a `failed` row: the last attempt failed, a code no retry changes, a cancellation or redaction at Stripe, or its days ran out (`abandoned`). `reasonCode` is the row's (section 1, step 5). A session Stripe had verified whose days ran out while it waited for its search or for you closes with `other`, never `abandoned`: the row's reason reads `verified at the provider; not completed within 14 days (screen_pending)`, or `(plan_refused)`, or `(no_typed_names)` (the days are `IDENTITY_SESSION_DAYS`). |
 | `identity_session_superseded { sessionId }` | An operator's row was written for the guardian while the session was open: the session closed without a row of its own, its redaction due as after a row. Your row stands. |
 | `identity_screen_pending { sessionId }` | The search gave no verdict: no row yet, the job tries again each pass. See below. |
-| `identity_screen_pending_stale { sessionId, hours }` (CRITICAL) | The session has waited for its search more than 24 hours; written at each pass of the job until the search answers, even a pass whose read of the session failed. Read `person_screen_error`, then see below. |
+| `identity_screen_pending_stale { sessionId, hours }` (CRITICAL) | The session has waited for its search more than 24 hours; written at each pass of the job that meets the session until the search answers, even a pass whose read of the session failed. A read in the two minutes before a pass (the guardian's return to the site, or the card's check) makes that pass skip the session, and its line. Read `person_screen_error`, then see below. |
 | `person_screen_error { status }` (CRITICAL on 401, 402, 403; warn otherwise) | Why the search gave none: OpenSanctions' HTTP status, or `timeout`, `unreachable`, `unreadable`, `invalid_query`, `query_<status>`. A 401 or 403 is the OpenSanctions key, a 402 its credits spent: no check completes on production until it is fixed. |
 | `identity_dob_not_read { sessionId }` | Stripe served no birth date for this session (a key without "Recent detailed verification results", or more than 48 hours after the document was processed): the search runs on the name alone. Said once per session. Repeated across sessions, check the key. |
 | `identity_session_refused { sessionId, reason }` (CRITICAL on production, warn on a sandbox) | The session waits for an operator; written once, when the result is refused. See "A result the rules refuse" below. |
-| `identity_session_waiting_operator { sessionId, ageHours }` (CRITICAL on production, warn on a sandbox) | The session still waits for an operator; written at each pass of the job until your row closes it or its days run out. `ageHours` is the session's age since it started. See "A result the rules refuse" below. |
+| `identity_session_waiting_operator { sessionId, ageHours }` (CRITICAL on production, warn on a sandbox) | The session still waits for an operator; written at each pass of the job that meets the session, until your row closes it or its days run out. A read in the two minutes before a pass (the guardian's return to the site, or the card's check) makes that pass skip the session, and its line. `ageHours` is the session's age since it started. See "A result the rules refuse" below. |
 | `identity_session_dropped { sessionId, reason }` | A read came back in the other mode (`mode`) or naming another session (`reference`): nothing written. `mode`: the key and the box disagree. |
 | `identity_session_unreadable { sessionId, field }` (error) | Stripe's answer lacked the shape we read, at the field named: nothing written, the caller got 503. Report it. |
 | `identity_session_names_unreadable { sessionId, keyId }` (CRITICAL) | The typed names are sealed under a PII key this box no longer holds: configure the key `keyId` names again (section 6). |
-| `identity_session_orphan_not_canceled { sessionId, status }` (warn) | Two starts of one account raced, or an operator's row was written for the account while Stripe made the session (the start then reads its rules again, so your row is never buried under a `started` row), and the session made at Stripe could not be canceled. No row points at it, and nobody holds its link. |
+| `identity_session_orphan_not_canceled { sessionId, status }` (warn) | Two starts of one account raced, or an operator's row was written for the account while Stripe made the session, and the session made at Stripe could not be canceled. The start reads its rules again over your row: a review or a pass of yours written while a start runs refuses that start, and no `started` row is written over it. No row points at it, and nobody holds its link. |
 | `identity_provider_unavailable { op, status, code, requestId }` (warn) | Stripe did not answer (429, 5xx, a timeout): the caller got 503, the job reads again. Act if it lasts. |
 | `identity_provider_error { op, status, code, requestId }` (error) | Stripe refused the call (another 4xx), with its machine code; `requestId` finds the request in Stripe's logs. |
 | `identity_provider_key_rejected { op, status, code, requestId }` (CRITICAL) | Stripe refused the key (401, 403): wrong, revoked, or missing a permission. No check moves until the key is fixed (0.1). |
@@ -289,8 +289,10 @@ row, even should the search answer later. Check with `identity:session` and `ide
 sandbox). With `plan_refused`, the record's rules refused a verified result. On production that is
 a session without the face match: the flow lacks the selfie (0.1), so fix the flow. The session
 stays open, waiting for an operator: it is not read or searched again until an operator writes a
-row for that guardian, and each pass of the job says so again
-(`identity_session_waiting_operator { sessionId, ageHours }`, at the same level). Until it closes,
+row for that guardian, and each pass of the job that meets it says so again
+(`identity_session_waiting_operator { sessionId, ageHours }`, at the same level; a read of the
+session by the guardian's return or the card's check in the two minutes before a pass makes that
+pass skip it). Until it closes,
 the guardian's start answers 409 `identity_under_review`. An operator's row closes it: record what
 you read (`identity:record`), or refuse the attempt (`identity:refuse`, `--expect-latest` the
 session's `started` row; during a renewal a refusal ends the earlier pass, "A renewal" below), and
@@ -742,9 +744,10 @@ confirms eight facts the tests cannot:
 7. Test mode returns one sample person for everyone (0.2): the same names for every verified
    session, whatever was typed. The testnet does not compare names.
 8. A verified session's passed row carries `liveness` `passed`, a `documentCountry` and a
-   `documentType`, read in `identity:show` at step 7. A sandbox row passes without the face match,
-   and a row of any box passes without a document type, so a mapping error there would first show
-   on mainnet. (A row without a document country passes nowhere: it lands in review,
+   `documentType`, read in `identity:show` at step 7. A row without a document type passes on
+   mainnet too, so this run is the only place that catches a mapping error there. A sandbox row
+   also passes without the face match, which mainnet would refuse and park for an operator
+   (`plan_refused`). (A row without a document country passes nowhere: it lands in review,
    `country_outside_iso`.)
 
 **1. Forward Stripe's events to the local API** (port 8789, the `PORT` default), in a terminal of

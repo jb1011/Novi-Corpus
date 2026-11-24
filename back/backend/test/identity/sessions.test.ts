@@ -779,6 +779,67 @@ describe("startSession", () => {
     },
   );
 
+  /** `write` run once, during the provider's next call of `op`: an operator's row landing then. */
+  function writeDuring(op: "retrieveSession" | "redactSession", write: () => void): void {
+    const call = provider[op].bind(provider) as (...args: unknown[]) => Promise<unknown>;
+    let written = false;
+    (provider as unknown as Record<string, unknown>)[op] = async (...args: unknown[]) => {
+      const answer = await call(...args);
+      if (!written) {
+        written = true;
+        write();
+      }
+      return answer;
+    };
+  }
+
+  /** An operator's row of the guardian, a review with a sanctions hit or a pass, written now. */
+  const operatorRow = (status: "needs_review" | "passed") => () =>
+    appended({
+      ...passedIdentityRow(GUARDIAN, { at: now, expiresAt: now + 1000 * DAY }),
+      environment: "sandbox",
+      synthetic: true,
+      status,
+      reviewReasons: status === "needs_review" ? ["watchlist_hit"] : [],
+    });
+
+  test.each<[string, "needs_review" | "passed", string]>([
+    ["an operator's review", "needs_review", "identity_under_review"],
+    ["an operator's pass", "passed", "identity_already_verified"],
+  ])(
+    "%s written while the reuse reads an open session that a final code closes is not buried: the session closes without a row, no new session opens, and the start answers its rule (%s, 409 %s)",
+    async (_who, status, code) => {
+      const s = await started();
+      provider.fail(s.ref, "consent_declined", "vr_attempt1");
+      now = T0 + MINUTE;
+      writeDuring("retrieveSession", operatorRow(status));
+
+      const refused = await refusal(startSession(deps(), GUARDIAN, TYPED));
+
+      expect([refused.code, refused.status]).toEqual([code, 409]);
+      expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", status]);
+      expect(s.session()).toMatchObject({ closedAt: now, completedCheckId: null });
+      expect(opsLines("identity_session_superseded")).toEqual([
+        expect.objectContaining({ sessionId: s.sessionId }),
+      ]);
+      expect(provider.created).toHaveLength(1);
+      expect(sessions.openForTenant(GUARDIAN)).toBeUndefined();
+    },
+  );
+
+  test("an operator's review written while the reuse ends an expired session at the provider is not buried either: 409 identity_under_review, no new session", async () => {
+    const s = await started();
+    now = T0 + 14 * DAY;
+    writeDuring("redactSession", operatorRow("needs_review"));
+
+    const refused = await refusal(startSession(deps(), GUARDIAN, TYPED));
+
+    expect([refused.code, refused.status]).toEqual(["identity_under_review", 409]);
+    expect(repo.list(GUARDIAN).map((r) => r.status)).toEqual(["started", "needs_review"]);
+    expect(s.session()).toMatchObject({ closedAt: now, completedCheckId: null });
+    expect(provider.created).toHaveLength(1);
+  });
+
   test("a row written during the provider call twice in a row answers 503: each provider session canceled, nothing opened", async () => {
     // An operator's failed row stands in no start's way, so the start tries once more.
     writeDuringCreate(() =>
