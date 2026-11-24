@@ -153,8 +153,9 @@ export const IDENTITY_SESSION_AAD = (sessionId: string, field: "first" | "last")
   `identity-session|${sessionId}|${field}`;
 
 const DAY_MS = 86_400_000;
+const HOUR_MS = 3_600_000;
 /** How long the provider's page stays open for the person, as the answer states it. */
-const URL_LIFETIME_MS = 48 * 3_600_000;
+const URL_LIFETIME_MS = 48 * HOUR_MS;
 /** A verified guardian may renew within this window before the expiry. */
 const RENEWAL_WINDOW_MS = 90 * DAY_MS;
 /** The window of the daily cap on sessions started. */
@@ -163,7 +164,7 @@ const DAILY_WINDOW_MS = DAY_MS;
 const REREAD_AFTER_MS = 2 * 60_000;
 const SWEEP_BATCH = 50;
 /** A screen pending longer than this raises a CRITICAL line at each sweep (ruling F5). */
-const SCREEN_PENDING_ALARM_MS = 24 * 3_600_000;
+const SCREEN_PENDING_ALARM_MS = 24 * HOUR_MS;
 /** Reviews waiting for a decision are few (an operator decides each); read many at once. */
 const DECISION_BATCH = 500;
 /** A review undecided longer than this raises a warning at each sweep (ruling F7). */
@@ -184,6 +185,15 @@ const tenantTag = (tenantId: string): string => tenantId.slice(0, 10);
 const days = (n: number): number => n * DAY_MS;
 /** The provider's mode a session of this deployment must read. */
 const livemodeOf = (deps: IdentitySessionDeps): boolean => deps.environment === "production";
+/**
+ * The level of a session parked for an operator (`waitsForOperator`): CRITICAL on production,
+ * where the guardian cannot pass the gate until a person acts; a warning on a sandbox (decided 24
+ * November).
+ */
+const parkedLevel = (
+  deps: IdentitySessionDeps,
+): { level: "error"; severity: "CRITICAL" } | { level: "warn" } =>
+  deps.environment === "production" ? { level: "error", severity: "CRITICAL" } : { level: "warn" };
 
 // ── the refusals ────────────────────────────────────────────────────────────────────────────
 
@@ -657,7 +667,7 @@ export function sessionView(deps: IdentitySessionDeps, tenantId: string): Sessio
  * - canceled: the failed row, abandoned, `closed`;
  * - verified: the screen, then the row (`completed`), or `screen_pending` when the screen errored
  *   (no row; the sweep reads it again). A result the record's rules refuse leaves the session
- *   open for an operator, with one ops line: `unchanged`;
+ *   open for an operator, with one ops line (CRITICAL on production): `unchanged`;
  * - an operator's row written since the session's `started` row, met where the session would
  *   write its own (a completion, the failure that closes, a cancellation): the session closes
  *   without a row, its redaction due, one ops line (`identity_session_superseded`): `closed`.
@@ -986,7 +996,11 @@ async function completeVerified(
       deps.sessions.recordRead(sessionId, readOf(fresh, read, now, dobNotRead));
       return "unchanged" as const;
     });
-    opsLog("identity_session_refused", { sessionId, reason: "no_typed_names" });
+    opsLog("identity_session_refused", {
+      ...parkedLevel(deps),
+      sessionId,
+      reason: "no_typed_names",
+    });
     return result;
   }
   // An operator's row written over the session stands: nobody is screened for a row not written.
@@ -1020,16 +1034,14 @@ async function completeVerified(
     // (ruling F4): the typed name is recorded without comparing it with the sample's, and the
     // duplicate rule does not run. Production compares and runs both.
     const testMode = deps.environment === "sandbox";
+    const flagged = providerFlagCause(deps, fresh.tenantId, outcome.country);
     let row: NewGuardianIdentityCheck;
     try {
       row = planCheck(checkDeps(deps, now), {
         ...checkBase(deps, fresh),
         // A country outside ISO 3166-1 cannot pass (ruling R12), nor a result after a revocation
         // (`revokedSinceLastPass`): an operator reviews it (`provider_flag`).
-        result:
-          outcome.country === null || revokedSinceLastPass(deps, fresh.tenantId)
-            ? "needs_review"
-            : "passed",
+        result: flagged === null ? "passed" : "needs_review",
         names: { ...names, full: null },
         nameMismatch: !testMode && !namesAgree(typed, outcome.names),
         country: outcome.country,
@@ -1045,9 +1057,11 @@ async function completeVerified(
       if (e instanceof CheckRefused) return "refused" as const;
       throw e;
     }
+    // The event names why the adapter flagged the review itself, which `provider_flag` alone does
+    // not say; `identity:show` prints it.
     const check = deps.identity.repo.append(
       row,
-      systemEvent(now, { reasonCode: null, reason: null, providerEventId: outcome.reportId }),
+      systemEvent(now, { reasonCode: flagged, reason: null, providerEventId: outcome.reportId }),
     );
     deps.sessions.close(sessionId, {
       at: now,
@@ -1064,7 +1078,7 @@ async function completeVerified(
     return "closed";
   }
   if (result === "refused") {
-    opsLog("identity_session_refused", { sessionId, reason: "plan_refused" });
+    opsLog("identity_session_refused", { ...parkedLevel(deps), sessionId, reason: "plan_refused" });
     return "unchanged";
   }
   opsLog("identity_session_completed", {
@@ -1087,6 +1101,24 @@ function revokedSinceLastPass(deps: IdentitySessionDeps, tenantId: string): bool
   const { repo } = deps.identity;
   const lastPass = repo.latestPassed(tenantId)?.checkId ?? 0;
   return repo.list(tenantId).some((row) => row.status === "revoked" && row.checkId > lastPass);
+}
+
+/** Why the adapter itself sends a verified result to review (`provider_flag`), as the completion
+ *  event's reason code says it; null when it does not. */
+type ProviderFlagCause = "after_revocation" | "country_outside_iso";
+
+/**
+ * The cause of the adapter's own `provider_flag`, or null: a revocation since the last pass, or a
+ * document country outside ISO 3166-1. When both hold, the revocation is named: the empty
+ * `documentCountry` of the row shows the other, while only the history shows a revocation.
+ */
+function providerFlagCause(
+  deps: IdentitySessionDeps,
+  tenantId: string,
+  country: string | null,
+): ProviderFlagCause | null {
+  if (revokedSinceLastPass(deps, tenantId)) return "after_revocation";
+  return country === null ? "country_outside_iso" : null;
 }
 
 /** The sanctions screen on the name of record and the birth date; `not_run` without a screener
@@ -1184,9 +1216,53 @@ function writeFailed(
 type Abandon = "expired" | "canceled" | "redacted";
 
 /**
- * The session closed with a failed row, `abandoned`; with `readFirst`, the read recorded too. A
- * session an operator's row was written over (`writtenOver`) closes without a row of its own:
- * `superseded`.
+ * Why an open session verified at the provider never completed: its screen gave no verdict, or
+ * it waits for an operator (`waitsForOperator`), the record's rules having refused its result or
+ * its typed names missing.
+ */
+function verifiedButOpen(
+  session: IdentitySession,
+): "screen_pending" | "plan_refused" | "no_typed_names" {
+  if (session.screenPendingSince !== null) return "screen_pending";
+  return session.typedNames === null ? "no_typed_names" : "plan_refused";
+}
+
+/**
+ * The failed row's reason of an abandon. A session whose days ran out after the provider verified
+ * the person was not left unfinished by them: its row says `other` and why it was not completed,
+ * never `abandoned` (decided 24 November; rows are kept for ever).
+ */
+function abandonFailure(deps: IdentitySessionDeps, fresh: IdentitySession, why: Abandon): Failure {
+  const ref = fresh.providerRef;
+  if (why === "canceled")
+    return {
+      reasonCode: "abandoned",
+      reason: "stripe canceled",
+      providerEventId: `${ref}:canceled`,
+    };
+  if (why === "redacted")
+    return {
+      reasonCode: "abandoned",
+      reason: "stripe redacted the session before a result",
+      providerEventId: `${ref}:redacted`,
+    };
+  if (fresh.lastStatus === "verified")
+    return {
+      reasonCode: "other",
+      reason: `verified at the provider; not completed within ${deps.limits.sessionDays} days (${verifiedButOpen(fresh)})`,
+      providerEventId: `${ref}:abandoned`,
+    };
+  return {
+    reasonCode: "abandoned",
+    reason: `no result within ${deps.limits.sessionDays} days`,
+    providerEventId: `${ref}:abandoned`,
+  };
+}
+
+/**
+ * The session closed with a failed row (`abandonFailure`); with `readFirst`, the read recorded
+ * too. A session an operator's row was written over (`writtenOver`) closes without a row of its
+ * own: `superseded`.
  */
 function closeAbandoned(
   deps: IdentitySessionDeps,
@@ -1195,30 +1271,21 @@ function closeAbandoned(
   why: Abandon,
   readFirst?: (fresh: IdentitySession) => SessionRead,
 ): "closed" | "superseded" | "unchanged" {
-  const ref = session.providerRef;
-  const failure: Failure =
-    why === "canceled"
-      ? { reasonCode: "abandoned", reason: "stripe canceled", providerEventId: `${ref}:canceled` }
-      : why === "redacted"
-        ? {
-            reasonCode: "abandoned",
-            reason: "stripe redacted the session before a result",
-            providerEventId: `${ref}:redacted`,
-          }
-        : {
-            reasonCode: "abandoned",
-            reason: `no result within ${deps.limits.sessionDays} days`,
-            providerEventId: `${ref}:abandoned`,
-          };
   const result = onOpenSession(deps, session.sessionId, (fresh) => {
+    // The reason is read from the session as it stands, before the read `readFirst` records.
+    const failure = abandonFailure(deps, fresh, why);
     if (readFirst !== undefined) deps.sessions.recordRead(fresh.sessionId, readFirst(fresh));
     if (writtenOver(deps, fresh)) return closeSuperseded(deps, fresh, now, fresh.reportId);
     writeFailed(deps, fresh, now, fresh.reportId, failure);
-    return "closed" as const;
+    return failure;
   });
-  if (result === "superseded") logSuperseded(session.sessionId);
-  if (result === "closed") logClosed(session, failure.reasonCode);
-  return result;
+  if (result === "unchanged") return "unchanged";
+  if (result === "superseded") {
+    logSuperseded(session.sessionId);
+    return "superseded";
+  }
+  logClosed(session, result.reasonCode);
+  return "closed";
 }
 
 function logClosed(session: IdentitySession, reasonCode: FailureReasonCode): void {
@@ -1321,8 +1388,9 @@ async function requestRedaction(
  *    provider (redacted, or canceled when redaction does not take them: `endAtProvider`) and
  *    closed as abandoned, or without a row when an operator's row was written over them
  *    (`writtenOver`); else read (`syncSession`; a refused result waiting for an operator is only
- *    looked at), and one still waiting for its screen more than 24 hours on raises a CRITICAL line
- *    (`screenPendingAlarm`).
+ *    looked at). Then, whatever the read did, one still waiting for an operator raises a line at
+ *    each pass, and one still waiting for its screen more than 24 hours on a CRITICAL line
+ *    (`openSessionAlarm`).
  * 2. Closed sessions whose row went to review: once the operator has decided the review (an
  *    acceptance, a refusal, or a name correction that settles it), or once it is no longer the
  *    tenant's standing row (anything written over it), their redaction falls due; a review left
@@ -1368,10 +1436,12 @@ export async function sweepSessions(
       } else {
         await syncAt(deps, session.sessionId, nowMs);
         counts.synced += 1;
-        screenPendingAlarm(deps, session.sessionId, nowMs);
       }
     } catch (e) {
       failed("sync", session.sessionId, e);
+    } finally {
+      // Whatever the read did, a read that threw included (decided 24 November).
+      openSessionAlarm(deps, session.sessionId, nowMs);
     }
   }
 
@@ -1402,21 +1472,35 @@ export async function sweepSessions(
 }
 
 /**
- * A session still waiting for its screen more than 24 hours after the screen first gave no
- * verdict: one CRITICAL line, `identity_screen_pending_stale { sessionId, hours }`, at each sweep
- * that reads it. The screener is down, or its key refused (`person_screen_error`), and on
- * production no check completes until a person acts.
+ * The alarm of an open session the sweep met, as the session stands after the sweep's read (or
+ * its failure), at each sweep:
+ *
+ * - waiting for an operator (`waitsForOperator`): `identity_session_waiting_operator { sessionId,
+ *   ageHours }`, CRITICAL on production and a warning on a sandbox (`parkedLevel`), until an
+ *   operator's row closes it or its days run out. The age is the session's, from its start.
+ * - waiting for its screen more than 24 hours after the screen first gave no verdict:
+ *   `identity_screen_pending_stale { sessionId, hours }`, CRITICAL. The screener is down, or its
+ *   key refused (`person_screen_error`), and on production no check completes until a person acts.
  */
-function screenPendingAlarm(deps: IdentitySessionDeps, sessionId: string, nowMs: number): void {
+function openSessionAlarm(deps: IdentitySessionDeps, sessionId: string, nowMs: number): void {
   const after = deps.sessions.byId(sessionId);
-  if (after === undefined || after.closedAt !== null || after.screenPendingSince === null) return;
+  if (after === undefined || after.closedAt !== null) return;
+  if (waitsForOperator(after)) {
+    opsLog("identity_session_waiting_operator", {
+      ...parkedLevel(deps),
+      sessionId,
+      ageHours: Math.floor((nowMs - after.createdAt) / HOUR_MS),
+    });
+    return;
+  }
+  if (after.screenPendingSince === null) return;
   const waited = nowMs - after.screenPendingSince;
   if (waited <= SCREEN_PENDING_ALARM_MS) return;
   opsLog("identity_screen_pending_stale", {
     level: "error",
     severity: "CRITICAL",
     sessionId,
-    hours: Math.floor(waited / 3_600_000),
+    hours: Math.floor(waited / HOUR_MS),
   });
 }
 

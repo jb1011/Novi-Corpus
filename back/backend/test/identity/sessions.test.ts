@@ -382,6 +382,46 @@ const namesOf = (row: GuardianIdentityCheck) => {
 
 const latestRow = (tenantId: string = GUARDIAN) => repo.latest(tenantId) as GuardianIdentityCheck;
 
+/**
+ * A session parked for an operator, on the environment of `d`: its verified result is refused by
+ * the record's rules (`plan_refused`), being a renewal whose result completed before the pass it
+ * would renew. The session stays open, its last read `verified`.
+ */
+async function parkedSession(d: IdentitySessionDeps, tenantId: string = GUARDIAN) {
+  appended({
+    ...passedIdentityRow(tenantId, { at: T0 - DAY, expiresAt: T0 + 30 * DAY }),
+    environment: d.environment,
+    synthetic: d.environment === "sandbox",
+  });
+  const s = await started(d, tenantId);
+  provider.verify(s.ref, { createdMs: T0 - 2 * DAY });
+  expect(await syncSession(d, s.sessionId)).toBe("unchanged");
+  expect(s.session()).toMatchObject({ closedAt: null, lastStatus: "verified" });
+  return s;
+}
+
+/** The level of a parked session's lines: CRITICAL on production, a warning on a sandbox. */
+const parkedLevel = (environment: "sandbox" | "production") =>
+  environment === "production" ? { level: "error", severity: "CRITICAL" } : { level: "warn" };
+
+/** An operator's refusal of the tenant's open attempt, written now. */
+function operatorRefuses(tenantId: string = GUARDIAN): void {
+  const begun = [...repo.list(tenantId)]
+    .reverse()
+    .find((r) => r.status === "started") as GuardianIdentityCheck;
+  appended(
+    {
+      ...begun,
+      status: "failed",
+      supersedesCheckId: begun.checkId,
+      completedAt: now,
+      operator: "ops.example",
+      operatorOsUser: "ops",
+    },
+    "refused",
+  );
+}
+
 // ── start ───────────────────────────────────────────────────────────────────────────────────
 
 describe("startSession", () => {
@@ -1235,6 +1275,104 @@ describe("syncSession", () => {
     expect(output.join("\n")).not.toContain("--liveness");
   });
 
+  test.each(["sandbox", "production"] as const)(
+    "on %s the refusal line of a parked session is loud, for both reasons and once each: CRITICAL on production, a warning on a sandbox",
+    async (environment) => {
+      const d = environment === "production" ? production() : deps();
+      const refused = await parkedSession(d, tenant(1));
+      // A session holding no typed names: there is no name of record to write.
+      const nameless = await started(d, tenant(2));
+      sessions.eraseTypedNames(nameless.sessionId, now);
+      provider.verify(nameless.ref);
+      expect(await syncSession(d, nameless.sessionId)).toBe("unchanged");
+      // Later passes look at both and write no second refusal line.
+      for (const minutes of [10, 20]) {
+        now = T0 + minutes * MINUTE;
+        await sweepSessions(d, now);
+      }
+
+      const lines = opsLines("identity_session_refused");
+      expect(lines).toEqual([
+        expect.objectContaining({
+          sessionId: refused.sessionId,
+          reason: "plan_refused",
+          ...parkedLevel(environment),
+        }),
+        expect.objectContaining({
+          sessionId: nameless.sessionId,
+          reason: "no_typed_names",
+          ...parkedLevel(environment),
+        }),
+      ]);
+      if (environment === "sandbox")
+        for (const l of lines) expect(l).not.toHaveProperty("severity");
+    },
+  );
+
+  test("the two reviews the adapter raises itself with provider_flag carry their cause on the completion event; any other completion carries none", async () => {
+    const revoke = (t: string) => {
+      const pass = passFor(t, T0 - 1000 * DAY, T0 + 30 * DAY);
+      appended(
+        {
+          ...pass,
+          status: "revoked",
+          supersedesCheckId: pass.checkId,
+          expiresAt: null,
+          names: null,
+          nameHmac: null,
+        },
+        "revoked",
+      );
+    };
+    const completed = async (t: string, country?: string) => {
+      const s = await started(deps(), t);
+      provider.verify(s.ref, country === undefined ? {} : { country });
+      expect(await syncSession(deps(), s.sessionId)).toBe("completed");
+      const row = latestRow(t);
+      return {
+        status: row.status,
+        reviewReasons: row.reviewReasons,
+        documentCountry: row.documentCountry,
+        event: repo.events(row.checkId)[0],
+      };
+    };
+    const systemRecorded = { kind: "recorded", actor: "system" };
+
+    // A document country outside ISO 3166-1 (Kosovo's XK).
+    expect(await completed(tenant(1), "XK")).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["provider_flag"],
+      documentCountry: null,
+      event: { ...systemRecorded, reasonCode: "country_outside_iso" },
+    });
+    // A result after a revocation.
+    revoke(tenant(2));
+    expect(await completed(tenant(2))).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["provider_flag"],
+      documentCountry: "FRA",
+      event: { ...systemRecorded, reasonCode: "after_revocation" },
+    });
+    // Both: the revocation is named, the empty document country shows the other cause.
+    revoke(tenant(3));
+    expect(await completed(tenant(3), "XK")).toMatchObject({
+      documentCountry: null,
+      event: { ...systemRecorded, reasonCode: "after_revocation" },
+    });
+    // A pass, and a review for another reason.
+    expect(await completed(tenant(4))).toMatchObject({
+      status: "passed",
+      event: { ...systemRecorded, reasonCode: null },
+    });
+    recordHuman(store, tenant(5), nullifierOf(tenant(5)), T0 - DAY);
+    screener.answer = "hit";
+    expect(await completed(tenant(5))).toMatchObject({
+      status: "needs_review",
+      reviewReasons: ["watchlist_hit"],
+      event: { ...systemRecorded, reasonCode: null },
+    });
+  });
+
   test("a refused result is screened once: later sweeps neither read it at the provider nor screen it again; an operator's row closes it without a row of its own", async () => {
     const d = production();
     const s = await started(d);
@@ -1934,6 +2072,103 @@ describe("sweepSessions", () => {
     await sweepSessions(deps(), now);
     expect(s.session().closedAt).toBe(now);
     expect(opsLines("identity_screen_pending_stale")).toHaveLength(2);
+  });
+
+  test.each(["sandbox", "production"] as const)(
+    "on %s a session waiting for an operator raises a line at each pass, with its age in hours, CRITICAL on production and a warning on a sandbox; none once an operator's row closes it",
+    async (environment) => {
+      const d = environment === "production" ? production() : deps();
+      const s = await parkedSession(d);
+      expect(opsLines("identity_session_waiting_operator")).toEqual([]);
+
+      for (const hours of [2, 3]) {
+        now = T0 + hours * 3_600_000;
+        await sweepSessions(d, now);
+      }
+      const lines = opsLines("identity_session_waiting_operator");
+      expect(lines).toEqual([
+        expect.objectContaining({
+          sessionId: s.sessionId,
+          ageHours: 2,
+          ...parkedLevel(environment),
+        }),
+        expect.objectContaining({
+          sessionId: s.sessionId,
+          ageHours: 3,
+          ...parkedLevel(environment),
+        }),
+      ]);
+      if (environment === "sandbox")
+        for (const l of lines) expect(l).not.toHaveProperty("severity");
+
+      // An operator's row: the next pass closes the session, and the line stops.
+      now = T0 + 3 * 3_600_000 + 30 * MINUTE;
+      operatorRefuses();
+      for (const hours of [4, 5]) {
+        now = T0 + hours * 3_600_000;
+        await sweepSessions(d, now);
+      }
+      expect(s.session().closedAt).toBe(T0 + 4 * 3_600_000);
+      expect(opsLines("identity_session_waiting_operator")).toHaveLength(2);
+    },
+  );
+
+  test("a screen pending for more than 24 hours raises its CRITICAL line even when the sweep's read of the session throws", async () => {
+    const s = await started();
+    provider.verify(s.ref);
+    screener.answer = "error";
+    expect(await syncSession(deps(), s.sessionId)).toBe("screen_pending");
+    provider.failNext.retrieve.push(
+      new StripeUnavailable(503, "Stripe Identity retrieve: HTTP 503"),
+    );
+    now = T0 + 25 * 3_600_000;
+
+    expect(await sweepSessions(deps(), now)).toEqual({ ...zero, errors: 1 });
+    expect(opsLines("identity_screen_pending_stale")).toEqual([
+      expect.objectContaining({ sessionId: s.sessionId, hours: 25, severity: "CRITICAL" }),
+    ]);
+  });
+
+  test("a session verified at the provider and not completed within its days closes with reason code other and its cause, not as abandoned; one left waiting for the person is abandoned", async () => {
+    const refused = await parkedSession(deps(), tenant(1));
+    // Its typed names lost: refused with no_typed_names.
+    const nameless = await started(deps(), tenant(2));
+    sessions.eraseTypedNames(nameless.sessionId, now);
+    provider.verify(nameless.ref);
+    expect(await syncSession(deps(), nameless.sessionId)).toBe("unchanged");
+    const pending = await started(deps(), tenant(3));
+    provider.verify(pending.ref);
+    screener.answer = "error";
+    expect(await syncSession(deps(), pending.sessionId)).toBe("screen_pending");
+    const waiting = await started(deps(), tenant(4));
+    now = T0 + 15 * DAY;
+
+    expect(await sweepSessions(deps(), now)).toMatchObject({ abandoned: 4, errors: 0 });
+    const closing = (t: string) => {
+      const row = latestRow(t);
+      return { status: row.status, event: repo.events(row.checkId)[0] };
+    };
+    const verifiedThen = (cause: string) => ({
+      status: "failed",
+      event: {
+        actor: "system",
+        reasonCode: "other",
+        reason: `verified at the provider; not completed within 14 days (${cause})`,
+      },
+    });
+    expect(closing(tenant(1))).toMatchObject(verifiedThen("plan_refused"));
+    expect(closing(tenant(2))).toMatchObject(verifiedThen("no_typed_names"));
+    expect(closing(tenant(3))).toMatchObject(verifiedThen("screen_pending"));
+    expect(closing(tenant(4))).toMatchObject({
+      status: "failed",
+      event: { reasonCode: "abandoned", reason: "no result within 14 days" },
+    });
+    expect(opsLines("identity_session_closed").map((l) => [l.sessionId, l.reasonCode])).toEqual([
+      [refused.sessionId, "other"],
+      [nameless.sessionId, "other"],
+      [pending.sessionId, "other"],
+      [waiting.sessionId, "abandoned"],
+    ]);
   });
 
   test("an error on one session is counted and logged, never thrown, and the others are still swept", async () => {
