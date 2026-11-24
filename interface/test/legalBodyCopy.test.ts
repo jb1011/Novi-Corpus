@@ -99,6 +99,12 @@ describe("the claims ceiling", () => {
     "autonomous legal person",
     "winds down",
     "wound down",
+    // The identity check names neither its provider nor its screener, and never says what the
+    // screen looks for: the guardian's privacy notice names them, and the card links to it.
+    "stripe",
+    "opensanctions",
+    "sanction",
+    "watchlist",
   ])("no sentence says %j", (forbidden) => {
     for (const s of ALL) expect(s.toLowerCase()).not.toContain(forbidden);
   });

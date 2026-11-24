@@ -146,6 +146,102 @@ export const LEGAL_BODY_COPY = {
       kept: "What we keep: the result, the date, the country and type of the document, and your name, encrypted.",
       never: "What we never see: the document itself, the photo, your date of birth or document number.",
       policy: "How a person is on record",
+      /** The card where the check runs automatically: the guardian starts it here, leaves for the
+       *  provider's page, and comes back to the result. The provider and the screener are never
+       *  named here; the guardian's privacy notice names them. */
+      automatic: {
+        why: "World ID proves one real person. The identity check says who.",
+        required: "Required before a legal body is created.",
+        optional:
+          "Optional on the testnet. On Arc mainnet this check is required before a legal body is created.",
+        testNote:
+          "Test check. You leave this site for our identity check provider's test page, pick an outcome there, and come back here. No document is read. The name is not compared with anything, so a made-up name is fine.",
+        testCounts: "A test check counts on the testnet only.",
+        locked: "First verify with World ID above. Then you confirm who you are here.",
+        loading: "Reading your check…",
+        unreadable: "Your check could not be read just now.",
+        retryRead: "Try again",
+        startAgain:
+          "The last check did not go through. You can start a new one, or write to us.",
+        expired: "Your identity check has expired. Start a new one to go on.",
+        revoked:
+          "Your identity check no longer counts. You can run it again. A person at Novi Corpus then reviews the result before it counts.",
+        continue: "Your check is open and not finished. Continue it below.",
+        retry: "That attempt did not go through. {reason}",
+        attemptsLeft: "{n} attempts left on this check.",
+        oneAttemptLeft: "1 attempt left on this check.",
+        reading: "Your result is being read. This page checks again by itself.",
+        readingLong:
+          "Still being read. This can take a few minutes. You can leave this page: the result is kept, and it shows here when you come back.",
+        checkAgain: "Check again",
+        finishing:
+          "Your part is done. We are finishing the check on our side, and this page shows the result when it is ready. Nothing more to do now. If it still says this tomorrow, write to us.",
+        review:
+          "Your part is done. A person at Novi Corpus is looking at the result, usually within one working day. Nothing more to do now: this page shows the result once it is decided.",
+        renewalDue: "Due again on {date}. You can renew now. Your current check counts until then.",
+        verifiedTestOn: "Verified on {date} (test check)",
+        verifiedTest: "Verified (test check)",
+        form: {
+          intro:
+            "You leave this site for our identity check provider's page. There you show a government document (a passport, an identity card or a driving licence) and take a live photo of your face. You need the document and a camera. It takes a few minutes, then you come back here.",
+          nameWhy:
+            "Type your first and last name exactly as the document prints them. This is the name that goes on your record, and it is compared with the document. If the two differ, a person reviews the result before it counts.",
+          nameAgain: "Type your name again: it is not kept in this browser.",
+          nameHelp: "Several given names on the document? Type them all in the first field.",
+          firstName: "First name, as printed on the document",
+          lastName: "Last name, as printed on the document",
+          nameProblem:
+            "Each name must be 1 to 100 characters. Remove any invisible character: a pasted name can carry one.",
+          opening: "Opening the check…",
+        },
+        buttons: {
+          start: "Start the check",
+          startAgain: "Start a new check",
+          runAgain: "Run the check again",
+          continue: "Continue the check",
+          retry: "Try again",
+          renew: "Renew now",
+        },
+        /** One sentence per code the start can refuse with; the server's own words never show. */
+        refusals: {
+          identity_already_verified:
+            "Your identity is already verified. A renewal opens 90 days before it is due.",
+          identity_under_review:
+            "Your check is being reviewed. This page shows the result once it is decided.",
+          identity_session_limit:
+            "Too many checks were started on this account today. Try again tomorrow.",
+          identity_provider_unavailable:
+            "The identity check is unavailable at the moment. Try again in a few minutes.",
+          validation_error:
+            "Each name must be 1 to 100 characters, typed as the document prints it.",
+          guardian_not_verified: "Verify with World ID first, above.",
+          identity_check_not_offered: "The identity check is not offered here at the moment.",
+          other: "The check could not be started just now. Try again in a moment.",
+        },
+        /** Why an attempt at the provider did not go through, by the provider's error code. The
+         *  three codes that end a session at once have no sentence: the card reads that session
+         *  closed and says `startAgain`. */
+        attempts: {
+          document_expired: "The document has expired. Use a document in date.",
+          document_type_not_supported:
+            "That kind of document is not accepted here. Use a passport, an identity card or a driving licence.",
+          document_unverified_other:
+            "The document could not be read. Try again in good light, with the whole document in the frame.",
+          selfie_face_mismatch:
+            "The photo did not match the document. Try again without glasses or a hat.",
+          selfie_document_missing_photo:
+            "The document shows no photo. Use a document with your photo.",
+          selfie_manipulated: "The photo could not be used. Take it live, with the camera.",
+          selfie_unverified_other: "The photo could not be read. Try again in good light.",
+          other: "Try again, or use another document.",
+        },
+        checked:
+          "What is checked: a government document and a live photo of your face, matched.",
+        kept: "What we keep: the result, the date, the country and type of the document, and your name, encrypted.",
+        neverHeld:
+          "What we never hold: the document itself, the photo, the document number or your address. Your date of birth is read once during the check and never stored.",
+        notice: "Privacy notice for the guardian",
+      },
     },
   },
 
@@ -946,6 +1042,9 @@ export const PERSON_SENTENCES: readonly string[] = [
   "Verified",
   "Verified on {date}",
   "Identity of the person in control verified",
+  "Verified on {date} (test check)",
+  "Verified (test check)",
+  "Your identity is already verified. A renewal opens 90 days before it is due.",
 ];
 
 /** The only sentences allowed to say "Novi" without "Corpus". */
