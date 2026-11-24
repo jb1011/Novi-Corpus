@@ -516,9 +516,14 @@ document as in step 3, a new session, and `identity:record --result passed --nam
 (`supersedesCheckId`): the guardian stays `verified`, and the expiry counts from the new completion,
 which must be after the current pass's (an older one is refused, so an expiry never moves back).
 Every rule of a pass applies, the duplicate check, `--name-mismatch` and the production rules
-included, so a renewal that lands in review (a watchlist hit, a duplicate, a name that differs)
-puts the guardian in review until you decide it. A failed session over a verified guardian is not
-recorded as such: revoke first if the guardian must lose the pass.
+included, so a renewal may land in review. What the guardian then reads follows the renewal rule
+(0.4, "A renewal"): a review with `watchlist_hit` or `country_blocked` ends the earlier pass, and
+the guardian reads `needs_review` until you decide it; a review for any other reason (a duplicate,
+a name that differs, a name that breaks the rule, a document out of date) leaves the guardian
+`verified` on the earlier pass, while that pass is in date. Your decision on the review
+(`identity:accept`, `identity:refuse` or `identity:correct-name`) ends the earlier pass either way:
+the guardian then reads the state of the row you wrote. A failed session over a verified guardian
+is not recorded as such: revoke first if the guardian must lose the pass.
 
 ### What `identity:record` refuses
 
@@ -725,7 +730,7 @@ document's country and type, and the names of record, encrypted.
 A one-off run on a builder's machine, before the testnet box gets the block. It needs the
 test-mode restricted key and flow (0.1, 0.2), the Stripe CLI signed in to the account
 (`stripe login`; `stripe listen` stays in test mode unless told otherwise), and a test wallet. It
-confirms seven facts the tests cannot:
+confirms eight facts the tests cannot:
 
 1. Stripe accepts both `verified_outputs` and `verified_outputs.dob` as expands in one read.
 2. A redaction cancels a session still waiting for the person.
@@ -736,6 +741,11 @@ confirms seven facts the tests cannot:
 6. Stripe takes `return_url` beside `verification_flow` when it creates a session.
 7. Test mode returns one sample person for everyone (0.2): the same names for every verified
    session, whatever was typed. The testnet does not compare names.
+8. A verified session's passed row carries `liveness` `passed`, a `documentCountry` and a
+   `documentType`, read in `identity:show` at step 7. A sandbox row passes without the face match,
+   and a row of any box passes without a document type, so a mapping error there would first show
+   on mainnet. (A row without a document country passes nowhere: it lands in review,
+   `country_outside_iso`.)
 
 **1. Forward Stripe's events to the local API** (port 8789, the `PORT` default), in a terminal of
 its own, for the whole run:
@@ -842,7 +852,7 @@ third failure closes the session: `identity_session_closed` with `reasonCode`
 curl -s "$API/world-id/me" -H "Authorization: Bearer $TOKEN"
 ```
 
-**7. "Verification success" (facts 1, 3 and 7).** Start again, with any test name, and choose
+**7. "Verification success" (facts 1, 3, 7 and 8).** Start again, with any test name, and choose
 "Verification success". The `processing` and `verified` events arrive, then
 `identity_session_completed` with `status` `passed`: the testnet does not compare the typed name
 with the sample's (0.2), so a name that differs from it passes too, recorded as typed. Fact 7 holds
@@ -856,7 +866,9 @@ sample. Say only whether it holds, never the names. Then:
 - `/world-id/me`: `identity` reads `"required": false`, `"automatic": true`, `"state": "verified"`,
   with the typed names and the dates;
 - `identity:show`: the passed row, `synthetic` `true`, `watchlist` `not_run`, `operator` null, and
-  its event by `system`.
+  its event by `system`. Fact 8 holds when that row reads `liveness` `passed`, a three-letter
+  `documentCountry` and a `documentType` (`passport`, `identity_card` or `driving_licence`); say
+  only which hold, never the names.
 
 Fact 1 holds when no `identity_dob_not_read` line came and `dobUnavailable` is `false`. A line means
 Stripe refused the read with the birth date or served none: check that the key has "Recent detailed
@@ -873,7 +885,7 @@ the least). The job's tests cover it; waiting for it is optional.
 grep -E '"opslog":"(identity_|person_screen_error|job_ran|job_failed)' ~/identity-first-run.log
 ```
 
-the seven facts (each holds, or the line that says it does not), and the `identity:session` outputs
+the eight facts (each holds, or the line that says it does not), and the `identity:session` outputs
 with `providerRef` and `reportId` cut to their prefix. Never the output of `identity:show` or
 `/world-id/me` (they print the names), a key, the `whsec_` secret, the flow id or a session `url`.
 
