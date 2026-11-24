@@ -1,7 +1,9 @@
 /**
  * The company's pot on REST: `POST /legal-body-orders/:id/pot`, the guardian's note of the pot's
  * address with its birth details and declaration, before the setup transaction; and
- * `GET /legal-body-orders/:id/pot`, the note as the guardian's page reads it. Mounted beside the
+ * `GET /legal-body-orders/:id/pot`, the note as the guardian's page reads it; and
+ * `POST /legal-body-orders/:id/pot/off-record`, the guardian's note that takes the pot off the
+ * public record, the pot itself untouched. Mounted beside the
  * order doors only where the deployment wires the pot, and answering only while the pot's seven
  * contracts are verified (Rulings R1 and R11).
  *
@@ -301,6 +303,142 @@ describe("POST and GET /legal-body-orders/:id/pot", () => {
       status: 200,
       body: V3_VIEW,
     });
+  });
+});
+
+describe("POST /legal-body-orders/:id/pot/off-record", () => {
+  const offRecordPath = (id: string) => `${potPath(id)}/off-record`;
+  const takeOff = async (app: App, id: string, token = guardianToken, body?: string | object) =>
+    answerOf(await call(app, "POST", offRecordPath(id), token, body));
+  const acts = () =>
+    (
+      s.db.prepare("SELECT act FROM pot_declarations ORDER BY declared_at").all() as {
+        act: string;
+      }[]
+    ).map((r) => r.act);
+
+  test("takes the pot off: 200 with the view, onRecord false, and the read answers the same; no body is read", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    // Whatever is posted, even a body that is not JSON, is not read.
+    const off = await takeOff(app, row.legalBodyId, guardianToken, "{not json");
+    expect(off).toMatchObject({ status: 200, body: { ...V3_VIEW, onRecord: false } });
+    expect(await read(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { pot: { ...V3_VIEW, onRecord: false } },
+    });
+    expect(acts()).toEqual(["declared", "removed"]);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+  });
+
+  test("409 pot_not_on_record with no note and for a second removal, with its sentence and nothing else", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    const none = await takeOff(app, row.legalBodyId);
+    expect(none).toMatchObject(refused(409, "pot_not_on_record"));
+    expect(Object.keys(none.body.error).sort()).toEqual(["code", "message"]);
+    expect(none.text).not.toMatch(/0x/i);
+    expect(rows()).toEqual([]);
+    await post(app, row.legalBodyId, V3_INPUT);
+    expect((await takeOff(app, row.legalBodyId)).status).toBe(200);
+    const again = await takeOff(app, row.legalBodyId);
+    expect(again).toMatchObject(refused(409, "pot_not_on_record"));
+    expect(again.text).not.toMatch(/0x/i);
+    expect(acts()).toEqual(["declared", "removed"]);
+  });
+
+  test("another tenant's body and an unknown id: one 404, and nothing is written", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    const token = await sessionOf(stranger);
+    for (const id of [row.legalBodyId, `lb_${"0".repeat(36)}`])
+      expect(await takeOff(app, id, token), id).toMatchObject(refused(404, "not_found"));
+    expect(acts()).toEqual(["declared"]);
+  });
+
+  test("takes no token, reads no chain, and checks the real human first", async () => {
+    const row = linkedBody();
+    const take = vi.fn(() => true);
+    const app = makeApp({ orders: { tenantBucket: () => ({ take }) } });
+    await post(app, row.legalBodyId, V3_INPUT);
+    take.mockClear();
+    take.mockImplementation(() => false);
+    const unverified = await sessionOf(ANVIL_ACCOUNT_4);
+    expect(await takeOff(app, row.legalBodyId, unverified)).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+    expect(acts()).toEqual(["declared"]);
+    // An empty bucket does not stop it: the door takes no token.
+    expect(await takeOff(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { onRecord: false },
+    });
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  test("no session: 401; a body over 8 KiB: 413; nothing is written", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    expect((await call(app, "POST", offRecordPath(row.legalBodyId), undefined)).status).toBe(401);
+    expect(
+      await takeOff(app, row.legalBodyId, guardianToken, { padding: "x".repeat(9_000) }),
+    ).toMatchObject(refused(413, "payload_too_large"));
+    expect(acts()).toEqual(["declared"]);
+  });
+
+  test("while the pot's contracts are not verified: 409 pot_not_offered, before any read, and taken off once they are", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    const findOwned = vi.spyOn(s.repo, "findOwned");
+    offered = false;
+    const off = await takeOff(app, row.legalBodyId);
+    expect(off).toMatchObject(refused(409, "pot_not_offered"));
+    expect(off.text).not.toMatch(/0x|mismatch|unreadable/i);
+    expect(findOwned).not.toHaveBeenCalled();
+    expect(acts()).toEqual(["declared"]);
+    offered = true;
+    expect((await takeOff(app, row.legalBodyId)).status).toBe(200);
+  });
+
+  test("a row of another factory is taken off all the same: a guardian may always withdraw a claim", async () => {
+    const row = linkedBody();
+    await post(makeApp(), row.legalBodyId, V3_INPUT);
+    const elsewhere = makeApp({
+      orders: { deployment: { chainId: CHAIN_ID, factory: OTHER_FACTORY } },
+    });
+    expect(await takeOff(elsewhere, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { address: V3_ADDRESS, onRecord: false },
+    });
+    expect(acts()).toEqual(["declared", "removed"]);
+  });
+
+  test("without the pot's deps the door is not mounted: 404", async () => {
+    const row = linkedBody();
+    const app = makeApp({ pot: false });
+    expect((await call(app, "POST", offRecordPath(row.legalBodyId), guardianToken)).status).toBe(
+      404,
+    );
+  });
+
+  test("taken off, the address is still the body's: another body's note door is pot_taken, and this body's puts it back", async () => {
+    const row = linkedBody();
+    const other = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    expect((await takeOff(app, row.legalBodyId)).status).toBe(200);
+    expect(await post(app, other.legalBodyId, V3_INPUT)).toMatchObject(refused(409, "pot_taken"));
+    const back = await post(app, row.legalBodyId, V3_INPUT);
+    expect(back).toMatchObject({ status: 200, body: { address: V3_ADDRESS, onRecord: true } });
+    expect(acts()).toEqual(["declared", "removed", "declared"]);
   });
 });
 

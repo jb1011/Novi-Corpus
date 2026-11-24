@@ -58,6 +58,12 @@ export type {
  * version is stored in the note and, with the note, in the body's event log (`pot_declared`), in one
  * transaction. The log names the act and the version only: no address.
  *
+ * TAKEN OFF THE PUBLIC RECORD. The guardian may withdraw the claim at any time, whatever the body's
+ * state (`removePot`): a `removed` note of the address on the record, and `pot_removed` in the
+ * event log, in one transaction. Nothing is read from the chain, and the pot itself, its money and
+ * its allowance are untouched: Novi Corpus holds no key to them. The address stays the body's (an
+ * address belongs to one legal body; one pot for life), and the note door puts it back.
+ *
  * OFFERED ONLY WHILE VERIFIED (Rulings R1 and R11). The doors answer `pot_not_offered` while this
  * process has not verified the code of the pot's seven contracts (`potOffer.ts`), before anything
  * is read: the flag is `offered`.
@@ -410,6 +416,57 @@ export async function declarePot(
     }
     if (attempt >= POT_NOTE_ATTEMPTS) throw refusal("rate_limited", 429);
   }
+}
+
+/**
+ * The guardian takes the company's pot off the public record, in this order:
+ *  0. the pot is offered (`assertPotOffered`): else 409 `pot_not_offered`, before anything is read;
+ *  1. the body is the tenant's: one 404 for unknown and not yours. Any state, revoked included: a
+ *     guardian may always withdraw a claim;
+ *  2. one transaction: the body's notes read; none, or a latest note that is `removed`, is 409
+ *     `pot_not_on_record`, and nothing is written; else a `removed` note of the latest note's
+ *     address appended (no birth details, no version, at now) and the tenant's `pot_removed` note
+ *     in the body's event log, naming the act only;
+ *  3. one ops line, with the body's id only.
+ * Answers the view `orderPot` answers from now on: the same address and birth details, `onRecord`
+ * false. No read of the chain or the registry: the pot itself, its money and its allowance are
+ * untouched. The address stays the body's, so another body's note of it is still `pot_taken`, and
+ * `declarePot` puts it back by its own rules. The real-human check is the door's, before this.
+ */
+export function removePot(
+  deps: LegalBodyPotDeps,
+  tenantId: string,
+  legalBodyId: string,
+): OrderPotView {
+  // 0.
+  assertPotOffered(deps);
+
+  // 1.
+  const row = deps.bodies.findOwned(tenantId, legalBodyId);
+  if (row === undefined) throw refusal("not_found", 404);
+  const id = row.legalBodyId;
+
+  // 2. The notes are read under the write lock, so the note taken off is the latest one when the
+  //    removal is written.
+  const view = deps.bodies.transaction((): OrderPotView => {
+    const notes = deps.repo.list(id);
+    const latest = notes.at(-1);
+    if (latest === undefined || latest.act === "removed") throw refusal("pot_not_on_record", 409);
+    const removed = deps.repo.append({
+      legalBodyId: id,
+      act: "removed",
+      address: latest.address,
+      birth: null,
+      declarationVersion: null,
+      at: Math.floor(deps.now() / 1000),
+    });
+    deps.bodies.recordEvent(id, "note", "tenant", null, { act: "pot_removed" });
+    return viewOf([...notes, removed], removed);
+  });
+
+  // 3.
+  opsLog("legal_body_pot_removed", { legalBodyId: id });
+  return view;
 }
 
 /**

@@ -129,9 +129,10 @@ export interface ApiDeps extends EntityViewDeps {
   /**
    * The company's pot: the guardian's notes of a linked body's pot, the registry and the chain a
    * note is checked against, and whether this process offers the pot now (its seven contracts'
-   * code verified, `potOffer.ts`). Its two doors are mounted beside the order doors, and only with
-   * them; they answer `pot_not_offered` while it is not offered. Absent (a chain with no pot
-   * table), the doors are a 404. `/config.legalBodies.pot` is whether they answer.
+   * code verified, `potOffer.ts`). Its doors (the note, its read, and taking it off the record) are
+   * mounted beside the order doors, and only with them; they answer `pot_not_offered` while it is
+   * not offered. Absent (a chain with no pot table), the doors are a 404.
+   * `/config.legalBodies.pot` is whether they answer.
    */
   legalBodyPot?: LegalBodyPotDeps;
   webOrigin: string;

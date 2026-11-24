@@ -111,6 +111,7 @@ const NAMED_CODES = [
   "pot_address_mismatch",
   "pot_exists",
   "pot_taken",
+  "pot_not_on_record",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";
@@ -234,6 +235,9 @@ describe("what the sentences say", () => {
     expect(LEGAL_BODY_SENTENCES.pot_exists).toBe(
       "This legal body already has its pot, and a legal body keeps one pot for its whole life. Nothing was noted.",
     );
+    expect(LEGAL_BODY_SENTENCES.pot_not_on_record).toBe(
+      "This legal body's pot is not on the public record, so nothing was taken off.",
+    );
     const pot = [
       "pot_not_offered",
       "pot_invalid",
@@ -244,6 +248,7 @@ describe("what the sentences say", () => {
       "pot_address_mismatch",
       "pot_exists",
       "pot_taken",
+      "pot_not_on_record",
     ];
     for (const code of pot) {
       const sentence = LEGAL_BODY_SENTENCES[code] as string;

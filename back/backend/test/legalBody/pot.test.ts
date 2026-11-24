@@ -3,6 +3,8 @@
  * after the server has noted its address, and the server notes it only after recomputing it itself
  * from the birth details (the salt, the ceiling, the agent's key the registry names, the guardian),
  * with the guardian's declaration stored in the note and in the body's event log. One pot for life.
+ * The guardian may take the pot off the public record at any time, with a note of its own: the pot
+ * itself is untouched, and the address stays the body's.
  *
  * The domain over a real in-memory database, a fake registry and a fake chain port, on a fixed
  * clock. Each body is placed through the order door's own domain function, so its agreement and
@@ -18,6 +20,7 @@ import {
   POT_DECLARATION,
   declarePot,
   orderPot,
+  removePot,
 } from "../../src/legalBody/pot";
 import { POT_CEILING_MAX_USDC } from "../../src/legalBody/safePot";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
@@ -795,5 +798,253 @@ describe("orderPot", () => {
         birth: { saltNonce: "1", agentWallet: A, ceilingUnits: "60000000" },
       },
     });
+  });
+});
+
+describe("taking the pot off the public record", () => {
+  const takeOff = (row: LegalBodyRecord, tenant: Address = G) =>
+    removePot(deps(), tenant, row.legalBodyId);
+  const acts = (row: LegalBodyRecord) => pots.list(row.legalBodyId).map((n) => n.act);
+  const eventActs = (row: LegalBodyRecord) =>
+    potEvents(row).map((e) => (e.detail as { act: string }).act);
+  const removedLines = () => printed.filter((line) => line.includes("legal_body_pot_removed"));
+
+  test("appends a removed note of the address on the record and writes pot_removed; the view and orderPot answer onRecord false with the same address and birth details", async () => {
+    const body = linked();
+    const declared = await declare(body, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    clock += 60_000;
+    const v = takeOff(body);
+    expect(v).toEqual({ address: V3_ADDRESS, onRecord: false, declaredAt: NOW_S, birth: BIRTH_V3 });
+    expect(orderPot(deps(), G, body.legalBodyId)).toEqual({
+      pot: { ...declared, onRecord: false },
+    });
+    expect(pots.list(body.legalBodyId)).toEqual([
+      {
+        legalBodyId: body.legalBodyId,
+        act: "declared",
+        address: V3_ADDRESS,
+        birth: BIRTH_V3,
+        declarationVersion: "pot-declaration-1",
+        declaredBy: "guardian",
+        declaredAt: NOW_S,
+      },
+      {
+        legalBodyId: body.legalBodyId,
+        act: "removed",
+        address: V3_ADDRESS,
+        birth: null,
+        declarationVersion: null,
+        declaredBy: "guardian",
+        declaredAt: NOW_S + 60,
+      },
+    ]);
+    const events = potEvents(body);
+    expect(events.map((e) => e.detail)).toEqual([
+      { act: "pot_declared", declarationVersion: "pot-declaration-1" },
+      { act: "pot_removed" },
+    ]);
+    expect(events[1]).toMatchObject({ kind: "note", actor: "tenant", txHash: null });
+    // One ops line, with the body's id only; no address anywhere in the line or the event.
+    const ops = removedLines();
+    expect(ops).toHaveLength(1);
+    const { opslog, at: _at, ...fields } = JSON.parse(ops[0] as string);
+    expect(opslog).toBe("legal_body_pot_removed");
+    expect(fields).toEqual({ legalBodyId: body.legalBodyId });
+    const written = `${ops.join("\n")}\n${JSON.stringify(events)}`.toLowerCase();
+    for (const address of [V3_ADDRESS, A, G]) expect(written).not.toContain(address.toLowerCase());
+    // The pot itself is untouched: neither the chain nor the registry was read.
+    expectNoChainRead();
+    // A lookup by its address still finds the body: a former pot.
+    expect(pots.legalBodyIdsByAddress(V3_ADDRESS, 10)).toEqual([body.legalBodyId]);
+  });
+
+  test("a removal with no note, and a second removal, are 409 pot_not_on_record, and write nothing", async () => {
+    const body = linked();
+    expect(await refusalOf(() => takeOff(body))).toMatchObject(refused("pot_not_on_record", 409));
+    expect(rows()).toEqual([]);
+    expect(potEvents(body)).toEqual([]);
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    takeOff(body);
+    clock += 60_000;
+    expect(await refusalOf(() => takeOff(body))).toMatchObject(refused("pot_not_on_record", 409));
+    expect(acts(body)).toEqual(["declared", "removed"]);
+    expect(eventActs(body)).toEqual(["pot_declared", "pot_removed"]);
+    expect(removedLines()).toHaveLength(1);
+  });
+
+  test("with a former pot, the one taken off is the address on the record, with its own birth details", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    const second = inputFor(60n);
+    await declare(body, second);
+    chain.port.codeHash.mockClear();
+    registry.getAgentWallet.mockClear();
+    clock += 60_000;
+    expect(takeOff(body)).toEqual({
+      address: second.address,
+      onRecord: false,
+      declaredAt: NOW_S + 60,
+      birth: { saltNonce: "1", agentWallet: A, ceilingUnits: "60000000" },
+    });
+    expect(pots.latest(body.legalBodyId)).toMatchObject({
+      act: "removed",
+      address: second.address,
+    });
+    // The former pot was never on the record since: nothing more to take off.
+    expect(await refusalOf(() => takeOff(body))).toMatchObject(refused("pot_not_on_record", 409));
+    expectNoChainRead();
+  });
+
+  test("in any state: a revoked body's pot and a broken body's pot can be taken off; a revoked body with no note is pot_not_on_record", async () => {
+    const revoked = linked();
+    await declare(revoked, V3_INPUT);
+    s.repo.recordEvent(revoked.legalBodyId, "revoked", "operator:ops.example", null, {
+      reason: "Recorded for a test.",
+    });
+    clock += 60_000;
+    expect(takeOff(revoked)).toMatchObject({ address: V3_ADDRESS, onRecord: false });
+    expect(eventActs(revoked)).toEqual(["pot_declared", "pot_removed"]);
+
+    const broken = linked();
+    const its = inputFor(60n);
+    await declare(broken, its);
+    expect(s.repo.markBroken(broken.legalBodyId, { reason: "a test" })).toBe(true);
+    clock += 60_000;
+    expect(takeOff(broken)).toMatchObject({ address: its.address, onRecord: false });
+
+    const bare = linked();
+    s.repo.recordEvent(bare.legalBodyId, "revoked", "operator:ops.example", null, {
+      reason: "Recorded for a test.",
+    });
+    expect(await refusalOf(() => takeOff(bare))).toMatchObject(refused("pot_not_on_record", 409));
+    expect(pots.list(bare.legalBodyId)).toEqual([]);
+  });
+
+  test("one 404 for another tenant's body and for an unknown id, and nothing is written", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    clock += 60_000;
+    expect(await refusalOf(() => takeOff(body, STRANGER))).toMatchObject(refused("not_found", 404));
+    expect(await refusalOf(() => removePot(deps(), G, `lb_${"0".repeat(36)}`))).toMatchObject(
+      refused("not_found", 404),
+    );
+    expect(acts(body)).toEqual(["declared"]);
+    expect(eventActs(body)).toEqual(["pot_declared"]);
+    expect(removedLines()).toEqual([]);
+    expectNoChainRead();
+  });
+
+  test("while the pot is not offered: pot_not_offered, before anything is read, and taken off once it is", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    offered = false;
+    const findOwned = vi.spyOn(s.repo, "findOwned");
+    clock += 60_000;
+    expect(await refusalOf(() => takeOff(body))).toMatchObject(refused("pot_not_offered", 409));
+    expect(findOwned).not.toHaveBeenCalled();
+    expect(acts(body)).toEqual(["declared"]);
+    offered = true;
+    expect(takeOff(body).onRecord).toBe(false);
+  });
+
+  test("the removed note and its event are one transaction: an event that fails leaves the pot on the record", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    const failing = vi.spyOn(s.repo, "recordEvent").mockImplementationOnce(() => {
+      throw new Error("the event log failed");
+    });
+    expect(() => takeOff(body)).toThrow("the event log failed");
+    failing.mockRestore();
+    expect(acts(body)).toEqual(["declared"]);
+    expect(eventActs(body)).toEqual(["pot_declared"]);
+    expect(removedLines()).toEqual([]);
+    expect(orderPot(deps(), G, body.legalBodyId).pot?.onRecord).toBe(true);
+  });
+
+  test("the notes are read inside the transaction the removed note is written in", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    const d = deps();
+    let inside = false;
+    const run = s.repo.transaction.bind(s.repo);
+    vi.spyOn(s.repo, "transaction").mockImplementation(
+      <T>(fn: () => T): T =>
+        run(() => {
+          inside = true;
+          try {
+            return fn();
+          } finally {
+            inside = false;
+          }
+        }),
+    );
+    const readsInside: boolean[] = [];
+    const list = d.repo.list.bind(d.repo);
+    const latest = d.repo.latest.bind(d.repo);
+    vi.spyOn(d.repo, "list").mockImplementation((id) => {
+      readsInside.push(inside);
+      return list(id);
+    });
+    vi.spyOn(d.repo, "latest").mockImplementation((id) => {
+      readsInside.push(inside);
+      return latest(id);
+    });
+    removePot(d, G, body.legalBodyId);
+    expect(readsInside.length).toBeGreaterThan(0);
+    expect(readsInside.every(Boolean)).toBe(true);
+  });
+
+  test("taken off, the address is still this body's: another legal body is pot_taken, and this body puts it back through the note door, as before", async () => {
+    const body = linked();
+    const other = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    takeOff(body);
+    registry.getAgentWallet.mockClear();
+    clock += 60_000;
+    expect(await refusalOf(() => declare(other, V3_INPUT))).toMatchObject(
+      refused("pot_taken", 409),
+    );
+    expect(pots.list(other.legalBodyId)).toEqual([]);
+    expectNoChainRead();
+    // The put-back: a declared note, with no registry read and no code read (no other address).
+    const back = await declare(body, V3_INPUT);
+    expect(back).toEqual({
+      address: V3_ADDRESS,
+      onRecord: true,
+      declaredAt: NOW_S + 120,
+      birth: BIRTH_V3,
+    });
+    expectNoChainRead();
+    expect(acts(body)).toEqual(["declared", "removed", "declared"]);
+    expect(eventActs(body)).toEqual(["pot_declared", "pot_removed", "pot_declared"]);
+    // …and it can be taken off again.
+    clock += 60_000;
+    expect(takeOff(body)).toEqual({
+      address: V3_ADDRESS,
+      onRecord: false,
+      declaredAt: NOW_S + 120,
+      birth: BIRTH_V3,
+    });
+    expect(acts(body)).toEqual(["declared", "removed", "declared", "removed"]);
+  });
+
+  test("taken off, a pot that holds code still holds the body to it: another address is pot_exists", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
+    clock += 60_000;
+    takeOff(body);
+    clock += 60_000;
+    expect(await refusalOf(() => declare(body, inputFor(60n)))).toMatchObject(
+      refused("pot_exists", 409),
+    );
+    expect(acts(body)).toEqual(["declared", "removed"]);
   });
 });

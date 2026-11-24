@@ -20,7 +20,13 @@ import {
   takeDoorTokens,
   toOrderView,
 } from "../../legalBody/orders";
-import { type LegalBodyPotDeps, assertPotOffered, declarePot, orderPot } from "../../legalBody/pot";
+import {
+  type LegalBodyPotDeps,
+  assertPotOffered,
+  declarePot,
+  orderPot,
+  removePot,
+} from "../../legalBody/pot";
 import { resolveOrder } from "../../legalBody/resolver";
 import { refusal, refusedLinkSentence } from "../../legalBody/sentences";
 import type { LegalTextStatus } from "../../legalBody/texts/index";
@@ -90,8 +96,10 @@ import { assertRealHuman } from "./worldId";
  *    declarationVersion }` notes the company's pot of a `linked` body before its setup transaction,
  *    once the server has recomputed its address from those birth details: 200 with its view
  *    (`OrderPotView`). `GET /legal-body-orders/:id/pot` reads it: `{ pot }`, null before any note.
- *    Both mounted where the deployment wires the pot; while its contracts are not verified, both
- *    answer 409 `pot_not_offered` before anything is read and without spending a token.
+ *    `POST /legal-body-orders/:id/pot/off-record` takes it off the public record, the pot itself
+ *    untouched: 200 with its view, `onRecord` false. All three mounted where the deployment wires
+ *    the pot; while its contracts are not verified, all three answer 409 `pot_not_offered` before
+ *    anything is read and without spending a token.
  *
  * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/grantDoors.ts`,
  * `legalBody/adoption.ts`, `legalBody/linkDoor.ts`, `legalBody/resolver.ts`,
@@ -403,7 +411,7 @@ export function mountLegalBodyOrderRoutes(
       }),
     );
 
-  // The company's pot. While its contracts are not verified, both doors answer `pot_not_offered`
+  // The company's pot. While its contracts are not verified, its doors answer `pot_not_offered`
   // first, reading nothing and spending no token. The note reads the registry and the chain, so it
   // takes a token as the treasury door does: after the real-human check and before the order is
   // read. A row of another factory or chain is read-only here. `declarePot` reads the order again
@@ -426,6 +434,17 @@ export function mountLegalBodyOrderRoutes(
         assertPotOffered(pot);
         const tenantId = realHuman(c.get("tenantId"));
         return c.json(orderPot(pot, tenantId, c.req.param("id")));
+      }),
+    );
+    // Taking the pot off the record reads no body and no chain, so it takes no token, as the
+    // abandon door takes none; each note it writes follows a note the note door wrote. Any row of
+    // the tenant's, of any state or deployment: a guardian may always withdraw a claim.
+    app.post("/legal-body-orders/:id/pot/off-record", limit, (c) =>
+      door("pot_off_record", () => {
+        assertPotOffered(pot);
+        const tenantId = realHuman(c.get("tenantId"));
+        const row = requireOwnedOrder(deps, tenantId, c.req.param("id"));
+        return c.json(removePot(pot, tenantId, row.legalBodyId));
       }),
     );
   }
