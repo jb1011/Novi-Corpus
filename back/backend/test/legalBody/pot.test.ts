@@ -206,7 +206,8 @@ describe("a pot noted", () => {
     const failing = vi.spyOn(s.repo, "recordEvent").mockImplementationOnce(() => {
       throw new Error("the event log failed");
     });
-    await expect(declare(other, V3_INPUT)).rejects.toThrow("the event log failed");
+    // Its own pot: an address belongs to one legal body.
+    await expect(declare(other, inputFor(60n))).rejects.toThrow("the event log failed");
     failing.mockRestore();
     expect(pots.list(other.legalBodyId)).toEqual([]);
     expect(potEvents(other)).toEqual([]);
@@ -496,6 +497,129 @@ describe("one pot for life", () => {
     expect(printed.filter((line) => line.includes("legal_body_pot_declared"))).toHaveLength(1);
   });
 
+  test("a former pot that lands after it was replaced: the replacement posted again is pot_exists, not answered", async () => {
+    // Y noted, its setup sent from a tab that was lost; X noted in its place while Y had no code.
+    const body = linked();
+    const y = V3_INPUT;
+    const x = inputFor(60n);
+    await declare(body, y);
+    clock += 60_000;
+    await declare(body, x);
+    // Y's setup lands. X posted again, as the website would before offering X's setup.
+    chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
+    chain.port.codeHash.mockClear();
+    clock += 60_000;
+    expect(await refusalOf(() => declare(body, x))).toMatchObject(refused("pot_exists", 409));
+    // Y read, then X's own code: X holds none.
+    expect(chain.port.codeHash.mock.calls).toEqual([[V3_ADDRESS], [x.address]]);
+    expect(pots.list(body.legalBodyId)).toHaveLength(2);
+    // Y, which holds the code, is still the one that can come back.
+    expect(await declare(body, y)).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+  });
+
+  test("two pots that both hold code: with the latest taken off, each can be put back, and a new pot cannot", async () => {
+    const body = linked();
+    const y = V3_INPUT;
+    const x = inputFor(60n);
+    await declare(body, y);
+    clock += 60_000;
+    await declare(body, x);
+    // Both setups landed: the body holds two pots.
+    chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
+    chain.codes.set((x.address as string).toLowerCase(), SOME_CODE);
+    const takeOff = (address: Address) => {
+      clock += 60_000;
+      pots.append({
+        legalBodyId: body.legalBodyId,
+        act: "removed",
+        address,
+        birth: null,
+        declarationVersion: null,
+        at: Math.floor(clock / 1000),
+      });
+    };
+    // X, the latest, taken off; X put back.
+    takeOff(x.address as Address);
+    clock += 60_000;
+    expect(await declare(body, x)).toMatchObject({ address: x.address, onRecord: true });
+    // X taken off again; Y put back instead.
+    takeOff(x.address as Address);
+    clock += 60_000;
+    expect(await declare(body, y)).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+    // The one on the record posted again is answered; X now comes back over Y.
+    clock += 60_000;
+    expect(await declare(body, y)).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+    clock += 60_000;
+    expect(await declare(body, x)).toMatchObject({ address: x.address, onRecord: true });
+    // A third, new pot stays refused, even one whose address already holds code.
+    clock += 60_000;
+    const third = inputFor(70n);
+    expect(await refusalOf(() => declare(body, third))).toMatchObject(refused("pot_exists", 409));
+    chain.codes.set((third.address as string).toLowerCase(), SOME_CODE);
+    expect(await refusalOf(() => declare(body, third))).toMatchObject(refused("pot_exists", 409));
+    expect(pots.list(body.legalBodyId).map((n) => n.act)).toEqual([
+      "declared",
+      "declared",
+      "removed",
+      "declared",
+      "removed",
+      "declared",
+      "declared",
+    ]);
+  });
+
+  test("the code of the other noted addresses is read at once, not one after the other", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    await declare(body, inputFor(60n));
+    clock += 60_000;
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    chain.port.codeHash.mockClear();
+    chain.port.codeHash.mockImplementation(async () => {
+      await gate;
+      return null;
+    });
+    const pending = declare(body, inputFor(70n));
+    await vi.waitFor(() => expect(chain.port.codeHash).toHaveBeenCalledTimes(2));
+    release();
+    expect((await pending).birth.ceilingUnits).toBe("70000000");
+  });
+
+  test("two different addresses posted at once: the later write checks again against the note written first", async () => {
+    const body = linked();
+    const first = inputFor(60n);
+    // The other request lands while this one reads the registry.
+    registry.getAgentWallet.mockImplementationOnce(async () => {
+      await declarePot(deps(), G, body.legalBodyId, first);
+      return A;
+    });
+    const second = await declare(body, V3_INPUT);
+    expect(second).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+    // The check was made again with the other request's note: its code was read.
+    expect(chain.port.codeHash.mock.calls).toEqual([[first.address]]);
+    expect(pots.list(body.legalBodyId).map((n) => n.address)).toEqual([first.address, V3_ADDRESS]);
+    expect(potEvents(body)).toHaveLength(2);
+  });
+
+  test("two different addresses posted at once, the first created at once: the later one is pot_exists", async () => {
+    const body = linked();
+    const first = inputFor(60n);
+    registry.getAgentWallet.mockImplementationOnce(async () => {
+      await declarePot(deps(), G, body.legalBodyId, first);
+      chain.codes.set((first.address as string).toLowerCase(), SOME_CODE);
+      return A;
+    });
+    expect(await refusalOf(() => declare(body, V3_INPUT))).toMatchObject(
+      refused("pot_exists", 409),
+    );
+    expect(pots.list(body.legalBodyId).map((n) => n.address)).toEqual([first.address]);
+    expect(potEvents(body)).toHaveLength(1);
+  });
+
   test("a code read that fails is 503 chain_unavailable, and nothing is noted", async () => {
     const body = linked();
     await declare(body, V3_INPUT);
@@ -510,6 +634,79 @@ describe("one pot for life", () => {
       refused("chain_unavailable", 503),
     );
     expect(pots.list(body.legalBodyId)).toHaveLength(1);
+  });
+});
+
+describe("an address belongs to one legal body (Ruling R13)", () => {
+  test("an address another body of the same guardian noted is pot_taken, before any chain read", async () => {
+    const first = linked();
+    const second = linked();
+    await declare(first, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    clock += 60_000;
+    expect(await refusalOf(() => declare(second, V3_INPUT))).toMatchObject(
+      refused("pot_taken", 409),
+    );
+    expect(pots.list(second.legalBodyId)).toEqual([]);
+    expectNoChainRead();
+    // …and taken off the first body's record, it is still the first body's.
+    pots.append({
+      legalBodyId: first.legalBodyId,
+      act: "removed",
+      address: V3_ADDRESS,
+      birth: null,
+      declarationVersion: null,
+      at: Math.floor(clock / 1000),
+    });
+    clock += 60_000;
+    expect(await refusalOf(() => declare(second, V3_INPUT))).toMatchObject(
+      refused("pot_taken", 409),
+    );
+  });
+
+  test("an address a body of another guardian holds a note of is pot_taken, for a new pot and for a put-back", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    pots.append({
+      legalBodyId: body.legalBodyId,
+      act: "removed",
+      address: V3_ADDRESS,
+      birth: null,
+      declarationVersion: null,
+      at: Math.floor(clock / 1000),
+    });
+    // A note of the same address on another guardian's body, written around the door.
+    const elsewhere = potBody(s, { nowMs: clock, tenant: STRANGER });
+    pots.append({
+      legalBodyId: elsewhere.legalBodyId,
+      act: "declared",
+      address: V3_ADDRESS,
+      birth: BIRTH_V3,
+      declarationVersion: "pot-declaration-1",
+      at: Math.floor(clock / 1000),
+    });
+    const fresh = linked();
+    registry.getAgentWallet.mockClear();
+    clock += 60_000;
+    for (const row of [body, fresh])
+      expect(await refusalOf(() => declare(row, V3_INPUT)), row.legalBodyId).toMatchObject(
+        refused("pot_taken", 409),
+      );
+    expectNoChainRead();
+    expect(pots.list(body.legalBodyId).map((n) => n.act)).toEqual(["declared", "removed"]);
+    expect(pots.list(fresh.legalBodyId)).toEqual([]);
+    // Even when this body holds the newer note of the address (both written around the door).
+    pots.append({
+      legalBodyId: body.legalBodyId,
+      act: "declared",
+      address: V3_ADDRESS,
+      birth: BIRTH_V3,
+      declarationVersion: "pot-declaration-1",
+      at: Math.floor(clock / 1000),
+    });
+    clock += 60_000;
+    expect(await refusalOf(() => declare(body, V3_INPUT))).toMatchObject(refused("pot_taken", 409));
   });
 });
 

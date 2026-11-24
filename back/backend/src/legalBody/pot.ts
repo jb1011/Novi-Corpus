@@ -44,11 +44,15 @@ export type {
  * rules (`potReading`) are sound only for an address noted this way, whose initializer fixes how
  * the Safe was set up: the server never notes, and never reads as a pot, an address a client sent
  * that it did not recompute. Nothing else is taken on trust, and nothing is read from the chain
- * but the code at the body's other noted addresses (one pot for life) and the registry's wallet.
+ * but the code at the body's noted addresses (one pot for life) and the registry's wallet.
  *
  * ONE POT FOR LIFE. Once any address a body noted holds code, the body takes no other pot: a
  * restart or a new key is done on the same Safe. A noted address that never got code may be
- * replaced; the one that holds code may always be put back on the record.
+ * replaced; one that holds code may always be put back on the record, and is the only kind that
+ * may stand once another noted address holds code.
+ *
+ * ONE LEGAL BODY PER POT (Ruling R13). An address another legal body has noted, of any guardian,
+ * is never noted for this one.
  *
  * THE DECLARATION. The guardian ticks one sentence (`POT_DECLARATION`) on the review screen; its
  * version is stored in the note and, with the note, in the body's event log (`pot_declared`), in one
@@ -112,6 +116,9 @@ const UINT256_MAX = 2n ** 256n - 1n;
 const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 /** The largest ceiling, in units. */
 const CEILING_MAX_UNITS = BigInt(POT_CEILING_MAX_USDC) * USDC_UNIT;
+/** How many times a note is checked again when another note of the same body was written while it
+ *  was being checked; past that, the door's 429. */
+const POT_NOTE_ATTEMPTS = 3;
 
 /** Addresses compared without regard to letter case. */
 const sameAddress = (a: string, b: string): boolean => a.toLowerCase() === b.toLowerCase();
@@ -256,20 +263,28 @@ function linkedBodyOf(
  *  5. the address is the one the server recomputes from the guardian (the body's), the first key,
  *     USDC, the ceiling, the thirty-day period and the salt number, in any letter case: else 409
  *     `pot_address_mismatch`. No chain read before this;
- *  6. the body's latest note is a declared note of this address: it is answered, nothing written;
- *  7. ONE POT FOR LIFE: any other address the body noted, read through `chainCall`, holds code:
- *     409 `pot_exists` (a noted address that never got code may be replaced; the one that holds
- *     code may be put back);
- *  8. a NEW POT (no declared note of this address yet): the registry's wallet of the body's agent,
+ *  6. Ruling R13: another legal body, of any guardian, has noted this address: 409 `pot_taken`.
+ *     A pot belongs to one legal body; moving it to another is not offered;
+ *  7. ONE POT FOR LIFE, before anything is answered: the code of every other address the body
+ *     declared is read at once, through `chainCall`. When one holds code, a NEW POT is 409
+ *     `pot_exists`; a note of an address the body declared before (the one on the record, or a
+ *     put-back) stands only if this address holds code itself, else 409 `pot_exists`. So a noted
+ *     address that never got code may be replaced, a former pot that landed late still holds the
+ *     body to it, and a pot that holds code can always come back. A body with no other address
+ *     reads nothing here;
+ *  8. the body's latest note is a declared note of this address: it is answered, nothing written;
+ *  9. a NEW POT (no declared note of this address yet): the registry's wallet of the body's agent,
  *     read now through `chainCall`, is not the agent's own (`ownAgentWallet`): 409
  *     `agent_wallet_required`; not the first key in any letter case: 409 `pot_address_mismatch`.
  *     A PUT-BACK of an address the body declared before reads no registry: the same address
  *     means the same birth details, and the key may have changed since on the same pot;
- *  9. one transaction: the body read again (still `linked`, not revoked), the latest note read
- *     again (a declared note of this address is answered, as in 6), the note appended (`declared`,
- *     the birth details, the declaration's version, at now), and the tenant's `pot_declared` note
- *     in the body's event log, naming the version only;
- * 10. one ops line, with the body's id only.
+ * 10. one transaction: the body read again (still `linked`, not revoked); the body's latest note
+ *     read again, and when another note was written since step 7 read them, nothing is written and
+ *     the note is checked again from step 7 (at most POT_NOTE_ATTEMPTS times, then the door's 429
+ *     `rate_limited`); else the note appended (`declared`, the birth details, the declaration's
+ *     version, at now) and the tenant's `pot_declared` note in the body's event log, naming the
+ *     version only;
+ * 11. one ops line, with the body's id only.
  * A read of the chain or the registry that fails is 503 `chain_unavailable`, and nothing is noted.
  * The real-human check, the door's throttle and the deployment check are the door's, before this.
  */
@@ -322,68 +337,79 @@ export async function declarePot(
   if (!sameAddress(recomputed, taken.address)) throw refusal("pot_address_mismatch", 409);
   const address = recomputed;
 
-  // 6.
-  const notes = deps.repo.list(id);
-  const latest = notes.at(-1);
-  if (latest?.act === "declared" && sameAddress(latest.address, address))
-    return viewOf(notes, latest);
+  // 6. Ruling R13. A removal is only ever of an address the same body declared, so the declared
+  //    notes name every body that ever noted the address.
+  if (deps.repo.legalBodyIdsByAddress(address, 2).some((holder) => holder !== id))
+    throw refusal("pot_taken", 409);
 
-  // 7.
-  const others = [
-    ...new Set(
-      notes
-        .filter((n) => n.act === "declared" && !sameAddress(n.address, address))
-        .map((n) => n.address),
-    ),
-  ];
-  for (const other of others) {
-    const code = await chainCall(id, "pot_code", () => deps.chain.codeHash(other));
-    if (code !== null) throw refusal("pot_exists", 409);
-  }
-
-  // 8.
-  const putBack = notes.some((n) => n.act === "declared" && sameAddress(n.address, address));
-  if (!putBack) {
-    const wallet = await chainCall(id, "pot_agent_wallet", () =>
-      deps.registry.getAgentWallet(BigInt(row.agentId)),
+  for (let attempt = 1; ; attempt += 1) {
+    const notes = deps.repo.list(id);
+    const latest = notes.at(-1);
+    const same = latest?.act === "declared" && sameAddress(latest.address, address);
+    const declaredBefore = notes.some(
+      (n) => n.act === "declared" && sameAddress(n.address, address),
     );
-    if (!ownAgentWallet(wallet, row.guardian)) throw refusal("agent_wallet_required", 409);
-    if (!sameAddress(wallet, taken.agentWallet)) throw refusal("pot_address_mismatch", 409);
-  }
 
-  // 9.
-  const outcome = deps.bodies.transaction((): { view: OrderPotView; appended: boolean } => {
-    if (deps.bodies.findById(id)?.bindingState !== "linked") throw refusal("order_closed", 409);
-    if (deps.bodies.isRevoked(id)) throw refusal("legal_body_revoked", 409);
-    const now = deps.repo.latest(id);
-    if (now?.act === "declared" && sameAddress(now.address, address))
-      return { view: viewOf(deps.repo.list(id), now), appended: false };
-    const appended = deps.repo.append({
-      legalBodyId: id,
-      act: "declared",
-      address,
-      birth,
-      declarationVersion: POT_DECLARATION.version,
-      at: Math.floor(deps.now() / 1000),
-    });
-    deps.bodies.recordEvent(id, "note", "tenant", null, {
-      act: "pot_declared",
-      declarationVersion: POT_DECLARATION.version,
-    });
-    return {
-      view: {
-        address: appended.address,
-        onRecord: true,
-        declaredAt: appended.declaredAt,
+    // 7.
+    const others = [
+      ...new Set(
+        notes
+          .filter((n) => n.act === "declared" && !sameAddress(n.address, address))
+          .map((n) => n.address),
+      ),
+    ];
+    if (others.length > 0) {
+      const codes = await Promise.all(
+        others.map((other) => chainCall(id, "pot_code", () => deps.chain.codeHash(other))),
+      );
+      if (codes.some((code) => code !== null)) {
+        if (!declaredBefore) throw refusal("pot_exists", 409);
+        const own = await chainCall(id, "pot_code", () => deps.chain.codeHash(address));
+        if (own === null) throw refusal("pot_exists", 409);
+      }
+    }
+
+    // 8.
+    if (same && latest !== undefined) return viewOf(notes, latest);
+
+    // 9.
+    if (!declaredBefore) {
+      const wallet = await chainCall(id, "pot_agent_wallet", () =>
+        deps.registry.getAgentWallet(BigInt(row.agentId)),
+      );
+      if (!ownAgentWallet(wallet, row.guardian)) throw refusal("agent_wallet_required", 409);
+      if (!sameAddress(wallet, taken.agentWallet)) throw refusal("pot_address_mismatch", 409);
+    }
+
+    // 10.
+    const view = deps.bodies.transaction((): OrderPotView | undefined => {
+      if (deps.bodies.findById(id)?.bindingState !== "linked") throw refusal("order_closed", 409);
+      if (deps.bodies.isRevoked(id)) throw refusal("legal_body_revoked", 409);
+      // Another note of this body was written since the notes were read: the checks were made
+      // against notes that are no longer the body's, so they are made again.
+      if (deps.repo.latest(id)?.declaredAt !== latest?.declaredAt) return undefined;
+      const appended = deps.repo.append({
+        legalBodyId: id,
+        act: "declared",
+        address,
         birth,
-      },
-      appended: true,
-    };
-  });
+        declarationVersion: POT_DECLARATION.version,
+        at: Math.floor(deps.now() / 1000),
+      });
+      deps.bodies.recordEvent(id, "note", "tenant", null, {
+        act: "pot_declared",
+        declarationVersion: POT_DECLARATION.version,
+      });
+      return { address: appended.address, onRecord: true, declaredAt: appended.declaredAt, birth };
+    });
 
-  // 10.
-  if (outcome.appended) opsLog("legal_body_pot_declared", { legalBodyId: id });
-  return outcome.view;
+    // 11.
+    if (view !== undefined) {
+      opsLog("legal_body_pot_declared", { legalBodyId: id });
+      return view;
+    }
+    if (attempt >= POT_NOTE_ATTEMPTS) throw refusal("rate_limited", 429);
+  }
 }
 
 /**

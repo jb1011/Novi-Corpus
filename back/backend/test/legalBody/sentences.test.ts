@@ -110,6 +110,7 @@ const NAMED_CODES = [
   "grant_allows_no_spending",
   "pot_address_mismatch",
   "pot_exists",
+  "pot_taken",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";
@@ -242,6 +243,7 @@ describe("what the sentences say", () => {
       "grant_allows_no_spending",
       "pot_address_mismatch",
       "pot_exists",
+      "pot_taken",
     ];
     for (const code of pot) {
       const sentence = LEGAL_BODY_SENTENCES[code] as string;

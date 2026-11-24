@@ -188,6 +188,9 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // …a body one of whose noted pots holds code, for any other address (one pot for life).
   pot_exists:
     "This legal body already has its pot, and a legal body keeps one pot for its whole life. Nothing was noted.",
+  // …an address another legal body has noted, of any guardian (Ruling R13).
+  pot_taken:
+    "This pot is already noted for another legal body, and a pot belongs to one legal body only. Nothing was noted.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */
