@@ -186,6 +186,11 @@ export type PublicConfig = {
   /** Optional for deploy-order safety: a backend that predates this field means "available"
    *  (every legacy deployment served turnkey). Mainnet ships false — circle-only. */
   turnkeyCustodyAvailable?: boolean;
+  /** Whether this deployment has the full-product factory: false on a box that serves only legal
+   *  bodies, which refuses full-product onboarding at the door. Optional for deploy-order safety:
+   *  a backend that predates it says nothing, and the wizard then runs as it did before. Only an
+   *  explicit `false` closes the wizard (`fullProductGate`). */
+  fullProductAvailable?: boolean;
   /** doola formation. Both are optional for deploy-order safety: a backend that predates them
    *  forms nothing, which is exactly what absent should mean. `formationEnvironment` is non-null
    *  whenever formation is available — the honesty invariant, and the reason the two are served

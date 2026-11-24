@@ -37,6 +37,8 @@ export const LEGAL_BODY_COPY = {
 
   frame: {
     exit: "Exit",
+    /** Beside Exit while signed in: the way back to the account's legal bodies from any step. */
+    myAgents: "My agents",
     loading: "Loading…",
   },
 
@@ -52,6 +54,7 @@ export const LEGAL_BODY_COPY = {
       company: "Your company",
       agreement: "Agreement",
       identity: "Your agent's identity",
+      wallet: "Agent's wallet",
       link: "Sign the link",
       pointer: "Point your identity",
       payment: "Payment",
@@ -68,8 +71,8 @@ export const LEGAL_BODY_COPY = {
   },
 
   sandbox: {
-    banner:
-      "Arc testnet. The company is a test declaration, its check is automatic, and the wording is a draft; nothing here is a filing.",
+    /** Above the choice of paths and on both doors: true of a formed company and a declared one. */
+    banner: "Arc testnet. The company is a test, the wording is a draft, and nothing here is a filing.",
     noPaymentStep: "There is no payment step on this testnet deployment.",
   },
 
@@ -273,25 +276,6 @@ export const LEGAL_BODY_COPY = {
 
   /* ── The steps after the gates. Each screen's own sentences, carried here so the one walk covers
         them from the start. ─────────────────────────────────────────────────────────────────── */
-
-  entrance: {
-    title: "About your agent",
-    intro: "Three answers, kept in this browser. They choose the door. They file nothing.",
-    company: "Your company",
-    have: "We have a Wyoming LLC",
-    form: "Form one for this agent",
-    capReached: "The formed companies this deployment takes are all spoken for.",
-    identity: "Your agent's identity",
-    hasOne: "It has one",
-    notYet: "Not yet",
-    agentId: "The agent's identity number",
-    key: "Who holds its key",
-    thisWallet: "This wallet",
-    anotherKey: "Another key I control",
-    keySentence:
-      "The key must be able to send a transaction on Arc, or have a sponsor, because the pointer is a transaction.",
-    continue: "Continue",
-  },
 
   filing: {
     title: "The state is filing the company",
@@ -511,6 +495,125 @@ export const LEGAL_BODY_COPY = {
       "The identity you picked or registered on this visit. Continuing reads its owner on the chain again first.",
     continueWith: "Continue with {agentId}",
     orChooseAnother: "Or choose another identity",
+  },
+
+  /** The agent's own wallet, written on its identity between the identity and the link. The page
+   *  never makes a key: it takes an address, and the signature that wallet made. */
+  agentWallet: {
+    title: "Your agent's wallet",
+    why: "Your agent needs a wallet of its own: the key it signs and pays with. Anyone it pays can then find its company. It must not be your wallet.",
+    checking: "Reading the agent's wallet on the registry.",
+    unreadable: "The registry could not be read just now. Nothing was changed.",
+    retry: "Try again",
+    todayGuardian: "Today the registry names your own wallet as this agent's wallet.",
+    todayNone: "Today the registry names no wallet for this agent.",
+    hasKeyTitle: "My agent has its own key",
+    hasKeyLine: "Give the key's address. The key signs one message to prove itself.",
+    noKeyTitle: "My agent has no key yet",
+    noKeyLine: "Create one where your agent runs. The key never passes through this site.",
+    providerTitle: "My agent has a wallet with a provider",
+    providerLine:
+      "Give the wallet's address. The wallet signs one message through its provider. It must already exist on {network}.",
+    noKeyAsk:
+      'Ask your agent: "Create an Ethereum key for yourself. Keep the private key in your own secret storage and never show it. Tell me only the address."',
+    noKeyCommandIntro: "Or, with Foundry installed where the agent runs:",
+    noKeyCommand: "cast wallet new ~/.foundry/keystores agent-key",
+    addressLabel: "The agent's wallet address",
+    /** Under the address field. An empty field is not an address either. */
+    addressProblems: {
+      not_address: "This is not an address: it starts with 0x and has 40 more characters.",
+      zero: "This address cannot be an agent's wallet.",
+      guardian: "This is your own wallet. The agent's wallet must be a different one.",
+    },
+    prepare: "Prepare the message",
+    messageIntro: "The agent's wallet signs this message. It is valid for a few minutes.",
+    messageHeading: "The message to sign",
+    signAsk:
+      'Ask your agent: "Sign this EIP-712 message with your key and give me the signature."',
+    signCommandIntro: "Or save it as message.json and run:",
+    signCommand: "cast wallet sign --data --from-file message.json --account agent-key",
+    countdown: "Valid for {seconds} more seconds.",
+    expired: "This message has expired. Prepare a new one.",
+    signatureLabel: "The signature",
+    /** Said under the signature field, after its label, as the paste panel's problems are. */
+    signatureEmpty: "is empty: paste the signature the agent's wallet made",
+    signatureProblems: {
+      wrong_key: "This signature was not made by that wallet's key, or not over this message.",
+      compact:
+        "This is a compact signature of 64 bytes. The registry takes the usual 65-byte form: sign again without the compact option.",
+      wrapped:
+        "This signature is made for a wallet that does not exist on {network} yet. The wallet must exist on the chain first.",
+      not_on_chain:
+        "No wallet exists at this address on {network} yet. A provider's wallet must exist on the chain before it can sign.",
+      contract_refused: "The wallet did not accept this signature.",
+    },
+    send: "Write the wallet on the identity",
+    sending: "Waiting for your wallet.",
+    waiting: "Waiting for the registry to show the wallet.",
+    wouldRevert:
+      "The registry would refuse this transaction, so nothing was sent. Prepare a new message.",
+    reverted: "The transaction did not go through. Nothing was changed. Prepare a new message.",
+    notThisWallet:
+      "The wallet connected here does not own this identity. Connect the wallet that owns it.",
+    noIdentity:
+      "There is no identity {agentId} on the identity registry of {network} now, so no wallet can be written on it.",
+    domainMismatch:
+      "The registry's signing domain is not the one this deployment names, so no message was prepared.",
+    declined: "Your wallet did not send the transaction, so nothing was written.",
+    /** `{minutes}` is the receipt's wait, from `REGISTER_RECEIPT_TIMEOUT_MS`. */
+    noReceipt:
+      "No receipt came back within {minutes} minutes, so whether the wallet was written is not known yet. Look at the transaction, then check again. If it is not on the chain, prepare a new message.",
+    ownerChanged:
+      "The identity's owner changed since the message was prepared. Prepare a new message.",
+    /** The one-click way to sign, when the agent's key is another account of the browser wallet. */
+    otherAccountTitle: "Sign with another account of your browser wallet",
+    otherAccountHow:
+      "In your wallet, connect the agent's account to this site as well, and keep your own account selected.",
+    otherAccountSign: "Sign with {address}",
+    otherAccountDeclined:
+      "Your wallet did not sign with that account. You can paste the signature instead.",
+    elsewhere:
+      "This identity is owned by another key. That key must write the agent's wallet on the registry (setAgentWallet), with a signature of the new wallet that is at most five minutes old. This page checks again by itself.",
+    checkAgain: "Check again",
+    line: "This agent's wallet: {address}",
+    /** The done page's card, for a legal body made before the rule: its identity still names the
+     *  guardian's own wallet (`doneLine`) or none (`doneLineNone`). A click opens the step here. */
+    doneTitle: "Set your agent's wallet",
+    doneLine:
+      "The registry still names your own wallet as this agent's wallet. A payment made by the agent does not lead to its company yet.",
+    doneLineNone:
+      "The registry names no wallet for this agent. It cannot act under its Charter until it has one.",
+    /** The allowlist refused the transaction this page built: ours, so said as ours. */
+    callRefused:
+      "The transaction was refused before your wallet opened ({problem}), so nothing was sent.",
+    callProblems: {
+      no_wallet_context:
+        "This page built the transaction without the identity, your wallet or the chain's time, so it will not send it. Nothing was sent.",
+      set_agent_wallet_args:
+        "This page built the transaction with values it does not take, so it will not send it. Nothing was sent.",
+      other_identity:
+        "This page built the transaction for another identity than this one, so it will not send it. Nothing was sent.",
+      wallet_is_zero:
+        "This page built the transaction with no wallet in it, so it will not send it. Nothing was sent.",
+      wallet_is_guardian:
+        "This page built the transaction with your own wallet as the agent's wallet, so it will not send it. Nothing was sent.",
+      deadline_out_of_window:
+        "The message's time does not fit the chain's clock, so this page will not send it. Nothing was sent. Prepare a new message.",
+      signature_shape:
+        "The signature is not whole bytes, or it is too long, so this page will not send it. Nothing was sent.",
+      sends_value:
+        "This page built the transaction with a value attached, so it will not send it. Nothing was sent.",
+      wrong_chain:
+        "This page built the transaction for another chain than this deployment's, so it will not send it. Nothing was sent.",
+      not_the_registry:
+        "This page built the transaction for another contract than the identity registry, so it will not send it. Nothing was sent.",
+      not_the_pinned_abi:
+        "This page built the transaction from another interface than the registry's, so it will not send it. Nothing was sent.",
+      wallet_on_another_chain:
+        "Your wallet is on another network than {network}. Switch it there and send again. Nothing was sent.",
+      chain_not_configured:
+        "This site sends to {network} only, and this deployment names another chain, so the wallet cannot be written here. Nothing was sent.",
+    },
   },
 
   link: {
@@ -756,8 +859,9 @@ export const LEGAL_BODY_COPY = {
       "the statement says attestationState {attestationState} and bindingState {bindingState}",
     standingNotKnown:
       "the statement gives a standing this page does not know, so it reads as unknown here",
+    /** On both doors' done page. */
     sandboxStatement:
-      "sandbox: this statement is a test about a test declaration, and nothing in it is a filing",
+      "sandbox: this statement is a test about a test company, and nothing in it is a filing",
     retry: "Try again",
     factsHeading: "What the statement says",
     facts: {
@@ -787,8 +891,22 @@ export const LEGAL_BODY_COPY = {
       "Say it with the word sandbox: a sandbox statement is a test, and nothing in it is a filing.",
   },
 
-  entry: {
-    button: "Get a legal body for an agent you already run",
+  /** "My agents": the account's legal bodies beside its agents with a treasury. */
+  account: {
+    legalBodies: "Legal bodies",
+    treasuryAgents: "Agents with a treasury",
+    add: "Add",
+    states: { in_progress: "In progress", linked: "Linked", attention: "Needs attention" },
+    actions: { continue: "Continue", open: "Open" },
+    agent: "agent #{agentId}",
+    unreadable: "Your legal bodies could not be read.",
+    emptyTitle: "Nothing here yet",
+    emptyBody: "Give your agent a legal body.",
+    getStarted: "Get started",
+    treasuryNone: "No agent with a treasury yet.",
+    treasuryUnreadable: "Your agents with a treasury could not be read.",
+    /** Beside a linked row's standing, when its record still names the guardian's wallet or none. */
+    walletOwed: "Agent's wallet not set",
   },
 
   transparency: {

@@ -4,11 +4,15 @@
  * once per tick. React StrictMode runs an effect twice, so the refresh plan is tested against the
  * second run as well: once a refresh is recorded, the same tick never asks for another one.
  */
-import { describe, expect, test } from "vitest";
-import { BINDING_STATES, type BindingState } from "@/lib/api/types";
+import { createElement } from "react";
+import { renderToString } from "react-dom/server";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { describe, expect, test, vi } from "vitest";
+import { ApiError, BINDING_STATES, type BindingState } from "@/lib/api/types";
 import type { CompanyStep } from "@/lib/legalBody/flow";
 import {
   COMPANY_POLL_MS,
+  READ_RETRIES,
   REFRESH_RETRY_MS,
   REFRESH_WINDOW_MS,
   RESERVED_POLL_MS,
@@ -16,8 +20,17 @@ import {
   filingPollInterval,
   orderPollInterval,
   refreshPlan,
+  retryRead,
   type RefreshAction,
 } from "@/lib/legalBody/polling";
+
+// The orders hook reads the session's token; a signed-in session, for the hook's wiring below.
+vi.mock("@/components/onboarding/AuthProvider", () => ({
+  useAuth: () => ({ session: { token: "t", address: "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266", expiresAt: 0 } }),
+}));
+
+import { useLegalBodyOrdersQuery } from "@/lib/api/legalBodyHooks";
+import { apiKeys } from "@/lib/api/keys";
 
 /** The one clock of this file: the moment the pointer transaction was confirmed. */
 const START = Date.parse("2026-10-12T12:00:00Z");
@@ -231,4 +244,59 @@ describe("filingPollInterval", () => {
       expect(filingPollInterval(state)).toBe(false);
     },
   );
+});
+
+describe("retryRead: whether a failed read is asked again", () => {
+  const refusal = (status: number) => new ApiError(status, { code: "refused", message: "no" });
+
+  test("at most the library's own default count", () => {
+    expect(READ_RETRIES).toBe(3);
+  });
+
+  test.each([400, 401, 403, 404, 409, 422, 429])("a %s is an answer, never asked again", (status) => {
+    expect(retryRead(0, refusal(status))).toBe(false);
+  });
+
+  test.each([500, 502, 503, 504])("a %s is asked again, three times at most", (status) => {
+    expect([0, 1, 2, 3].map((n) => retryRead(n, refusal(status)))).toEqual([true, true, true, false]);
+  });
+
+  test("no answer at all (a timeout, the network) is asked again, three times at most", () => {
+    const timeout = new ApiError(0, { code: "timeout", message: "The server took too long to answer." });
+    const offline = new TypeError("Failed to fetch");
+    for (const error of [timeout, offline])
+      expect([0, 1, 2, 3].map((n) => retryRead(n, error))).toEqual([true, true, true, false]);
+  });
+
+  test("as TanStack Query counts: a 403 is asked once, a 500 four times", async () => {
+    const asked = async (error: unknown) => {
+      let calls = 0;
+      const client = new QueryClient();
+      await client
+        .fetchQuery({
+          queryKey: ["retryRead", String(error)],
+          queryFn: () => {
+            calls += 1;
+            return Promise.reject(error);
+          },
+          retry: retryRead,
+          retryDelay: 0,
+        })
+        .catch(() => undefined);
+      return calls;
+    };
+    expect(await asked(refusal(403))).toBe(1);
+    expect(await asked(refusal(500))).toBe(1 + READ_RETRIES);
+  });
+
+  test("the orders list reads with it, so a 403 is said at once on \"My agents\" and a 401 routes to sign-in at once", () => {
+    const client = new QueryClient();
+    function Reader() {
+      useLegalBodyOrdersQuery();
+      return null;
+    }
+    renderToString(createElement(QueryClientProvider, { client }, createElement(Reader)));
+    const query = client.getQueryCache().find({ queryKey: apiKeys.legalBodyOrders("t") });
+    expect(query?.options.retry).toBe(retryRead);
+  });
 });

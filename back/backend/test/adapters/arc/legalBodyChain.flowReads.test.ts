@@ -1,8 +1,8 @@
 /**
  * The reads the legal-body flow adds to LegalBodyChain, against a fake node behind viem's real
- * `http` transport (`helpers/fakeRpcNode`): the executor's pending count, a body's own status, and
- * the linked-body pointer at a given block. The relay seam is a real ArcAdapter over the same
- * node, so every recorded request is what production would put on the wire.
+ * `http` transport (`helpers/fakeRpcNode`): the executor's pending count, a body's own status, the
+ * linked-body pointer and the agent's wallet at a given block. The relay seam is a real ArcAdapter
+ * over the same node, so every recorded request is what production would put on the wire.
  *
  * Also the port the flow's domain code depends on: a plain object must satisfy it, and so must
  * the real class.
@@ -15,9 +15,14 @@ import {
   decodeFunctionData,
   encodeFunctionResult,
   isAddressEqual,
+  zeroAddress,
 } from "viem";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { legalBodyFactoryAbi, legalManagerAbi } from "../../../src/abis/generated";
+import {
+  iIdentityRegistryAbi,
+  legalBodyFactoryAbi,
+  legalManagerAbi,
+} from "../../../src/abis/generated";
 import {
   LegalBodyChain,
   type LegalBodyChainDeps,
@@ -40,6 +45,8 @@ const FACTORY = "0x00000000000000000000000000000000000000fb" as Address;
 const REGISTRY = "0x0000000000000000000000000000000000000002" as Address;
 const CONTROLLER = "0x000000000000000000000000000000000000c0DE" as Address;
 const BODY = "0x0000000000000000000000000000000000000b0D" as Address;
+/** A placeholder wallet of the agent's own, checksummed. */
+const AGENT_WALLET = "0x00000000000000000000000000000000000000A1" as Address;
 
 /** The block the pinned reads in this file are pinned to, and how it goes on the wire. */
 const BLOCK = 77n;
@@ -47,9 +54,16 @@ const BLOCK_ON_WIRE = "0x4d";
 
 afterEach(() => resetSenderNonces());
 
+type Contract = "factory" | "body" | "registry";
+const ABI_OF: Record<Contract, Abi> = {
+  factory: legalBodyFactoryAbi as Abi,
+  body: legalManagerAbi as Abi,
+  registry: iIdentityRegistryAbi as Abi,
+};
+
 /** The view an `eth_call` asks for, decoded against the ABI of the contract it was sent to. */
 function viewOf(params: unknown[]): {
-  contract: "factory" | "body";
+  contract: Contract;
   functionName: string;
   args: readonly unknown[];
 } {
@@ -58,16 +72,16 @@ function viewOf(params: unknown[]): {
     ? "factory"
     : isAddressEqual(to, BODY)
       ? "body"
-      : undefined;
+      : isAddressEqual(to, REGISTRY)
+        ? "registry"
+        : undefined;
   if (!contract) throw new Error(`eth_call to an unexpected address ${to}`);
-  const abi = (contract === "factory" ? legalBodyFactoryAbi : legalManagerAbi) as Abi;
-  const { functionName, args } = decodeFunctionData({ abi, data });
+  const { functionName, args } = decodeFunctionData({ abi: ABI_OF[contract], data });
   return { contract, functionName, args: args ?? [] };
 }
 
-function returns(contract: "factory" | "body", functionName: string, result: unknown) {
-  const abi = (contract === "factory" ? legalBodyFactoryAbi : legalManagerAbi) as Abi;
-  return { result: encodeFunctionResult({ abi, functionName, result }) };
+function returns(contract: Contract, functionName: string, result: unknown) {
+  return { result: encodeFunctionResult({ abi: ABI_OF[contract], functionName, result }) };
 }
 
 /** A node that answers each view by name. A view it has no answer for gets a JSON-RPC error. */
@@ -168,6 +182,42 @@ describe("linkedLegalBody", () => {
   });
 });
 
+describe("agentWallet", () => {
+  test("agentWallet calls getAgentWallet on the configured registry with the block number, and reads latest without one", async () => {
+    const node = nodeAnswering({
+      getAgentWallet: returns("registry", "getAgentWallet", AGENT_WALLET),
+    });
+    const chain = chainOver(node);
+
+    await expect(chain.agentWallet(42n, BLOCK)).resolves.toBe(AGENT_WALLET);
+    await expect(chain.agentWallet(42n)).resolves.toBe(AGENT_WALLET);
+
+    expect(trace(node)).toEqual([
+      `registry.getAgentWallet@${BLOCK_ON_WIRE}`,
+      "registry.getAgentWallet@latest",
+    ]);
+    for (const r of node.requests) expect(viewOf(r.params).args).toEqual([42n]);
+  });
+
+  test("an agent with no wallet answers the zero address as it is", async () => {
+    const node = nodeAnswering({
+      getAgentWallet: returns("registry", "getAgentWallet", zeroAddress),
+    });
+    await expect(chainOver(node).agentWallet(42n, BLOCK)).resolves.toBe(zeroAddress);
+  });
+
+  test("a failed read throws", async () => {
+    const internal = nodeAnswering({
+      getAgentWallet: { error: { code: -32603, message: "Internal error" } },
+    });
+    await expect(chainOver(internal).agentWallet(42n, BLOCK)).rejects.toThrow();
+
+    // No code at the registry: the node answers empty bytes, which are no address.
+    const empty = nodeAnswering({ getAgentWallet: { result: "0x" } });
+    await expect(chainOver(empty).agentWallet(42n, BLOCK)).rejects.toThrow();
+  });
+});
+
 describe("bodyStatus", () => {
   test.each([
     { value: 0, label: "0", status: "active" },
@@ -220,6 +270,7 @@ describe("LegalBodyChainPort", () => {
       executor: LOCAL_TEST_ACCOUNT.address,
       head: vi.fn(async () => ({ number: 1n, timestamp: 1n })),
       identityOwner: vi.fn(async (_agentId: bigint, _blockNumber?: bigint) => undefined),
+      agentWallet: vi.fn<LegalBodyChainPort["agentWallet"]>(async () => AGENT_WALLET),
       hasCode: vi.fn(async (_address: Address, _blockNumber?: bigint) => false),
       linkDigest: vi.fn<LegalBodyChainPort["linkDigest"]>(async () => `0x${"d1".repeat(32)}`),
       predictLegalBody: vi.fn<LegalBodyChainPort["predictLegalBody"]>(async () => BODY),

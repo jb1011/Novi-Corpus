@@ -17,6 +17,7 @@ import type { OwnerBranch } from "@/lib/legalBody/flow";
  * - `bug`: the browser built a request the door does not read;
  * - `pasted_not_hex`: what was pasted is not a signature the door reads;
  * - `identity`: no identity with this id; back to the identity step;
+ * - `wallet`: the identity names no wallet of the agent's own; back to the agent's wallet step;
  * - `sentence`: the door's own sentence, shown as served.
  */
 export type DoorRoute =
@@ -28,13 +29,16 @@ export type DoorRoute =
   | "bug"
   | "pasted_not_hex"
   | "identity"
+  | "wallet"
   | "sentence";
 
 /**
  * The route for a house error from the link door, by its code.
  *
  * `agent_in_flight` and `deadline_out_of_window` are not here: the link door answers them as its
- * flat 422, which reaches `linkSubmitOutcome`, never this function.
+ * flat 422, which reaches `linkSubmitOutcome`, never this function. `agent_wallet_required` is
+ * both: the link-message door's 409, and the submit's flat 422 (the step's view asks this table
+ * for that one code).
  */
 export function linkDoorRoute(code: string, branch: OwnerBranch): DoorRoute {
   switch (code) {
@@ -58,6 +62,8 @@ export function linkDoorRoute(code: string, branch: OwnerBranch): DoorRoute {
       return "new_message";
     case "identity_not_found":
       return "identity";
+    case "agent_wallet_required":
+      return "wallet";
     case "malformed_link":
     case "malformed_signature":
       // In the browser both fields come from the wallet and the served message: a refusal is ours.

@@ -41,7 +41,7 @@ import {
   pasteSubmitPlan,
   type PasteOutcome,
 } from "@/lib/legalBody/paste";
-import { IdentityLine } from "./IdentityLine";
+import { AgentWalletLine, IdentityLine } from "./IdentityLine";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
 
 const P = LEGAL_BODY_COPY.paste;
@@ -87,6 +87,7 @@ export function PasteLinkPanel({
         intro={agentId !== null ? fillCopy(P.intro, { agentId }) : undefined}
       />
       <IdentityLine agentId={identityOnStep({ order, memoryAgentId: agentId })} />
+      <AgentWalletLine wallet={kit.agentWallet} />
       {order === null || agentId === null ? (
         <Callout tone="warn">{L.identityUnknown}</Callout>
       ) : (

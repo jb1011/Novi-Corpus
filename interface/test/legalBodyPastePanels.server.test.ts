@@ -229,6 +229,8 @@ function kit(
     startAnother: vi.fn(),
     routeSignIn: vi.fn(() => false),
     door: "declare",
+    agentWallet: null,
+    refreshAgentWallet: vi.fn(async () => {}),
   };
 }
 
@@ -553,6 +555,16 @@ describe("the agent id, where a person looks for it", () => {
 
   test("the link panel with no identity known: no line", () => {
     expect(text(linkMarkup(kit(LINK, order()), null))).not.toContain(LEGAL_BODY_COPY.identity.yourIdentity);
+  });
+
+  test("the link panel: the agent's wallet under the identity's line, once the registry names one", () => {
+    const walletLine = fillCopy(LEGAL_BODY_COPY.agentWallet.line, { address: THIRD });
+    const page = text(linkMarkup({ ...kit(LINK, order()), agentWallet: THIRD }));
+    expect(page).toContain(walletLine);
+    expect(page.indexOf(walletLine)).toBeGreaterThan(page.indexOf(line(LIVE_AGENT)));
+    expect(page.indexOf(walletLine)).toBeLessThan(page.indexOf(P.howItWorks));
+    for (const agentWallet of [null, "none", "unreadable"] as const)
+      expect(text(linkMarkup({ ...kit(LINK, order()), agentWallet }))).not.toContain("This agent's wallet");
   });
 
   test("the pointer panel: the order's identity, while the chain is read and once the call is shown", () => {

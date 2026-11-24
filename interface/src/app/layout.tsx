@@ -13,15 +13,17 @@ const archivo = Archivo({
 const siteUrl =
   process.env.NEXT_PUBLIC_SITE_URL ?? "https://novicorpus.xyz";
 
+const title = "Novi Corpus: a legal body for your agent";
+const description =
+  "Agents with a legal body: a Wyoming DAO LLC linked to the agent's on-chain identity, a verified human accountable for it, and a public record anyone can check.";
+
 export const metadata: Metadata = {
-  title: "Novi Corpus — A company for your agent",
-  description:
-    "Create a company for your agent: custody choice, World ID verification, on-chain spending policy, law-to-code operating agreement, and a USDC treasury on Arc.",
+  title,
+  description,
   metadataBase: new URL(siteUrl),
   openGraph: {
-    title: "Novi Corpus — A company for your agent",
-    description:
-      "Agents with enforceable spending rules, Wyoming DAO LLC operating agreements, custody choice, and guardian controls. Deploy and fund on Arc.",
+    title,
+    description,
     type: "website",
   },
   icons: {

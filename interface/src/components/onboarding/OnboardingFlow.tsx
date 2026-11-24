@@ -35,6 +35,8 @@ import {
 } from "@/lib/formation/companyIntake";
 import { useCompanyQuery, usePublicConfigQuery } from "@/lib/api/hooks";
 import { PAYMENT_NO_LONGER_REQUIRED } from "@/lib/formation/payment";
+import { START_COPY } from "@/lib/start/copy";
+import { fullProductGate } from "@/lib/start/paths";
 import {
   buildPersistedOnboarding,
   clearOnboardingStorage,
@@ -276,38 +278,33 @@ function OnboardingFlowInner({ initial }: { initial: Persisted | null }) {
     goTo("fund");
   }, [session.entityId, session.entity?.id, router, goTo]);
 
+  // A deployment that says outright it has no full-product factory refuses every onboard at the
+  // door, so the wizard gives way to a page that says so and points at the paths it does offer.
+  // Only an explicit `false` does this: a config still loading, unreadable or from a backend that
+  // predates the field runs the wizard as before. Placed after every hook, never before one.
+  if (fullProductGate(publicConfig) === "not_offered") {
+    return <FullProductNotOffered />;
+  }
+
   return (
     <div className="min-h-screen bg-paper font-mono text-ink">
       <FlowBackground />
 
-      <header className="sticky top-0 z-40">
-        <div className="absolute inset-0 -z-10 border-b hairline bg-paper/80 backdrop-blur-md" />
-        <div className="mx-auto flex h-16 max-w-[1180px] items-center justify-between px-5 lg:px-8">
-          <div className="flex items-center gap-4">
-            <Wordmark />
-          </div>
-          <div className="flex items-center gap-2">
-            <span className="hidden text-[12px] text-muted-2 sm:inline">
-              Step {idx + 1} of {phases.length - 1}
-            </span>
-            <Link
-              href="/"
-              className="rounded-full px-3 py-1.5 text-[12.5px] text-muted transition-colors hover:bg-paper-2 hover:text-ink"
-            >
-              Exit
-            </Link>
-            {phase !== "welcome" && (
-              <button
-                type="button"
-                onClick={startOver}
-                className="rounded-full border hairline-strong px-3 py-1.5 text-[12px] text-muted-2 transition-colors hover:bg-paper-2 hover:text-ink"
-              >
-                Start over
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
+      <FlowHeader>
+        <span className="hidden text-[12px] text-muted-2 sm:inline">
+          Step {idx + 1} of {phases.length - 1}
+        </span>
+        <ExitLink />
+        {phase !== "welcome" && (
+          <button
+            type="button"
+            onClick={startOver}
+            className="rounded-full border hairline-strong px-3 py-1.5 text-[12px] text-muted-2 transition-colors hover:bg-paper-2 hover:text-ink"
+          >
+            Start over
+          </button>
+        )}
+      </FlowHeader>
 
       <main className="mx-auto grid max-w-[1180px] grid-cols-1 gap-10 px-5 pb-24 pt-10 lg:grid-cols-[230px_1fr] lg:gap-14 lg:px-8 lg:pt-14">
         <div className="lg:sticky lg:top-24 lg:self-start">
@@ -505,6 +502,63 @@ function StepFrame({
   return (
     <div key={phase} className="anim-line" style={{ animationDuration: "0.4s" }}>
       {children}
+    </div>
+  );
+}
+
+/** The wizard's sticky header: the wordmark on the left, the screen's own controls on the right. */
+function FlowHeader({ children }: { children: ReactNode }) {
+  return (
+    <header className="sticky top-0 z-40">
+      <div className="absolute inset-0 -z-10 border-b hairline bg-paper/80 backdrop-blur-md" />
+      <div className="mx-auto flex h-16 max-w-[1180px] items-center justify-between px-5 lg:px-8">
+        <div className="flex items-center gap-4">
+          <Wordmark />
+        </div>
+        <div className="flex items-center gap-2">{children}</div>
+      </div>
+    </header>
+  );
+}
+
+function ExitLink() {
+  return (
+    <Link
+      href="/"
+      className="rounded-full px-3 py-1.5 text-[12.5px] text-muted transition-colors hover:bg-paper-2 hover:text-ink"
+    >
+      Exit
+    </Link>
+  );
+}
+
+/** What `/onboarding` shows where the server says the full product is not offered. */
+function FullProductNotOffered() {
+  const copy = START_COPY.notOffered;
+  return (
+    <div className="min-h-screen bg-paper font-mono text-ink">
+      <FlowBackground />
+
+      <FlowHeader>
+        <ExitLink />
+      </FlowHeader>
+
+      <main className="mx-auto max-w-[1180px] px-5 pb-24 pt-10 lg:px-8 lg:pt-14">
+        <div className="anim-line max-w-2xl" style={{ animationDuration: "0.4s" }}>
+          <h1 className="text-balance text-[30px] font-medium leading-[1.08] tracking-[-0.02em] text-ink sm:text-[38px]">
+            {copy.title}
+          </h1>
+          <p className="mt-3 text-pretty text-[14.5px] leading-[1.6] text-muted">{copy.body}</p>
+          <div className="mt-8">
+            <Link
+              href="/start"
+              className="inline-flex items-center justify-center gap-2 rounded-full bg-ink px-5 py-2.5 text-[13.5px] font-medium text-paper transition-colors hover:bg-ink-hover focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60 focus-visible:ring-offset-2 focus-visible:ring-offset-paper"
+            >
+              {copy.choose}
+            </Link>
+          </div>
+        </div>
+      </main>
     </div>
   );
 }

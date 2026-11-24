@@ -6,7 +6,6 @@ import {
 } from "@/lib/api/types";
 import { walletKindOf } from "@/lib/legalBody/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
-import type { LegalBodyDerivation } from "@/lib/legalBody/flow";
 import type { WorldIdGateState } from "@/lib/legalBody/worldIdGate";
 import { walletSignedIn, type WalletAttempt } from "@/lib/walletSignIn";
 
@@ -200,10 +199,4 @@ export function bannerLines(config: AvailableConfig): string[] {
   if (config.environment !== "sandbox") return [];
   const S = LEGAL_BODY_COPY.sandbox;
   return config.paymentRequired ? [S.banner] : [S.banner, S.noPaymentStep];
-}
-
-/** A deployment that takes no new declaration still runs existing threads; only the new-company
- *  form gives way to its sentence. */
-export function declarationsClosed(config: AvailableConfig, derivation: LegalBodyDerivation): boolean {
-  return !config.declarations && derivation.phase === "company" && derivation.companyStep === "form";
 }

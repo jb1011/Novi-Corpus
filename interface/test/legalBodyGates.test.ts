@@ -19,7 +19,6 @@ import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
   anySignInRequired,
   bannerLines,
-  declarationsClosed,
   humanErrorSentence,
   humanStepView,
   isSignInRequired,
@@ -314,19 +313,3 @@ describe("bannerLines", () => {
   });
 });
 
-describe("declarationsClosed", () => {
-  test("a deployment that takes no declarations shows its sentence in place of the form", () => {
-    expect(declarationsClosed(available({ declarations: false }), { phase: "company", companyStep: "form" })).toBe(true);
-  });
-
-  test("existing threads still run there", () => {
-    const config = available({ declarations: false });
-    expect(declarationsClosed(config, { phase: "agreement" })).toBe(false);
-    expect(declarationsClosed(config, { phase: "company", companyStep: "waiting" })).toBe(false);
-    expect(declarationsClosed(config, { phase: "done" })).toBe(false);
-  });
-
-  test("a deployment that takes declarations shows the form", () => {
-    expect(declarationsClosed(available(), { phase: "company", companyStep: "form" })).toBe(false);
-  });
-});

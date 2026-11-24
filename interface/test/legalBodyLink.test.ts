@@ -504,6 +504,7 @@ describe("linkErrorOutcome", () => {
     ["other_deployment", 409, { kind: "back", to: "agreement" }],
     ["company_not_eligible", 409, { kind: "back", to: "company" }],
     ["identity_not_found", 422, { kind: "back", to: "identity" }],
+    ["agent_wallet_required", 409, { kind: "back", to: "wallet" }],
     ["rate_limited", 429, { kind: "wait" }],
     ["legal_body_attempts", 429, { kind: "wait" }],
     ["busy", 503, { kind: "wait" }],
@@ -668,7 +669,7 @@ describe("linkOutcomeView", () => {
     expect(L.tryAgainSoon).toContain("try again in a moment");
   });
 
-  test.each(["agreement", "company", "identity"] as const)("back to the %s, with the sentence", (to) => {
+  test.each(["agreement", "company", "identity", "wallet"] as const)("back to the %s, with the sentence", (to) => {
     expect(view({ kind: "back", to, sentence: "door words" })).toEqual({
       lines: ["door words"],
       action: "sign",
@@ -752,6 +753,42 @@ describe("linkOutcomeView", () => {
 
   test("a wallet not connected here", () => {
     expect(view({ kind: "not_connected" })).toEqual({ lines: [L.notConnected], action: "sign", sendBack: null });
+  });
+
+  describe("agent_wallet_required: no wallet of the agent's own, back to the agent's wallet step", () => {
+    const SERVED =
+      "This agent has no wallet of its own yet: its identity must name a wallet that is not the guardian's wallet before a legal body is created.";
+    const BACK = { lines: [SERVED], action: "sign", sendBack: { to: "wallet", sentence: SERVED } };
+
+    test("as the message door's house refusal: the served sentence, carried to the wallet step", () => {
+      const outcome = linkErrorOutcome(apiError(409, "agent_wallet_required", SERVED), "message");
+      expect(outcome).toEqual({ kind: "back", to: "wallet", sentence: SERVED });
+      expect(view(outcome)).toEqual(BACK);
+    });
+
+    test("as the submit door's flat 422 before the reserve: the served sentence, carried to the wallet step", () => {
+      const answer: LinkSubmitAnswer = {
+        status: 422,
+        body: {
+          code: "agent_wallet_required",
+          message: SERVED,
+          detail: { identityOwner: GUARDIAN, agentWallet: GUARDIAN },
+          order: order(),
+        },
+      };
+      const outcome = linkAnswerOutcome(answer, "lbo_draft");
+      expect(outcome).toEqual({ kind: "refused", code: "agent_wallet_required", sentence: SERVED, lapsed: false });
+      expect(view(outcome)).toEqual(BACK);
+      expect(keepsSignedLink(outcome)).toBe(false);
+    });
+
+    test("a lapsed order is closed first: the wallet cannot help an order that lapsed", () => {
+      expect(view({ kind: "refused", code: "agent_wallet_required", sentence: SERVED, lapsed: true })).toEqual({
+        lines: [SERVED],
+        action: "new_order",
+        sendBack: { to: "closed", sentence: SERVED },
+      });
+    });
   });
 
   test("no line of any outcome is left with a template unfilled", () => {

@@ -344,6 +344,9 @@ export class TransportFailure extends Error {
 
 /** The identity owner of every fake chain unless told otherwise: anvil's published account #4. */
 export const IDENTITY_OWNER = ANVIL_ACCOUNT_4;
+/** The wallet every fake chain's identity names unless told otherwise: a placeholder of the
+ *  agent's own, neither the owner nor any guardian. */
+export const AGENT_WALLET = "0x00000000000000000000000000000000000000A1" as Address;
 /** The head a fake chain reads: its number pins the reads, its timestamp is chain time. */
 export const LINK_HEAD = { number: 7_777n, timestamp: 1_800_000_000n };
 /** The gas limit a fake chain's simulation answers. */
@@ -363,6 +366,7 @@ export function fakeLinkChainMembers() {
     factory: FACTORY,
     head: vi.fn<LinkChainPort["head"]>(async () => LINK_HEAD),
     identityOwner: vi.fn<LinkChainPort["identityOwner"]>(async () => IDENTITY_OWNER.address),
+    agentWallet: vi.fn<LinkChainPort["agentWallet"]>(async () => AGENT_WALLET),
     hasCode: vi.fn<LinkChainPort["hasCode"]>(async () => false),
     linkDigest: vi.fn<LinkChainPort["linkDigest"]>(async (l) =>
       offChainLinkDigest({ chainId: CHAIN_ID, factory: FACTORY, link: l }),

@@ -5,6 +5,7 @@
 import { describe, expect, test } from "vitest";
 import {
   LEGAL_BODY_PHASES,
+  LEGAL_BODY_PHASES_FORMED,
   canJumpTo,
   phaseLabel,
   railCurrentOf,
@@ -37,13 +38,14 @@ const config = (over: Partial<AvailableConfig> = {}): AvailableConfig => ({
 });
 
 describe("the phases", () => {
-  test("all nine, in the flow's order, with their labels", () => {
+  test("all ten, in the flow's order, with their labels", () => {
     expect(LEGAL_BODY_PHASES).toEqual([
       { id: "signin", label: "Sign in" },
       { id: "human", label: "Accountable human" },
       { id: "company", label: "Your company" },
       { id: "agreement", label: "Agreement" },
       { id: "identity", label: "Your agent's identity" },
+      { id: "wallet", label: "Agent's wallet" },
       { id: "link", label: "Sign the link" },
       { id: "pointer", label: "Point your identity" },
       { id: "payment", label: "Payment" },
@@ -55,7 +57,7 @@ describe("the phases", () => {
     expect(LEGAL_BODY_PHASES.map((p) => p.id)).not.toContain("closed");
   });
 
-  test("a deployment that charges nothing shows eight, without payment", () => {
+  test("a deployment that charges nothing shows nine, without payment", () => {
     const ids = visibleLegalBodyPhases(config()).map((p) => p.id);
     expect(ids).toEqual([
       "signin",
@@ -63,6 +65,7 @@ describe("the phases", () => {
       "company",
       "agreement",
       "identity",
+      "wallet",
       "link",
       "pointer",
       "done",
@@ -77,6 +80,7 @@ describe("the phases", () => {
       "filing",
       "agreement",
       "identity",
+      "wallet",
       "link",
       "pointer",
       "done",
@@ -86,10 +90,30 @@ describe("the phases", () => {
     expect(charged.indexOf("filing")).toBe(charged.indexOf("payment") + 1);
   });
 
-  test("a charging deployment shows nine, payment just before done", () => {
+  test("a charging deployment shows ten, payment just before done", () => {
     const ids = visibleLegalBodyPhases(config({ paymentRequired: true })).map((p) => p.id);
-    expect(ids).toHaveLength(9);
+    expect(ids).toHaveLength(10);
     expect(ids.indexOf("payment")).toBe(ids.indexOf("done") - 1);
+  });
+
+  test.each([
+    ["the declaration door", LEGAL_BODY_PHASES],
+    ["the formed door", LEGAL_BODY_PHASES_FORMED],
+  ])("on %s the agent's wallet sits right after the identity and right before the link", (_door, rail) => {
+    const ids = rail.map((p) => p.id);
+    expect(ids.filter((id) => id === "wallet")).toHaveLength(1);
+    expect(ids.indexOf("wallet")).toBe(ids.indexOf("identity") + 1);
+    expect(ids.indexOf("link")).toBe(ids.indexOf("wallet") + 1);
+    expect(rail.find((p) => p.id === "wallet")?.label).toBe(LEGAL_BODY_COPY.rail.labels.wallet);
+  });
+
+  test("on every rail a deployment shows, charging or not, the wallet stays between the identity and the link", () => {
+    for (const paymentRequired of [false, true])
+      for (const door of ["declare", "form"] as const) {
+        const ids = visibleLegalBodyPhases(config({ paymentRequired }), door).map((p) => p.id);
+        expect(ids.indexOf("wallet")).toBe(ids.indexOf("identity") + 1);
+        expect(ids.indexOf("link")).toBe(ids.indexOf("wallet") + 1);
+      }
   });
 });
 
@@ -100,6 +124,8 @@ describe("railPhaseOf", () => {
     [{ phase: "agreement" }, "agreement"],
     [{ phase: "identity" }, "identity"],
     [{ phase: "identity", notice: { kind: "identity_taken", agentId: "42" } }, "identity"],
+    [{ phase: "wallet", walletStep: "checking", branch: "browser" }, "wallet"],
+    [{ phase: "wallet", walletStep: "needed", branch: "paste" }, "wallet"],
     [{ phase: "link", branch: "browser" }, "link"],
     [{ phase: "link", branch: "paste", notice: { kind: "creating" } }, "link"],
     [{ phase: "pointer", branch: "browser" }, "pointer"],
@@ -120,6 +146,7 @@ describe("railPhaseOf", () => {
 describe("phaseLabel", () => {
   test("each phase by its rail name; closed by the rail's end", () => {
     expect(phaseLabel("identity")).toBe("Your agent's identity");
+    expect(phaseLabel("wallet")).toBe("Agent's wallet");
     expect(phaseLabel("payment")).toBe("Payment");
     expect(phaseLabel("closed")).toBe("Done");
   });
@@ -150,6 +177,24 @@ describe("railDone", () => {
       human: true,
       company: true,
       agreement: true,
+    });
+  });
+
+  test("on the agent's wallet the identity is done; on the link the wallet is done too", () => {
+    expect(railDone(phases, "wallet")).toEqual({
+      signin: true,
+      human: true,
+      company: true,
+      agreement: true,
+      identity: true,
+    });
+    expect(railDone(phases, "link")).toEqual({
+      signin: true,
+      human: true,
+      company: true,
+      agreement: true,
+      identity: true,
+      wallet: true,
     });
   });
 
@@ -217,7 +262,7 @@ describe("showRail: a closed order's screen is a terminal notice, with no rail",
     expect(showRail("flow", { phase: "closed" })).toBe(false);
   });
 
-  test.each(["company", "agreement", "identity", "link", "pointer", "payment", "done"] as const)(
+  test.each(["company", "agreement", "identity", "wallet", "link", "pointer", "payment", "done"] as const)(
     "%s shows the rail",
     (phase) => {
       expect(showRail("flow", { phase })).toBe(true);
@@ -250,6 +295,17 @@ describe("canJumpTo", () => {
   test("back to an earlier step", () => {
     expect(canJumpTo(phases, "link", "identity")).toBe(true);
     expect(canJumpTo(phases, "link", "agreement")).toBe(true);
+  });
+
+  test("from the link back to the agent's wallet, and from the wallet back to the identity, on both doors", () => {
+    for (const door of ["declare", "form"] as const) {
+      const rail = visibleLegalBodyPhases(config(), door);
+      expect(canJumpTo(rail, "link", "wallet")).toBe(true);
+      expect(canJumpTo(rail, "pointer", "wallet")).toBe(true);
+      expect(canJumpTo(rail, "wallet", "identity")).toBe(true);
+      expect(canJumpTo(rail, "wallet", "link")).toBe(false);
+      expect(canJumpTo(rail, "identity", "wallet")).toBe(false);
+    }
   });
 
   test("never forward, never to the current phase, never off the rail", () => {

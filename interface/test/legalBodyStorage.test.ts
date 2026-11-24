@@ -15,6 +15,7 @@ import {
   buildLegalBodyMemory,
   clearLegalBodyMemory,
   LEGAL_BODY_STORAGE_KEY,
+  MAX_STORED_INTENT_KNOWN,
   parseLegalBodyMemory,
   PERSISTED_LEGAL_BODY_KEYS,
   readLegalBodyMemory,
@@ -38,9 +39,7 @@ function fullMemory(over: Partial<LegalBodyMemory> = {}): LegalBodyMemory {
     ownerChoice: "this-wallet",
     agentId: "42",
     door: "declare",
-    identityChoice: "not-yet",
-    signer: "this-wallet",
-    suggestedAgentId: "7",
+    startAnother: null,
     ...over,
   };
 }
@@ -117,9 +116,7 @@ describe("the allowlist", () => {
       "ownerChoice",
       "agentId",
       "door",
-      "identityChoice",
-      "signer",
-      "suggestedAgentId",
+      "startAnother",
     ]);
     // The built memory carries exactly those names: none missing, none added.
     expect(Object.keys(buildLegalBodyMemory({ tenant: TENANT })).sort()).toEqual(
@@ -160,9 +157,7 @@ describe("the allowlist", () => {
       ownerChoice: null,
       agentId: null,
       door: null,
-      identityChoice: null,
-      signer: null,
-      suggestedAgentId: null,
+      startAnother: null,
     });
     const bytes = JSON.stringify(memory);
     for (const value of TYPED_VALUES) expect(bytes, value).not.toContain(value);
@@ -296,9 +291,55 @@ describe("parseLegalBodyMemory", () => {
     }
   });
 
+  test("a start-another intent survives a round trip, and a malformed one reads null", () => {
+    const intent = { kind: "another-company", known: ["co_1", "co_2"] } as const;
+    expect(buildLegalBodyMemory({ tenant: TENANT, startAnother: intent }).startAnother).toEqual(intent);
+    expect(buildLegalBodyMemory({ tenant: TENANT, startAnother: { kind: "x", known: [] } }).startAnother).toBeNull();
+    expect(buildLegalBodyMemory({ tenant: TENANT, startAnother: { kind: "another-company", known: ["a b"] } }).startAnother).toBeNull();
+    const many = Array.from({ length: MAX_STORED_INTENT_KNOWN + 1 }, (_, i) => `co_${i}`);
+    expect(buildLegalBodyMemory({ tenant: TENANT, startAnother: { kind: "another-company", known: many } }).startAnother).toBeNull();
+  });
+
+  test("an intent keeps its kind, its company and the ids known at the click, and nothing else", () => {
+    const agent = { kind: "another-agent", companyId: "co_1", known: ["ord_1"] } as const;
+    const extra = { ...agent, companyName: TYPED_FIELDS.companyName };
+    expect(buildLegalBodyMemory({ tenant: TENANT, startAnother: extra }).startAnother).toEqual(agent);
+    const company = { kind: "another-company", companyId: "co_1", known: [] };
+    expect(buildLegalBodyMemory({ tenant: TENANT, startAnother: company }).startAnother).toEqual({
+      kind: "another-company",
+      known: [],
+    });
+    for (const bad of [
+      { kind: "another-agent", known: [] },
+      { kind: "another-agent", companyId: "a b", known: [] },
+      { kind: "another-agent", companyId: "co_1", known: "ord_1" },
+      { kind: "another-agent", companyId: "co_1", known: [7] },
+      { kind: "another-company" },
+      ["another-company"],
+      "another-company",
+      null,
+    ]) {
+      expect(buildLegalBodyMemory({ tenant: TENANT, startAnother: bad }).startAnother, JSON.stringify(bad)).toBeNull();
+    }
+  });
+
   test("names off the allowlist in a stored blob are dropped on the way in", () => {
     const raw = JSON.stringify({ ...fullMemory(), ...TYPED_FIELDS });
     expect(parseLegalBodyMemory(raw, TENANT)).toEqual(fullMemory());
+  });
+
+  test("an older blob with the entrance's answers reads without them", () => {
+    // The "About your agent" screen wrote these three; nothing reads them any more.
+    const entrance = { identityChoice: "not-yet", signer: "this-wallet", suggestedAgentId: "7" };
+    const raw = JSON.stringify({ ...fullMemory(), ...entrance });
+
+    const memory = parseLegalBodyMemory(raw, TENANT);
+
+    expect(memory).toEqual(fullMemory());
+    for (const key of Object.keys(entrance)) expect(memory, key).not.toHaveProperty(key);
+    // ...and the memory written back from it holds none of them either.
+    const bytes = JSON.stringify(buildLegalBodyMemory(memory!));
+    for (const key of Object.keys(entrance)) expect(bytes, key).not.toContain(key);
   });
 });
 
@@ -313,6 +354,19 @@ describe("read, write and clear", () => {
     expect(readLegalBodyMemory(TENANT)).toEqual(memory);
     expect(readLegalBodyMemory(TENANT.toLowerCase() as `0x${string}`)).toEqual(memory);
     expect(readLegalBodyMemory(OTHER_TENANT)).toBeNull();
+  });
+
+  test("an intent too large to keep is dropped by the store, and the rest of the memory is kept", () => {
+    const { storage } = memoryStorage();
+    vi.stubGlobal("localStorage", storage);
+    const known = Array.from({ length: MAX_STORED_INTENT_KNOWN }, (_, i) => `co_${i}`);
+    const kept = fullMemory({ startAnother: { kind: "another-company", known } });
+
+    writeLegalBodyMemory(kept);
+    expect(readLegalBodyMemory(TENANT)).toEqual(kept);
+
+    writeLegalBodyMemory(fullMemory({ startAnother: { kind: "another-company", known: [...known, "co_x"] } }));
+    expect(readLegalBodyMemory(TENANT)).toEqual(fullMemory());
   });
 
   test("clear forgets the memory and leaves the wizard's key alone", () => {

@@ -11,7 +11,7 @@
  * and filing number is an invention, and every key is one of anvil's published test accounts.
  */
 import type Database from "better-sqlite3";
-import { type Hex, getAddress, keccak256, toHex } from "viem";
+import { type Hex, getAddress, keccak256, toHex, zeroAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   type LegalBodyChainPort,
@@ -837,6 +837,28 @@ describe("the re-submit step", () => {
       expect(rowOf(row.legalBodyId).bindingState, name).toBe("reserved");
       expect(rowOf(row.legalBodyId).nextBindingCheckAt, name).toBe(clock + 30_000);
     }
+  });
+
+  test("a reserved order whose agent wallet was removed waits with link_refused and the code agent_wallet_required, and no create is sent", async () => {
+    const row = await reservedOrder();
+    chain.agentWallet.mockResolvedValue(zeroAddress);
+
+    expect(await resolveOrder(deps(), row.legalBodyId)).toBe("waiting");
+
+    expect(chain.agentWallet).toHaveBeenCalledWith(linkOfRow(row).agentId, LINK_HEAD.number);
+    expect(chain.estimateCreate).not.toHaveBeenCalled();
+    expect(chain.submitCreate).not.toHaveBeenCalled();
+    expect(s.repo.listDeploySubmissions(row.legalBodyId)).toEqual([]);
+    expect(rowOf(row.legalBodyId).bindingState).toBe("reserved");
+    expect(opsLines()).toEqual([
+      expect.objectContaining({
+        opslog: "legal_body_resolve",
+        orderId: row.legalBodyId,
+        outcome: "waiting",
+        why: "link_refused",
+        code: "agent_wallet_required",
+      }),
+    ]);
   });
 
   test("a create the record refuses, a create cap and a refusal thrown by the create each answer waiting, with nothing recorded", async () => {

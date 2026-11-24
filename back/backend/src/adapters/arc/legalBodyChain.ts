@@ -477,6 +477,18 @@ export class LegalBodyChain {
     }
   }
 
+  /** The wallet the registry names as the agent's (`getAgentWallet`): the zero address when the
+   *  agent has none. Every failure throws. */
+  agentWallet(agentId: bigint, blockNumber?: bigint): Promise<Address> {
+    return this.d.publicClient.readContract({
+      address: this.d.identityRegistry,
+      abi: iIdentityRegistryAbi,
+      functionName: "getAgentWallet",
+      args: [agentId],
+      blockNumber,
+    });
+  }
+
   /** The digest the identity owner signs for `link`, as the factory computes it. */
   linkDigest(link: LegalBodyLink, blockNumber?: bigint): Promise<Hex> {
     return this.d.publicClient.readContract({

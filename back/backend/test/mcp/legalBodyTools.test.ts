@@ -373,6 +373,29 @@ describe("each tool answers what its door answers for the same input", () => {
     expect(snapshot(w)).toEqual(before);
   });
 
+  test("get_link_message passes the code agent_wallet_required and its sentence through, as the door answers them, and writes nothing", async () => {
+    const w = world();
+    const row = await ordered(w);
+    // The registry names the guardian's own wallet as the agent's.
+    w.chain.agentWallet.mockResolvedValue(guardian.address);
+    const before = snapshot(w);
+
+    const viaDoor = await answerOf(
+      await call(w.app, "POST", messagePath(row.legalBodyId), await sessionOf(guardian), {
+        agentId: "42",
+      }),
+    );
+    const viaTool = await callTool(w, keyOf(w, guardian.address), "get_link_message", {
+      orderId: row.legalBodyId,
+      agentId: "42",
+    });
+
+    const answer = { code: "agent_wallet_required", message: S.agent_wallet_required };
+    expect(viaDoor).toMatchObject({ status: 409, body: { error: answer } });
+    expect(viaTool).toEqual({ isError: true, text: JSON.stringify(answer), body: answer });
+    expect(snapshot(w)).toEqual(before);
+  });
+
   test("submit_link answers the door's order for the same order from the same state: reserved, or deployed once the create's receipt is read", async () => {
     const reserved = await linkedBothWays();
     expect(reserved.viaDoor.status).toBe(202);
@@ -714,6 +737,13 @@ describe("what an answer may carry", () => {
     expect(description).toContain("types.EIP712Domain");
     expect(description).toContain(
       "answers link_outlasts_grant: ask again with a smaller ttlSeconds, or, when the shortest lifetime is still too long, have the guardian place a new order in the web app.",
+    );
+    expect(description).toContain(
+      "the identity's owner sets it in the registry with setAgentWallet and the new wallet's signature, and until then this answers agent_wallet_required.",
+    );
+    // The same rule on the submit, which the door checks again there.
+    expect(byName.get("submit_link")?.description ?? "").toContain(
+      "The identity must name a wallet of the agent's own, not the guardian's wallet: the identity's owner sets it in the registry with setAgentWallet and the new wallet's signature, and until then this answers status refused with the code agent_wallet_required.",
     );
     const inputs = (name: string) =>
       Object.keys(byName.get(name)?.inputSchema.properties ?? {}).sort();

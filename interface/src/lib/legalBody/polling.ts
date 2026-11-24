@@ -6,7 +6,7 @@
  * these answers, apart from the binding refresh after the pointer transaction, which continues a
  * click and is idempotent under the order's lock: no answer here ever starts a write on its own.
  */
-import type { BindingState, CompanyState } from "@/lib/api/types";
+import { ApiError, type BindingState, type CompanyState } from "@/lib/api/types";
 import type { CompanyStep } from "@/lib/legalBody/flow";
 
 /** The order, while the create it reserved is not confirmed. */
@@ -66,4 +66,19 @@ export function companyPollInterval(
  *  company is not polled: the screen already has the fact, and a focus refetch covers the rest. */
 export function filingPollInterval(state: CompanyState): number | false {
   return state === "in_progress" || state === "ready" ? COMPANY_POLL_MS : false;
+}
+
+/** How many times a failed read is asked again at most: TanStack Query's own default. */
+export const READ_RETRIES = 3;
+
+/**
+ * Whether a failed read is asked again, as TanStack Query's `retry` (`failureCount` is the retries
+ * already made). A refusal (any 4xx: a session that ended, an account the real-human check does
+ * not accept, an id it does not know, too many requests) is the server's answer: asking again only
+ * keeps the screen waiting for it, so it is said at once. No answer at all (the network, a
+ * timeout) and a server error (5xx) are asked again, `READ_RETRIES` times at most.
+ */
+export function retryRead(failureCount: number, error: unknown): boolean {
+  if (failureCount >= READ_RETRIES) return false;
+  return !(error instanceof ApiError && error.status >= 400 && error.status < 500);
 }

@@ -62,7 +62,7 @@ export function RequireAuth({ children }: { children: ReactNode }) {
         <Card className="relative z-10 w-full p-6 text-center">
           <h1 className="text-[22px] font-medium text-ink">Sign in to continue</h1>
           <p className="mt-2 text-[13px] leading-relaxed text-muted">
-            Connect the guardian wallet you used when creating your agents.
+            Connect the wallet you use as guardian. A first sign-in opens your account.
           </p>
           <div className="mt-6 flex flex-col gap-3">
             <Button

@@ -200,7 +200,12 @@ const FRESH_LINK_CODES: readonly string[] = ["deadline_out_of_window", "already_
 function dropsServedLink(outcome: PasteOutcome): boolean {
   switch (outcome.kind) {
     case "refused":
-      return outcome.lapsed || FRESH_LINK_CODES.includes(outcome.code);
+      // A refusal that sends the flow to the agent's wallet step leaves this step too.
+      return (
+        outcome.lapsed ||
+        FRESH_LINK_CODES.includes(outcome.code) ||
+        linkDoorRoute(outcome.code, "paste") === "wallet"
+      );
     case "back":
     case "new_message":
     case "stop":
@@ -214,9 +219,10 @@ function dropsServedLink(outcome: PasteOutcome): boolean {
 /**
  * What the panel says after an outcome. A flat refusal keeps the draft: the door's sentence as
  * served, the link and the pasted text kept, so the owner key can sign again; only a refusal that
- * needs a new link drops it. What was pasted, refused by the field or by the door, is said under
- * the field. The rest reads as on the other branch (`linkOutcomeView`), whose way out of a lapsed
- * order and whose sentences carried back are the same here.
+ * needs a new link, or that sends the flow to the agent's wallet step, drops it. What was pasted,
+ * refused by the field or by the door, is said under the field. The rest reads as on the other
+ * branch (`linkOutcomeView`), whose way out of a lapsed order and whose sentences carried back are
+ * the same here.
  */
 export function pasteOutcomeView(
   outcome: PasteOutcome,

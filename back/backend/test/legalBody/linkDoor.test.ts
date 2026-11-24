@@ -8,7 +8,7 @@
  * name, company and filing number is an invention, and every key is one of anvil's published test
  * accounts.
  */
-import { type Address, type Hex, getAddress, parseSignature } from "viem";
+import { type Address, type Hex, getAddress, parseSignature, zeroAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   LegalBodyChainFaultError,
@@ -242,6 +242,7 @@ function chainReads(): number {
     [
       "head",
       "identityOwner",
+      "agentWallet",
       "hasCode",
       "linkDigest",
       "predictLegalBody",
@@ -401,6 +402,32 @@ describe("linkMessage", () => {
       "identity_not_found",
       422,
     );
+    expect(chain.agentWallet).not.toHaveBeenCalled();
+  });
+
+  test("linkMessage answers 409 agent_wallet_required for an identity whose wallet is the guardian's, or none, and writes nothing", async () => {
+    const row = draft();
+    const before = snapshot();
+    for (const wallet of [tenant, tenant.toLowerCase() as Address, zeroAddress]) {
+      chain.agentWallet.mockResolvedValueOnce(wallet);
+      await refusedAsync(
+        () => linkMessage(deps(), tenant, row.legalBodyId, { agentId: "42" }),
+        "agent_wallet_required",
+        409,
+      );
+    }
+    // The wallet is read at the head the owner is read at.
+    expect(chain.agentWallet.mock.calls).toEqual([
+      [42n, LINK_HEAD.number],
+      [42n, LINK_HEAD.number],
+      [42n, LINK_HEAD.number],
+    ]);
+    expect(snapshot()).toEqual(before);
+
+    // The owner's own address is a wallet of the agent's own: the owner is not the guardian.
+    chain.agentWallet.mockResolvedValueOnce(owner.address);
+    const served = await linkMessage(deps(), tenant, row.legalBodyId, { agentId: "42" });
+    expect(served.identityOwner).toBe(owner.address);
   });
 
   test("an order whose stored agreement was corrupted is a 500 agreement_unreadable, before the chain is read", async () => {
@@ -423,6 +450,12 @@ describe("linkMessage", () => {
       503,
     );
     chain.identityOwner.mockRejectedValueOnce(new TransportFailure());
+    await refusedAsync(
+      () => linkMessage(deps(), tenant, row.legalBodyId, { agentId: "42" }),
+      "chain_unavailable",
+      503,
+    );
+    chain.agentWallet.mockRejectedValueOnce(new TransportFailure());
     await refusedAsync(
       () => linkMessage(deps(), tenant, row.legalBodyId, { agentId: "42" }),
       "chain_unavailable",
@@ -833,6 +866,12 @@ describe("submitLink: refusals before the reserve keep the draft", () => {
         detail: {},
       },
       {
+        code: "agent_wallet_required",
+        what: "an identity that names no wallet",
+        steer: () => chain.agentWallet.mockResolvedValueOnce(zeroAddress),
+        detail: { identityOwner: owner.address, agentWallet: zeroAddress },
+      },
+      {
         code: "already_created",
         what: "a body found at the predicted address",
         steer: () => chain.bodyCreator.mockResolvedValueOnce(PREVIOUS_OWNER),
@@ -906,6 +945,51 @@ describe("submitLink: refusals before the reserve keep the draft", () => {
       expect(snapshot(), c.what).toEqual(before);
       expect(a.create, c.what).not.toHaveBeenCalled();
     }
+  });
+
+  test("submitLink answers refused agent_wallet_required with detail.agentWallet, and the order stays a draft", async () => {
+    const row = draft();
+    chain.agentWallet.mockResolvedValue(tenant);
+    const before = snapshot();
+    const a = afterReserve();
+
+    const result = await submitFor(row, { after: a });
+
+    expect(result).toEqual({
+      status: "refused",
+      code: "agent_wallet_required",
+      order: orderViewOf(deps(), row),
+      detail: { identityOwner: owner.address, agentWallet: tenant },
+    });
+    expect(chain.agentWallet).toHaveBeenCalledWith(42n, LINK_HEAD.number);
+    // Refused before the factory is asked anything about the link.
+    expect(chain.linkDigest).not.toHaveBeenCalled();
+    expect(chain.estimateCreate).not.toHaveBeenCalled();
+    expect(snapshot()).toEqual(before);
+    expect(a.create).not.toHaveBeenCalled();
+    expect(rowOf(row.legalBodyId).bindingState).toBe("draft");
+  });
+
+  test("a wallet set at the message and removed before the submit is refused at the submit", async () => {
+    const row = draft();
+    const served = await linkMessage(deps(), tenant, row.legalBodyId, { agentId: "42" });
+    expect(served.identityOwner).toBe(owner.address);
+
+    chain.agentWallet.mockResolvedValue(zeroAddress);
+    const a = afterReserve();
+    const result = await submitFor(row, {
+      message: served.typedData.message,
+      signature: (await signedLink(linkFor(row, { deadline: BigInt(served.deadline) }))).signature,
+      after: a,
+    });
+
+    expect(result).toMatchObject({
+      status: "refused",
+      code: "agent_wallet_required",
+      detail: { agentWallet: zeroAddress },
+    });
+    expect(a.create).not.toHaveBeenCalled();
+    expect(rowOf(row.legalBodyId).bindingState).toBe("draft");
   });
 
   test("a transport error, a platform fault or a digest mismatch in the check, and a head that cannot be read after it, are 503s that change nothing", async () => {
@@ -1194,6 +1278,7 @@ describe("the link door's codes", () => {
       delay_mismatch: true,
       deadline_out_of_window: true,
       identity_not_found: true,
+      agent_wallet_required: true,
       unsupported_signer: true,
       bad_signature: true,
       already_created: true,
