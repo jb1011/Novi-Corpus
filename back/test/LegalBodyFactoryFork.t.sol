@@ -2,8 +2,8 @@
 pragma solidity ^0.8.24;
 
 import {Test} from "forge-std/Test.sol";
+import {BytecodeMetadata} from "./helpers/BytecodeMetadata.sol";
 import {ControllerRelayHarness} from "./helpers/ControllerRelayHarness.sol";
-import {DeployLegalBodyFactory} from "../script/DeployLegalBodyFactory.s.sol";
 import {NoviController} from "../src/NoviController.sol";
 import {LegalBody} from "../src/LegalBody.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
@@ -215,28 +215,14 @@ contract LegalBodyFactoryForkTest is ControllerRelayHarness {
     }
 }
 
-/// @dev Exposes the deploy script's metadata-stripping helper to tests.
-contract DeployLegalBodyFactoryHarness is DeployLegalBodyFactory {
-    function stripMetadata(bytes memory code) external pure returns (bytes memory) {
-        return _stripMetadata(code);
-    }
-}
-
-/// @notice The deploy script's implementation check: runtime code equal to this repo's compiled
-///         LegalManager once the CBOR metadata is dropped. The live comparison only holds for a
-///         build with the repo's own EVM version (foundry.toml), because that is what the live
-///         implementation was compiled for. A build for a newer EVM (the fork suites run under
-///         one) produces different code, so the live comparison skips there.
+/// @notice The live LegalManager implementation is this repo's code: its runtime code equals the
+///         compiled LegalManager once the CBOR metadata is dropped. The live comparison only
+///         holds for a build with the repo's own EVM version (foundry.toml), because that is what
+///         the live implementation was compiled for. A build for a newer EVM (the fork suites run
+///         under one) produces different code, so the live comparison skips there.
 contract LegalBodyFactoryDeployCheckForkTest is Test {
     address internal constant LIVE_FULL_FACTORY = 0x83D529E813Fe825b84250034A7A63f460A2ECA77;
     address internal constant LIVE_IMPL = 0xc2e89ABf562f2EB366e4dde42325af16EeF542a6;
-
-    DeployLegalBodyFactoryHarness internal script;
-
-    function setUp() public {
-        script = new DeployLegalBodyFactoryHarness();
-        vm.makePersistent(address(script)); // survives the fork switch below
-    }
 
     function _supportsPush0() internal returns (bool ok) {
         bytes memory initcode = hex"5f";
@@ -247,18 +233,18 @@ contract LegalBodyFactoryDeployCheckForkTest is Test {
         ok = probe != address(0);
     }
 
-    function test_stripMetadata_dropsTheCborTail() public view {
+    function test_stripMetadata_dropsTheCborTail() public pure {
         // 3 code bytes, then a 4-byte "CBOR" block and its 2-byte big-endian length (4).
         bytes memory code = hex"6001ff" hex"a1b2c3d4" hex"0004";
-        assertEq(script.stripMetadata(code), hex"6001ff");
+        assertEq(BytecodeMetadata.strip(code), hex"6001ff");
         // Only the metadata differs: equal after stripping.
-        assertEq(script.stripMetadata(hex"6001ff" hex"a1b2" hex"0002"), script.stripMetadata(code));
+        assertEq(BytecodeMetadata.strip(hex"6001ff" hex"a1b2" hex"0002"), BytecodeMetadata.strip(code));
     }
 
-    function test_stripMetadata_guardsLengthsLongerThanTheCode() public view {
-        assertEq(script.stripMetadata(hex"ffff"), hex"ffff", "L + 2 > length: unchanged");
-        assertEq(script.stripMetadata(hex"00"), hex"00", "shorter than the length field: unchanged");
-        assertEq(script.stripMetadata(hex"0000"), hex"", "L = 0 drops just the length field");
+    function test_stripMetadata_guardsLengthsLongerThanTheCode() public pure {
+        assertEq(BytecodeMetadata.strip(hex"ffff"), hex"ffff", "L + 2 > length: unchanged");
+        assertEq(BytecodeMetadata.strip(hex"00"), hex"00", "shorter than the length field: unchanged");
+        assertEq(BytecodeMetadata.strip(hex"0000"), hex"", "L = 0 drops just the length field");
     }
 
     function test_fork_liveImplementationIsThisRepoLegalManager() public {
@@ -274,6 +260,6 @@ contract LegalBodyFactoryDeployCheckForkTest is Test {
         bytes memory ours = vm.getDeployedCode("LegalManager.sol:LegalManager");
         assertGt(live.length, 0, "live implementation missing");
         assertTrue(keccak256(live) != keccak256(ours), "metadata differs, so the raw codes differ");
-        assertEq(script.stripMetadata(live), script.stripMetadata(ours), "live implementation is not this repo's");
+        assertEq(BytecodeMetadata.strip(live), BytecodeMetadata.strip(ours), "live implementation is not this repo's");
     }
 }

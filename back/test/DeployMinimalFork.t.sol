@@ -8,7 +8,9 @@ import {IIdentityRegistry} from "../src/interfaces/IIdentityRegistry.sol";
 /// @notice Runs the shipped Minimal deploy script against live Arc testnet state, with fresh keys
 ///         and the live identity registry, then uses what it deployed end to end: a link signed
 ///         by the identity owner, the owner's pointer, the guardian's dissolution and its cancel,
-///         and the refusal of every full-product selector. Nothing is broadcast.
+///         the refusal of every full-product selector, and a whole release: a version published
+///         by the administrator's ceremony and a body moved to it by its guardian's signature.
+///         Nothing is broadcast.
 contract DeployMinimalForkTest is DeployMinimalChecks {
     address internal constant LIVE_REGISTRY = 0x8004A818BFB912233c491871b3d84c89A494BD9e;
     uint256 internal constant ARC_TESTNET = 5042002;
@@ -80,6 +82,14 @@ contract DeployMinimalForkTest is DeployMinimalChecks {
 
     function test_fork_executorCannotRelayFullProductSelectors() public onlyFork {
         _assertExecutorCannotRelayFullProduct(LIVE_REGISTRY, agentId);
+    }
+
+    function test_fork_nobodyCanRelayReleaseSelectors() public onlyFork {
+        _assertNobodyCanRelayRelease();
+    }
+
+    function test_fork_releaseCeremonyThenGuardianUpgrade() public onlyFork {
+        _assertReleaseAndGuardianUpgrade(_createBodyViaExecutor(agentId));
     }
 
     function test_fork_nobodyHoldsWildcard() public onlyFork {

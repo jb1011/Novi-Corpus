@@ -143,7 +143,8 @@ Live operations on testnet: formation runs, demo runs, monitoring.
 | [runbooks/formation-e2e-1-2026-08-26.md](./runbooks/formation-e2e-1-2026-08-26.md) | Record | 2026-09-18 | The first end-to-end formation run on doola's sandbox. |
 | [runbooks/formation-settle-probe-2026-09.md](./runbooks/formation-settle-probe-2026-09.md) | Record | 2026-09-10 | The live settle probe that gated a merge. |
 | [runbooks/controller-monitoring.md](./runbooks/controller-monitoring.md) | Runbook | 2026-10-19 | Monitoring the NoviController. |
-| [runbooks/minimal-mainnet-deploy.md](./runbooks/minimal-mainnet-deploy.md) | Runbook | 2026-11-10 | Deploying Minimal Novi to Arc mainnet, and its testnet rehearsal. |
+| [runbooks/minimal-mainnet-deploy.md](./runbooks/minimal-mainnet-deploy.md) | Runbook | 2026-11-20 | Deploying Minimal Novi to Arc mainnet, and its testnet rehearsal. |
+| [runbooks/legal-body-version-release.md](./runbooks/legal-body-version-release.md) | Runbook | 2026-11-20 | Publishing or withdrawing a version of the legal body's code. |
 | [runbooks/legalbody-monitor.service](./runbooks/legalbody-monitor.service) | Ops file | 2026-09-09 | systemd unit for the monitor. |
 | [runbooks/novi-heartbeat.sh](./runbooks/novi-heartbeat.sh) | Ops file | 2026-10-19 | The server heartbeat script (see "Dead-man's switch" in [controller-monitoring.md](./runbooks/controller-monitoring.md)). |
 | [runbooks/novi-heartbeat.service](./runbooks/novi-heartbeat.service) | Ops file | 2026-10-19 | systemd unit for the heartbeat. |

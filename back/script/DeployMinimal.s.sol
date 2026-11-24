@@ -2,6 +2,7 @@
 pragma solidity ^0.8.24;
 
 import {Script, console2} from "forge-std/Script.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
 import {ControllerSelectors} from "../src/libraries/ControllerSelectors.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
 import {LegalBody} from "../src/LegalBody.sol";
@@ -10,7 +11,9 @@ import {NoviController} from "../src/NoviController.sol";
 /// @notice Deploys Minimal Novi in one broadcast: a fresh LegalBody implementation, a
 ///         LegalBodyFactory owned by the controller from construction, and a NoviController that
 ///         grants the executor only the two legal-body selectors and pins both to the factory in
-///         its constructor. Nothing is relayable before it is pinned, and no admin transaction
+///         its constructor. The same constructor pins the factory's two release selectors
+///         (publishing and withdrawing a version of the body's code) to the factory and grants
+///         them to no one. Nothing is relayable before it is pinned, and no admin transaction
 ///         follows: there is no acceptOwnership, no pin ceremony and no break-glass.
 /// @dev    Env:
 ///           PRIVATE_KEY              throwaway deployer key; it ends up holding no role
@@ -179,6 +182,33 @@ contract DeployMinimal is Script {
             require(!controller.hasRole(bytes32(full[i]), c.executor), "executor holds a full-product grant");
             require(controller.boundTarget(full[i]) == address(0), "a full-product selector is pinned");
         }
+        // Publishing and withdrawing a version are pinned to the factory and held by no one: a
+        // release is a one-off ceremony of the role administrator, never a standing grant.
+        bytes4[] memory release = ControllerSelectors.minimalReleaseSelectors();
+        for (uint256 i = 0; i < release.length; i++) {
+            require(controller.boundTarget(release[i]) == address(factory), "release selector not pinned to the factory");
+            bytes32 role = bytes32(release[i]);
+            require(
+                !controller.hasRole(role, c.executor) && !controller.hasRole(role, c.admin)
+                    && !controller.hasRole(role, deployer),
+                "a release selector is granted"
+            );
+        }
+
+        // The version list holds the implementation and nothing else, and the factory predicts
+        // body addresses for the proxy this repository compiles around that implementation.
+        require(factory.versionCount() == 1, "the factory does not list exactly one version");
+        LegalBodyFactory.Version memory first = factory.versionInfo(1);
+        require(first.implementation == address(d.implementation), "version 1 is not the implementation");
+        require(first.codehash == address(d.implementation).codehash, "version 1 code hash");
+        require(!first.withdrawn, "version 1 is withdrawn");
+        require(
+            factory.proxyInitCodeHash()
+                == keccak256(
+                    abi.encodePacked(type(ERC1967Proxy).creationCode, abi.encode(address(d.implementation), bytes("")))
+                ),
+            "the factory's proxy code is not this repository's ERC1967Proxy"
+        );
 
         bytes32 wildcard = controller.WILDCARD_ROLE();
         require(
@@ -213,7 +243,7 @@ contract DeployMinimal is Script {
         console2.log("All post-conditions hold in the local simulation. Addresses for the addresses file:");
         console2.log("{");
         console2.log('  "ours": {');
-        console2.log(string.concat('    "legalManagerImpl": "', vm.toString(address(d.implementation)), '",'));
+        console2.log(string.concat('    "legalBodyImpl": "', vm.toString(address(d.implementation)), '",'));
         console2.log(string.concat('    "legalBodyFactory": "', vm.toString(address(d.factory)), '",'));
         console2.log(string.concat('    "noviController": "', vm.toString(address(d.controller)), '",'));
         console2.log('    "controllerDeployTx": "",');
