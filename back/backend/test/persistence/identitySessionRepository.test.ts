@@ -161,6 +161,41 @@ describe("SqliteIdentitySessionRepository", () => {
     expect(count()).toBe(3);
   });
 
+  test("the database itself holds one open session per tenant: a raw second open row is refused, a second row after the first is closed is taken", () => {
+    // Past the repository and its check: the table's partial unique index decides.
+    const insertRaw = (n: number, closedAt: number | null) =>
+      db
+        .prepare(
+          `INSERT INTO identity_sessions (session_id, tenant_id, provider, provider_ref, environment,
+             livemode, return_path, created_at, started_check_id, closed_at, updated_at)
+           VALUES (@session_id, @tenant_id, 'stripe', @provider_ref, 'sandbox', 0, '/legal-body',
+             @at, @n, @closed_at, @at)`,
+        )
+        .run({
+          session_id: sid(n),
+          tenant_id: tenant(7),
+          provider_ref: `vs_test${n}`,
+          at: T0 + n,
+          n,
+          closed_at: closedAt,
+        });
+
+    insertRaw(1, null);
+    expect(() => insertRaw(2, null)).toThrow(
+      /UNIQUE constraint failed: identity_sessions.tenant_id/,
+    );
+    expect(count()).toBe(1);
+
+    db.prepare("UPDATE identity_sessions SET closed_at = ? WHERE session_id = ?").run(
+      T0 + DAY,
+      sid(1),
+    );
+    expect(insertRaw(2, null).changes).toBe(1);
+    // Closed rows are not held by it: a tenant keeps every session it ever closed.
+    expect(insertRaw(3, T0 + DAY).changes).toBe(1);
+    expect(count()).toBe(3);
+  });
+
   test("the open-session check is read inside the caller's transaction, which an insert joins", () => {
     expect(() =>
       repo.transaction(() => {

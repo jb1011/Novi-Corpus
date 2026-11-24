@@ -14,8 +14,9 @@ import type { EncryptedName } from "./identityRepository";
  *
  * Every write checks its SHAPE before it writes, and a refusal names the field and the rule, never
  * the value. Whether a write is due at all (a read, a close, a redaction) is the caller's decision;
- * the one rule held here is that a tenant has at most one open session. Times are unix ms. The
- * table is `identity_sessions` in db.ts.
+ * the one rule held here is that a tenant has at most one open session, which the table's unique
+ * index `idx_identity_sessions_one_open` holds as well. Times are unix ms. The table is
+ * `identity_sessions` in db.ts.
  */
 
 /** The typed names of a session, sealed: first and last under one key. */
@@ -105,12 +106,13 @@ export interface IdentitySessionRepository {
   /**
    * Validates the shape and throws on a bad one, before writing anything. Refused while the tenant
    * has an open session, the check read in the same IMMEDIATE transaction as the write (inside the
-   * caller's `transaction`, it joins it). Returns the stored row.
+   * caller's `transaction`, it joins it); the table's unique index refuses a second open row
+   * whatever writes it. Returns the stored row.
    */
   insert(s: NewIdentitySession): IdentitySession;
   byId(sessionId: string): IdentitySession | undefined;
   byProviderRef(providerRef: string): IdentitySession | undefined;
-  /** The tenant's open session, the newest if there were ever two. */
+  /** The tenant's open session: there is at most one (the table's unique index). */
   openForTenant(tenantId: string): IdentitySession | undefined;
   /** The tenant's newest session, open or closed (the operator's `identity:session`). */
   latestForTenant(tenantId: string): IdentitySession | undefined;

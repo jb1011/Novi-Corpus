@@ -1390,6 +1390,10 @@ const IDENTITY_SESSIONS_DDL = `
   );
   CREATE INDEX IF NOT EXISTS idx_identity_sessions_tenant_open
     ON identity_sessions(tenant_id, created_at) WHERE closed_at IS NULL;
+  -- One open session per tenant, held by the database whatever writes the row; the repository's
+  -- own check stays before it, for its message (decided 24 November).
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_identity_sessions_one_open
+    ON identity_sessions(tenant_id) WHERE closed_at IS NULL;
   CREATE INDEX IF NOT EXISTS idx_identity_sessions_redact
     ON identity_sessions(redact_due_at) WHERE redact_due_at IS NOT NULL AND redacted_at IS NULL;
 `;
