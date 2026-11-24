@@ -20,6 +20,7 @@ import {
   takeDoorTokens,
   toOrderView,
 } from "../../legalBody/orders";
+import { type LegalBodyPotDeps, assertPotOffered, declarePot, orderPot } from "../../legalBody/pot";
 import { resolveOrder } from "../../legalBody/resolver";
 import { refusal, refusedLinkSentence } from "../../legalBody/sentences";
 import type { LegalTextStatus } from "../../legalBody/texts/index";
@@ -84,18 +85,26 @@ import { assertRealHuman } from "./worldId";
  *  - `POST /legal-body-orders/:id/treasury` with `{ address, provider, providerName?,
  *    limitsReadableAt?, registryTxHash? }` records the treasury of record of a `linked` body: the
  *    wallet its agent pays from, once the registry shows it as the agent's wallet. 200 with the
- *    block the lookups serve (`TreasuryBlock`). Mounted where the deployment wires the record.
+ *    block the lookups serve (`TreasuryBlock`). Mounted where the deployment wires the record;
+ *  - `POST /legal-body-orders/:id/pot` with `{ address, saltNonce, ceilingUnits, agentWallet,
+ *    declarationVersion }` notes the company's pot of a `linked` body before its setup transaction,
+ *    once the server has recomputed its address from those birth details: 200 with its view
+ *    (`OrderPotView`). `GET /legal-body-orders/:id/pot` reads it: `{ pot }`, null before any note.
+ *    Both mounted where the deployment wires the pot; while its contracts are not verified, both
+ *    answer 409 `pot_not_offered` before anything is read and without spending a token.
  *
  * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/grantDoors.ts`,
  * `legalBody/adoption.ts`, `legalBody/linkDoor.ts`, `legalBody/resolver.ts`,
- * `legalBody/binding.ts`, `legalBody/gasSeed.ts`, `legalBody/treasury.ts`); these handlers decide
+ * `legalBody/binding.ts`, `legalBody/gasSeed.ts`, `legalBody/treasury.ts`, `legalBody/pot.ts`);
+ * these handlers decide
  * only what is a well-formed request, and the refresh which of the domain's two passes to run.
  * Every door starts with the real-human check (a verified credential, never a waiver), the reads
  * included; the domain functions of the order door, the three grant doors, the two adoption doors,
  * the two link doors and the binding door (`readBinding`, which the `get_binding` tool calls too)
  * make that check first themselves.
- * The one exception is the gas seed: while it is off, it answers before that check, reading
- * nothing and spending no token; on, `requestGasSeed` makes the check first.
+ * The exceptions are the gas seed and the pot: while either is off, it answers before that check,
+ * reading nothing and spending no token; on, `requestGasSeed` makes the check first, and the pot
+ * doors make it right after the off check.
  * Mounted under their own session protection, and only where the deployment wires the feature.
  *
  * An error a door did not choose never reaches the caller as it was thrown: anything but an
@@ -177,6 +186,7 @@ export function mountLegalBodyOrderRoutes(
   deps: LegalBodyOrderDeps,
   gasSeed?: GasSeedDeps,
   treasury?: LegalBodyTreasuryDeps,
+  pot?: LegalBodyPotDeps,
 ): void {
   // On every POST door, the abandon and refresh doors included: they read no body, and still
   // bound what a caller may send them. A declared length over the limit is refused before a byte
@@ -392,6 +402,33 @@ export function mountLegalBodyOrderRoutes(
         return c.json(treasuryView(declared));
       }),
     );
+
+  // The company's pot. While its contracts are not verified, both doors answer `pot_not_offered`
+  // first, reading nothing and spending no token. The note reads the registry and the chain, so it
+  // takes a token as the treasury door does: after the real-human check and before the order is
+  // read. A row of another factory or chain is read-only here. `declarePot` reads the order again
+  // and makes every other check itself, the body's fields included. The read takes no token, as
+  // the order's own read takes none.
+  if (pot) {
+    app.post("/legal-body-orders/:id/pot", limit, (c) =>
+      door("pot", async () => {
+        assertPotOffered(pot);
+        const body = await readJson(c);
+        const tenantId = realHuman(c.get("tenantId"));
+        takeDoorTokens(deps, tenantId);
+        const row = requireOwnedOrder(deps, tenantId, c.req.param("id"));
+        assertThisDeployment(deps, row);
+        return c.json(await declarePot(pot, tenantId, row.legalBodyId, body));
+      }),
+    );
+    app.get("/legal-body-orders/:id/pot", (c) =>
+      door("pot_read", () => {
+        assertPotOffered(pot);
+        const tenantId = realHuman(c.get("tenantId"));
+        return c.json(orderPot(pot, tenantId, c.req.param("id")));
+      }),
+    );
+  }
 }
 
 /**

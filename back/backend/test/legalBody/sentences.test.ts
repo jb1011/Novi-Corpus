@@ -37,6 +37,7 @@ const ANSWERING_MODULES = [
   "legalBody/checkLink.ts",
   "legalBody/gasSeed.ts",
   "legalBody/treasury.ts",
+  "legalBody/pot.ts",
   "legalBody/draftTextRefusal.ts",
   "formation/company.ts",
   "workflow/formationPayment.ts",
@@ -101,6 +102,14 @@ const NAMED_CODES = [
   "link_outlasts_grant",
   "grant_unreadable",
   "declaration_outdated",
+  "pot_not_offered",
+  "pot_invalid",
+  "pot_declaration_required",
+  "pot_chain_unsupported",
+  "ceiling_above_grant",
+  "grant_allows_no_spending",
+  "pot_address_mismatch",
+  "pot_exists",
 ];
 
 const CODE = "([a-z][a-z0-9_]*)";
@@ -206,6 +215,43 @@ describe("what the sentences say", () => {
     // door did not choose.
     for (const code of [...Object.keys(LINK_REFUSAL_CODES), "order_lapsed", "internal_error"])
       expect(LEGAL_BODY_SENTENCES[code], code).not.toMatch(NOTHING_CHANGED);
+  });
+
+  test("the pot's sentences: the brief's words, and none that claims more than was read", () => {
+    expect(LEGAL_BODY_SENTENCES.pot_invalid).toBe(
+      "The pot's details are not ones the record takes: its address, its salt number, its first ceiling, its first key and the declaration's version, as the page sends them.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_declaration_required).toBe(
+      "A pot is noted only with the guardian's declaration, in the version the page shows. Nothing was noted.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_chain_unsupported).toBe(
+      "The pot is not offered on this deployment's chain.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_address_mismatch).toBe(
+      "This address is not the one a pot with your wallet as only owner, this agent's wallet as only key and this ceiling would have. Nothing was noted.",
+    );
+    expect(LEGAL_BODY_SENTENCES.pot_exists).toBe(
+      "This legal body already has its pot, and a legal body keeps one pot for its whole life. Nothing was noted.",
+    );
+    const pot = [
+      "pot_not_offered",
+      "pot_invalid",
+      "pot_declaration_required",
+      "pot_chain_unsupported",
+      "ceiling_above_grant",
+      "grant_allows_no_spending",
+      "pot_address_mismatch",
+      "pot_exists",
+    ];
+    for (const code of pot) {
+      const sentence = LEGAL_BODY_SENTENCES[code] as string;
+      expect(sentence, code).not.toMatch(
+        /enforced|guarantee|free\b|our agents|per thirty days|\u2014/i,
+      );
+    }
+    // The two that speak of the ceiling count fixed periods.
+    for (const code of ["ceiling_above_grant", "grant_allows_no_spending"])
+      expect(LEGAL_BODY_SENTENCES[code], code).toContain("in each thirty-day period");
   });
 
   test("a sentence that can be followed by order_lapsed sends nobody back to the order it ends", () => {

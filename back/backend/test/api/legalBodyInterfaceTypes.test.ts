@@ -169,6 +169,7 @@ const LEGAL_BODY_CONFIG_KEYS: Record<keyof AvailableLegalBodyConfig, true> = {
   paymentRequired: true,
   identityRequired: true,
   identityCheckAutomatic: true,
+  pot: true,
   formedDoor: true,
   filingWorkingDays: true,
   linkTtl: true,
@@ -295,3 +296,12 @@ test("the interface's adoption fields are this backend's, by name and type, in o
     ADOPTION_FIELDS.map(({ name, type }) => ({ name, type })),
   );
 });
+
+/**
+ * The guardian ticks the pot's declaration on the website's review screen, and the server stores
+ * its version: the website's copy must hold the same words and the same version, word for word.
+ * The website's copy gains its pot section with the pot's step (Task 10), which turns this on.
+ */
+test.todo(
+  "the website's copy holds POT_DECLARATION's text and version, word for word (interface/src/lib/legalBody/copy.ts)",
+);

@@ -163,6 +163,31 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // wording than the declaration of the pair this deployment serves.
   declaration_outdated:
     "This company was declared under another wording than the one this deployment serves, and a declaration is never rewritten: declare the company as a new one, then place the order on it.",
+  // The two pot doors, while this process has not verified the code of the pot's seven contracts
+  // (at start-up, or since a node could not be read): the reason stays in the boot log.
+  pot_not_offered: "The pot is not offered on this deployment just now.",
+  // `POST /legal-body-orders/:id/pot`: details the door cannot take as they were sent.
+  pot_invalid:
+    "The pot's details are not ones the record takes: its address, its salt number, its first ceiling, its first key and the declaration's version, as the page sends them.",
+  // …a declaration of another version than the one the server stores, or none.
+  pot_declaration_required:
+    "A pot is noted only with the guardian's declaration, in the version the page shows. Nothing was noted.",
+  // …a deployment on a chain with no pot table.
+  pot_chain_unsupported: "The pot is not offered on this deployment's chain.",
+  // …a ceiling above the sum of the grant's thirty-day amounts for buying, paying and engaging
+  // contractors, where the order has a grant (Ruling R12).
+  ceiling_above_grant:
+    "The pot's ceiling in each thirty-day period cannot be above the total your agent's grant allows for buying, paying and engaging contractors. Nothing was noted.",
+  // …a grant that allows none of the three.
+  grant_allows_no_spending:
+    "Your agent's grant allows no buying, no paying and no engaging of contractors, so a pot would have nothing to release in each thirty-day period. Nothing was noted.",
+  // …an address that is not the one the server recomputes from the birth details, or a first key
+  // that is not the wallet the registry names as the agent's.
+  pot_address_mismatch:
+    "This address is not the one a pot with your wallet as only owner, this agent's wallet as only key and this ceiling would have. Nothing was noted.",
+  // …a body one of whose noted pots holds code, for any other address (one pot for life).
+  pot_exists:
+    "This legal body already has its pot, and a legal body keeps one pot for its whole life. Nothing was noted.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */

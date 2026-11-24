@@ -3,6 +3,7 @@ import {
   type Hex,
   type PublicClient,
   getAddress,
+  isAddress,
   keccak256,
   zeroAddress,
 } from "viem";
@@ -210,10 +211,15 @@ const POT_CONTRACT_NAMES: Readonly<Record<keyof PotAddresses, string>> = {
 /** The order the seven are read and reported in: the table's. */
 const POT_CONTRACTS = Object.keys(POT_CONTRACT_NAMES) as (keyof PotAddresses)[];
 
-/** mismatch: the chain answered, and a contract holds no code or other code (a security stop for
- *  the pot; retrying will not change it). unreadable: a read of the code failed, or answered
- *  something that is not code (the deployment may be fine; it could not be confirmed). */
+/** mismatch: the chain answered, and a contract holds no code or other code; or the table or the
+ *  hashes the check was handed cannot be used (a security stop for the pot; retrying will not
+ *  change it). unreadable: a read of the code failed, or answered something that is not code (the
+ *  deployment may be fine; it could not be confirmed). */
 export type PotContractsProblem = "mismatch" | "unreadable";
+
+/** What the check was handed and could not use, before any read: no table of addresses, no
+ *  record of hashes, or a table entry that is not an address. Always a mismatch. */
+export type PotContractsUnusable = "table" | "hashes" | "address";
 
 /**
  * The one error `assertPotContracts` throws, whose `reason` says which: a caller catches exactly
@@ -228,6 +234,8 @@ export class PotContractsNotVerifiedError extends Error {
   readonly address?: Address;
   readonly expected?: Hex;
   readonly actual?: Hex | null;
+  /** Set when the check could not use what it was handed (always a mismatch): no read was made. */
+  readonly unusable?: PotContractsUnusable;
 
   constructor(f: {
     reason: PotContractsProblem;
@@ -235,6 +243,7 @@ export class PotContractsNotVerifiedError extends Error {
     address?: Address;
     expected?: Hex;
     actual?: Hex | null;
+    unusable?: PotContractsUnusable;
     cause?: unknown;
   }) {
     super(PotContractsNotVerifiedError.describe(f), { cause: f.cause });
@@ -244,6 +253,7 @@ export class PotContractsNotVerifiedError extends Error {
     this.address = f.address;
     this.expected = f.expected;
     this.actual = f.actual;
+    this.unusable = f.unusable;
   }
 
   /** One line for the boot log: the contract, its address and, on a mismatch, the two hashes. */
@@ -253,12 +263,21 @@ export class PotContractsNotVerifiedError extends Error {
     address?: Address;
     expected?: Hex;
     actual?: Hex | null;
+    unusable?: PotContractsUnusable;
     cause?: unknown;
   }): string {
+    const name =
+      f.contract === undefined ? undefined : (POT_CONTRACT_NAMES[f.contract] ?? f.contract);
+    if (f.unusable === "table")
+      return "mismatch: the table of the pot's seven contracts is not a table of addresses";
+    if (f.unusable === "hashes")
+      return "mismatch: the pinned code hashes are not a record of hashes";
+    if (f.unusable === "address")
+      return `mismatch: the pot's ${name ?? "contract"} (${f.contract}) has no address in the table`;
     const which =
       f.contract === undefined
         ? "one of the pot's seven contracts"
-        : `the pot's ${POT_CONTRACT_NAMES[f.contract] ?? f.contract} (${f.contract}) at ${f.address}`;
+        : `the pot's ${name} (${f.contract}) at ${f.address}`;
     if (f.reason === "unreadable") {
       const why = f.cause instanceof Error ? `: ${f.cause.message.split("\n")[0]}` : "";
       return `unreadable: the code of ${which} could not be read${why}`;
@@ -279,6 +298,11 @@ export class PotContractsNotVerifiedError extends Error {
  *   contract: the chain's answer for one contract is a stop whatever the others answered.
  * - `reason: "unreadable"`: a read failed, or answered something that is not code.
  *
+ * Before any read, what it was handed is checked: a table that is not an object, a hashes record
+ * that is not one, or a table entry that is not an address (in any letter case) is a mismatch
+ * too, with `unusable` saying which, and no read is made. Never a plain TypeError, and never
+ * `unreadable`, which the caller would try again forever.
+ *
  * The first contract at fault in the table's order is named. The check decides nothing about the
  * rest of the server: its caller catches this one class, boots anyway and only switches the pot
  * off (Ruling R1). A caller that forgot to catch it would still fail closed: the boot would stop,
@@ -289,6 +313,15 @@ export async function assertPotContracts(
   a: PotAddresses,
   hashes: Readonly<Record<keyof PotAddresses, Hex>> = POT_CODE_HASHES,
 ): Promise<void> {
+  if (typeof a !== "object" || a === null)
+    throw new PotContractsNotVerifiedError({ reason: "mismatch", unusable: "table" });
+  if (typeof hashes !== "object" || hashes === null)
+    throw new PotContractsNotVerifiedError({ reason: "mismatch", unusable: "hashes" });
+  for (const contract of POT_CONTRACTS) {
+    const address: unknown = a[contract];
+    if (typeof address !== "string" || !isAddress(address, { strict: false }))
+      throw new PotContractsNotVerifiedError({ reason: "mismatch", contract, unusable: "address" });
+  }
   const reads = await Promise.allSettled(
     POT_CONTRACTS.map(async (contract) => {
       const code: unknown = await client.getCode({ address: checksummed(a[contract]) });

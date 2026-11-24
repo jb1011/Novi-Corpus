@@ -1258,6 +1258,10 @@ export type LegalBodyConfig =
        *  leaving the record to an operator. Absent from a backend before the automatic identity
        *  check, read as false. */
       identityCheckAutomatic?: boolean;
+      /** The company's pot is offered: its doors are mounted and the server has verified the code
+       *  of its seven contracts. The web app offers nothing of the pot unless this is true. Absent
+       *  from a backend before the pot, read as false. */
+      pot?: boolean;
       /** Whether to show the door that forms a company through doola: `cap_reached` when every
        *  gate holds but the deployment has taken all the formed companies it takes. Absent from a
        *  backend before F-A-1, read as "hidden". */
@@ -1281,6 +1285,7 @@ export const LEGAL_BODY_CONFIG_KEYS = [
   "paymentRequired",
   "identityRequired",
   "identityCheckAutomatic",
+  "pot",
   "formedDoor",
   "filingWorkingDays",
   "linkTtl",

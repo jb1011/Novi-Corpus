@@ -598,3 +598,67 @@ describe("assertPotContracts: the seven contracts hold the pinned code", () => {
     expect(e.reason).toBe("unreadable");
   });
 });
+
+describe("assertPotContracts: a table or a hashes record it cannot use is a mismatch, before any read", () => {
+  // Never a plain TypeError, and never `unreadable`, which the caller would try again forever.
+  test("a table entry that is not an address: a mismatch naming that contract, with no read", async () => {
+    for (const bad of [undefined, null, 42, "", "0x1234", `0x${"g".repeat(40)}`, {}]) {
+      for (const name of NAMES) {
+        const { client, getCode } = codeClient(FAKE_CODES);
+        const table = { ...T, [name]: bad } as unknown as PotAddresses;
+        const e = await refusalOf(assertPotContracts(client, table, FAKE_HASHES));
+        expect(e.reason, `${name}: ${String(bad)}`).toBe("mismatch");
+        expect(e.contract).toBe(name);
+        expect(e.address).toBeUndefined();
+        expect(e.message).toMatch(/^mismatch: /);
+        expect(e.message).toContain(name);
+        expect(getCode).not.toHaveBeenCalled();
+      }
+    }
+  });
+
+  test("the first entry at fault, in the table's order, is named", async () => {
+    const table = { ...T, usdc: "0x1234", proxyFactory: null } as unknown as PotAddresses;
+    const e = await refusalOf(
+      assertPotContracts(codeClient(FAKE_CODES).client, table, FAKE_HASHES),
+    );
+    expect(e.contract).toBe("proxyFactory");
+  });
+
+  test("a null table, or one that is not an object: a mismatch, with no read", async () => {
+    for (const table of [null, undefined, "table", 7]) {
+      const { client, getCode } = codeClient(FAKE_CODES);
+      const e = await refusalOf(
+        assertPotContracts(client, table as unknown as PotAddresses, FAKE_HASHES),
+      );
+      expect(e.reason, String(table)).toBe("mismatch");
+      expect(e.contract).toBeUndefined();
+      expect(e.message).toMatch(/^mismatch: /);
+      expect(getCode).not.toHaveBeenCalled();
+    }
+  });
+
+  test("null hashes, or hashes that are not an object: a mismatch, with no read", async () => {
+    for (const hashes of [null, "hashes", 7]) {
+      const { client, getCode } = codeClient(FAKE_CODES);
+      const e = await refusalOf(
+        assertPotContracts(
+          client,
+          T,
+          hashes as unknown as Readonly<Record<keyof PotAddresses, Hex>>,
+        ),
+      );
+      expect(e.reason, String(hashes)).toBe("mismatch");
+      expect(e.contract).toBeUndefined();
+      expect(e.message).toMatch(/^mismatch: /);
+      expect(getCode).not.toHaveBeenCalled();
+    }
+  });
+
+  test("an entry in any letter case is still an address, and is read checksummed", async () => {
+    const lower = Object.fromEntries(NAMES.map((n) => [n, T[n].toLowerCase()])) as PotAddresses;
+    const { client, getCode } = codeClient(FAKE_CODES);
+    await expect(assertPotContracts(client, lower, FAKE_HASHES)).resolves.toBeUndefined();
+    expect(getCode.mock.calls.map(([p]) => p)).toEqual(NAMES.map((name) => ({ address: T[name] })));
+  });
+});
