@@ -5,8 +5,14 @@ import {Script, console2} from "forge-std/Script.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
 import {ControllerSelectors} from "../src/libraries/ControllerSelectors.sol";
 
-/// @notice Deploys the LegalBodyFactory, owned by the controller from construction, and prints
-///         the admin ceremony that follows it. The ceremony is not broadcast here: it needs the
+/// @notice SUPERSEDED by `DeployMinimal.s.sol`, and kept only until the deploy scripts are
+///         tidied. It can no longer complete: it requires LEGAL_MANAGER_IMPL to be a plain
+///         LegalManager, and the factory's constructor now refuses anything that is not a
+///         LegalBody (`NotImplementation`). Use `DeployMinimal.s.sol`, which deploys the
+///         LegalBody implementation, the factory and the controller together.
+///
+///         What it did: deploy the LegalBodyFactory, owned by the controller from construction,
+///         and print the admin ceremony that follows it. The ceremony is not broadcast here: it needs the
 ///         controller ADMIN key, which is not the deployer, and it is done by a person.
 /// @dev    Env: PRIVATE_KEY, CHAIN_ID, IDENTITY_REGISTRY, CONTROLLER, LEGAL_MANAGER_IMPL (all
 ///         required); CONTROLLER_EXECUTOR (optional, only for the printed ceremony).

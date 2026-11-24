@@ -4,10 +4,10 @@ pragma solidity ^0.8.24;
 import {Script, console2} from "forge-std/Script.sol";
 import {ControllerSelectors} from "../src/libraries/ControllerSelectors.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
-import {LegalManager} from "../src/LegalManager.sol";
+import {LegalBody} from "../src/LegalBody.sol";
 import {NoviController} from "../src/NoviController.sol";
 
-/// @notice Deploys Minimal Novi in one broadcast: a fresh LegalManager implementation, a
+/// @notice Deploys Minimal Novi in one broadcast: a fresh LegalBody implementation, a
 ///         LegalBodyFactory owned by the controller from construction, and a NoviController that
 ///         grants the executor only the two legal-body selectors and pins both to the factory in
 ///         its constructor. Nothing is relayable before it is pinned, and no admin transaction
@@ -45,7 +45,7 @@ contract DeployMinimal is Script {
     }
 
     struct Deployment {
-        LegalManager implementation;
+        LegalBody implementation;
         LegalBodyFactory factory;
         NoviController controller;
         uint256 controllerDeployBlock;
@@ -83,7 +83,7 @@ contract DeployMinimal is Script {
             adminDelay: _envAdminDelay()
         });
         Deployment memory d = Deployment({
-            implementation: LegalManager(payable(implementation)),
+            implementation: LegalBody(payable(implementation)),
             factory: LegalBodyFactory(factory),
             controller: NoviController(controller),
             controllerDeployBlock: 0
@@ -109,7 +109,7 @@ contract DeployMinimal is Script {
         _requirePreConditions(c, deployer);
 
         vm.startBroadcast(c.deployerKey);
-        d.implementation = new LegalManager();
+        d.implementation = new LegalBody();
         // The implementation took one nonce; the factory takes the next and the controller the
         // one after it.
         uint256 nonce = vm.getNonce(deployer);

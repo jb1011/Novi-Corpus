@@ -231,13 +231,11 @@ function revertBytes(name: string): Hex {
 }
 
 /** The reverts that are a fault of the platform's setup: every error the controller declares, the
- *  factory's ownership errors, and the errors of its deployment of a body. */
+ *  factory's ownership errors, and its errors about the code behind a body. */
 const PLATFORM_FAULTS = [
   ...(noviControllerAbi as Abi).flatMap((x) => (x.type === "error" ? [x.name] : [])),
   "OwnableUnauthorizedAccount",
   "OwnableInvalidOwner",
-  "FailedDeployment",
-  "InsufficientBalance",
   "NotContract",
   "NotImplementation",
 ];

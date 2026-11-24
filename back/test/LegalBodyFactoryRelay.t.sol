@@ -5,12 +5,13 @@ import {ControllerRelayHarness} from "./helpers/ControllerRelayHarness.sol";
 import {ControllerSelectors} from "../src/libraries/ControllerSelectors.sol";
 import {NoviController} from "../src/NoviController.sol";
 import {LegalBodyFactory} from "../src/LegalBodyFactory.sol";
+import {LegalBody} from "../src/LegalBody.sol";
 import {LegalManager} from "../src/LegalManager.sol";
 import {MockIdentityRegistry} from "./mocks/MockIdentityRegistry.sol";
 
 contract LegalBodyFactoryRelayTest is ControllerRelayHarness {
     MockIdentityRegistry internal registry;
-    LegalManager internal impl;
+    LegalBody internal impl;
     LegalBodyFactory internal factory;
     address internal stranger = makeAddr("stranger");
     uint256 internal ownerPk = 0xA11CE;
@@ -25,7 +26,7 @@ contract LegalBodyFactoryRelayTest is ControllerRelayHarness {
         registry = new MockIdentityRegistry();
         (bytes4[] memory ps, address[] memory pt) = _registryPins(address(registry));
         controller = new NoviController(24 hours, admin, executor, _grantedSelectors(), ps, pt);
-        impl = new LegalManager();
+        impl = new LegalBody();
         factory = new LegalBodyFactory(address(impl), address(registry), address(controller));
         guardian = vm.addr(guardianPk);
         vm.prank(makeAddr("burn")); // a test contract cannot receive the registry's _safeMint
