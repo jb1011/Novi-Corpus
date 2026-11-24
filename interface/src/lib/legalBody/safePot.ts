@@ -35,7 +35,7 @@ import { sameAddress } from "./flow";
 // ---------------------------------------------------------------------------------------------
 
 /** The pot's period: thirty days in minutes, the module's `resetTimeMin`. The periods are fixed:
- *  each starts where the last one ended, counted from the minute the ceiling was set. */
+ *  each starts where the last one ended, counted from the minute the ceiling was first set. */
 export const POT_PERIOD_MINUTES = 43200;
 /** Units in 1 USDC: the ERC-20 face of Arc's native balance has 6 decimals. */
 export const USDC_UNIT = BigInt(1_000_000);
@@ -120,6 +120,31 @@ const POT_CHAIN_IDS: readonly number[] = [5042, 5042002];
  *  each time, so a caller that changes its copy changes nothing else. */
 export function potAddresses(chainId: number): PotAddresses | null {
   return POT_CHAIN_IDS.includes(chainId) ? { ...ARC_POT_ADDRESSES } : null;
+}
+
+/** Why the setup could not be built: another singleton (the factory would create the Safe at
+ *  another address than the one predicted, and the money would go to the predicted one), another
+ *  proxy factory (the same), or an amount below 0. */
+export type PotBuildProblem = "other_singleton" | "other_proxy_factory" | "negative_amount";
+
+/** Thrown by the setup's builders on what no screen should hand them: a bug to fix, never a
+ *  sentence to show. The allowlist refuses each case before it calls them. */
+export class PotBuildError extends Error {
+  readonly problem: PotBuildProblem;
+  constructor(problem: PotBuildProblem) {
+    super(`The pot's setup cannot be built: ${problem}.`);
+    this.name = "PotBuildError";
+    this.problem = problem;
+  }
+}
+
+/** The pot's address is predicted from the pinned init code hash, which holds the pinned
+ *  singleton, and from the pinned factory: with any other, the prediction would be wrong. */
+function assertPinnedSafe(a: PotAddresses): void {
+  if (!sameAddress(a.safeSingleton, ARC_POT_ADDRESSES.safeSingleton))
+    throw new PotBuildError("other_singleton");
+  if (!sameAddress(a.proxyFactory, ARC_POT_ADDRESSES.proxyFactory))
+    throw new PotBuildError("other_proxy_factory");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -624,8 +649,10 @@ export function potInitializer(a: PotAddresses, p: PotSetup): Hex {
 }
 
 /** CREATE2 of the factory: salt = keccak256(keccak256(initializer) ++ saltNonce as 32 bytes), with
- *  SAFE_PROXY_INIT_CODE_HASH. No chain read: the init code hash is pinned. Checksummed. */
+ *  SAFE_PROXY_INIT_CODE_HASH. No chain read: the init code hash is pinned. Checksummed. Throws
+ *  `PotBuildError` unless `a` names the pinned singleton and factory. */
 export function predictPotAddress(a: PotAddresses, initializer: Hex, saltNonce: bigint): Address {
+  assertPinnedSafe(a);
   const salt = keccak256(encodePacked(["bytes32", "uint256"], [keccak256(initializer), saltNonce]));
   return getContractAddress({
     opcode: "CREATE2",
@@ -640,11 +667,14 @@ export type Call3Value = { target: Address; allowFailure: false; value: bigint; 
 
 /** Call 1 creates the Safe; call 2 sends `fundWei` to the predicted address, left out when 0;
  *  call 3 sends `agentGasWei` to the agent's wallet, left out when 0. `value` is their sum: the
- *  value the guardian's transaction to Multicall3 carries. */
+ *  value the guardian's transaction to Multicall3 carries. Throws `PotBuildError` unless `a` names
+ *  the pinned singleton and factory, and when an amount is below 0. */
 export function potSetupCalls(
   a: PotAddresses,
   p: PotSetup & { saltNonce: bigint; fundWei: bigint; agentGasWei: bigint },
 ): { pot: Address; calls: Call3Value[]; value: bigint } {
+  assertPinnedSafe(a);
+  if (p.fundWei < ZERO || p.agentGasWei < ZERO) throw new PotBuildError("negative_amount");
   const initializer = potInitializer(a, p);
   const pot = predictPotAddress(a, initializer, p.saltNonce);
   const calls: Call3Value[] = [

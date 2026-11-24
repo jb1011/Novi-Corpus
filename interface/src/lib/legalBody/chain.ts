@@ -2,14 +2,43 @@
  * The legal-body flow's chain layer: the pinned ABI fragments, the pointer encoder, the one
  * allowlist every wallet write request passes, the door that sends it, and the mint parse.
  *
- * Pin and assert, then send: nothing reaches a wallet unless it is one of the four calls below,
- * built for the selected order or, for the agent's wallet, the selected identity, on the chain and
- * registry that `/config` names. Addresses come from the API (`/config.legalBodies`, the order),
- * never from this bundle. Never an approval, a transfer or a value.
+ * Pin and assert, then send: nothing reaches a wallet unless it is one of the six calls below.
+ * Four are on the identity registry, built for the selected order or, for the agent's wallet, the
+ * selected identity, on the chain and registry that `/config` names: never an approval, a transfer
+ * or a value. Two are the company's pot, sent from the order's guardian's own account: its setup,
+ * one transaction to Multicall3 that creates the pot and may carry money to two places only, the
+ * pot it creates and the agent's own wallet; and the guardian's `execTransaction` on the noted pot,
+ * which carries no value and changes the ceiling, stops the allowance, takes the pot's money back
+ * to the guardian, or starts it again. A pot call is rebuilt from the allowlist's own context and
+ * sent only when the request equals the rebuild. The registry's addresses come from the API
+ * (`/config.legalBodies`, the order), never from this bundle; the pot's contracts are pinned per
+ * chain in `safePot.ts`, and the pot's own address is the one the server noted for the order.
  */
 import { encodeAbiParameters, encodeFunctionData, formatUnits, getAddress } from "viem";
 import type { Address, Hex, LegalBodyConfig, LegalBodyOrderView } from "@/lib/api/types";
 import { sameAddress } from "./flow";
+import {
+  multicall3Abi,
+  POT_AGENT_GAS_MAX_UNITS,
+  POT_CEILING_MAX_USDC,
+  POT_EXEC_GAS_CAP,
+  POT_FUND_MAX_UNITS,
+  POT_PERIOD_MINUTES,
+  POT_SETUP_GAS_CAP,
+  potAddresses,
+  potChangeArgs,
+  potRestoreArgs,
+  potSetupCalls,
+  potStopArgs,
+  potWithdrawArgs,
+  safeAbi,
+  USDC_UNIT,
+  WEI_PER_UNIT,
+  type Call3Value,
+  type PotAddresses,
+  type PotSetup,
+  type SafeExecArgs,
+} from "./safePot";
 
 // ---------------------------------------------------------------------------------------------
 // Pinned ABI fragments
@@ -203,28 +232,82 @@ export function walletKindOf(code: Hex | undefined): WalletKind {
 // The allowlist
 // ---------------------------------------------------------------------------------------------
 
-/** The only shape a wallet write request takes in this flow. */
+/**
+ * The only shape a wallet write request takes in this flow: the registry's three functions over
+ * `identityRegistryAbi`, `aggregate3Value` over `multicall3Abi`, or `execTransaction` over
+ * `safeAbi`. One object type rather than one per pair: which ABI goes with which name, like every
+ * other field, is the allowlist's to check at run time, since the type was never proof.
+ */
 export type WriteRequest = {
   chainId: number;
   address: Address;
-  abi: typeof identityRegistryAbi;
-  functionName: "register" | "setMetadata" | "setAgentWallet";
+  abi: typeof identityRegistryAbi | typeof multicall3Abi | typeof safeAbi;
+  functionName:
+    | "register"
+    | "setMetadata"
+    | "setAgentWallet"
+    | "aggregate3Value"
+    | "execTransaction";
   args: readonly unknown[];
   value?: bigint;
   gas?: bigint;
 };
+
+/**
+ * What the allowlist rebuilds a pot call from. It is pure and reads nothing: a screen reads these
+ * in the same click. `guardian` is the order's `guardian` as the API served it; `agentWallet` is
+ * the registry's `getAgentWallet` for the order's identity; `pot` is the address the server noted
+ * for the order; `delegates`, `modules` and `balanceWei` are a `readPotRaw` of that pot. Money
+ * sent as value is in native wei (18 decimals); the ceiling is in USDC units (6).
+ */
+export type PotCallContext =
+  | {
+      kind: "setup";
+      guardian: Address;
+      agentWallet: Address;
+      ceilingUnits: bigint;
+      saltNonce: bigint;
+      fundWei: bigint;
+      agentGasWei: bigint;
+    }
+  | { kind: "change"; pot: Address; guardian: Address; agentWallet: Address; ceilingUnits: bigint }
+  | {
+      kind: "stop";
+      pot: Address;
+      guardian: Address;
+      delegates: readonly Address[];
+      modules: readonly Address[];
+    }
+  | {
+      kind: "withdraw";
+      pot: Address;
+      guardian: Address;
+      modules: readonly Address[];
+      balanceWei: bigint;
+    }
+  | {
+      kind: "restore";
+      pot: Address;
+      guardian: Address;
+      agentWallet: Address;
+      ceilingUnits: bigint;
+      delegates: readonly Address[];
+      modules: readonly Address[];
+    };
 
 export type CallContext = {
   config: Pick<
     Extract<LegalBodyConfig, { available: true }>,
     "chainId" | "identityRegistry" | "factory"
   >;
-  /** The selected order; required for the pointer. */
+  /** The selected order; required for the pointer and for every pot call. */
   order: LegalBodyOrderView | null;
   /** The selected identity (its id in decimal), the guardian, and the caller's reading of the
    *  chain's time in seconds (finite, 0 or more); required for the agent's wallet, which needs no
    *  order. */
   wallet?: { agentId: string; guardian: Address; nowSeconds: number };
+  /** The pot's facts of the click; required for a pot call. */
+  pot?: PotCallContext;
 };
 
 export type Refusal = { ok: false; problem: string };
@@ -282,6 +365,248 @@ export function agentWalletCall(
   };
 }
 
+// ---------------------------------------------------------------------------------------------
+// The pot's calls: the context as read, and the rebuild
+// ---------------------------------------------------------------------------------------------
+
+const ZERO = BigInt(0);
+/** The largest ceiling, in units: POT_CEILING_MAX_USDC whole USDC. */
+const MAX_CEILING_UNITS = BigInt(POT_CEILING_MAX_USDC) * USDC_UNIT;
+/** The most delegates, or modules, a context may list: the first page `readPotRaw` reads. */
+const MAX_POT_LIST = 10;
+
+type SetupContext = Extract<PotCallContext, { kind: "setup" }>;
+/** A list as the context held it: copied, its entries not read yet. */
+type UnreadList = readonly unknown[];
+/** An action's context as read: every field of its kind, the lists copied but their entries
+ *  read only by the rule of the kind that encodes them. */
+type ExecRead =
+  | Extract<PotCallContext, { kind: "change" }>
+  | { kind: "stop"; pot: Address; guardian: Address; delegates: UnreadList; modules: UnreadList }
+  | { kind: "withdraw"; pot: Address; guardian: Address; modules: UnreadList; balanceWei: bigint }
+  | {
+      kind: "restore";
+      pot: Address;
+      guardian: Address;
+      agentWallet: Address;
+      ceilingUnits: bigint;
+      delegates: UnreadList;
+      modules: UnreadList;
+    };
+
+const isAddress = (x: unknown): x is Address => typeof x === "string" && ADDRESS.test(x);
+/** A bigint of 0 or more. */
+const isAmount = (x: unknown): x is bigint => typeof x === "bigint" && x >= ZERO;
+/** Addresses compared without regard to letter case; what is not a string is never equal. */
+const sameAddr = (a: unknown, b: Address): boolean => typeof a === "string" && sameAddress(a, b);
+/** Hex compared in lower case; anything that is not a string is never equal. */
+const sameHex = (a: unknown, b: Hex): boolean =>
+  typeof a === "string" && a.toLowerCase() === b.toLowerCase();
+/** An address handed to the wallet: checksummed from lower case (viem refuses a mixed case that is
+ *  not the checksum). Only ever called on an address the rules read. */
+const checksummed = (a: Address): Address => getAddress(a.toLowerCase());
+
+/** The setup's context, read once into a copy of its own, or null when it is no setup's context:
+ *  not an object, another kind, an address that is not `0x` and 40 hex digits, or a number that is
+ *  not a bigint of 0 or more. The rules read the copy only. */
+function readSetupContext(raw: unknown): SetupContext | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const { kind, guardian, agentWallet, ceilingUnits, saltNonce, fundWei, agentGasWei } =
+    raw as Record<string, unknown>;
+  if (
+    kind !== "setup" ||
+    !isAddress(guardian) ||
+    !isAddress(agentWallet) ||
+    !isAmount(ceilingUnits) ||
+    !isAmount(saltNonce) ||
+    !isAmount(fundWei) ||
+    !isAmount(agentGasWei)
+  )
+    return null;
+  return { kind: "setup", guardian, agentWallet, ceilingUnits, saltNonce, fundWei, agentGasWei };
+}
+
+/** An action's context, read once into a copy of its own, or null when it is no action's context:
+ *  not an object, a kind other than change, stop, withdraw and restore, an address that is not `0x`
+ *  and 40 hex digits, a number that is not a bigint of 0 or more (a balance also no more than a
+ *  uint256: no chain holds more), or a list that is not a list. */
+function readExecContext(raw: unknown): ExecRead | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const { kind, pot, guardian, agentWallet, ceilingUnits, delegates, modules, balanceWei } =
+    raw as Record<string, unknown>;
+  if (!isAddress(pot) || !isAddress(guardian)) return null;
+  const listed = Array.isArray(delegates) ? [...(delegates as unknown[])] : null;
+  const on = Array.isArray(modules) ? [...(modules as unknown[])] : null;
+  if (kind === "change") {
+    if (!isAddress(agentWallet) || !isAmount(ceilingUnits)) return null;
+    return { kind: "change", pot, guardian, agentWallet, ceilingUnits };
+  }
+  if (kind === "stop") {
+    if (listed === null || on === null) return null;
+    return { kind: "stop", pot, guardian, delegates: listed, modules: on };
+  }
+  if (kind === "withdraw") {
+    if (on === null || !isAmount(balanceWei) || balanceWei > MAX_UINT256) return null;
+    return { kind: "withdraw", pot, guardian, modules: on, balanceWei };
+  }
+  if (kind === "restore") {
+    if (!isAddress(agentWallet) || !isAmount(ceilingUnits) || listed === null || on === null)
+      return null;
+    return {
+      kind: "restore",
+      pot,
+      guardian,
+      agentWallet,
+      ceilingUnits,
+      delegates: listed,
+      modules: on,
+    };
+  }
+  return null;
+}
+
+/** A list the rules may encode: at most ten entries, each an address; otherwise null. */
+const addressList = (list: UnreadList): readonly Address[] | null =>
+  list.length <= MAX_POT_LIST && list.every(isAddress) ? (list as readonly Address[]) : null;
+
+/** The agent's wallet and the ceiling, for the setup, the change and the restore, in this order:
+ *  never the zero address; never the guardian's own wallet; a whole number of USDC from 1 to
+ *  POT_CEILING_MAX_USDC. */
+function walletAndCeilingProblem(p: {
+  guardian: Address;
+  agentWallet: Address;
+  ceilingUnits: bigint;
+}): Refusal | null {
+  if (ZERO_ADDRESS.test(p.agentWallet)) return refuse("wallet_is_zero");
+  if (sameAddress(p.agentWallet, p.guardian)) return refuse("wallet_is_guardian");
+  if (
+    p.ceilingUnits % USDC_UNIT !== ZERO ||
+    p.ceilingUnits < USDC_UNIT ||
+    p.ceilingUnits > MAX_CEILING_UNITS
+  )
+    return refuse("ceiling_out_of_bounds");
+  return null;
+}
+
+/** Wei that is a whole number of USDC units, and at most `maxUnits` of them. */
+const wholeUnits = (wei: bigint, maxUnits: bigint): boolean =>
+  wei % WEI_PER_UNIT === ZERO && wei / WEI_PER_UNIT <= maxUnits;
+
+/** What the pot is set to: the table's USDC, and always the thirty-day period. */
+const potSetupOf = (
+  a: PotAddresses,
+  p: { guardian: Address; agentWallet: Address; ceilingUnits: bigint },
+): PotSetup => ({
+  guardian: p.guardian,
+  agentWallet: p.agentWallet,
+  token: a.usdc,
+  ceilingUnits: p.ceilingUnits,
+  periodMinutes: POT_PERIOD_MINUTES,
+});
+
+/** The setup's own rules, in order, then its rebuild: the wallet and the ceiling; the pot's money
+ *  in whole units, at most POT_FUND_MAX_UNITS; the fee money the same, at most
+ *  POT_AGENT_GAS_MAX_UNITS; a salt nonce no larger than a uint256. Nothing reaches the encoder
+ *  before every rule has passed. */
+function rebuildSetup(
+  a: PotAddresses,
+  p: SetupContext,
+): { ok: true; calls: Call3Value[]; value: bigint } | Refusal {
+  const problem = walletAndCeilingProblem(p);
+  if (problem !== null) return problem;
+  if (!wholeUnits(p.fundWei, POT_FUND_MAX_UNITS)) return refuse("fund_out_of_bounds");
+  if (!wholeUnits(p.agentGasWei, POT_AGENT_GAS_MAX_UNITS)) return refuse("agent_gas_out_of_bounds");
+  if (p.saltNonce > MAX_UINT256) return refuse("salt_out_of_bounds");
+  const { calls, value } = potSetupCalls(a, {
+    ...potSetupOf(a, p),
+    saltNonce: p.saltNonce,
+    fundWei: p.fundWei,
+    agentGasWei: p.agentGasWei,
+  });
+  return { ok: true, calls, value };
+}
+
+/** An action's own rules, by kind, then its rebuild. change: the wallet and the ceiling. stop: at
+ *  most ten delegates and modules, each an address; something to stop. withdraw: no module on;
+ *  something in the pot. restore: the wallet and the ceiling; the lists as for the stop; no module
+ *  but the pot's own. */
+function rebuildExec(a: PotAddresses, p: ExecRead): { ok: true; args: SafeExecArgs } | Refusal {
+  if (p.kind === "change") {
+    const problem = walletAndCeilingProblem(p);
+    if (problem !== null) return problem;
+    return { ok: true, args: potChangeArgs(a, potSetupOf(a, p)) };
+  }
+  if (p.kind === "stop") {
+    const delegates = addressList(p.delegates);
+    const modules = addressList(p.modules);
+    if (delegates === null || modules === null) return refuse("no_pot_context");
+    const args = potStopArgs(a, { guardian: p.guardian, delegates, modules });
+    return args === null ? refuse("nothing_to_stop") : { ok: true, args };
+  }
+  if (p.kind === "withdraw") {
+    if (p.modules.length !== 0) return refuse("allowance_still_on");
+    if (p.balanceWei === ZERO) return refuse("nothing_to_withdraw");
+    return { ok: true, args: potWithdrawArgs({ guardian: p.guardian, balanceWei: p.balanceWei }) };
+  }
+  const problem = walletAndCeilingProblem(p);
+  if (problem !== null) return problem;
+  const delegates = addressList(p.delegates);
+  const modules = addressList(p.modules);
+  if (delegates === null || modules === null) return refuse("no_pot_context");
+  const args = potRestoreArgs(a, { ...potSetupOf(a, p), delegates, modules });
+  return args === null ? refuse("restore_other_module") : { ok: true, args };
+}
+
+/** The setup, as the screen asks for it: `aggregate3Value` on the table's Multicall3, its value
+ *  the sum of the inner amounts, and the gas given. Refused, never thrown, when the chain has no
+ *  pot or the context breaks the setup's own rules; whether it may be sent is `allowedCall`'s to
+ *  say. */
+export function potSetupCall(
+  config: CallContext["config"],
+  p: Extract<PotCallContext, { kind: "setup" }>,
+  gas: bigint,
+): WriteRequest | Refusal {
+  const a = potAddresses(config.chainId);
+  if (a === null) return refuse("pot_chain_unsupported");
+  const read = readSetupContext(p);
+  if (read === null) return refuse("no_pot_context");
+  const rebuilt = rebuildSetup(a, read);
+  if (!rebuilt.ok) return rebuilt;
+  return {
+    chainId: config.chainId,
+    address: checksummed(a.multicall3),
+    abi: multicall3Abi,
+    functionName: "aggregate3Value",
+    args: [rebuilt.calls],
+    value: rebuilt.value,
+    gas,
+  };
+}
+
+/** A guardian's action on the noted pot: `execTransaction` with no value, and the gas given.
+ *  Refused, never thrown, when the chain has no pot or the context breaks its kind's rules; whether
+ *  it may be sent is `allowedCall`'s to say. */
+export function potExecCall(
+  config: CallContext["config"],
+  p: Extract<PotCallContext, { kind: "change" | "stop" | "withdraw" | "restore" }>,
+  gas: bigint,
+): WriteRequest | Refusal {
+  const a = potAddresses(config.chainId);
+  if (a === null) return refuse("pot_chain_unsupported");
+  const read = readExecContext(p);
+  if (read === null) return refuse("no_pot_context");
+  const rebuilt = rebuildExec(a, read);
+  if (!rebuilt.ok) return rebuilt;
+  return {
+    chainId: config.chainId,
+    address: checksummed(read.pot),
+    abi: safeAbi,
+    functionName: "execTransaction",
+    args: rebuilt.args,
+    gas,
+  };
+}
+
 /** The states whose body the owner may point at: `deployed`, and `broken` because the pointer was
  *  cleared. Never a replaced or superseded body: pointing back at it breaks its replacement. And
  *  never a revoked one, which the flow does not offer either. */
@@ -292,11 +617,167 @@ function pointable(order: LegalBodyOrderView): boolean {
   );
 }
 
-/** What the allowlist accepted: the calldata, and the arguments it was encoded from. */
-type Checked = { ok: true; data: Hex; args: readonly unknown[] };
+/** What the allowlist accepted: the calldata, and the arguments it was encoded from. A pot call
+ *  also carries the whole request the wallet gets, rebuilt by the rules with nothing of the
+ *  caller's object in it, and the account that must send it: the order's guardian. */
+type Checked = {
+  ok: true;
+  data: Hex;
+  args: readonly unknown[];
+  pot?: { guardian: Address; request: WriteRequest };
+};
 
-/** The allowlist itself; `allowedCall` shows its answer, `sendAllowedCall` sends it. */
+/** The setup's calls equal to the rebuild's, field by field: the target and the call data without
+ *  regard to case, `allowFailure` false, the value exactly. One list of calls, and nothing else. */
+function sameCalls(args: unknown, want: readonly Call3Value[]): boolean {
+  if (!Array.isArray(args) || args.length !== 1) return false;
+  const calls: unknown = args[0];
+  if (!Array.isArray(calls) || calls.length !== want.length) return false;
+  return want.every((w, i) => {
+    const call: unknown = calls[i];
+    if (typeof call !== "object" || call === null) return false;
+    const { target, allowFailure, value, callData } = call as Record<string, unknown>;
+    return (
+      sameAddr(target, w.target) &&
+      allowFailure === false &&
+      value === w.value &&
+      sameHex(callData, w.callData)
+    );
+  });
+}
+
+/** Ten values equal to the rebuild's: addresses without regard to case, bytes in lower case,
+ *  numbers exactly and of the same kind. */
+function sameExecArgs(args: unknown, want: SafeExecArgs): boolean {
+  if (!Array.isArray(args) || args.length !== want.length) return false;
+  const [to, value, data, operation, safeTxGas, baseGas, gasPrice, gasToken, refundReceiver, sig] =
+    args as unknown[];
+  return (
+    sameAddr(to, want[0]) &&
+    value === want[1] &&
+    sameHex(data, want[2]) &&
+    operation === want[3] &&
+    safeTxGas === want[4] &&
+    baseGas === want[5] &&
+    gasPrice === want[6] &&
+    sameAddr(gasToken, want[7]) &&
+    sameAddr(refundReceiver, want[8]) &&
+    sameHex(sig, want[9])
+  );
+}
+
+/**
+ * The pot's two calls. First, for both: the request's chain is the configured one; the chain has
+ * the pot's contracts; a complete context of the function's kind; an order on this deployment,
+ * linked and not revoked, whose guardian is the context's; a gas from 1 to the call's cap. Then
+ * the call's own rules (`checkSetup`, `checkExec`).
+ */
+function checkPotCall(
+  req: WriteRequest,
+  ctx: CallContext,
+  fn: "aggregate3Value" | "execTransaction",
+): Checked | Refusal {
+  const { config } = ctx;
+  if (req.chainId !== config.chainId) return refuse("wrong_chain");
+  const table = potAddresses(config.chainId);
+  if (table === null) return refuse("pot_chain_unsupported");
+  const p = fn === "aggregate3Value" ? readSetupContext(ctx.pot) : readExecContext(ctx.pot);
+  if (p === null) return refuse("no_pot_context");
+  const order: unknown = ctx.order;
+  if (typeof order !== "object" || order === null) return refuse("no_order");
+  const o = order as LegalBodyOrderView;
+  if (o.chainId !== config.chainId || !sameAddress(o.factory, config.factory))
+    return refuse("order_on_another_deployment");
+  if (o.state !== "linked" || o.revoked !== false) return refuse("order_not_linked");
+  if (!sameAddr(o.guardian, p.guardian)) return refuse("guardian_is_not_the_orders");
+  const gas: unknown = req.gas;
+  const cap = p.kind === "setup" ? POT_SETUP_GAS_CAP : POT_EXEC_GAS_CAP;
+  if (typeof gas !== "bigint" || gas <= ZERO || gas > cap) return refuse("gas_out_of_bounds");
+  // `readSetupContext` reads only a setup and `readExecContext` never one: the kind is the
+  // function's.
+  return p.kind === "setup"
+    ? checkSetup(req, config.chainId, table, p, gas)
+    : checkExec(req, config.chainId, table, p, gas);
+}
+
+/** The setup: to the table's Multicall3, over the pinned ABI; its own rules and the rebuild; the
+ *  value (absent reads as 0) the rebuild's; the calls the rebuild's. */
+function checkSetup(
+  req: WriteRequest,
+  chainId: number,
+  a: PotAddresses,
+  p: SetupContext,
+  gas: bigint,
+): Checked | Refusal {
+  if (!sameAddr(req.address, a.multicall3)) return refuse("not_multicall3");
+  if (req.abi !== multicall3Abi) return refuse("not_the_pinned_abi");
+  const rebuilt = rebuildSetup(a, p);
+  if (!rebuilt.ok) return rebuilt;
+  const given: unknown = req.value;
+  if ((given === undefined ? ZERO : given) !== rebuilt.value) return refuse("value_mismatch");
+  if (!sameCalls(req.args, rebuilt.calls)) return refuse("setup_args");
+  const args = [rebuilt.calls];
+  return {
+    ok: true,
+    data: encodeFunctionData({
+      abi: multicall3Abi,
+      functionName: "aggregate3Value",
+      args: [rebuilt.calls],
+    }),
+    args,
+    pot: {
+      guardian: p.guardian,
+      request: {
+        chainId,
+        address: checksummed(a.multicall3),
+        abi: multicall3Abi,
+        functionName: "aggregate3Value",
+        args,
+        value: rebuilt.value,
+        gas,
+      },
+    },
+  };
+}
+
+/** An action: no value; over the pinned ABI; on the noted pot; its kind's rules and the rebuild;
+ *  the ten arguments the rebuild's. */
+function checkExec(
+  req: WriteRequest,
+  chainId: number,
+  a: PotAddresses,
+  p: ExecRead,
+  gas: bigint,
+): Checked | Refusal {
+  const value: unknown = req.value;
+  if (value !== undefined && value !== ZERO) return refuse("sends_value");
+  if (req.abi !== safeAbi) return refuse("not_the_pinned_abi");
+  if (!sameAddr(req.address, p.pot)) return refuse("not_the_pot");
+  const rebuilt = rebuildExec(a, p);
+  if (!rebuilt.ok) return rebuilt;
+  if (!sameExecArgs(req.args, rebuilt.args)) return refuse("exec_args");
+  const request: WriteRequest = {
+    chainId,
+    address: checksummed(p.pot),
+    abi: safeAbi,
+    functionName: "execTransaction",
+    args: rebuilt.args,
+    gas,
+  };
+  if (value === ZERO) request.value = ZERO;
+  return {
+    ok: true,
+    data: encodeFunctionData({ abi: safeAbi, functionName: "execTransaction", args: rebuilt.args }),
+    args: rebuilt.args,
+    pot: { guardian: p.guardian, request },
+  };
+}
+
+/** The allowlist itself; `allowedCall` shows its answer, `sendAllowedCall` sends it. The pot's two
+ *  functions take their own rules; any other name takes the registry's, which refuse any value. */
 function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
+  const fn = req.functionName;
+  if (fn === "aggregate3Value" || fn === "execTransaction") return checkPotCall(req, ctx, fn);
   const { config } = ctx;
   if (req.value !== undefined && req.value !== BigInt(0)) return refuse("sends_value");
   if (req.chainId !== config.chainId) return refuse("wrong_chain");
@@ -413,16 +894,31 @@ function checkCall(req: WriteRequest, ctx: CallContext): Checked | Refusal {
 
 /**
  * The allowlist's answer, for a screen to show. Both doors, this one and `sendAllowedCall`, pass
- * `checkCall`, which holds the rules, so there is one allowlist: exactly four calls on the registry
- * of `/config`'s chain. `register()` and `register(string)`; `setMetadata(agentId, "legalBody",
- * pointer)` for the selected order's own identity and body; and `setAgentWallet(agentId, newWallet,
- * deadline, signature)` for the selected identity, with no order needed. Its rules, in order: a
- * complete context (an id that is a string, the guardian's address, a finite chain time of 0 or
- * more); four arguments of the right types; the context's identity, no larger than a uint256;
- * never the zero address; never the guardian's own wallet; a deadline from the chain's time to 300
- * seconds after it, no larger than a uint256; a signature of 1 to 2,048 whole bytes. Refuses with
- * the first rule broken, in the order they are written, and never throws on what it is handed.
- * Returns the calldata it checked, encoded over the pinned ABI.
+ * `checkCall`, which holds the rules, so there is one allowlist: exactly six calls.
+ *
+ * Four on the registry of `/config`'s chain, never with a value. `register()` and
+ * `register(string)`; `setMetadata(agentId, "legalBody", pointer)` for the selected order's own
+ * identity and body; and `setAgentWallet(agentId, newWallet, deadline, signature)` for the
+ * selected identity, with no order needed. Its rules, in order: a complete context (an id that is
+ * a string, the guardian's address, a finite chain time of 0 or more); four arguments of the right
+ * types; the context's identity, no larger than a uint256; never the zero address; never the
+ * guardian's own wallet; a deadline from the chain's time to 300 seconds after it, no larger than a
+ * uint256; a signature of 1 to 2,048 whole bytes.
+ *
+ * Two for the company's pot, for an order that is linked and not revoked, from a context whose
+ * guardian is the order's, on a chain the pot's table holds, with a gas from 1 to the call's cap.
+ * The setup, `aggregate3Value` on the table's Multicall3: it creates the Safe the context
+ * describes (the guardian its only owner, the agent's wallet its only delegate, the ceiling in
+ * each thirty-day period) and may carry money to two places only, the pot it creates (at most
+ * 1,000,000,000 USDC) and the agent's own wallet (at most 1 USDC), each in whole units; its value
+ * is the sum of the two. And the guardian's `execTransaction` on the noted pot, with no value:
+ * change the ceiling, stop the allowance, take the pot's money back to the guardian (only once no
+ * module is on), or start again with the registry's key. Each is rebuilt from the context alone,
+ * with the table's USDC and the thirty-day period, and accepted only when the request equals the
+ * rebuild. `sendAllowedCall` then asks that the connected account be the guardian's.
+ *
+ * Refuses with the first rule broken, in the order they are written, and never throws on what it
+ * is handed. Returns the calldata it checked, encoded over the pinned ABI.
  */
 export function allowedCall(
   req: WriteRequest,
@@ -434,14 +930,18 @@ export function allowedCall(
 
 /** The request the wallet gets: the fields the allowlist read, with the arguments it checked
  *  (a new array, never the caller's, which could still change), and nothing else: a key it did not
- *  read (a calldata suffix, a nonce) never reaches the wallet. `gas` passes through untouched. */
-function forwarded(req: WriteRequest, args: readonly unknown[]): WriteRequest {
+ *  read (a calldata suffix, a nonce, an account) never reaches the wallet. The ABI is the pinned
+ *  one of the branch that accepted, never the request's. For the registry's calls `value` and
+ *  `gas` pass through untouched; a pot call's request is the one its branch rebuilt, with the value
+ *  and the gas it checked. */
+function forwarded(req: WriteRequest, checked: Checked): WriteRequest {
+  if (checked.pot !== undefined) return checked.pot.request;
   const out: WriteRequest = {
     chainId: req.chainId,
     address: req.address,
     abi: identityRegistryAbi,
     functionName: req.functionName,
-    args,
+    args: checked.args,
   };
   if (req.value !== undefined) out.value = req.value;
   if (req.gas !== undefined) out.gas = req.gas;
@@ -451,13 +951,18 @@ function forwarded(req: WriteRequest, args: readonly unknown[]): WriteRequest {
 /**
  * The one door to the wallet: the allowlist, then the chain. Refuses, with a problem the screen
  * turns into a sentence, when this site is not configured for the request's chain or the wallet
- * is on another one, instead of switching the wallet silently. Otherwise one `writeContract`.
+ * is on another one, instead of switching the wallet silently; and, for a pot call, when the
+ * connected account (`walletAddress`) is not the order's guardian or none is named: the setup's
+ * money would come from another account, and an action's approval holds only from the guardian's
+ * own. Otherwise one `writeContract`.
  */
 export async function sendAllowedCall(
   req: WriteRequest,
   ctx: CallContext,
   deps: {
     walletChainId: number | undefined;
+    /** The connected account; a pot call is sent only from the guardian's. */
+    walletAddress?: Address;
     configuredChainIds: readonly number[];
     writeContract: (req: WriteRequest) => Promise<Hex>;
   },
@@ -466,7 +971,9 @@ export async function sendAllowedCall(
   if (!checked.ok) return checked;
   if (!deps.configuredChainIds.includes(req.chainId)) return refuse("chain_not_configured");
   if (deps.walletChainId !== req.chainId) return refuse("wallet_on_another_chain");
-  const hash = await deps.writeContract(forwarded(req, checked.args));
+  if (checked.pot !== undefined && !sameAddr(deps.walletAddress, checked.pot.guardian))
+    return refuse("wallet_is_not_the_guardian");
+  const hash = await deps.writeContract(forwarded(req, checked));
   return { ok: true, hash, data: checked.data };
 }
 

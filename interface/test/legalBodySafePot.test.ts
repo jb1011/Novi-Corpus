@@ -47,6 +47,7 @@ import {
   potStopArgs,
   potStopParts,
   potWithdrawArgs,
+  PotBuildError,
   predictPotAddress,
   SAFE_FALLBACK_HANDLER_SLOT,
   SAFE_GUARD_SLOT,
@@ -433,6 +434,63 @@ describe("the setup", () => {
       "0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D",
     );
     expect(exec(potChangeArgs(low, lower))).toBe(exec(potChangeArgs(T, V3)));
+  });
+});
+
+describe("the setup is built only from the pinned Safe, and with no amount below 0", () => {
+  /** What `f` threw, or undefined. */
+  const thrown = (f: () => unknown): unknown => {
+    try {
+      f();
+    } catch (e) {
+      return e;
+    }
+    return undefined;
+  };
+  const setup = { ...V3, saltNonce: BigInt(1), fundWei: BigInt(5), agentGasWei: BigInt(7) };
+  const init = potInitializer(T, V3);
+
+  test("another singleton: potSetupCalls and predictPotAddress throw PotBuildError, other_singleton", () => {
+    // The creation would run another singleton at another address, and the money would go to the
+    // address predicted for the pinned one.
+    const other: PotAddresses = { ...T, safeSingleton: OTHER_MODULE };
+    for (const f of [() => potSetupCalls(other, setup), () => predictPotAddress(other, init, BigInt(1))]) {
+      const e = thrown(f);
+      expect(e).toBeInstanceOf(PotBuildError);
+      expect(e).toBeInstanceOf(Error);
+      expect(e).toMatchObject({ name: "PotBuildError", problem: "other_singleton" });
+    }
+  });
+
+  test("another proxy factory: potSetupCalls and predictPotAddress throw PotBuildError, other_proxy_factory", () => {
+    const other: PotAddresses = { ...T, proxyFactory: OTHER_MODULE };
+    for (const f of [() => potSetupCalls(other, setup), () => predictPotAddress(other, init, BigInt(1))]) {
+      expect(thrown(f)).toMatchObject({ name: "PotBuildError", problem: "other_proxy_factory" });
+    }
+  });
+
+  test("the pinned singleton and factory in another letter case are the pinned ones", () => {
+    const loud: PotAddresses = {
+      ...T,
+      safeSingleton: T.safeSingleton.toLowerCase() as Address,
+      proxyFactory: `0x${T.proxyFactory.slice(2).toUpperCase()}` as Address,
+    };
+    expect(potSetupCalls(loud, setup)).toEqual(potSetupCalls(T, setup));
+    expect(predictPotAddress(loud, init, BigInt(1))).toBe("0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D");
+  });
+
+  test("money for the pot, or fee money, below 0: PotBuildError, negative_amount, before viem sees it", () => {
+    for (const p of [
+      { ...setup, fundWei: BigInt(-1) },
+      { ...setup, agentGasWei: BigInt(-1) },
+      { ...setup, fundWei: BigInt(-5), agentGasWei: BigInt(5) },
+    ]) {
+      const e = thrown(() => potSetupCalls(T, p));
+      expect(e).toBeInstanceOf(PotBuildError);
+      expect(e).toMatchObject({ name: "PotBuildError", problem: "negative_amount" });
+    }
+    // 0 is no money, never a refusal.
+    expect(potSetupCalls(T, { ...setup, fundWei: ZERO, agentGasWei: ZERO }).calls).toHaveLength(1);
   });
 });
 

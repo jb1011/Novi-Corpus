@@ -310,7 +310,8 @@ const CONFIGURED_CHAIN_IDS: readonly number[] = [arcTestnet.id];
  * connection's chain only when that chain is configured, so with `[arcTestnet]` alone
  * `useChainId()` reports Arc testnet whatever network the wallet sits on: the
  * `wallet_on_another_chain` sentence would never show, and wagmi would refuse the send itself with
- * its own error instead. The connection's chain tracks the wallet.
+ * its own error instead. The connection's chain tracks the wallet. The connected account is read
+ * from the same connection: a pot call is sent only from the order's guardian's own account.
  *
  * The cast is the only one of the flow: wagmi resolves the `register` overloads from literal
  * argument tuples, and the request here carries the arguments the allowlist checked as a wide
@@ -318,7 +319,7 @@ const CONFIGURED_CHAIN_IDS: readonly number[] = [arcTestnet.id];
  */
 export function useAllowedWrite() {
   const { writeContractAsync } = useWriteContract();
-  const { chainId } = useConnection();
+  const { address, chainId } = useConnection();
   const writeContract = useCallback(
     (req: WriteRequest) => writeContractAsync(req as Parameters<typeof writeContractAsync>[0]),
     [writeContractAsync],
@@ -327,9 +328,10 @@ export function useAllowedWrite() {
     (req: WriteRequest, ctx: CallContext) =>
       sendAllowedCall(req, ctx, {
         walletChainId: chainId,
+        walletAddress: address,
         configuredChainIds: CONFIGURED_CHAIN_IDS,
         writeContract,
       }),
-    [chainId, writeContract],
+    [address, chainId, writeContract],
   );
 }

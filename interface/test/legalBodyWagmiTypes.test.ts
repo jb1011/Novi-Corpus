@@ -14,10 +14,21 @@ import {
   identityRegistryAbi,
   pointerCall,
   POINTER_KEY,
+  potExecCall,
+  potSetupCall,
   registerCall,
   type CallContext,
   type WriteRequest,
 } from "@/lib/legalBody/chain";
+import {
+  multicall3Abi,
+  POT_PERIOD_MINUTES,
+  potAddresses,
+  potChangeArgs,
+  potSetupCalls,
+  safeAbi,
+  type PotAddresses,
+} from "@/lib/legalBody/safePot";
 import {
   LINK_FIELDS,
   type LegalBodyOrderView,
@@ -37,6 +48,11 @@ const FACTORY = "0x069f4ADEabcBEd3ffFe2cB6Aaf9e7a66E8731456" as const;
 const BODY = "0x5969B48ff7A3a4c6689366a9a6D7AA24b0C4b5EE" as const;
 const CHAIN = 5042002;
 const config: CallContext["config"] = { chainId: CHAIN, identityRegistry: REGISTRY, factory: FACTORY };
+/** The real run's guardian, agent's key and Safe, and the pot's contracts on Arc testnet. */
+const G = "0x15D4EE6F84b6bf8ceE5A24cCb19FDF8257c22b0A" as const;
+const A = "0x2dDcf8da463526614b9FA5E87Db259a3Bf06667C" as const;
+const POT = "0x0bbBa174c1D6b6Edd2F1A86ff5af435B645b77EF" as const;
+const T = potAddresses(CHAIN) as PotAddresses;
 
 export async function typeLevel() {
   // The two register overloads and the pointer, their arguments written out as literal tuples.
@@ -65,6 +81,52 @@ export async function typeLevel() {
   if ("ok" in p) return;
   // @ts-expect-error the wide `args` does not satisfy `setMetadata`'s tuple either
   await write(p);
+
+  // The pot's setup and an action of the guardian's, as wagmi takes them: both functions are
+  // payable, the setup's value is the sum of its inner amounts, and the ten arguments of
+  // `execTransaction` are the builders' own tuple.
+  const pot = {
+    guardian: G,
+    agentWallet: A,
+    token: T.usdc,
+    ceilingUnits: BigInt(50_000_000),
+    periodMinutes: POT_PERIOD_MINUTES,
+  };
+  const s = potSetupCalls(T, { ...pot, saltNonce: BigInt(1), fundWei: BigInt(0), agentGasWei: BigInt(0) });
+  await write({
+    abi: multicall3Abi,
+    address: T.multicall3,
+    functionName: "aggregate3Value",
+    args: [s.calls],
+    value: s.value,
+    chainId: CHAIN,
+    gas: BigInt(650_000),
+  });
+  await write({
+    abi: safeAbi,
+    address: POT,
+    functionName: "execTransaction",
+    args: potChangeArgs(T, pot),
+    chainId: CHAIN,
+    gas: BigInt(200_000),
+  });
+  // The flow's own pot requests carry the wide `args` too: through the one adapter only.
+  const setup = potSetupCall(
+    config,
+    { kind: "setup", guardian: G, agentWallet: A, ceilingUnits: BigInt(50_000_000), saltNonce: BigInt(1), fundWei: BigInt(0), agentGasWei: BigInt(0) },
+    BigInt(650_000),
+  );
+  if ("ok" in setup) return;
+  // @ts-expect-error the wide `args` satisfies no `aggregate3Value` tuple
+  await write(setup);
+  const change = potExecCall(
+    config,
+    { kind: "change", pot: POT, guardian: G, agentWallet: A, ceilingUnits: BigInt(20_000_000) },
+    BigInt(200_000),
+  );
+  if ("ok" in change) return;
+  // @ts-expect-error nor the ten values of `execTransaction`
+  await write(change);
 
   // Typed data in viem's own form: every uint256 a bigint, `EIP712Domain` left to viem.
   await sign({
