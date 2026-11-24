@@ -1797,6 +1797,7 @@ describe("sessionView", () => {
       attemptsLeft: 3,
       lastErrorCode: null,
       reading: false,
+      held: null,
     });
 
     provider.fail(s.ref, "document_unverified_other", "vr_attempt1");
@@ -1805,11 +1806,37 @@ describe("sessionView", () => {
       attemptsLeft: 2,
       lastErrorCode: "document_unverified_other",
       reading: false,
+      held: null,
     });
 
     provider.update(s.ref, { status: "processing", lastErrorCode: null });
     await syncSession(deps(), s.sessionId);
-    expect(sessionView(deps(), GUARDIAN)).toMatchObject({ reading: true });
+    expect(sessionView(deps(), GUARDIAN)).toMatchObject({ reading: true, held: null });
+  });
+
+  test("a session the provider verified is held, never reading: by the system while its screen has no verdict, for an operator once the rules refused it", async () => {
+    const s = await started();
+    provider.verify(s.ref);
+    screener.answer = "error";
+    expect(await syncSession(deps(), s.sessionId)).toBe("screen_pending");
+    expect(sessionView(deps(), GUARDIAN)).toMatchObject({
+      status: "open",
+      reading: false,
+      held: "system",
+    });
+
+    screener.answer = "clear";
+    now = T0 + 10 * MINUTE;
+    expect(await syncSession(deps(), s.sessionId)).toBe("completed");
+    expect(sessionView(deps(), GUARDIAN)).toEqual({ status: "none" });
+
+    const parked = await parkedSession(deps(), tenant(2));
+    expect(sessionView(deps(), tenant(2))).toMatchObject({
+      status: "open",
+      sessionId: parked.sessionId,
+      reading: false,
+      held: "operator",
+    });
   });
 });
 

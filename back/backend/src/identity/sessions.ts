@@ -109,6 +109,13 @@ export interface IdentitySessionDeps {
   now?: () => number;
 }
 
+/**
+ * Who a verified session waits on: `system` while our screen has given no verdict (the sweep
+ * reads it again by itself), `operator` once its result waits for a person (`waitsForOperator`).
+ * The words say who acts, never why.
+ */
+export type SessionHold = "system" | "operator";
+
 export type SessionView =
   | { status: "none" }
   | {
@@ -117,8 +124,10 @@ export type SessionView =
       startedAt: number;
       attemptsLeft: number;
       lastErrorCode: string | null;
-      /** The provider has the person's attempt and its result is being read. */
+      /** The provider is processing the person's attempt. Never true while the session is held. */
       reading: boolean;
+      /** Who a verified session waits on; null unless the provider verified it. */
+      held: SessionHold | null;
     };
 
 export type SyncOutcome =
@@ -663,7 +672,13 @@ export function sessionView(deps: IdentitySessionDeps, tenantId: string): Sessio
     startedAt: open.createdAt,
     attemptsLeft: Math.max(0, deps.limits.attemptsPerSession - open.failedAttempts),
     lastErrorCode: open.lastErrorCode,
-    reading: open.lastStatus === "processing" || open.lastStatus === "verified",
+    reading: open.lastStatus === "processing",
+    held:
+      open.lastStatus !== "verified"
+        ? null
+        : open.screenPendingSince !== null
+          ? "system"
+          : "operator",
   };
 }
 
