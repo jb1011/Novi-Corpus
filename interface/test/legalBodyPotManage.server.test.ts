@@ -78,6 +78,11 @@ vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
       throw new Error("not in this test");
     },
   }),
+  useTakePotOffRecordMutation: () => ({
+    mutateAsync: async () => {
+      throw new Error("not in this test");
+    },
+  }),
   useReadOrderPotNow: () => async () => {
     throw new Error("not in this test");
   },
@@ -414,7 +419,8 @@ describe("the pot's card, as the chain shows the pot", () => {
     const m = manage({ ...HEALTHY, owners: [P] });
     expect(text(m)).toContain(POT.notYours);
     for (const words of SAFE_BUTTONS) expect(button(m, words), words).toBeNull();
-    expect(buttons(m)).toHaveLength(0);
+    // Task 13: the record's action is the only button, and it reaches no wallet.
+    expect(buttons(m).map((b) => b.words)).toEqual([POT.offRecordSend]);
     for (const s of [POT.changeTitle, POT.stopTitle, POT.agentTitle]) expect(text(m), s).not.toContain(s);
   });
 

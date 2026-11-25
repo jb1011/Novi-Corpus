@@ -95,6 +95,12 @@ vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
       throw new Error("not in this test");
     },
   }),
+  useTakePotOffRecordMutation: () => ({
+    mutateAsync: async () => {
+      calls.declares += 1;
+      throw new Error("not in this test");
+    },
+  }),
   useReadOrderPotNow: () => async () => {
     calls.freshPotReads += 1;
     throw new Error("not in this test");

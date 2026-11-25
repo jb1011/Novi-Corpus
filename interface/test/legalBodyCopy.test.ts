@@ -487,6 +487,7 @@ describe("the company's pot", () => {
       "Fee money is at most 1 USDC. Money for the company goes in the pot.",
     ],
     ["amountProblems.empty", POT.amountProblems.empty, "Give an amount."],
+    ["amountProblems.zero", POT.amountProblems.zero, "Give an amount above 0 USDC."],
     ["review", POT.review, "Review"],
     ["reviewTitle", POT.reviewTitle, "Check before you sign"],
     ["reviewOwner", POT.reviewOwner, "Only owner of the pot: {address} (your wallet)"],
@@ -720,6 +721,11 @@ describe("the company's pot", () => {
     ],
     ["backOnTitle", POT.backOnTitle, "Put the pot back on the public record"],
     ["backOnSend", POT.backOnSend, "Put it back on the record"],
+    [
+      "recordChangeFailed",
+      POT.recordChangeFailed,
+      "Novi Corpus could not change the public record just now, so nothing was changed. Try again.",
+    ],
     ["agentTitle", POT.agentTitle, "For your agent"],
     [
       "agentLine",

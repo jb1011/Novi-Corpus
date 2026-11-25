@@ -31,7 +31,13 @@ import type {
   PotBirth,
   PotBlock,
 } from "@/lib/api/types";
-import { allowedCall, potExecCall, potSetupCall, type CallContext } from "@/lib/legalBody/chain";
+import {
+  allowedCall,
+  potExecCall,
+  potSetupCall,
+  potTransferCall,
+  type CallContext,
+} from "@/lib/legalBody/chain";
 import type { AgentWalletRead } from "@/lib/legalBody/agentWallet";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import type { LegalBodyNotice } from "@/lib/legalBody/flow";
@@ -57,6 +63,7 @@ import {
   potCard,
   potCeilingHint,
   potCreatedView,
+  potFeeLines,
   potFormCheck,
   potFormStart,
   potGasLimit,
@@ -100,11 +107,22 @@ import {
   potActionFailureView,
   potCeilingCheck,
   potExecSimulationOk,
+  isPotTransfer,
+  potRecordFailureView,
+  potTransferAmount,
+  potTransferDoneView,
+  potTransferFailureView,
+  potTransferSendLabel,
   runPotAction,
+  runPotTransfer,
   type PotActionDeps,
   type PotExecContext,
   type PotSafeAction,
+  type PotTransfer,
+  type PotTransferContext,
+  type PotTransferDeps,
 } from "@/lib/legalBody/safePotActions";
+import { TIMEOUT_CODE } from "@/lib/api/timeout";
 import { ApiError } from "@/lib/api/types";
 
 const P_ = LEGAL_BODY_COPY.pot;
@@ -871,14 +889,40 @@ describe("what the card says of a reading, and what it offers", () => {
   });
 
   test("potReadingView: off the record, put_back in place of take_off_record, and the offRecord line; never put_back for another deployment's order", () => {
+    // Add money only while the pot is on the record (Task 13): money put in a pot taken off the
+    // record would not show beside the company.
     const off = view(HEALTHY, { onRecord: false });
-    expect(off.actions).toEqual(["change", "stop", "add_money", "fee_money", "put_back"]);
+    expect(off.actions).toEqual(["change", "stop", "fee_money", "put_back"]);
     expect(off.lines.at(-1)).toBe(P_.offRecord);
     expect(view(HEALTHY).lines).not.toContain(P_.offRecord);
     expect(view(HEALTHY, { onRecord: false, onThisDeployment: false }).actions).toEqual([
-      "change", "stop", "add_money", "fee_money",
+      "change", "stop", "fee_money",
     ]);
     expect(view({ ...HEALTHY, owners: [P] }, { onRecord: false }).actions).toEqual(["put_back"]);
+  });
+
+  test("add money only while the pot is on the record and reads ceiling_read or stopped: never off the record, never for other_delegate (a changed key is moved first), never for a pot this page does not read", () => {
+    for (const raw of [HEALTHY, STOPPED, { ...HEALTHY, delegates: { list: [], next: 0 } }]) {
+      expect(view(raw).actions, "on the record").toContain("add_money");
+      expect(view(raw, { onRecord: false }).actions, "off the record").not.toContain("add_money");
+    }
+    // After a changed-key setup, the pot reads other_delegate until the new key is set: "My agent
+    // has a new key" and "Stop" only, then the record action.
+    expect(view(HEALTHY, {}, P).actions).toEqual(["new_key", "stop", "take_off_record"]);
+    for (const raw of [{ ...HEALTHY, guard: P }, { ...HEALTHY, owners: [P] }, { ...HEALTHY, delegates: { list: [A, P], next: 0 } }])
+      expect(view(raw).actions).not.toContain("add_money");
+  });
+
+  test("potFeeLines: the lines the reading view says of the agent key's fee money, for a plain key only", () => {
+    expect(potFeeLines(HEALTHY)).toEqual([fillCopy(P_.shownFeeMoney, { amount: "0.1" })]);
+    expect(potFeeLines({ ...HEALTHY, agentBalanceWei: BigInt("1000000000000000") })).toEqual([
+      fillCopy(P_.shownFeeMoney, { amount: "0.001" }),
+      P_.feeMoneyLow,
+    ]);
+    expect(potFeeLines({ ...HEALTHY, agentHasCode: true, agentBalanceWei: ZERO })).toEqual([]);
+    // The reading view says exactly these.
+    for (const raw of [HEALTHY, STOPPED, { ...HEALTHY, agentBalanceWei: ZERO }])
+      for (const line of potFeeLines(raw)) expect(view(raw).lines).toContain(line);
   });
 
   test("potReadingView: the fee money line, and feeMoneyLow under 0.01 USDC for a plain key, not at 0.01", () => {
@@ -2364,5 +2408,483 @@ describe("the actions' sentences, the ceiling field, and what the card shows aft
     });
     expect(potCeilingCheck("20", { kind: "no_spending" })).toEqual({ ok: false, line: P_.grantNoSpending });
     expect(potCeilingCheck("4000", { kind: "none" })).toEqual({ ok: true, ceilingUnits: USDC(4000) });
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// Add money and send fee money: one USDC transfer each (`safePotActions.ts`). Every context is
+// built from the click's own reads; the money moves as USDC units, never as value.
+// ---------------------------------------------------------------------------------------------
+
+describe("potTransferAmount: the amount typed, in USDC units", () => {
+  test("'' is empty, '5' is 5000000 units, '0.0000001' is too precise; fee money '1.5' is above its 1 USDC", () => {
+    for (const kind of ["add_money", "fee_money"] as PotTransfer[])
+      expect(potTransferAmount(kind, ""), kind).toEqual({ ok: false, sentence: P_.amountProblems.empty });
+    expect(potTransferAmount("add_money", "5")).toEqual({ ok: true, amountUnits: BigInt(5_000_000) });
+    expect(potTransferAmount("add_money", "0.0000001")).toEqual({ ok: false, sentence: P_.amountProblems.too_precise });
+    expect(potTransferAmount("fee_money", "0.0000001")).toEqual({ ok: false, sentence: P_.amountProblems.too_precise });
+    expect(potTransferAmount("fee_money", "1.5")).toEqual({ ok: false, sentence: P_.amountProblems.gas_too_large });
+    // 1.5 USDC is fine for the pot.
+    expect(potTransferAmount("add_money", "1.5")).toEqual({ ok: true, amountUnits: BigInt(1_500_000) });
+  });
+
+  test("the bounds: fee money at most 1 USDC, the pot's money at most 1,000,000,000 USDC; 0 is refused; anything else than an amount is not one", () => {
+    expect(potTransferAmount("fee_money", "0.1")).toEqual({ ok: true, amountUnits: BigInt(100_000) });
+    expect(potTransferAmount("fee_money", "1")).toEqual({ ok: true, amountUnits: USDC(1) });
+    expect(potTransferAmount("fee_money", "1.000001")).toEqual({ ok: false, sentence: P_.amountProblems.gas_too_large });
+    expect(potTransferAmount("fee_money", "0.000001")).toEqual({ ok: true, amountUnits: BigInt(1) });
+    expect(potTransferAmount("add_money", "1000000000")).toEqual({ ok: true, amountUnits: USDC(1_000_000_000) });
+    expect(potTransferAmount("add_money", "1000000000.000001")).toEqual({ ok: false, sentence: P_.amountProblems.too_large });
+    for (const kind of ["add_money", "fee_money"] as PotTransfer[]) {
+      for (const zero of ["0", "0.0", ".0", "0.000000", "00"])
+        expect(potTransferAmount(kind, zero), `${kind} ${zero}`).toEqual({ ok: false, sentence: P_.amountProblems.zero });
+      for (const bad of ["abc", "5 ", " 5", "-1", "1,5", ".", "1e3", "0x10"])
+        expect(potTransferAmount(kind, bad), `${kind} ${bad}`).toEqual({ ok: false, sentence: P_.amountProblems.not_amount });
+    }
+    expect(P_.amountProblems.zero).not.toMatch(/\{[a-zA-Z]+\}/);
+  });
+
+  test("potTransferSendLabel: the amount that will be sent once the field reads one, formatted from its units; the panel's title before", () => {
+    expect(potTransferSendLabel("add_money", "")).toBe(P_.addMoneyTitle);
+    expect(potTransferSendLabel("add_money", "5")).toBe(fillCopy(P_.addMoneySend, { amount: "5" }));
+    expect(potTransferSendLabel("add_money", "5.50")).toBe(fillCopy(P_.addMoneySend, { amount: "5.5" }));
+    expect(potTransferSendLabel("add_money", "abc")).toBe(P_.addMoneyTitle);
+    expect(potTransferSendLabel("fee_money", "0.1")).toBe(fillCopy(P_.feeMoneySend, { amount: "0.1" }));
+    expect(potTransferSendLabel("fee_money", "")).toBe(P_.feeMoneyTitle);
+    expect(potTransferSendLabel("fee_money", "1.5")).toBe(P_.feeMoneyTitle);
+    expect(isPotTransfer("add_money") && isPotTransfer("fee_money")).toBe(true);
+    for (const other of ["change", "stop", "take_off_record", "put_back", "toString"]) expect(isPotTransfer(other), other).toBe(false);
+  });
+});
+
+describe("runPotTransfer: one USDC transfer, from the click's own reads", () => {
+  type Fresh = Awaited<ReturnType<PotTransferDeps["read"]>>;
+  const BALANCE = WEI(USDC(1000));
+  /** The click's read: the registry names `agentWallet`, the pot read for it, the guardian's
+   *  balance in native wei. */
+  const fresh = (raw: PotRaw, agentWallet: Address = A, guardianBalanceWei: bigint = BALANCE): Fresh => ({
+    agentWallet,
+    raw,
+    reading: read(raw, agentWallet),
+    guardianBalanceWei,
+  });
+  const none = (agentWallet: AgentWalletRead): Fresh => ({ agentWallet, raw: null, reading: null, guardianBalanceWei: BALANCE });
+  /** The real Safe as GET /pot serves it, on the record. */
+  const NOTED_SAFE: OrderPotView = {
+    address: SAFE_CREATED,
+    onRecord: true,
+    declaredAt: 1_764_000_000,
+    birth: { saltNonce: "72231338869903870587851170785833461215", agentWallet: A, ceilingUnits: "2000000" },
+  };
+  /** What the card hands the runner: the noted pot, the guardian, the key the fee money panel
+   *  names, and the amount typed in units. */
+  const args = (amountUnits: bigint, shownAgentWallet: Address = A) => ({
+    pot: SAFE_CREATED,
+    guardian: G,
+    shownAgentWallet,
+    amountUnits,
+  });
+  const ADD = BigInt(5_000_000);
+  const FEE = BigInt(100_000);
+  /** V14 and V15's estimate from G on the real node. */
+  const ESTIMATE = BigInt(49_338);
+
+  /** Hand-made dependencies that say yes, each recording its call; the allowlist is the real one,
+   *  as the card's closure asks it, and `data` holds the calldata it accepted. */
+  function harness(f: Fresh, impl: Partial<PotTransferDeps> = {}) {
+    const calls: string[] = [];
+    const checked: PotTransferContext[] = [];
+    const sent: PotTransferContext[] = [];
+    const data: Hex[] = [];
+    const yes: PotTransferDeps = {
+      alive: () => true,
+      read: async () => f,
+      readNoted: async () => NOTED_SAFE,
+      preflight: () => ({ ok: true }),
+      check: (ctx) => {
+        const req = potTransferCall(CFG, ctx, POT_TRANSFER_GAS_CAP);
+        if ("ok" in req) return req;
+        const allowed = allowedCall(req, { config: CFG, order: order(), pot: ctx });
+        return allowed.ok ? { ok: true, call: { to: req.address, data: allowed.data } } : allowed;
+      },
+      simulate: async () => TRUE_WORD,
+      estimate: async () => ESTIMATE,
+      readBalance: async () => BALANCE,
+      account: () => G,
+      send: async () => ({ ok: true, hash: HASH }),
+    };
+    const use = { ...yes, ...impl };
+    const d: PotTransferDeps = {
+      alive: () => use.alive(),
+      read: () => {
+        calls.push("read");
+        return use.read();
+      },
+      readNoted: () => {
+        calls.push("noted");
+        return use.readNoted();
+      },
+      preflight: () => {
+        calls.push("preflight");
+        return use.preflight();
+      },
+      check: (ctx) => {
+        calls.push("check");
+        checked.push(ctx);
+        const answer = use.check(ctx);
+        if (answer.ok) data.push(answer.call.data);
+        return answer;
+      },
+      simulate: (call) => {
+        calls.push("simulate");
+        return use.simulate(call);
+      },
+      estimate: (call) => {
+        calls.push("estimate");
+        return use.estimate(call);
+      },
+      readBalance: () => {
+        calls.push("balance");
+        return use.readBalance();
+      },
+      account: () => {
+        calls.push("account");
+        return use.account();
+      },
+      send: (ctx, gas) => {
+        calls.push(`send ${gas}`);
+        sent.push(ctx);
+        return use.send(ctx, gas);
+      },
+    };
+    return { d, calls, checked, sent, data };
+  }
+  const ADD_ALL = ["read", "noted", "preflight", "check", "simulate", "estimate", "account", "send 64140"];
+  const FEE_ALL = ["read", "preflight", "check", "simulate", "estimate", "account", "send 64140"];
+  const ADD_CTX: PotTransferContext = { kind: "add_money", pot: SAFE_CREATED, guardian: G, amountUnits: ADD };
+  const FEE_CTX: PotTransferContext = { kind: "fee_money", guardian: G, agentWallet: A, agentHasCode: false, amountUnits: FEE };
+  const goneAfter = (n: number) => {
+    let asked = 0;
+    return () => {
+      asked += 1;
+      return asked <= n;
+    };
+  };
+
+  test("all pass: the click's reads (and for Add money the noted pot, fresh), the page's checks, the allowlist, the simulation, the estimate, the account, then the one send; an estimate of 49338 sends gas 64140", async () => {
+    for (const raw of [HEALTHY, STOPPED]) {
+      const add = harness(fresh(raw));
+      expect(await runPotTransfer("add_money", args(ADD), add.d)).toEqual({ ok: true, hash: HASH, agentWallet: A });
+      expect(add.calls).toEqual(ADD_ALL);
+      expect(add.sent).toEqual([ADD_CTX]);
+      expect(add.checked).toEqual([ADD_CTX]);
+      const fee = harness(fresh(raw));
+      expect(await runPotTransfer("fee_money", args(FEE), fee.d)).toEqual({ ok: true, hash: HASH, agentWallet: A });
+      expect(fee.calls).toEqual(FEE_ALL);
+      expect(fee.sent).toEqual([FEE_CTX]);
+    }
+    expect(potGasLimit(ESTIMATE, POT_TRANSFER_GAS_CAP)).toBe(BigInt(64_140));
+  });
+
+  test("each accepted context passes Task 4's allowlist with its vector's bytes: V14 (add money, 5 USDC to the real Safe) and V15 (fee money, 0.1 USDC to A)", async () => {
+    const add = harness(fresh(HEALTHY));
+    await runPotTransfer("add_money", args(ADD), add.d);
+    expect(add.data).toHaveLength(1);
+    expect(size(add.data[0])).toBe(68);
+    expect(keccak256(add.data[0])).toBe("0x6269aa34f7e2541c8a744afcb67cfe5d56fe010b0019d20866a2d1ae6bd4e168");
+    const fee = harness(fresh(HEALTHY));
+    await runPotTransfer("fee_money", args(FEE), fee.d);
+    expect(size(fee.data[0])).toBe(68);
+    expect(keccak256(fee.data[0])).toBe("0x81c73e55a126dfa49b01a558cb943527c09e803ac8ae17fa26f2b84a6532ab10");
+  });
+
+  test("a read that throws is read_failed and nothing else is called; a registry that cannot be read too; a registry naming the guardian, none or zero is agent_wallet", async () => {
+    const error = offlineError();
+    for (const kind of ["add_money", "fee_money"] as PotTransfer[]) {
+      const thrown = harness(fresh(HEALTHY), { read: async () => Promise.reject(error) });
+      expect(await runPotTransfer(kind, args(ADD), thrown.d)).toEqual({ ok: false, problem: "read_failed", cause: error });
+      expect(thrown.calls).toEqual(["read"]);
+      const unread = harness(none("unreadable"));
+      expect(await runPotTransfer(kind, args(FEE), unread.d)).toMatchObject({ ok: false, problem: "read_failed" });
+      expect(unread.calls).toEqual(["read"]);
+      for (const f of [fresh(HEALTHY, G), fresh(HEALTHY, G.toLowerCase() as Address), none("none"), fresh(HEALTHY, zeroAddress)]) {
+        const h = harness(f);
+        expect(await runPotTransfer(kind, args(FEE), h.d), `${kind} ${String(f.agentWallet)}`).toEqual({ ok: false, problem: "agent_wallet" });
+        expect(h.calls).toEqual(["read"]);
+      }
+    }
+  });
+
+  test("add money to a pot whose fresh read is not_the_guardians, limits_not_read or absent is refused before any simulation, and the card reads again", async () => {
+    const cases: [string, Fresh][] = [
+      ["not_the_guardians", fresh({ ...HEALTHY, owners: [P] })],
+      ["limits_not_read, a guard", fresh({ ...HEALTHY, guard: P })],
+      // A changed key on a running pot: other_delegate until the new key is set.
+      ["limits_not_read, other_delegate", fresh(HEALTHY, P)],
+      ["absent", fresh({ ...HEALTHY, codeHash: null })],
+    ];
+    for (const [what, f] of cases) {
+      const h = harness(f);
+      expect(await runPotTransfer("add_money", args(ADD), h.d), what).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
+      expect(h.calls, what).toEqual(["read"]);
+      expect(h.sent, what).toEqual([]);
+    }
+    expect(potTransferFailureView({ ok: false, problem: "refused", cause: POT_ACTION_MOVED }, { environment: "sandbox", guardian: G })).toEqual({
+      lines: [P_.actionMoved],
+      reread: true,
+    });
+    // A stopped pot reads stopped whatever key the registry names: money may go in.
+    expect((await runPotTransfer("add_money", args(ADD), harness(fresh(STOPPED, P)).d)).ok).toBe(true);
+  });
+
+  test("add money only to the noted pot, on the record, read fresh in the click: another address, off the record or no note is refused; a failed read is pot_unreadable", async () => {
+    for (const [what, noted] of [
+      ["another address noted", { ...NOTED_SAFE, address: V3_POT }],
+      ["off the record", { ...NOTED_SAFE, onRecord: false }],
+      ["no note", null],
+    ] as [string, OrderPotView | null][]) {
+      const h = harness(fresh(HEALTHY), { readNoted: async () => noted });
+      expect(await runPotTransfer("add_money", args(ADD), h.d), what).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
+      expect(h.calls, what).toEqual(["read", "noted"]);
+    }
+    const server = new ApiError(503, { code: "chain_unavailable", message: "x" });
+    const failed = harness(fresh(HEALTHY), { readNoted: async () => Promise.reject(server) });
+    expect(await runPotTransfer("add_money", args(ADD), failed.d)).toEqual({ ok: false, problem: "pot_unreadable", cause: server });
+    expect(failed.calls).toEqual(["read", "noted"]);
+    expect(potTransferFailureView({ ok: false, problem: "pot_unreadable", cause: server }, { environment: "sandbox", guardian: G }).lines).toEqual([
+      P_.problems.pot_unreadable,
+    ]);
+    // The same address in another letter case is the noted pot.
+    const lower = harness(fresh(HEALTHY), { readNoted: async () => ({ ...NOTED_SAFE, address: SAFE_CREATED.toLowerCase() as Address }) });
+    expect((await runPotTransfer("add_money", args(ADD), lower.d)).ok).toBe(true);
+    // Fee money does not ask the record.
+    const fee = harness(fresh(HEALTHY), { readNoted: async () => null });
+    expect((await runPotTransfer("fee_money", args(FEE), fee.d)).ok).toBe(true);
+    expect(fee.calls).not.toContain("noted");
+  });
+
+  test("fee money when the click's registry read names a wallet with code is refused before any simulation, with the allowlist's code and the plain key's sentence (Ruling R10)", async () => {
+    const h = harness(fresh({ ...HEALTHY, agentHasCode: true }));
+    expect(await runPotTransfer("fee_money", args(FEE), h.d)).toEqual({ ok: false, problem: "refused", cause: "fee_money_contract_wallet" });
+    expect(h.calls).toEqual(["read"]);
+    const ENV = { environment: "sandbox" as const, guardian: G };
+    expect(potTransferFailureView({ ok: false, problem: "refused", cause: "fee_money_contract_wallet" }, ENV)).toEqual({
+      lines: [potRefusalSentence("fee_money_needs_plain_key", ENV)],
+      reread: false,
+    });
+    // The allowlist says the same of such a context, whatever the runner did.
+    const req = potTransferCall(CFG, { ...FEE_CTX, agentHasCode: true }, POT_TRANSFER_GAS_CAP);
+    expect(req).toEqual({ ok: false, problem: "fee_money_contract_wallet" });
+    // Money for the pot does not depend on the key's code.
+    expect((await runPotTransfer("add_money", args(ADD), harness(fresh({ ...HEALTHY, agentHasCode: true })).d)).ok).toBe(true);
+  });
+
+  test("Ruling R23 applied to money: fee money pressed on a card that named key A, while the click's registry read names key Q, is refused and the card reads again; the same key in any letter case goes", async () => {
+    const moved = harness(fresh(STOPPED, Q));
+    expect(await runPotTransfer("fee_money", args(FEE, A), moved.d)).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
+    expect(moved.calls).toEqual(["read"]);
+    expect(moved.sent).toEqual([]);
+    const same = harness(fresh(HEALTHY, A));
+    expect(await runPotTransfer("fee_money", args(FEE, A.toLowerCase() as Address), same.d)).toEqual({ ok: true, hash: HASH, agentWallet: A });
+    // The transfer goes to the key read in the click, which is the one shown.
+    expect(same.sent).toEqual([FEE_CTX]);
+  });
+
+  test("a guardian's balance one wei under the amount is not_enough, with the balance and the amount in wei, before the page's checks; at the amount it goes", async () => {
+    const under = WEI(ADD) - BigInt(1);
+    const add = harness(fresh(HEALTHY, A, under));
+    expect(await runPotTransfer("add_money", args(ADD), add.d)).toEqual({ ok: false, problem: "not_enough", balanceWei: under, totalWei: WEI(ADD) });
+    expect(add.calls).toEqual(["read", "noted"]);
+    const feeUnder = WEI(FEE) - BigInt(1);
+    const fee = harness(fresh(HEALTHY, A, feeUnder));
+    expect(await runPotTransfer("fee_money", args(FEE), fee.d)).toMatchObject({ ok: false, problem: "not_enough", totalWei: WEI(FEE) });
+    expect(fee.calls).toEqual(["read"]);
+    expect((await runPotTransfer("add_money", args(ADD), harness(fresh(HEALTHY, A, WEI(ADD))).d)).ok).toBe(true);
+    expect(
+      potTransferFailureView({ ok: false, problem: "not_enough", balanceWei: under, totalWei: WEI(ADD) }, { environment: "sandbox", guardian: G }).lines,
+    ).toEqual([fillCopy(P_.problems.not_enough, { balance: "4.999999999999999999", total: "5" })]);
+  });
+
+  test("an amount that is not a positive bigint reads nothing and sends nothing", async () => {
+    for (const amount of [ZERO, BigInt(-1), 5 as unknown as bigint]) {
+      const h = harness(fresh(HEALTHY));
+      expect(await runPotTransfer("add_money", args(amount), h.d), String(amount)).toEqual({ ok: false, problem: "refused" });
+      expect(h.calls).toEqual([]);
+    }
+  });
+
+  test("the page's own checks and the allowlist come before the chain: a refusal is its problem, and nothing is simulated", async () => {
+    for (const problem of ["not_this_wallet", "wrong_network", "refused"] as const) {
+      const h = harness(fresh(HEALTHY), { preflight: () => ({ ok: false, problem }) });
+      expect(await runPotTransfer("fee_money", args(FEE), h.d)).toEqual({ ok: false, problem });
+      expect(h.calls).toEqual(["read", "preflight"]);
+    }
+    // Above the allowlist's bounds: its own code.
+    const rich = WEI(USDC(2_000_000_000));
+    const add = harness(fresh(HEALTHY, A, rich));
+    expect(await runPotTransfer("add_money", args(USDC(1_000_000_000) + BigInt(1)), add.d)).toEqual({ ok: false, problem: "refused", cause: "fund_out_of_bounds" });
+    expect(add.calls).toEqual(["read", "noted", "preflight", "check"]);
+    const fee = harness(fresh(HEALTHY));
+    expect(await runPotTransfer("fee_money", args(USDC(1) + BigInt(1)), fee.d)).toEqual({ ok: false, problem: "refused", cause: "agent_gas_out_of_bounds" });
+    expect(fee.calls).toEqual(["read", "preflight", "check"]);
+  });
+
+  test("a simulation that does not answer true is would_revert and nothing is sent; one the chain refuses too; one the node could not answer is read_failed", async () => {
+    for (const impl of [
+      { simulate: async () => `0x${"0".repeat(64)}` as Hex },
+      { simulate: async () => "0x" as Hex },
+      { simulate: async () => Promise.reject(callRevertError()) },
+      { simulate: async () => Promise.reject(revertError()) },
+    ] as Partial<PotTransferDeps>[]) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotTransfer("fee_money", args(FEE), h.d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(h.calls).toEqual(["read", "preflight", "check", "simulate"]);
+    }
+    const offline = harness(fresh(HEALTHY), { simulate: async () => Promise.reject(offlineError()) });
+    expect(await runPotTransfer("fee_money", args(FEE), offline.d)).toMatchObject({ ok: false, problem: "read_failed" });
+  });
+
+  test("an estimate above POT_TRANSFER_GAS_CAP, or none, is would_revert; at the cap the limit is the cap", async () => {
+    for (const impl of [
+      { estimate: async () => POT_TRANSFER_GAS_CAP + BigInt(1) },
+      { estimate: async () => ZERO },
+      { estimate: async () => Promise.reject(callRevertError("EstimateGasExecutionError")) },
+    ] as Partial<PotTransferDeps>[]) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotTransfer("add_money", args(ADD), h.d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(h.calls).toEqual(["read", "noted", "preflight", "check", "simulate", "estimate"]);
+    }
+    const atCap = harness(fresh(HEALTHY), { estimate: async () => POT_TRANSFER_GAS_CAP });
+    expect((await runPotTransfer("add_money", args(ADD), atCap.d)).ok).toBe(true);
+    expect(atCap.calls.at(-1)).toBe(`send ${POT_TRANSFER_GAS_CAP}`);
+  });
+
+  test("money short at the simulation or the estimate: the guardian's balance read again, and how much is held and needed said; a balance that cannot be read is read_failed", async () => {
+    const short = BigInt("100000000000000");
+    for (const at of ["simulate", "estimate"] as const) {
+      const h = harness(fresh(HEALTHY), { [at]: async () => Promise.reject(moneyShortError()), readBalance: async () => short });
+      expect(await runPotTransfer("add_money", args(ADD), h.d), at).toEqual({ ok: false, problem: "not_enough", balanceWei: short, totalWei: WEI(ADD) });
+      expect(h.calls.at(-1), at).toBe("balance");
+      expect(h.calls.some((c) => c.startsWith("send")), at).toBe(false);
+    }
+    const unread = harness(fresh(HEALTHY), {
+      simulate: async () => Promise.reject(moneyShortError()),
+      readBalance: async () => Promise.reject(offlineError()),
+    });
+    expect(await runPotTransfer("fee_money", args(FEE), unread.d)).toMatchObject({ ok: false, problem: "read_failed" });
+  });
+
+  test("the step's lifetime is asked after every await and right before the send: a person who left gets no wallet prompt", async () => {
+    const addCases: [number, string[]][] = [
+      [0, ["read"]],
+      [1, ["read", "noted"]],
+      [2, ["read", "noted", "preflight", "check", "simulate"]],
+      [3, ["read", "noted", "preflight", "check", "simulate", "estimate"]],
+      [4, ["read", "noted", "preflight", "check", "simulate", "estimate", "account"]],
+    ];
+    for (const [n, upTo] of addCases) {
+      const h = harness(fresh(HEALTHY), { alive: goneAfter(n) });
+      expect(await runPotTransfer("add_money", args(ADD), h.d), String(n)).toEqual({ ok: false, problem: "left" });
+      expect(h.calls, String(n)).toEqual(upTo);
+    }
+    const feeCases: [number, string[]][] = [
+      [0, ["read"]],
+      [1, ["read", "preflight", "check", "simulate"]],
+      [2, ["read", "preflight", "check", "simulate", "estimate"]],
+      [3, ["read", "preflight", "check", "simulate", "estimate", "account"]],
+    ];
+    for (const [n, upTo] of feeCases) {
+      const h = harness(fresh(HEALTHY), { alive: goneAfter(n) });
+      expect(await runPotTransfer("fee_money", args(FEE), h.d), String(n)).toEqual({ ok: false, problem: "left" });
+      expect(h.calls, String(n)).toEqual(upTo);
+    }
+    // A read, a note or a simulation that threw while the person left is not said either.
+    for (const impl of [
+      { alive: goneAfter(0), read: async () => Promise.reject(offlineError()) },
+      { alive: goneAfter(1), readNoted: async () => Promise.reject(offlineError()) },
+      { alive: goneAfter(2), simulate: async () => Promise.reject(callRevertError()) },
+      { alive: goneAfter(2), simulate: async () => Promise.reject(moneyShortError()) },
+    ] as Partial<PotTransferDeps>[]) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotTransfer("add_money", args(ADD), h.d)).toEqual({ ok: false, problem: "left" });
+      expect(h.calls.some((c) => c.startsWith("send"))).toBe(false);
+    }
+  });
+
+  test("the account connected NOW is read right before the send: a switch refuses with wallet_is_not_the_guardian, and nothing is sent", async () => {
+    for (const account of [P, null]) {
+      const h = harness(fresh(HEALTHY), { account: () => account });
+      expect(await runPotTransfer("fee_money", args(FEE), h.d), String(account)).toEqual({
+        ok: false,
+        problem: "refused",
+        cause: "wallet_is_not_the_guardian",
+      });
+      expect(h.calls).toEqual(["read", "preflight", "check", "simulate", "estimate", "account"]);
+    }
+    expect((await runPotTransfer("fee_money", args(FEE), harness(fresh(HEALTHY), { account: () => G.toLowerCase() as Address }).d)).ok).toBe(true);
+  });
+
+  test("the send's outcomes, as Create the pot reads them: a refusal of the door, the wallet's no, a fee it cannot pay, a revert, any other throw", async () => {
+    const outcomes: [Partial<PotTransferDeps>, object][] = [
+      [{ send: async () => ({ ok: false, problem: "wallet_on_another_chain" }) }, { problem: "refused", cause: "wallet_on_another_chain" }],
+      [{ send: async () => Promise.reject(rejectedError()) }, { problem: "declined" }],
+      [{ send: async () => Promise.reject(moneyShortError("TransactionExecutionError")) }, { problem: "no_gas" }],
+      [{ send: async () => Promise.reject(revertError()) }, { problem: "would_revert" }],
+      [{ send: async () => Promise.reject(offlineError()) }, { problem: "refused" }],
+    ];
+    for (const [impl, want] of outcomes) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotTransfer("add_money", args(ADD), h.d)).toMatchObject({ ok: false, ...want });
+      expect(h.calls).toEqual(ADD_ALL);
+    }
+  });
+});
+
+describe("after a transfer, and the public record's two actions", () => {
+  const ENV = { environment: "sandbox" as const, guardian: G };
+
+  test("potTransferFailureView: every other problem is the actions' own sentence", () => {
+    for (const problem of ["read_failed", "agent_wallet", "would_revert", "declined", "no_gas"] as const)
+      expect(potTransferFailureView({ ok: false, problem }, ENV), problem).toEqual(potActionFailureView({ ok: false, problem }, ENV));
+    expect(potTransferFailureView({ ok: false, problem: "left" }, ENV)).toEqual({ lines: [], reread: false });
+    expect(potTransferFailureView({ ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" }, ENV).lines).toEqual([
+      fillCopy(P_.problems.not_this_wallet, { address: G }),
+    ]);
+  });
+
+  test("potTransferDoneView: after Add money the pot's balance as read now; after Send fee money what the key holds, with the low mark's warning", () => {
+    expect(potTransferDoneView("add_money", { ...HEALTHY, balanceUnits: USDC(195) })).toEqual({
+      ok: true,
+      lines: [fillCopy(P_.shownBalance, { balance: "195" })],
+    });
+    expect(potTransferDoneView("fee_money", { ...HEALTHY, agentBalanceWei: BigInt("200000000000000000") })).toEqual({
+      ok: true,
+      lines: [fillCopy(P_.shownFeeMoney, { amount: "0.2" })],
+    });
+    expect(potTransferDoneView("fee_money", { ...HEALTHY, agentBalanceWei: BigInt("1000000000000000") }).lines).toEqual([
+      fillCopy(P_.shownFeeMoney, { amount: "0.001" }),
+      P_.feeMoneyLow,
+    ]);
+  });
+
+  test("potRecordFailureView: a retry after a lost answer (pot_not_on_record) reads GET /pot again and shows no failure; pot_exists, pot_pending and pot_taken read again and say the server's sentence", () => {
+    const served = (code: string, message = `The server's sentence for ${code}.`) => new ApiError(409, { code, message });
+    expect(potRecordFailureView(served("pot_not_on_record"))).toEqual({ lines: [], reread: true });
+    for (const code of ["pot_exists", "pot_pending", "pot_taken"])
+      expect(potRecordFailureView(served(code)), code).toEqual({ lines: [`The server's sentence for ${code}.`], reread: true });
+    expect(potRecordFailureView(served("agent_wallet_required")).reread).toBe(true);
+    // Another refusal: its sentence, as served, and nothing read again.
+    for (const code of ["rate_limited", "other_deployment", "legal_body_revoked", "pot_not_offered"])
+      expect(potRecordFailureView(served(code)), code).toEqual({ lines: [`The server's sentence for ${code}.`], reread: false });
+    // No answer the server wrote: this page's own sentence, never "nothing was sent" of a wallet.
+    for (const e of [
+      new ApiError(0, { code: TIMEOUT_CODE, message: "The request took too long." }),
+      new ApiError(502, { code: "http_error", message: "Bad gateway" }),
+      new ApiError(409, { code: "pot_exists", message: "  " }),
+      new Error("Failed to fetch"),
+      undefined,
+    ])
+      expect(potRecordFailureView(e)).toEqual({ lines: [P_.recordChangeFailed], reread: false });
+    expect(P_.recordChangeFailed).not.toMatch(/\{[a-zA-Z]+\}|sent/);
   });
 });

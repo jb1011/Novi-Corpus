@@ -723,8 +723,9 @@ function spentLine(r: CeilingRead): string {
 
 /** The agent key's fee money, and the low mark's warning under it: for a plain key only. A wallet
  *  with code (a contract wallet or a delegated key) pays its fees its own way, and no fee money is
- *  offered to it, so nothing is said of its balance. */
-function feeLines(raw: PotRaw): string[] {
+ *  offered to it, so nothing is said of its balance. The card shows these lines in its "Send fee
+ *  money" panel, beside the button they are about. */
+export function potFeeLines(raw: PotRaw): string[] {
   if (raw.agentHasCode) return [];
   const lines = [fillCopy(POT.shownFeeMoney, { amount: formatNative(raw.agentBalanceWei) })];
   if (raw.agentBalanceWei < POT_FEE_LOW_WEI) lines.push(POT.feeMoneyLow);
@@ -747,14 +748,15 @@ function stoppable(a: PotAddresses | null, guardian: Address, raw: PotRaw): bool
 /**
  * What the card says of a reading, and what it offers. Every state but `absent` offers the record
  * action: `take_off_record` when `onRecord`, else `put_back`, never for an order of another
- * deployment (the server refuses it).
+ * deployment (the server refuses it). `add_money` only while the pot is on the record: money put
+ * in a pot taken off it would not show beside the company.
  *  - ceiling_read: change, stop, add_money, and fee_money unless the agent's wallet holds code;
  *  - stopped: start_again; stop while the add-on is still on (no key, module on); withdraw once no
  *    add-on is on and the pot holds money; add_money; fee_money unless the agent's wallet holds
  *    code;
  *  - limits_not_read: with `other_delegate` and the registry's `agentWallet` (never the guardian's)
  *    not among a complete list of the pot's keys, new_key and stop; otherwise stop when there is
- *    something to stop;
+ *    something to stop. No money: after a changed-key setup, the new key is set first;
  *  - not_the_guardians: the record action only;
  *  - absent: nothing (the card offers the setup).
  * The lines: the address and the only owner; for ceiling_read the key, the ceiling, what is left
@@ -796,8 +798,9 @@ export function potReadingView(
       );
       if (p.nowSeconds < reading.periodEndsAt) lines.push(spentLine(reading));
       lines.push(fillCopy(POT.shownBalance, { balance: usdc(reading.balanceUnits) }));
-      lines.push(...feeLines(raw));
-      actions.push("change", "stop", "add_money");
+      lines.push(...potFeeLines(raw));
+      actions.push("change", "stop");
+      if (p.onRecord) actions.push("add_money");
       if (!raw.agentHasCode) actions.push("fee_money");
       break;
     case "stopped":
@@ -806,12 +809,12 @@ export function potReadingView(
         owner,
         POT.stoppedLine,
         fillCopy(POT.shownBalance, { balance: usdc(reading.balanceUnits) }),
-        ...feeLines(raw),
+        ...potFeeLines(raw),
       );
       actions.push("start_again");
       if (stoppable(a, p.guardian, raw)) actions.push("stop");
       if (raw.modules.list.length === 0 && raw.balanceWei > ZERO) actions.push("withdraw");
-      actions.push("add_money");
+      if (p.onRecord) actions.push("add_money");
       if (!raw.agentHasCode) actions.push("fee_money");
       break;
     case "limits_not_read": {

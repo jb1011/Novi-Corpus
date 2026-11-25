@@ -13,7 +13,7 @@ import {
 import type { Hex } from "@/lib/api/types";
 import { txUrl } from "@/lib/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
-import type { PotActionStage } from "@/lib/legalBody/safePotActions";
+import type { PotCardStage } from "@/lib/legalBody/safePotActions";
 import type { PotCardShown, PotFormMoney, PotProblemThen } from "@/lib/legalBody/safePotRun";
 import type { PotForm, PotFormCheck } from "@/lib/legalBody/safePotStep";
 
@@ -287,16 +287,7 @@ export function PotReviewPanel({
         </Callout>
       )}
 
-      <label className="mt-6 flex cursor-pointer items-start gap-3 rounded-xl border hairline bg-paper/40 px-4 py-3 text-[13px] leading-[1.6] text-ink">
-        <input
-          type="checkbox"
-          checked={declared}
-          disabled={busy}
-          onChange={(e) => onDeclared(e.target.checked)}
-          className="mt-1 h-4 w-4 shrink-0"
-        />
-        <span>{POT.declaration}</span>
-      </label>
+      <PotDeclarationTick declared={declared} disabled={busy} onDeclared={onDeclared} className="mt-6" />
 
       {problems.length > 0 && (
         <Callout tone="warn" className="mt-6">
@@ -314,6 +305,35 @@ export function PotReviewPanel({
         </Button>
       </div>
     </div>
+  );
+}
+
+/** The declaration's tick box, controlled: unticked until the guardian ticks it, each time it is
+ *  asked (the setup's review, and putting the pot back on the public record). */
+export function PotDeclarationTick({
+  declared,
+  disabled,
+  onDeclared,
+  className = "",
+}: {
+  declared: boolean;
+  disabled: boolean;
+  onDeclared: (declared: boolean) => void;
+  className?: string;
+}) {
+  return (
+    <label
+      className={`${className ? `${className} ` : ""}flex cursor-pointer items-start gap-3 rounded-xl border hairline bg-paper/40 px-4 py-3 text-[13px] leading-[1.6] text-ink`}
+    >
+      <input
+        type="checkbox"
+        checked={declared}
+        disabled={disabled}
+        onChange={(e) => onDeclared(e.target.checked)}
+        className="mt-1 h-4 w-4 shrink-0"
+      />
+      <span>{POT.declaration}</span>
+    </label>
   );
 }
 
@@ -507,11 +527,44 @@ export function PotCeilingField({
   );
 }
 
+/** An amount typed for a transfer, in USDC: as typed, with the sentence that refuses it under it. */
+export function PotAmountField({
+  id,
+  label,
+  value,
+  error,
+  disabled,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  error: string | undefined;
+  disabled: boolean;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <Field label={label} error={error} htmlFor={id}>
+      <TextInput
+        id={id}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        invalid={error !== undefined}
+        inputMode="decimal"
+        autoComplete="off"
+        spellCheck={false}
+        disabled={disabled}
+      />
+    </Field>
+  );
+}
+
 /**
- * Where the last action is: the checks before the wallet, the wallet open, the chain awaited (with
- * the transaction's link); done, with what the chain shows now, or a warning in the reading's own
- * sentences when it does not show what was asked; or a problem, with Check again only when the
- * chain may still show the transaction. `after` comes under it (one pot for life, under the stop).
+ * Where the last transaction is (one of the Safe actions, or a transfer): the checks before the
+ * wallet, the wallet open, the chain awaited (with the transaction's link); done, with what the
+ * chain shows now, or a warning in the reading's own sentences when it does not show what was
+ * asked; or a problem, with Check again only when the chain may still show the transaction.
+ * `after` comes under it (one pot for life, under the stop).
  */
 export function PotActionResultPanel({
   title,
@@ -521,7 +574,7 @@ export function PotActionResultPanel({
   onCheckAgain,
 }: {
   title: string;
-  stage: Exclude<PotActionStage, { at: "idle" }>;
+  stage: Exclude<PotCardStage<string>, { at: "idle" }>;
   after: readonly string[];
   busy: boolean;
   onCheckAgain: () => void;

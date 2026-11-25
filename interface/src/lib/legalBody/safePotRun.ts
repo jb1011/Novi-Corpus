@@ -472,10 +472,10 @@ export async function runPotCreate(
 // After a refusal
 // ---------------------------------------------------------------------------------------------
 
-/** A failed note of the pot: the server's own sentence and the next step its code chooses; with
- *  no answer the server wrote (a timeout, an answer that is not the house envelope, no words),
- *  this page's own sentence and a try again. */
-export function potNoteFailure(e: unknown): { next: PotServerNext; line: string } {
+/** A refusal of the server's pot doors as the server wrote it: its code and its own sentence; null
+ *  for no answer the server wrote (a timeout, an answer that is not the house envelope, no words).
+ *  Shared with `safePotActions.ts`. */
+export function potServedRefusal(e: unknown): { code: string; line: string } | null {
   if (
     e instanceof ApiError &&
     e.code !== TIMEOUT_CODE &&
@@ -483,7 +483,15 @@ export function potNoteFailure(e: unknown): { next: PotServerNext; line: string 
     typeof e.message === "string" &&
     e.message.trim() !== ""
   )
-    return { next: potServerNext(e.code), line: e.message };
+    return { code: e.code, line: e.message };
+  return null;
+}
+
+/** A failed note of the pot: the server's own sentence and the next step its code chooses; with
+ *  no answer the server wrote, this page's own sentence and a try again. */
+export function potNoteFailure(e: unknown): { next: PotServerNext; line: string } {
+  const served = potServedRefusal(e);
+  if (served !== null) return { next: potServerNext(served.code), line: served.line };
   return { next: "try_again", line: POT.problems.record_failed };
 }
 

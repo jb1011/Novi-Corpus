@@ -2,7 +2,14 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useConnection, usePublicClient } from "wagmi";
-import { useAllowedWrite, useOrderGrantQuery, useWalletNow } from "@/lib/api/legalBodyHooks";
+import { Callout } from "@/components/onboarding/primitives";
+import {
+  useAllowedWrite,
+  useDeclarePotMutation,
+  useOrderGrantQuery,
+  useTakePotOffRecordMutation,
+  useWalletNow,
+} from "@/lib/api/legalBodyHooks";
 import type { Address, LegalBodyOrderView, OrderPotView } from "@/lib/api/types";
 import { arcTestnet } from "@/lib/chain";
 import { readAgentWallet } from "@/lib/legalBody/agentWallet";
@@ -12,7 +19,7 @@ import {
   identityRegistryAbi,
   potExecCall,
 } from "@/lib/legalBody/chain";
-import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
+import { LEGAL_BODY_COPY, POT_DECLARATION_VERSION, fillCopy } from "@/lib/legalBody/copy";
 import { sameAddress } from "@/lib/legalBody/flow";
 import { REGISTER_RECEIPT_TIMEOUT_MS } from "@/lib/legalBody/identity";
 import { stepLifetime } from "@/lib/legalBody/lifetime";
@@ -27,11 +34,13 @@ import {
 } from "@/lib/legalBody/safePotRules";
 import {
   isPotSafeAction,
+  isPotTransfer,
   potActionAfter,
   potActionDoneView,
   potActionFailureView,
   potActionTakesCeiling,
   potCeilingCheck,
+  potRecordFailureView,
   runPotAction,
   type PotActionStage,
   type PotReadAgain,
@@ -40,17 +49,21 @@ import {
 import {
   potAgentCommands,
   potCeilingHint,
+  potFeeLines,
   potProblemSentence,
   potReadingView,
   potRefusalSentence,
   potSendPreflight,
+  type PotAction,
 } from "@/lib/legalBody/safePotStep";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
+import { PotMoney } from "./PotMoney";
 import {
   PotActionPanel,
   PotActionResultPanel,
   PotAgentPanel,
   PotCeilingField,
+  PotDeclarationTick,
   PotManageFrame,
 } from "./PotPanels";
 
@@ -59,6 +72,10 @@ const POT = LEGAL_BODY_COPY.pot;
 type Client = NonNullable<ReturnType<typeof usePublicClient>>;
 /** The actions that set a ceiling, each with its own field. */
 type CeilingAction = "change" | "start_again" | "new_key";
+/** The public record's two actions: one call to the server each, no wallet. */
+type RecordAction = Extract<PotAction, "take_off_record" | "put_back">;
+const isRecordAction = (action: PotAction): action is RecordAction =>
+  action === "take_off_record" || action === "put_back";
 
 const TITLES: Readonly<Record<PotSafeAction, string>> = {
   change: POT.changeTitle,
@@ -74,8 +91,10 @@ const TITLES: Readonly<Record<PotSafeAction, string>> = {
  * period and what was taken in it are kept), stop it (every key listed off and the add-on off, no
  * amount), take the money back (only once no add-on is on), start again (after a stop), and move
  * the allowance to the agent's new key (when the registry names a key that is not the pot's).
- * There is never a way to create a second pot. Under them, for a pot whose ceiling is read, what
- * the agent does with its own key: the MCP tools by name and the two commands.
+ * There is never a way to create a second pot. Then the two USDC transfers (`PotMoney`: Add money,
+ * Send fee money, with what the agent's key holds for its fees beside it), the public record's
+ * action (`PotRecordAction`: take the pot off it, or put it back), and, for a pot whose ceiling is
+ * read, what the agent does with its own key: the MCP tools by name and the two commands.
  *
  * The card is drawn from the done page's reads (`agentWallet`, `raw`, `reading`: the record's key
  * and the pot read for it). An action's click never builds from them: it reads the registry's key
@@ -370,6 +389,12 @@ export function PotManage({
     nowSeconds,
   });
   const actions = view.actions.filter(isPotSafeAction);
+  const transfers = view.actions.filter(isPotTransfer);
+  const recordAction = view.actions.find(isRecordAction) ?? null;
+  // What the agent's key holds for its fees is said in the Send fee money panel, beside its
+  // button, and not twice on the card.
+  const feeShownBelow = transfers.includes("fee_money") ? potFeeLines(shownRaw) : [];
+  const frameLines = view.lines.filter((line) => !feeShownBelow.includes(line));
   const hint = cap === null || cap === "unreadable" ? null : potCeilingHint(cap);
   const commands =
     shownReading.state === "ceiling_read" && a !== null
@@ -470,7 +495,7 @@ export function PotManage({
   }
 
   return (
-    <PotManageFrame lines={view.lines}>
+    <PotManageFrame lines={frameLines}>
       {stage.at !== "idle" && (
         <PotActionResultPanel
           title={TITLES[stage.action]}
@@ -481,7 +506,130 @@ export function PotManage({
         />
       )}
       {actions.map(panel)}
+      <PotMoney
+        kit={kit}
+        order={order}
+        noted={noted}
+        agentWallet={shownWallet}
+        raw={shownRaw}
+        offered={transfers}
+        onChanged={onChanged}
+      />
+      <PotRecordAction kit={kit} order={order} noted={noted} action={recordAction} onChanged={onChanged} />
       {commands && <PotAgentPanel take={commands.take} read={commands.read} />}
     </PotManageFrame>
   );
+}
+
+/**
+ * The pot on the public record: "Take the pot off the public record" while it is on it (one call
+ * of the server's off-record door, which answers whatever the pot's flag: a guardian may always
+ * withdraw a claim), or "Put the pot back on the public record" (one note of the noted address
+ * again, with the birth details the server served and the declaration's version), offered by the
+ * reading only for an order of this deployment. Putting it back needs the declaration ticked
+ * again: the button stays disabled until it is. Neither reaches a wallet or the chain.
+ *
+ * After either, the noted pot and the record are read again (`onChanged`). A refusal routes to
+ * sign-in when it means that; a removal already done (a retry after a lost answer) shows nothing
+ * and reads again; `pot_exists`, `pot_pending` and `pot_taken` say the server's sentence and read
+ * again (`potRecordFailureView`). A click's continuation stops once the card is gone.
+ */
+export function PotRecordAction({
+  kit,
+  order,
+  noted,
+  action,
+  onChanged,
+}: {
+  kit: LegalBodyStepKit;
+  order: LegalBodyOrderView;
+  noted: OrderPotView;
+  /** The record action the card's reading offers, or none. */
+  action: RecordAction | null;
+  /** Reads the noted pot, its reading and the record again. */
+  onChanged: () => void;
+}) {
+  const takeOff = useTakePotOffRecordMutation(order.id);
+  const declarePot = useDeclarePotMutation(order.id);
+  const [life] = useState(() => stepLifetime());
+  useEffect(() => {
+    life.begin();
+    return () => life.end();
+  }, [life]);
+  const latestOnChanged = useRef(onChanged);
+  useEffect(() => {
+    latestOnChanged.current = onChanged;
+  });
+  // The declaration, ticked again for each put back: never kept in a browser store.
+  const [declared, setDeclared] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [lines, setLines] = useState<string[]>([]);
+  const inFlight = useRef(false);
+
+  async function onRecord(act: RecordAction) {
+    if (inFlight.current) return;
+    if (act === "put_back" && !declared) return;
+    inFlight.current = true;
+    setBusy(true);
+    setLines([]);
+    try {
+      if (act === "take_off_record") await takeOff.mutateAsync();
+      else
+        await declarePot.mutateAsync({
+          address: noted.address,
+          saltNonce: noted.birth.saltNonce,
+          ceilingUnits: noted.birth.ceilingUnits,
+          agentWallet: noted.birth.agentWallet,
+          declarationVersion: POT_DECLARATION_VERSION,
+        });
+      if (!life.alive()) return;
+      setDeclared(false);
+      latestOnChanged.current();
+    } catch (e) {
+      if (!life.alive()) return;
+      // A refusal of the server that means "sign in" goes there.
+      if (kit.routeSignIn(e)) return;
+      const failed = potRecordFailureView(e);
+      setLines(failed.lines);
+      if (failed.reread) latestOnChanged.current();
+    } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  }
+
+  const said = lines.length > 0 && (
+    <Callout tone="warn" className="mb-4">
+      {lines.join(" ")}
+    </Callout>
+  );
+  if (action === "take_off_record")
+    return (
+      <PotActionPanel
+        title={POT.offRecordTitle}
+        lines={[POT.offRecordLine]}
+        sendLabel={POT.offRecordSend}
+        onSend={() => void onRecord("take_off_record")}
+        disabled={busy}
+        loading={busy}
+      >
+        {said}
+      </PotActionPanel>
+    );
+  if (action === "put_back")
+    return (
+      <PotActionPanel
+        title={POT.backOnTitle}
+        lines={[]}
+        sendLabel={POT.backOnSend}
+        onSend={() => void onRecord("put_back")}
+        disabled={busy || !declared}
+        loading={busy}
+      >
+        {said}
+        <PotDeclarationTick declared={declared} disabled={busy} onDeclared={setDeclared} />
+        {!declared && <p className="mt-2 text-[12.5px] text-muted-2">{POT.declarationNeeded}</p>}
+      </PotActionPanel>
+    );
+  return said ? <div className="border-t hairline pt-5">{said}</div> : null;
 }

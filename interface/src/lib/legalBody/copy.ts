@@ -688,6 +688,8 @@ export const LEGAL_BODY_COPY = {
       too_large: "This amount is too large.",
       gas_too_large: "Fee money is at most 1 USDC. Money for the company goes in the pot.",
       empty: "Give an amount.",
+      /** Add money and Send fee money never send 0. */
+      zero: "Give an amount above 0 USDC.",
     },
 
     /* The review and the setup. */
@@ -893,6 +895,9 @@ export const LEGAL_BODY_COPY = {
       "This pot is off the public record. A search by its address still leads to the company, marked as a former pot.",
     backOnTitle: "Put the pot back on the public record",
     backOnSend: "Put it back on the record",
+    /** Taking the pot off the record, or putting it back, with no answer the server wrote. */
+    recordChangeFailed:
+      "Novi Corpus could not change the public record just now, so nothing was changed. Try again.",
 
     /* The agent's side. The commands are data the page fills in, shown in copy boxes. */
     agentTitle: "For your agent",

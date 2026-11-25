@@ -8,23 +8,47 @@
  * failures, and what the card shows after the receipt (`potActionFailureView`,
  * `potActionDoneView`, `potActionAfter`), and the ceiling typed for it (`potCeilingCheck`).
  *
+ * Then the two USDC transfers of the card, "Add money" (to the noted pot) and "Send fee money" (to
+ * the agent's key), each one `transfer` the guardian sends (`runPotTransfer`), with the amount
+ * typed for it (`potTransferAmount`) and what the card says before and after; and what the card
+ * says when taking the pot off the public record, or putting it back, was refused
+ * (`potRecordFailureView`).
+ *
  * Nothing here holds a key, writes to a browser store or reads a clock.
  */
-import type { Address, Hex } from "@/lib/api/types";
+import type { Address, Hex, OrderPotView } from "@/lib/api/types";
 import type { AgentWalletRead } from "./agentWallet";
 import { formatNative, type PotCallContext } from "./chain";
 import { LEGAL_BODY_COPY, fillCopy } from "./copy";
 import { sameAddress } from "./flow";
 import { registerSendFailure } from "./identity";
-import { POT_CEILING_MAX_USDC, POT_EXEC_GAS_CAP, USDC_UNIT } from "./safePot";
+import {
+  formatUsdcUnits,
+  parseUsdcAmount,
+  POT_AGENT_GAS_MAX_UNITS,
+  POT_CEILING_MAX_USDC,
+  POT_EXEC_GAS_CAP,
+  POT_FUND_MAX_UNITS,
+  POT_TRANSFER_GAS_CAP,
+  unitsToWei,
+  USDC_UNIT,
+} from "./safePot";
 import type { PotCeilingCap, PotRaw, PotReading } from "./safePotRules";
-import { causeNamed, chainRefused, MONEY_SHORT, type PotPreflightProblem } from "./safePotRun";
+import {
+  causeNamed,
+  chainRefused,
+  MONEY_SHORT,
+  potServedRefusal,
+  type PotPreflightProblem,
+} from "./safePotRun";
 import {
   potCreatedView,
+  potFeeLines,
   potFormCheck,
   potGasLimit,
   potProblemSentence,
   potRefusalSentence,
+  potServerNext,
 } from "./safePotStep";
 
 const POT = LEGAL_BODY_COPY.pot;
@@ -393,21 +417,24 @@ export type PotReadAgain = {
   confirmed: boolean;
 };
 
-/** Where one action of the card is. `checking` is the click before the wallet opens; `sending` is
- *  the wallet open; `done` is the pot read again after the receipt. */
-export type PotActionStage =
+/** Where one transaction of the card is, for its actions `A`. `checking` is the click before the
+ *  wallet opens; `sending` is the wallet open; `done` is the pot read again after the receipt. */
+export type PotCardStage<A extends string> =
   | { at: "idle" }
-  | { at: "checking"; action: PotSafeAction }
-  | { at: "sending"; action: PotSafeAction }
-  | { at: "waiting"; action: PotSafeAction; hash: Hex }
-  | { at: "done"; action: PotSafeAction; ok: boolean; lines: string[]; hash: Hex }
+  | { at: "checking"; action: A }
+  | { at: "sending"; action: A }
+  | { at: "waiting"; action: A; hash: Hex }
+  | { at: "done"; action: A; ok: boolean; lines: string[]; hash: Hex }
   | {
       at: "problem";
-      action: PotSafeAction;
+      action: A;
       lines: string[];
       hash: Hex | null;
       again: PotReadAgain | null;
     };
+
+/** Where one of the guardian's Safe actions is. */
+export type PotActionStage = PotCardStage<PotSafeAction>;
 
 /**
  * After an action's receipt, the pot read again (against `agentWallet`, the registry's key of the
@@ -445,4 +472,308 @@ export function potCeilingCheck(
   const checked = potFormCheck({ ceiling, fund: "", agentGas: "" }, cap, "contract");
   if (checked.ok) return { ok: true, ceilingUnits: checked.ceilingUnits };
   return { ok: false, line: checked.ceiling ?? POT.problems.refused };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Add money and send fee money: one USDC transfer each
+// ---------------------------------------------------------------------------------------------
+
+/** The guardian's two USDC transfers: "Add money" to the noted pot, "Send fee money" to the
+ *  agent's key. Each is one `transfer` on the table's USDC, the ERC-20 face of the same balance,
+ *  in USDC units (6 decimals): never a value sent. */
+export type PotTransfer = "add_money" | "fee_money";
+
+const TRANSFERS: readonly string[] = ["add_money", "fee_money"];
+
+/** Whether a card's action is one of the two transfers. */
+export const isPotTransfer = (action: string): action is PotTransfer => TRANSFERS.includes(action);
+
+/** The allowlist's context of one of them (`potTransferCall`). */
+export type PotTransferContext = Extract<PotCallContext, { kind: "add_money" | "fee_money" }>;
+
+/**
+ * The amount typed for a transfer, in UNITS, or the sentence under its field: "" is `empty`; six
+ * decimals at most (`too_precise`); at most POT_FUND_MAX_UNITS for the pot (`too_large`) and
+ * POT_AGENT_GAS_MAX_UNITS, 1 USDC, for the fee money (`gas_too_large`); never 0 (`zero`); anything
+ * else is not an amount.
+ */
+export function potTransferAmount(
+  kind: PotTransfer,
+  raw: string,
+): { ok: true; amountUnits: bigint } | { ok: false; sentence: string } {
+  if (raw === "") return { ok: false, sentence: POT.amountProblems.empty };
+  const units = parseUsdcAmount(raw, kind === "add_money" ? POT_FUND_MAX_UNITS : POT_AGENT_GAS_MAX_UNITS);
+  if (typeof units !== "bigint") {
+    if (units.problem === "too_large" && kind === "fee_money")
+      return { ok: false, sentence: POT.amountProblems.gas_too_large };
+    return { ok: false, sentence: POT.amountProblems[units.problem] };
+  }
+  if (units === ZERO) return { ok: false, sentence: POT.amountProblems.zero };
+  return { ok: true, amountUnits: units };
+}
+
+/** A transfer's button: the amount it will send once the field reads one, formatted from its
+ *  units ("Add 5 USDC", "Send 0.1 USDC"); the panel's title before. */
+export function potTransferSendLabel(kind: PotTransfer, raw: string): string {
+  const amount = potTransferAmount(kind, raw);
+  if (kind === "add_money")
+    return amount.ok
+      ? fillCopy(POT.addMoneySend, { amount: formatUsdcUnits(amount.amountUnits) })
+      : POT.addMoneyTitle;
+  return amount.ok
+    ? fillCopy(POT.feeMoneySend, { amount: formatUsdcUnits(amount.amountUnits) })
+    : POT.feeMoneyTitle;
+}
+
+/** The click's own reads: the registry's key, the pot read for it (null when the registry names no
+ *  address), and the guardian's balance in native wei. */
+export type PotTransferRead = {
+  agentWallet: AgentWalletRead;
+  raw: PotRaw | null;
+  reading: PotReading | null;
+  guardianBalanceWei: bigint;
+};
+
+/** What one transfer's click does, each the card's own closure. */
+export type PotTransferDeps = {
+  /** Whether the card is still on screen (its lifetime): asked after every await and right
+   *  before the send. */
+  alive(): boolean;
+  /** Fresh reads made in this click: the registry's `getAgentWallet` through `readAgentWallet`,
+   *  `readPotRaw` and `potReading` for it at a fresh block, and the guardian's `getBalance`.
+   *  Throws when the chain cannot be read. */
+  read(): Promise<PotTransferRead>;
+  /** `GET /pot`, a request made now, for Add money only: the money goes only to the pot noted,
+   *  and on the record, as the server holds it now. Throws when it fails. */
+  readNoted(): Promise<OrderPotView | null>;
+  preflight(): { ok: true } | { ok: false; problem: PotPreflightProblem };
+  /** The allowlist's answer on the exact request (`potTransferCall` at POT_TRANSFER_GAS_CAP, then
+   *  `allowedCall`): the call it accepted, or its refusal's code. Nothing reaches the chain before. */
+  check(ctx: PotTransferContext): { ok: true; call: PotExecChecked } | { ok: false; problem: string };
+  /** The eth_call of the accepted transfer from the guardian: the return data (true is the
+   *  32-byte word 1). Throws on a revert. */
+  simulate(call: PotExecChecked): Promise<Hex>;
+  /** eth_estimateGas of the same call, with NO fee field. Throws on a revert. */
+  estimate(call: PotExecChecked): Promise<bigint>;
+  /** The guardian's balance in native wei, read again when the node says the money is short. */
+  readBalance(): Promise<bigint>;
+  /** The account connected NOW, right before the send. */
+  account(): Address | null;
+  /** The allowlist's door to the wallet (`potTransferCall` with the gas decided here). */
+  send(
+    ctx: PotTransferContext,
+    gas: bigint,
+  ): Promise<{ ok: true; hash: Hex } | { ok: false; problem: string }>;
+};
+
+/** A failed transfer: an action's problem; the noted pot that could not be read from the server;
+ *  or the guardian's balance (read in the click, or again when the node said the money is short)
+ *  under the amount, with both in native wei. */
+export type PotTransferFailure =
+  | { ok: false; problem: PotActionProblem; cause?: unknown }
+  | { ok: false; problem: "pot_unreadable"; cause?: unknown }
+  | { ok: false; problem: "not_enough"; balanceWei: bigint; totalWei: bigint };
+
+const LEFT_TRANSFER: PotTransferFailure = { ok: false, problem: "left" };
+const MOVED: PotTransferFailure = { ok: false, problem: "refused", cause: POT_ACTION_MOVED };
+
+/** A simulation or an estimate of a transfer that threw: the money short (the guardian's balance
+ *  read again, `not_enough` with it and the amount), a refusal of the chain (`would_revert`), or a
+ *  node that did not answer (`read_failed`). */
+async function transferChainFailure(
+  cause: unknown,
+  totalWei: bigint,
+  d: PotTransferDeps,
+): Promise<PotTransferFailure> {
+  if (causeNamed(cause, MONEY_SHORT)) {
+    let balanceWei: bigint;
+    try {
+      balanceWei = await d.readBalance();
+    } catch (e) {
+      return d.alive() ? { ok: false, problem: "read_failed", cause: e } : LEFT_TRANSFER;
+    }
+    if (!d.alive()) return LEFT_TRANSFER;
+    return { ok: false, problem: "not_enough", balanceWei, totalWei };
+  }
+  return { ok: false, problem: chainRefused(cause) ? "would_revert" : "read_failed", cause };
+}
+
+/**
+ * One USDC transfer of the guardian's, in this order, stopping at the first that fails, and asking
+ * the card's lifetime after EVERY await and right before the send (`left`):
+ *  0. an amount that is a bigint above 0, else `refused` with nothing read;
+ *  1. the click's reads (`read_failed`, with the error as `cause`; a registry that could not be
+ *     read too);
+ *  2. a registry key of the agent's own (`agent_wallet` for none, the zero address or the
+ *     guardian's);
+ *  3. the kind's own rules, from THAT read (`refused`, cause POT_ACTION_MOVED, the card reads
+ *     again, unless said otherwise):
+ *     - add money: a pot that reads `ceiling_read` or `stopped` (so it holds the pot's code, is the
+ *       guardian's alone, and after a changed-key setup the new key is set first); then `GET /pot`
+ *       read now (`pot_unreadable` when it fails) names this pot, on the record. The context is
+ *       the noted pot and the amount;
+ *     - fee money: the registry's key of the click is the one the card's panel named
+ *       (`shownAgentWallet`, in any letter case; Ruling R23 applied to money: the guardian never
+ *       sends to a key they were not shown), and it holds no code (`refused` with the allowlist's
+ *       own code, `fee_money_contract_wallet`). The context is that key and the amount;
+ *  4. the guardian's balance read in the click under the amount in wei (`not_enough`);
+ *  5. the page's own checks (their problem);
+ *  6. the allowlist on the exact request (`refused`, with its code as `cause`);
+ *  7. the simulation from the guardian, and `potExecSimulationOk` of its answer (`would_revert`);
+ *  8. the estimate, and `potGasLimit` under POT_TRANSFER_GAS_CAP (`would_revert`). For 7 and 8, a
+ *     throw is `not_enough` when the node says the money is short (the balance read again), else
+ *     `would_revert` only when the chain refused it, else `read_failed`;
+ *  9. the account connected now is the guardian's, else `refused` with
+ *     `wallet_is_not_the_guardian`, and nothing is sent;
+ * 10. the one transfer through the allowlist, its outcomes read as `runPotCreate` reads them.
+ * The answer names the registry's key of the click: the pot and the key are read back against it.
+ */
+export async function runPotTransfer(
+  kind: PotTransfer,
+  p: {
+    pot: Address;
+    guardian: Address;
+    /** The key the fee money panel names: the click's own read must name it too. */
+    shownAgentWallet: Address;
+    amountUnits: bigint;
+  },
+  d: PotTransferDeps,
+): Promise<{ ok: true; hash: Hex; agentWallet: Address } | PotTransferFailure> {
+  // 0.
+  const amountUnits: unknown = p.amountUnits;
+  if (typeof amountUnits !== "bigint" || amountUnits <= ZERO) return { ok: false, problem: "refused" };
+  const totalWei = unitsToWei(amountUnits);
+  // 1.
+  let fresh: PotTransferRead;
+  try {
+    fresh = await d.read();
+  } catch (cause) {
+    return d.alive() ? { ok: false, problem: "read_failed", cause } : LEFT_TRANSFER;
+  }
+  if (!d.alive()) return LEFT_TRANSFER;
+  // 2.
+  const wallet = fresh.agentWallet;
+  if (wallet === "unreadable") return { ok: false, problem: "read_failed" };
+  if (!agentsOwn(wallet, p.guardian)) return { ok: false, problem: "agent_wallet" };
+  const { raw, reading } = fresh;
+  const balance: unknown = fresh.guardianBalanceWei;
+  if (raw === null || reading === null || typeof balance !== "bigint")
+    return { ok: false, problem: "read_failed" };
+  // 3.
+  let ctx: PotTransferContext;
+  if (kind === "add_money") {
+    if (reading.state !== "ceiling_read" && reading.state !== "stopped") return MOVED;
+    let noted: OrderPotView | null;
+    try {
+      noted = await d.readNoted();
+    } catch (cause) {
+      return d.alive() ? { ok: false, problem: "pot_unreadable", cause } : LEFT_TRANSFER;
+    }
+    if (!d.alive()) return LEFT_TRANSFER;
+    if (noted === null || !sameAddress(noted.address, p.pot) || noted.onRecord !== true) return MOVED;
+    ctx = { kind: "add_money", pot: p.pot, guardian: p.guardian, amountUnits };
+  } else {
+    if (!sameAddress(wallet, p.shownAgentWallet)) return MOVED;
+    if (raw.agentHasCode !== false)
+      return { ok: false, problem: "refused", cause: "fee_money_contract_wallet" };
+    ctx = { kind: "fee_money", guardian: p.guardian, agentWallet: wallet, agentHasCode: false, amountUnits };
+  }
+  // 4.
+  if (balance < totalWei) return { ok: false, problem: "not_enough", balanceWei: balance, totalWei };
+  // 5.
+  const pre = d.preflight();
+  if (!pre.ok) return { ok: false, problem: pre.problem };
+  // 6.
+  const checked = d.check(ctx);
+  if (!checked.ok) return { ok: false, problem: "refused", cause: checked.problem };
+  // 7.
+  let returned: Hex;
+  try {
+    returned = await d.simulate(checked.call);
+  } catch (cause) {
+    return d.alive() ? transferChainFailure(cause, totalWei, d) : LEFT_TRANSFER;
+  }
+  if (!d.alive()) return LEFT_TRANSFER;
+  if (!potExecSimulationOk(returned)) return { ok: false, problem: "would_revert" };
+  // 8.
+  let estimate: bigint;
+  try {
+    estimate = await d.estimate(checked.call);
+  } catch (cause) {
+    return d.alive() ? transferChainFailure(cause, totalWei, d) : LEFT_TRANSFER;
+  }
+  if (!d.alive()) return LEFT_TRANSFER;
+  const gas = potGasLimit(estimate, POT_TRANSFER_GAS_CAP);
+  if (gas === null) return { ok: false, problem: "would_revert" };
+  // 9.
+  if (!sameAddress(d.account(), p.guardian))
+    return { ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" };
+  if (!d.alive()) return LEFT_TRANSFER;
+  // 10.
+  let sent: { ok: true; hash: Hex } | { ok: false; problem: string };
+  try {
+    sent = await d.send(ctx, gas);
+  } catch (cause) {
+    const failure = registerSendFailure(cause);
+    if (failure.kind === "rejected") return { ok: false, problem: "declined", cause };
+    if (failure.kind === "no_gas") return { ok: false, problem: "no_gas", cause };
+    return { ok: false, problem: chainRefused(cause) ? "would_revert" : "refused", cause };
+  }
+  if (!sent.ok) return { ok: false, problem: "refused", cause: sent.problem };
+  return { ok: true, hash: sent.hash, agentWallet: wallet };
+}
+
+/** A failed transfer's sentences: money short names what the wallet holds and what is needed; a
+ *  noted pot the server could not answer for says so; every other problem is the actions' own
+ *  (`potActionFailureView`), a pot not as the card showed it read again. */
+export function potTransferFailureView(
+  f: PotTransferFailure,
+  p: { environment: Environment; guardian: Address },
+): { lines: string[]; reread: boolean } {
+  if (f.problem === "not_enough")
+    return {
+      lines: [potProblemSentence({ problem: "not_enough", balanceWei: f.balanceWei, totalWei: f.totalWei })],
+      reread: false,
+    };
+  if (f.problem === "pot_unreadable")
+    return { lines: [potProblemSentence({ problem: "pot_unreadable" })], reread: false };
+  return potActionFailureView(f, p);
+}
+
+/** Where one transfer of the card is. */
+export type PotTransferStage = PotCardStage<PotTransfer>;
+
+/** After a transfer's receipt, what the chain shows now of what it moved: the pot's balance after
+ *  Add money; what the agent's key holds after Send fee money, with the low mark's warning. */
+export function potTransferDoneView(kind: PotTransfer, raw: PotRaw): { ok: boolean; lines: string[] } {
+  if (kind === "add_money")
+    return { ok: true, lines: [fillCopy(POT.shownBalance, { balance: formatUsdcUnits(raw.balanceUnits) })] };
+  return { ok: true, lines: potFeeLines(raw) };
+}
+
+// ---------------------------------------------------------------------------------------------
+// The public record: take the pot off it, or put it back
+// ---------------------------------------------------------------------------------------------
+
+/** The refusals after which the card reads the noted pot and the record again: one pot for life,
+ *  a pot still being set up, an address another legal body holds, and a removal already done (a
+ *  retry after a lost answer). */
+const RECORD_REREAD: readonly string[] = ["pot_exists", "pot_pending", "pot_taken", "pot_not_on_record"];
+
+/**
+ * Taking the pot off the public record, or putting it back, refused by the server: what the card
+ * says, and whether it reads the noted pot and the record again. A removal already done
+ * (`pot_not_on_record`, a retry after a lost answer) says nothing and reads again: the card then
+ * shows the pot as off the record. `pot_exists`, `pot_pending` and `pot_taken`, and any code the
+ * server's next step reads again for, say the server's own sentence and read again. Any other
+ * refusal says the server's sentence; with no answer the server wrote, this page's own.
+ */
+export function potRecordFailureView(e: unknown): { lines: string[]; reread: boolean } {
+  const served = potServedRefusal(e);
+  if (served === null) return { lines: [POT.recordChangeFailed], reread: false };
+  if (served.code === "pot_not_on_record") return { lines: [], reread: true };
+  const next = potServerNext(served.code);
+  const reread =
+    RECORD_REREAD.includes(served.code) || next === "reread_pot" || next === "reread_record";
+  return { lines: [served.line], reread };
 }
