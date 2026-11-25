@@ -601,6 +601,7 @@ export function PotRecordAction({
   action,
   lock,
   onChanged,
+  notYours = false,
 }: {
   kit: LegalBodyStepKit;
   order: LegalBodyOrderView;
@@ -611,6 +612,9 @@ export function PotRecordAction({
   lock: PotCardLock;
   /** Reads the noted pot, its reading and the record again. */
   onChanged: () => void;
+  /** The noted address is not a pot only the guardian's wallet owns (Ruling R32): the take off
+   *  says only what it does to the record (Ruling R38). */
+  notYours?: boolean;
 }) {
   const takeOff = useTakePotOffRecordMutation(order.id);
   const declarePot = useDeclarePotMutation(order.id);
@@ -670,7 +674,7 @@ export function PotRecordAction({
     return (
       <PotActionPanel
         title={POT.offRecordTitle}
-        lines={[POT.offRecordLine]}
+        lines={[notYours ? POT.offRecordNotYoursLine : POT.offRecordLine]}
         sendLabel={POT.offRecordSend}
         onSend={() => void onRecord("take_off_record")}
         disabled={lock.busy}
@@ -742,6 +746,7 @@ export function PotTakeOffCard({
         action={noted.onRecord ? "take_off_record" : null}
         lock={lock}
         onChanged={onChanged}
+        notYours={notYours}
       />
     </PotManageFrame>
   );

@@ -891,10 +891,14 @@ export const LEGAL_BODY_COPY = {
     feeMoneySend: "Send {amount} USDC",
     offRecordTitle: "Take the pot off the public record",
     offRecordLine:
-      "The record stops showing this pot beside the legal body. The pot, its money and its allowance stay as they are. A search by the pot's address still leads to the company, marked as a former pot.",
+      "The record stops showing this pot beside the legal body. The pot, its money and its allowance stay as they are. If the pot exists on the chain, a search by its address still leads to this legal body, marked as a former pot, unless a newer legal body has replaced this one.",
+    /** The take off of a noted address that is not a pot only the guardian's wallet owns (Ruling
+     *  R32): nothing of a pot is claimed for it. */
+    offRecordNotYoursLine:
+      "The record stops showing this address beside the legal body. Nothing on the chain changes.",
     offRecordSend: "Take it off the record",
     offRecord:
-      "This pot is off the public record. A search by its address still leads to the company, marked as a former pot.",
+      "This pot is off the public record. A search by its address still leads to this legal body, marked as a former pot, unless a newer legal body has replaced this one.",
     backOnTitle: "Put the pot back on the public record",
     backOnSend: "Put it back on the record",
     /** Taking the pot off the record, or putting it back, with no answer the server wrote: the

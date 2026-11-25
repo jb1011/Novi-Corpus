@@ -716,15 +716,22 @@ describe("the company's pot", () => {
     ["feeMoneySend", POT.feeMoneySend, "Send {amount} USDC"],
     ["offRecordTitle", POT.offRecordTitle, "Take the pot off the public record"],
     [
+      // Ruling R38: what the lookup by a pot's address does, exactly.
       "offRecordLine",
       POT.offRecordLine,
-      "The record stops showing this pot beside the legal body. The pot, its money and its allowance stay as they are. A search by the pot's address still leads to the company, marked as a former pot.",
+      "The record stops showing this pot beside the legal body. The pot, its money and its allowance stay as they are. If the pot exists on the chain, a search by its address still leads to this legal body, marked as a former pot, unless a newer legal body has replaced this one.",
+    ],
+    [
+      // Ruling R38: the take off of an address that is not a pot only the guardian's wallet owns.
+      "offRecordNotYoursLine",
+      POT.offRecordNotYoursLine,
+      "The record stops showing this address beside the legal body. Nothing on the chain changes.",
     ],
     ["offRecordSend", POT.offRecordSend, "Take it off the record"],
     [
       "offRecord",
       POT.offRecord,
-      "This pot is off the public record. A search by its address still leads to the company, marked as a former pot.",
+      "This pot is off the public record. A search by its address still leads to this legal body, marked as a former pot, unless a newer legal body has replaced this one.",
     ],
     ["backOnTitle", POT.backOnTitle, "Put the pot back on the public record"],
     ["backOnSend", POT.backOnSend, "Put it back on the record"],

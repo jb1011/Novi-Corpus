@@ -482,6 +482,8 @@ describe("the done page's pot card", () => {
       expect(t, what).toContain(POT.title);
       expect(t, what).toContain(fillCopy(POT.shownAddress, { address: V3_POT }));
       expect(t, what).toContain(POT.offRecordTitle);
+      expect(t, what).toContain(POT.offRecordLine);
+      expect(t, what).not.toContain(POT.offRecordNotYoursLine);
       const take = button(m, POT.offRecordSend);
       expect(take, what).not.toBeNull();
       expect(isDisabled(take), what).toBe(false);
@@ -602,6 +604,9 @@ describe("the done page's pot card", () => {
           expect(t, what).toContain(POT.notYours);
           expect(t, what).toContain(fillCopy(POT.shownAddress, { address: noted.address }));
           expect(button(m, POT.offRecordSend), what).not.toBeNull();
+          // Ruling R38: its own line, never the pot's (nothing of a pot is claimed for it).
+          expect(t, what).toContain(POT.offRecordNotYoursLine);
+          expect(t, what).not.toContain(POT.offRecordLine);
           for (const s of [...NEVER, POT.stopTitle, POT.withdrawTitle]) expect(t, `${what}: ${s}`).not.toContain(s);
           expect(calls.rawQueries.filter((q) => q.pot !== null), what).toEqual([]);
           // Off the record: the sentence, and nothing to press.
