@@ -661,12 +661,6 @@ function LegalBodySession({
   );
 }
 
-/**
- * The memory's write, once a thread is on screen: the one effect besides the address's arrival and
- * the scroll. It writes only what `memoryAfterThread` says has changed, from the values themselves,
- * so a re-render with the same thread writes nothing. It runs after the arrival's write, so a
- * thread on screen in the same render has the last word.
- */
 
 /** What the flow's one switch reads beside the derivation and the step kit: the session's own
  *  reads and the closures its steps call. */
@@ -736,7 +730,7 @@ export function legalBodyPhaseScreen(input: LegalBodyPhaseScreenInput): ReactNod
             sentence={closedSentence(derivation.notice, config.environment)}
             onWayOut={startAnother}
           />
-          <PotBesideTheFlow kit={kit} />
+          <PotBesideTheFlow key={kit.orderId ?? "none"} kit={kit} />
         </>
       );
     case "payment":
@@ -848,7 +842,7 @@ export function legalBodyPhaseScreen(input: LegalBodyPhaseScreenInput): ReactNod
           ) : (
             <PointerStep key={kit.orderId ?? "none"} kit={kit} />
           )}
-          <PotBesideTheFlow kit={kit} />
+          <PotBesideTheFlow key={kit.orderId ?? "none"} kit={kit} />
         </>
       );
     case "done":
@@ -859,6 +853,12 @@ export function legalBodyPhaseScreen(input: LegalBodyPhaseScreenInput): ReactNod
   }
 }
 
+/**
+ * The memory's write, once a thread is on screen: the one effect besides the address's arrival and
+ * the scroll. It writes only what `memoryAfterThread` says has changed, from the values themselves,
+ * so a re-render with the same thread writes nothing. It runs after the arrival's write, so a
+ * thread on screen in the same render has the last word.
+ */
 function useStoredThread(next: LegalBodyMemory | null) {
   const tenant = next?.tenant ?? null;
   const companyId = next?.companyId ?? null;

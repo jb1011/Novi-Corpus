@@ -258,7 +258,8 @@ its full card (the switch on, linked, not revoked, no notice, a record naming a 
 the allowance" there, and "Take the money back" once it is stopped. Everywhere else the page shows the exit card:
 on the done page in place of the full card, and under the closed notice (another deployment on the same chain,
 replaced, superseded) or under the pointer step (its pointer cleared) that a fallen body lands on, where no public
-record is read and the pot is read against the note's first key. The exit card offers "Stop the allowance" while a
+record is read and the pot is read against the note's first key. "My agents" lists no row for a replaced or
+superseded body yet: support gives the guardian the old body's own address, `/legal-body?order=<its id>`. The exit card offers "Stop the allowance" while a
 key or the pot's module is listed, "Take the money back" while no module is on and the pot holds money, and "Take the
 pot off the public record" while it is on the record. What it needs: a noted pot (on the record or taken off it)
 whose address the browser recomputes itself from the note's birth details and the guardian, an order on the
