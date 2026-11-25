@@ -310,6 +310,9 @@ export type PotCallContext =
       ceilingUnits: bigint;
       delegates: readonly Address[];
       modules: readonly Address[];
+      /** The click's raw read of `agentWallet`'s allowance shows leftovers, for a key that is not
+       *  listed: the restore deletes them first (Ruling R35). Either value is safe. */
+      clearAllowance: boolean;
     }
   | { kind: "add_money"; pot: Address; guardian: Address; amountUnits: bigint }
   | {
@@ -420,6 +423,7 @@ type ExecRead =
       ceilingUnits: bigint;
       delegates: UnreadList;
       modules: UnreadList;
+      clearAllowance: boolean;
     };
 
 const isAddress = (x: unknown): x is Address => typeof x === "string" && ADDRESS.test(x);
@@ -481,11 +485,21 @@ function readSetupContext(raw: unknown): SetupContext | null {
 /** An action's context, read once into a copy of its own, or null when it is no action's context:
  *  not an object, a kind other than change, stop, withdraw and restore, an address that is not `0x`
  *  and 40 hex digits, a number that is not a bigint of 0 or more (a balance also no more than a
- *  uint256: no chain holds more), or a list that is not a list. */
+ *  uint256: no chain holds more), a list that is not a list, or a restore's leftovers fact that is
+ *  not a boolean. */
 function readExecContext(raw: unknown): ExecRead | null {
   if (typeof raw !== "object" || raw === null) return null;
-  const { kind, pot, guardian, agentWallet, ceilingUnits, delegates, modules, balanceWei } =
-    raw as Record<string, unknown>;
+  const {
+    kind,
+    pot,
+    guardian,
+    agentWallet,
+    ceilingUnits,
+    delegates,
+    modules,
+    balanceWei,
+    clearAllowance,
+  } = raw as Record<string, unknown>;
   if (!isAddress(pot) || !isAddress(guardian)) return null;
   const listed = Array.isArray(delegates) ? [...(delegates as unknown[])] : null;
   const on = Array.isArray(modules) ? [...(modules as unknown[])] : null;
@@ -502,7 +516,13 @@ function readExecContext(raw: unknown): ExecRead | null {
     return { kind: "withdraw", pot, guardian, modules: on, balanceWei };
   }
   if (kind === "restore") {
-    if (!isAddress(agentWallet) || !isAmount(ceilingUnits) || listed === null || on === null)
+    if (
+      !isAddress(agentWallet) ||
+      !isAmount(ceilingUnits) ||
+      listed === null ||
+      on === null ||
+      typeof clearAllowance !== "boolean"
+    )
       return null;
     return {
       kind: "restore",
@@ -512,6 +532,7 @@ function readExecContext(raw: unknown): ExecRead | null {
       ceilingUnits,
       delegates: listed,
       modules: on,
+      clearAllowance,
     };
   }
   return null;
@@ -632,7 +653,12 @@ function rebuildExec(a: PotAddresses, p: ExecRead): { ok: true; args: SafeExecAr
   const delegates = addressList(p.delegates);
   const modules = addressList(p.modules);
   if (delegates === null || modules === null) return refuse("no_pot_context");
-  const args = potRestoreArgs(a, { ...potSetupOf(a, p), delegates, modules });
+  const args = potRestoreArgs(a, {
+    ...potSetupOf(a, p),
+    delegates,
+    modules,
+    clearAllowance: p.clearAllowance,
+  });
   return args === null ? refuse("restore_other_module") : { ok: true, args };
 }
 

@@ -1806,6 +1806,13 @@ const STOPPED_3: PotRaw = { ...STOPPED, balanceUnits: USDC(3), balanceWei: WEI(U
 const STOPPED_EMPTY: PotRaw = { ...STOPPED, balanceUnits: ZERO, balanceWei: ZERO };
 /** The add-on on, no key: stopped, `no_delegate`. */
 const NO_DELEGATE: PotRaw = { ...HEALTHY, delegates: { list: [], next: 0 } };
+/** The running pot as read for P, a key it never listed: the module answers no token and a zero
+ *  allowance for P (the reading is `other_delegate`, the pot's key being A). */
+const FOR_P: PotRaw = { ...HEALTHY, tokens: [], allowance: [ZERO, ZERO, ZERO, ZERO, ZERO] };
+/** A key removed elsewhere with `removeDelegate(key, false)`, the add-on still on: no key listed
+ *  (stopped, `no_delegate`), and the removed key's allowance kept, with what was taken in its
+ *  period (Ruling R35). */
+const REMOVED_KEEPING: PotRaw = { ...NO_DELEGATE };
 /** The 32-byte word 1: Safe's execTransaction answering true. */
 const TRUE_WORD: Hex = `0x${"0".repeat(63)}1`;
 
@@ -1917,6 +1924,7 @@ describe("potActionContext: each action's context from this click's own reads", 
       ceilingUnits: USDC(50),
       delegates: [],
       modules: [],
+      clearAllowance: false,
     });
     expect(ctxOf("start_again", STOPPED, P, USDC(50))).toMatchObject({ agentWallet: P, delegates: [], modules: [] });
     expect(ctxOf("start_again", NO_DELEGATE, A, USDC(50))).toMatchObject({ delegates: [], modules: [T.allowanceModule] });
@@ -1930,7 +1938,7 @@ describe("potActionContext: each action's context from this click's own reads", 
   });
 
   test("a new key: only for other_delegate with the registry's key absent from a complete list, a restore for that key", () => {
-    expect(ctxOf("new_key", HEALTHY, P, USDC(50))).toEqual({
+    expect(ctxOf("new_key", FOR_P, P, USDC(50))).toEqual({
       kind: "restore",
       pot: SAFE_CREATED,
       guardian: G,
@@ -1938,6 +1946,7 @@ describe("potActionContext: each action's context from this click's own reads", 
       ceilingUnits: USDC(50),
       delegates: [A],
       modules: [T.allowanceModule],
+      clearAllowance: false,
     });
     for (const [what, raw, wallet] of [
       ["the registry's key is the pot's", HEALTHY, A],
@@ -1951,16 +1960,57 @@ describe("potActionContext: each action's context from this click's own reads", 
       expect(ctxOf("new_key", raw, wallet, USDC(50)), what).toEqual(REFUSED);
   });
 
-  test("each accepted context passes the allowlist with its vector's bytes: V6, V9, V10, V11, V12 and V13", () => {
+  test("Ruling R35: a restore clears the leftovers of an unlisted key whose raw allowance shows any, and only then", () => {
+    // Removed elsewhere with its allowance kept: amount, spent, period and last reset are not 0.
+    expect(ctxOf("start_again", REMOVED_KEEPING, A, USDC(50))).toMatchObject({
+      kind: "restore",
+      agentWallet: A,
+      delegates: [],
+      modules: [T.allowanceModule],
+      clearAllowance: true,
+    });
+    // Any one of the four not 0 is a leftover; the nonce alone is not.
+    const allowance = (a: number, s: number, r: number, l: number, n: number) =>
+      [BigInt(a), BigInt(s), BigInt(r), BigInt(l), BigInt(n)] as PotRaw["allowance"];
+    for (const [what, kept, clear] of [
+      ["amount", allowance(1, 0, 0, 0, 2), true],
+      ["spent", allowance(0, 1, 0, 0, 2), true],
+      ["period", allowance(0, 0, 43200, 0, 2), true],
+      ["last reset", allowance(0, 0, 0, 29919864, 2), true],
+      ["the nonce alone", allowance(0, 0, 0, 0, 7), false],
+      ["nothing", allowance(0, 0, 0, 0, 0), false],
+    ] as [string, PotRaw["allowance"], boolean][]) {
+      expect(ctxOf("start_again", { ...STOPPED, allowance: kept }, A, USDC(50)), what).toMatchObject({ clearAllowance: clear });
+      expect(ctxOf("new_key", { ...FOR_P, allowance: kept }, P, USDC(50)), what).toMatchObject({ clearAllowance: clear });
+    }
+    // A read that is not five numbers is cleared: the part only removes rights.
+    for (const odd of [undefined, [ZERO, ZERO], [0, 0, 0, 0, 0], "00000"])
+      expect(ctxOf("start_again", { ...STOPPED, allowance: odd as unknown as PotRaw["allowance"] }, A, USDC(50))).toMatchObject({
+        clearAllowance: true,
+      });
+    // A listed key is removed with its allowance: nothing to clear apart.
+    expect(
+      ctxOf("start_again", { ...STOPPED, delegates: { list: [A], next: 0 }, allowance: HEALTHY.allowance }, A, USDC(50)),
+    ).toMatchObject({ delegates: [A], clearAllowance: false });
+    // The stop, the change and the take back carry no such fact.
+    for (const [action, raw] of [["stop", HEALTHY], ["change", HEALTHY], ["withdraw", STOPPED_3]] as [PotSafeAction, PotRaw][])
+      expect(ctxOf(action, raw, A, USDC(20))).not.toHaveProperty("clearAllowance");
+  });
+
+  test("each accepted context passes the allowlist with its vector's bytes: V6, V9, V10, V11, V12, V13, V16 and V17", () => {
     const cases: [string, PotSafeAction, PotRaw, Address, bigint | undefined, number, Hex][] = [
       ["V6 change", "change", HEALTHY, A, USDC(20), 676, "0xc615b5f6bca36df97bbcb1f78c3a6a5f5a4cfb3c0f932d529192511423f01944"],
       ["V9 stop", "stop", HEALTHY, A, undefined, 900, "0xd709c6dfd342e50a6df9859f5063de95552f967b76c3281224a69a8c93507324"],
       ["V10 take back", "withdraw", STOPPED_3, A, undefined, 484, "0xce7031830a444423e2440b3aa34c5e9bfd41e6606641d3deb24abb35961dd164"],
       ["V11 start again", "start_again", STOPPED, A, USDC(50), 1092, "0x86747b4dd8d72f104246417a357650d86a7dd380fef6a438545ae98b453fdb76"],
-      ["V12 a new key on a running pot", "new_key", HEALTHY, P, USDC(50), 1124, "0xf8652af05b7d90febd332989e7aa09032325dac7467a629f72dc61fb28bed50c"],
+      ["V12 a new key on a running pot", "new_key", FOR_P, P, USDC(50), 1124, "0xf8652af05b7d90febd332989e7aa09032325dac7467a629f72dc61fb28bed50c"],
       // A stopped pot reads `stopped` whatever key the registry names: its start again is for the
       // registry's key of the click, the new one, which is V13's shape.
       ["V13 the new key on a stopped pot", "start_again", STOPPED, P, USDC(50), 1092, "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12"],
+      // Switched off elsewhere with disableModule alone: A still listed, removed first.
+      ["V16 start again, the key still listed", "start_again", { ...STOPPED, delegates: { list: [A], next: 0 }, allowance: HEALTHY.allowance }, A, USDC(50), 1252, "0x5cc5e16da50f1eaa12fa7f4a415b509af88d67e05b494e1fb809035362871c1f"],
+      // A removed elsewhere with its allowance kept, the add-on on: its leftovers deleted first.
+      ["V17 a restore of an unlisted key with leftovers", "start_again", REMOVED_KEEPING, A, USDC(50), 1124, "0x5df83fef2cd3e804490975a21e4f0eef03d743e6c8c799fbff13906b8d90959a"],
     ];
     for (const [name, action, raw, wallet, ceiling, bytes, hash] of cases) {
       const data = acceptedData(acceptedCtx(ctxOf(action, raw, wallet, ceiling)));
@@ -2079,7 +2129,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
       ["stop", fresh(HEALTHY), undefined],
       ["withdraw", fresh(STOPPED_3), undefined],
       ["start_again", fresh(STOPPED), USDC(50)],
-      ["new_key", fresh(HEALTHY, P), USDC(50)],
+      ["new_key", fresh(FOR_P, P), USDC(50)],
     ];
     for (const [action, f, ceiling] of cases) {
       const h = harness(f);
@@ -2174,7 +2224,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
   });
 
   test("Ruling R23: the key shown and the key read in the click are the same (any letter case): the restore is for that key, built from the click's read", async () => {
-    const h = harness(fresh(HEALTHY, P));
+    const h = harness(fresh(FOR_P, P));
     expect(await runPotAction("new_key", args(USDC(50), P.toLowerCase() as Address), h.d)).toEqual({
       ok: true,
       hash: HASH,
@@ -2189,12 +2239,13 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
         ceilingUnits: USDC(50),
         delegates: [A],
         modules: [T.allowanceModule],
+        clearAllowance: false,
       },
     ]);
     const again = harness(fresh(STOPPED, P));
     expect(await runPotAction("start_again", args(USDC(50), P), again.d)).toMatchObject({ ok: true, agentWallet: P });
     expect(again.sent).toEqual([
-      { kind: "restore", pot: SAFE_CREATED, guardian: G, agentWallet: P, ceilingUnits: USDC(50), delegates: [], modules: [] },
+      { kind: "restore", pot: SAFE_CREATED, guardian: G, agentWallet: P, ceilingUnits: USDC(50), delegates: [], modules: [], clearAllowance: false },
     ]);
   });
 

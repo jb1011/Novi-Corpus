@@ -311,7 +311,7 @@ export const multiSendAbi = [
   },
 ] as const;
 
-/** AllowanceModule v0.1.1: the guardian's three writes, the agent's take, and the three reads. */
+/** AllowanceModule v0.1.1: the guardian's four writes, the agent's take, and the three reads. */
 export const allowanceModuleAbi = [
   {
     type: "function",
@@ -326,6 +326,18 @@ export const allowanceModuleAbi = [
     inputs: [
       { type: "address", name: "delegate" },
       { type: "bool", name: "removeAllowances" },
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+  {
+    // Sets the delegate's amount, spent, period and last reset for the token to 0, its nonce
+    // kept, whether the delegate is listed or not (Ruling R35).
+    type: "function",
+    name: "deleteAllowance",
+    inputs: [
+      { type: "address", name: "delegate" },
+      { type: "address", name: "token" },
     ],
     outputs: [],
     stateMutability: "nonpayable",
@@ -565,6 +577,19 @@ const removeDelegatePart = (a: PotAddresses, delegate: Address): Hex =>
     }),
   );
 
+/** `deleteAllowance(delegate, token)`: the delegate's allowance on the token back to 0, its nonce
+ *  kept, so the next `setAllowance` starts a new period at the minute it is mined. */
+const deleteAllowancePart = (a: PotAddresses, delegate: Address, token: Address): Hex =>
+  multiSendPart(
+    a.allowanceModule,
+    ZERO,
+    encodeFunctionData({
+      abi: allowanceModuleAbi,
+      functionName: "deleteAllowance",
+      args: [low(delegate), low(token)],
+    }),
+  );
+
 /** `setAllowance(agent, token, ceiling, period, 0)`. With a reset base of 0, the module's source
  *  starts the first period at the minute the call is mined when the delegate has no period yet (a
  *  new pot, or a key added again after `removeDelegate(d, true)`), and otherwise keeps the current
@@ -752,7 +777,8 @@ export function potWithdrawArgs(p: { guardian: Address; balanceWei: bigint }): S
 /**
  * The restore (start again, or a new key, on the same Safe), in this order: removeDelegate(d,
  * true) for EVERY listed delegate, `agentWallet` included when it is listed; enableModule(module)
- * sent to the zero address when `modules` is empty; addDelegate(agentWallet);
+ * sent to the zero address when `modules` is empty; deleteAllowance(agentWallet, token) when
+ * `agentWallet` is NOT listed and `clearAllowance` is true; addDelegate(agentWallet);
  * setAllowance(agentWallet, token, ceiling, period, 0). No amount. Null when `modules` is neither
  * empty nor exactly [module]: a Safe with another module is not a pot this site restores.
  *
@@ -765,16 +791,33 @@ export function potWithdrawArgs(p: { guardian: Address; balanceWei: bigint }): S
  * starts the period at the minute the restore is mined, because the allowance's last reset is 0.
  * So every restore starts a new thirty-day period, with nothing taken yet. The inputs of V11, V12
  * and V13 list no such key: their bytes are unchanged.
+ *
+ * Why `deleteAllowance` for a key that is not listed (Ruling R35): a key removed elsewhere with
+ * `removeDelegate(key, false)` is no longer listed but keeps its allowance (its period's start and
+ * what was taken in it), and `setAllowance` with a reset base of 0 would carry them on. The click
+ * reads that key's allowance, and when any of its amount, spent, period or last reset is not 0 it
+ * says so (`clearAllowance`): `deleteAllowance` sets those four to 0, nonce kept, and the new
+ * period starts at the minute the restore is mined. Either value is safe: the part only removes
+ * rights. A listed key needs none (its removal clears it), and a false or missing flag is the
+ * restore as before: V11 to V13 byte for byte. V16 is the start again of a listed key; V17 the
+ * restore of an unlisted key with leftovers on a pot whose module is still on.
  */
 export function potRestoreParts(
   a: PotAddresses,
-  p: PotSetup & { delegates: readonly Address[]; modules: readonly Address[] },
+  p: PotSetup & {
+    delegates: readonly Address[];
+    modules: readonly Address[];
+    clearAllowance?: boolean;
+  },
 ): Hex[] | null {
   const off = p.modules.length === 0;
   const ours = p.modules.length === 1 && sameAddress(p.modules[0], a.allowanceModule);
   if (!off && !ours) return null;
   const parts = p.delegates.map((d) => removeDelegatePart(a, d));
   if (off) parts.push(enableModulePart(a));
+  const listed = p.delegates.some((d) => sameAddress(d, p.agentWallet));
+  if (p.clearAllowance === true && !listed)
+    parts.push(deleteAllowancePart(a, p.agentWallet, p.token));
   parts.push(addDelegatePart(a, p.agentWallet), setAllowancePart(a, p));
   return parts;
 }
@@ -783,7 +826,11 @@ export function potRestoreParts(
  *  null when the parts are. */
 export function potRestoreArgs(
   a: PotAddresses,
-  p: PotSetup & { delegates: readonly Address[]; modules: readonly Address[] },
+  p: PotSetup & {
+    delegates: readonly Address[];
+    modules: readonly Address[];
+    clearAllowance?: boolean;
+  },
 ): SafeExecArgs | null {
   const parts = potRestoreParts(a, p);
   if (parts === null) return null;

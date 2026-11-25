@@ -1021,11 +1021,18 @@ const RESTORE_V11: Restore = {
   ceilingUnits: BigInt(50_000_000),
   delegates: [],
   modules: [],
+  clearAllowance: false,
 };
 /** V12: a new key on a running pot. */
 const RESTORE_V12: Restore = { ...RESTORE_V11, agentWallet: P, delegates: [A], modules: [T.allowanceModule] };
 /** V13: a new key on a stopped pot. */
 const RESTORE_V13: Restore = { ...RESTORE_V11, agentWallet: P };
+/** V16: start again with the key itself still listed (a pot switched off with disableModule
+ *  alone): the key removed with its allowance first. */
+const RESTORE_V16: Restore = { ...RESTORE_V11, delegates: [A] };
+/** V17: a restore of a key removed elsewhere with its allowance kept, the module still on: its
+ *  leftovers deleted first (Ruling R35). */
+const RESTORE_V17: Restore = { ...RESTORE_V11, modules: [T.allowanceModule], clearAllowance: true };
 
 /** The order of a linked legal body whose guardian is the real run's. */
 const linked = (over: Partial<LegalBodyOrderView> = {}) => order({ state: "linked", guardian: G, ...over });
@@ -1348,9 +1355,11 @@ describe("the allowlist takes the guardian's Safe actions", () => {
     ["V11 start again", RESTORE_V11, 1092, "0x86747b4dd8d72f104246417a357650d86a7dd380fef6a438545ae98b453fdb76"],
     ["V12 new key", RESTORE_V12, 1124, "0xf8652af05b7d90febd332989e7aa09032325dac7467a629f72dc61fb28bed50c"],
     ["V13 new key on a stopped pot", RESTORE_V13, 1092, "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12"],
+    ["V16 start again, the key still listed", RESTORE_V16, 1252, "0x5cc5e16da50f1eaa12fa7f4a415b509af88d67e05b494e1fb809035362871c1f"],
+    ["V17 restore of an unlisted key with leftovers", RESTORE_V17, 1124, "0x5df83fef2cd3e804490975a21e4f0eef03d743e6c8c799fbff13906b8d90959a"],
   ];
 
-  test("V6 change, V9 stop, V10 take back, V11 start again and V12 new key are accepted on the pot, each with its vector's data", () => {
+  test("V6 change, V9 stop, V10 take back, V11 start again, V12 and V13 new key, V16 and V17 restores are accepted on the pot, each with its vector's data", () => {
     for (const [name, p, bytes, hash] of vectors) {
       const req = execReq(p);
       expect(req, name).toMatchObject({
@@ -1591,6 +1600,10 @@ describe("the allowlist refuses a pot call", () => {
     ["delegates that are not a list", stop, potCtx(odd({ ...STOP_V9, delegates: A })), "no_pot_context"],
     ["modules that are not a list", withdraw, potCtx(odd({ ...WITHDRAW_V10, modules: null })), "no_pot_context"],
     ["no modules for a restore", restore, potCtx(odd({ ...RESTORE_V11, modules: undefined })), "no_pot_context"],
+    ["a restore that does not say whether leftovers are cleared", restore, potCtx(odd({ ...RESTORE_V11, clearAllowance: undefined })), "no_pot_context"],
+    ["a restore whose leftovers fact is a string", restore, potCtx(odd({ ...RESTORE_V11, clearAllowance: "false" })), "no_pot_context"],
+    ["a restore built without clearing leftovers its context clears", restore, potCtx(RESTORE_V17), "exec_args"],
+    ["a restore that clears leftovers its context does not", execReq(RESTORE_V17), potCtx({ ...RESTORE_V17, clearAllowance: false }), "exec_args"],
     ["a setup with no order", setup, potCtx(SETUP_V5, { order: null }), "no_order"],
     ["an action with no order", stop, potCtx(STOP_V9, { order: null }), "no_order"],
     ["an order that is undefined", change, potCtx(CHANGE_V6, { order: undefined as unknown as null }), "no_order"],

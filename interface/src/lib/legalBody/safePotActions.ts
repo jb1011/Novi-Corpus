@@ -109,6 +109,14 @@ const guardiansAlone = (r: PotReading): boolean =>
 const listOf = (list: unknown): Address[] | null =>
   Array.isArray(list) ? [...(list as Address[])] : null;
 
+/** The raw allowance of the click's key shows leftovers (Ruling R35): any of its amount, spent,
+ *  period and last reset not 0. A read that is not five bigints counts as leftovers too: the part
+ *  that clears them only removes rights. The nonce alone is none. */
+const leftovers = (allowance: unknown): boolean =>
+  !Array.isArray(allowance) ||
+  allowance.length !== 5 ||
+  allowance.slice(0, 4).some((field) => field !== ZERO);
+
 /**
  * The context of one of the guardian's Safe actions, from THIS click's reads: `agentWallet` is the
  * key the registry names in the click, and `raw` and `reading` the pot read for it at one block.
@@ -125,6 +133,9 @@ const listOf = (list: unknown): Address[] | null =>
  *  - new_key: `other_delegate`, the registry's key absent from a complete list of the pot's keys
  *    and not the guardian's, a restore for it with a new ceiling (V12). A stopped pot reads
  *    `stopped` whatever key the registry names: its start again is then for the new key.
+ * A restore of a key the pot does not list whose raw allowance shows leftovers (a key removed
+ * elsewhere with its allowance kept) says so (`clearAllowance`, Ruling R35): the restore deletes
+ * them first, so a new period starts with nothing taken (V17).
  * A restore is always for the registry's key of the click (Ruling R19: after a changed-key setup
  * the pot's key is the note's first one, never the registry's), and `runPotAction` sends it only
  * when that key is also the one the card named (Ruling R23).
@@ -155,6 +166,8 @@ export function potActionContext(
           ceilingUnits: p.newCeilingUnits,
           delegates,
           modules,
+          clearAllowance:
+            !delegates.some((d) => sameAddress(d, agentWallet)) && leftovers(raw.allowance),
         }
       : refused;
   switch (action) {

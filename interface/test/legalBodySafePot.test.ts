@@ -231,6 +231,7 @@ describe("the pinned fragments", () => {
       parseAbi([
         "function addDelegate(address delegate)",
         "function removeDelegate(address delegate, bool removeAllowances)",
+        "function deleteAllowance(address delegate, address token)",
         "function setAllowance(address delegate, address token, uint96 allowanceAmount, uint16 resetTimeMin, uint32 resetBaseMin)",
         "function executeAllowanceTransfer(address safe, address token, address to, uint96 amount, address paymentToken, uint96 payment, address delegate, bytes signature)",
         "function getDelegates(address safe, uint48 start, uint8 pageSize) view returns (address[] results, uint48 next)",
@@ -654,6 +655,76 @@ describe("the guardian's transactions on a running or stopped pot", () => {
       1092,
       "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12",
     );
+  });
+
+  test("V16 start again with the key itself still listed (removeDelegate first), and V17 a restore of an unlisted key with leftovers (deleteAllowance first): each encodes to its vector", () => {
+    const v16 = potRestoreArgs(T, { ...V3, delegates: [A], modules: [], clearAllowance: false });
+    pinned(
+      exec(v16 as SafeExecArgs),
+      1252,
+      "0x5cc5e16da50f1eaa12fa7f4a415b509af88d67e05b494e1fb809035362871c1f",
+    );
+    // A listed key's allowance goes with its removal: the flag adds nothing for it.
+    expect(potRestoreArgs(T, { ...V3, delegates: [A], modules: [], clearAllowance: true })).toEqual(v16);
+    const v17 = potRestoreArgs(T, {
+      ...V3,
+      delegates: [],
+      modules: [T.allowanceModule],
+      clearAllowance: true,
+    });
+    pinned(
+      exec(v17 as SafeExecArgs),
+      1124,
+      "0x5df83fef2cd3e804490975a21e4f0eef03d743e6c8c799fbff13906b8d90959a",
+    );
+    const parts = splitParts(
+      concat(
+        potRestoreParts(T, { ...V3, delegates: [], modules: [T.allowanceModule], clearAllowance: true }) as Hex[],
+      ),
+    );
+    expect(parts.map((p) => decodeModuleCall(p.data).functionName)).toEqual([
+      "deleteAllowance",
+      "addDelegate",
+      "setAllowance",
+    ]);
+    expect(decodeModuleCall(parts[0].data)).toMatchObject({ args: [A, T.usdc] });
+  });
+
+  test("Ruling R35: the deleteAllowance part comes only for an unlisted key with leftovers, after the removals and the module, before addDelegate; V11 to V13 are unchanged by a false flag", () => {
+    // A stopped pot (module off) whose key was removed elsewhere with its allowance kept.
+    const stopped = potRestoreParts(T, { ...V3, delegates: [], modules: [], clearAllowance: true }) as Hex[];
+    const stoppedParts = stopped.map((p) => splitParts(p)[0]);
+    expect(stoppedParts.map((p) => p.to)).toEqual([
+      zeroAddress,
+      T.allowanceModule,
+      T.allowanceModule,
+      T.allowanceModule,
+    ]);
+    expect(decodeSafeCall(stoppedParts[0].data)).toMatchObject({ functionName: "enableModule" });
+    expect(decodeModuleCall(stoppedParts[1].data)).toMatchObject({ functionName: "deleteAllowance", args: [A, T.usdc] });
+    // A new key P, unlisted, with leftovers, while the old key A is listed: A removed first.
+    const moved = potRestoreParts(T, {
+      ...V3,
+      agentWallet: P,
+      delegates: [A],
+      modules: [T.allowanceModule],
+      clearAllowance: true,
+    }) as Hex[];
+    expect(moved.map((p) => decodeModuleCall(splitParts(p)[0].data))).toMatchObject([
+      { functionName: "removeDelegate", args: [A, true] },
+      { functionName: "deleteAllowance", args: [P, T.usdc] },
+      { functionName: "addDelegate", args: [P] },
+      { functionName: "setAllowance" },
+    ]);
+    // A false flag, or none, is the restore as before: V11 to V13 byte for byte.
+    for (const clearAllowance of [false, undefined]) {
+      const v11 = potRestoreArgs(T, { ...V3, delegates: [], modules: [], clearAllowance });
+      pinned(exec(v11 as SafeExecArgs), 1092, "0x86747b4dd8d72f104246417a357650d86a7dd380fef6a438545ae98b453fdb76");
+      const v12 = potRestoreArgs(T, { ...V3, agentWallet: P, delegates: [A], modules: [T.allowanceModule], clearAllowance });
+      pinned(exec(v12 as SafeExecArgs), 1124, "0xf8652af05b7d90febd332989e7aa09032325dac7467a629f72dc61fb28bed50c");
+      const v13 = potRestoreArgs(T, { ...V3, agentWallet: P, delegates: [], modules: [], clearAllowance });
+      pinned(exec(v13 as SafeExecArgs), 1092, "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12");
+    }
   });
 
   test("the restore's order: remove the old key, enable the module when it is off, add the key, set the ceiling", () => {
