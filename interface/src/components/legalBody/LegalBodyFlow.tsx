@@ -109,7 +109,7 @@ import { AgentWalletStep } from "./AgentWalletStep";
 import { AgreementStep } from "./AgreementStep";
 import { ClosedNotice } from "./ClosedNotice";
 import { CompanyStep } from "./CompanyStep";
-import { DoneStep } from "./DoneStep";
+import { DoneStep, PotBesideTheFlow } from "./DoneStep";
 import { FilingStep } from "./FilingStep";
 import { Blank, FlowBackground, FlowHeader } from "./FlowFrame";
 import { HumanStep } from "./HumanStep";
@@ -617,125 +617,29 @@ function LegalBodySession({
       agentWallet,
       refreshAgentWallet,
     };
-    const label = LEGAL_BODY_COPY.rail.labels;
-    switch (derivation.phase) {
-      case "closed":
-        return (
-          <ClosedNotice
-            sentence={closedSentence(derivation.notice, config.environment)}
-            onWayOut={startAnother}
-          />
-        );
-      case "payment":
-        return (
-          <PaymentStep
-            eyebrow={label.payment}
-            companyId={kit.companyId}
-            onBack={door === "form" ? () => jump("company") : undefined}
-            onComplete={() => {
-              void companyQuery.refetch();
-              void companiesQuery.refetch();
-            }}
-          />
-        );
-      case "filing":
-        return <FilingStep key={kit.companyId ?? "filing"} kit={kit} />;
-      case "company": {
-        // In front of a new company with no door chosen, the choice of paths, in place: a door
-        // picked here is remembered, the full product opens the wizard. `companyStepScreen`
-        // decides, closed doors included; this renders its answer.
-        const cards = pathCards(publicConfig);
-        const opening = companyStepScreen({
-          companyId: kit.companyId,
-          company,
-          companyStep: derivation.companyStep,
-          door: memory?.door ?? null,
-          cards,
-          declarations: config.declarations === true,
-        });
-        if (opening === "choice")
-          return (
-            <PathChoice
-              cards={cards}
-              initial={preselectedPath(cards, null)}
-              facts={pathFacts(publicConfig)}
-              back={
-                companies.length > 0 || orders.length > 0
-                  ? { href: "/agents", label: START_COPY.backToAgents }
-                  : undefined
-              }
-              onContinue={(path) => {
-                if (path === "full") router.push(fullProductHref(readPersistedOnboarding()));
-                else remember({ door: path });
-              }}
-            />
-          );
-        return opening === "closed" ? (
-          <StepPlaceholder kit={kit} sentence={LEGAL_BODY_COPY.company.declarationsOff} />
-        ) : (
-          // One form per thread: a new declaration never inherits another thread's typing.
-          <CompanyStep key={kit.companyId ?? "new"} kit={kit} />
-        );
-      }
-      case "agreement":
-        return (
-          // One step per company: a placed order is held across the moment the list names it.
-          <AgreementStep
-            key={kit.companyId ?? "none"}
-            kit={kit}
-            onRead={agreementRead}
-            onBackToCompany={backToCompany}
-            refusedDraftIds={refusedDraftIds}
-          />
-        );
-      case "identity":
-        // One step per order: a new order never inherits another's typing or reads. The identity
-        // already chosen on this visit is offered first.
-        return (
-          <IdentityStep
-            key={kit.orderId ?? "none"}
-            kit={kit}
-            suggestedAgentId={identitySuggestion}
-            onIdentity={noteIdentity}
-          />
-        );
-      case "wallet":
-        // One step per order: a click's state never carries over to another order. The registry's
-        // answer, read again after the transaction, moves the flow on to the link.
-        if (choices.agentId === null) return <StepPlaceholder kit={kit} />;
-        return <AgentWalletStep key={kit.orderId ?? "none"} kit={kit} agentId={choices.agentId} />;
-      case "link":
-        // One step per order: a click's state never carries over to another order. Another key
-        // signs on its own panel, which never opens this browser's wallet.
-        if (linkScreen(derivation) === "paste")
-          return (
-            <PasteLinkPanel
-              key={kit.orderId ?? "none"}
-              kit={kit}
-              agentId={choices.agentId}
-              onSendBack={(to, sentence) => void sendBack(to, sentence)}
-            />
-          );
-        return (
-          <LinkStep
-            key={kit.orderId ?? "none"}
-            kit={kit}
-            agentId={choices.agentId}
-            onSendBack={(to, sentence) => void sendBack(to, sentence)}
-          />
-        );
-      case "pointer":
-        // One step per order. Another key sends the pointer on its own panel, which never opens
-        // this browser's wallet; this wallet writes it on its own step.
-        if (pointerScreen(derivation) === "paste")
-          return <PastePointerPanel key={kit.orderId ?? "none"} kit={kit} />;
-        return <PointerStep key={kit.orderId ?? "none"} kit={kit} />;
-      case "done":
-        // One page per order: the public read is keyed by the order's identity.
-        return <DoneStep key={kit.orderId ?? "none"} kit={kit} />;
-      default:
-        return <StepPlaceholder kit={kit} />;
-    }
+    return legalBodyPhaseScreen({
+      derivation,
+      kit,
+      publicConfig,
+      memory,
+      companies,
+      orders,
+      company,
+      door,
+      choices,
+      router,
+      companyQuery,
+      companiesQuery,
+      jump,
+      startAnother,
+      remember,
+      agreementRead,
+      backToCompany,
+      refusedDraftIds,
+      identitySuggestion,
+      noteIdentity,
+      sendBack,
+    });
   }
 
   return (
@@ -763,6 +667,198 @@ function LegalBodySession({
  * so a re-render with the same thread writes nothing. It runs after the arrival's write, so a
  * thread on screen in the same render has the last word.
  */
+
+/** What the flow's one switch reads beside the derivation and the step kit: the session's own
+ *  reads and the closures its steps call. */
+export type LegalBodyPhaseScreenInput = {
+  derivation: LegalBodyDerivation;
+  kit: LegalBodyStepKit;
+  publicConfig: ReturnType<typeof usePublicConfigQuery>["data"];
+  memory: LegalBodyMemory | null;
+  companies: readonly CompanyView[];
+  orders: readonly LegalBodyOrderView[];
+  company: CompanyView | null;
+  door: LegalBodyStepKit["door"];
+  choices: { ownerChoice: unknown; agentId: string | null };
+  router: { push: (href: string) => void };
+  companyQuery: { refetch: () => unknown };
+  companiesQuery: { refetch: () => unknown };
+  jump: (target: LegalBodyRailPhase) => void;
+  startAnother: (kind: "new_order" | "new_company") => void;
+  remember: (patch: MemoryPatch) => void;
+  agreementRead: (orderId: string) => void;
+  backToCompany: (sentence: string) => void;
+  refusedDraftIds: readonly string[];
+  identitySuggestion: string | null;
+  noteIdentity: (event: IdentitySuggestionEvent) => void;
+  sendBack: (to: LinkSendBack, sentence: string) => Promise<void>;
+};
+
+/**
+ * The flow's one switch: the screen of the thread's phase, as `deriveLegalBodyPhase` decided it.
+ * The session calls it with its own reads and closures; nothing here reads or writes anything.
+ * Under a closed notice and under the pointer step, the pot of the order (`PotBesideTheFlow`,
+ * Ruling R37): the exit card reaches every body R33 names, whatever phase it lands on.
+ */
+export function legalBodyPhaseScreen(input: LegalBodyPhaseScreenInput): ReactNode {
+  const {
+    derivation,
+    kit,
+    publicConfig,
+    memory,
+    companies,
+    orders,
+    company,
+    door,
+    choices,
+    router,
+    companyQuery,
+    companiesQuery,
+    jump,
+    startAnother,
+    remember,
+    agreementRead,
+    backToCompany,
+    refusedDraftIds,
+    identitySuggestion,
+    noteIdentity,
+    sendBack,
+  } = input;
+  const { config } = kit;
+  const label = LEGAL_BODY_COPY.rail.labels;
+  switch (derivation.phase) {
+    case "closed":
+      // Ruling R37: under the notice, the pot of a body closed here (another deployment on this
+      // chain, replaced, superseded): its exit card, or its take off, when it has one.
+      return (
+        <>
+          <ClosedNotice
+            sentence={closedSentence(derivation.notice, config.environment)}
+            onWayOut={startAnother}
+          />
+          <PotBesideTheFlow kit={kit} />
+        </>
+      );
+    case "payment":
+      return (
+        <PaymentStep
+          eyebrow={label.payment}
+          companyId={kit.companyId}
+          onBack={door === "form" ? () => jump("company") : undefined}
+          onComplete={() => {
+            void companyQuery.refetch();
+            void companiesQuery.refetch();
+          }}
+        />
+      );
+    case "filing":
+      return <FilingStep key={kit.companyId ?? "filing"} kit={kit} />;
+    case "company": {
+      // In front of a new company with no door chosen, the choice of paths, in place: a door
+      // picked here is remembered, the full product opens the wizard. `companyStepScreen`
+      // decides, closed doors included; this renders its answer.
+      const cards = pathCards(publicConfig);
+      const opening = companyStepScreen({
+        companyId: kit.companyId,
+        company,
+        companyStep: derivation.companyStep,
+        door: memory?.door ?? null,
+        cards,
+        declarations: config.declarations === true,
+      });
+      if (opening === "choice")
+        return (
+          <PathChoice
+            cards={cards}
+            initial={preselectedPath(cards, null)}
+            facts={pathFacts(publicConfig)}
+            back={
+              companies.length > 0 || orders.length > 0
+                ? { href: "/agents", label: START_COPY.backToAgents }
+                : undefined
+            }
+            onContinue={(path) => {
+              if (path === "full") router.push(fullProductHref(readPersistedOnboarding()));
+              else remember({ door: path });
+            }}
+          />
+        );
+      return opening === "closed" ? (
+        <StepPlaceholder kit={kit} sentence={LEGAL_BODY_COPY.company.declarationsOff} />
+      ) : (
+        // One form per thread: a new declaration never inherits another thread's typing.
+        <CompanyStep key={kit.companyId ?? "new"} kit={kit} />
+      );
+    }
+    case "agreement":
+      return (
+        // One step per company: a placed order is held across the moment the list names it.
+        <AgreementStep
+          key={kit.companyId ?? "none"}
+          kit={kit}
+          onRead={agreementRead}
+          onBackToCompany={backToCompany}
+          refusedDraftIds={refusedDraftIds}
+        />
+      );
+    case "identity":
+      // One step per order: a new order never inherits another's typing or reads. The identity
+      // already chosen on this visit is offered first.
+      return (
+        <IdentityStep
+          key={kit.orderId ?? "none"}
+          kit={kit}
+          suggestedAgentId={identitySuggestion}
+          onIdentity={noteIdentity}
+        />
+      );
+    case "wallet":
+      // One step per order: a click's state never carries over to another order. The registry's
+      // answer, read again after the transaction, moves the flow on to the link.
+      if (choices.agentId === null) return <StepPlaceholder kit={kit} />;
+      return <AgentWalletStep key={kit.orderId ?? "none"} kit={kit} agentId={choices.agentId} />;
+    case "link":
+      // One step per order: a click's state never carries over to another order. Another key
+      // signs on its own panel, which never opens this browser's wallet.
+      if (linkScreen(derivation) === "paste")
+        return (
+          <PasteLinkPanel
+            key={kit.orderId ?? "none"}
+            kit={kit}
+            agentId={choices.agentId}
+            onSendBack={(to, sentence) => void sendBack(to, sentence)}
+          />
+        );
+      return (
+        <LinkStep
+          key={kit.orderId ?? "none"}
+          kit={kit}
+          agentId={choices.agentId}
+          onSendBack={(to, sentence) => void sendBack(to, sentence)}
+        />
+      );
+    case "pointer":
+      // One step per order. Another key sends the pointer on its own panel, which never opens
+      // this browser's wallet; this wallet writes it on its own step. Under it (Ruling R37), the
+      // pot of a body whose pointer was cleared: its exit card, or its take off, when it has one.
+      return (
+        <>
+          {pointerScreen(derivation) === "paste" ? (
+            <PastePointerPanel key={kit.orderId ?? "none"} kit={kit} />
+          ) : (
+            <PointerStep key={kit.orderId ?? "none"} kit={kit} />
+          )}
+          <PotBesideTheFlow kit={kit} />
+        </>
+      );
+    case "done":
+      // One page per order: the public read is keyed by the order's identity.
+      return <DoneStep key={kit.orderId ?? "none"} kit={kit} />;
+    default:
+      return <StepPlaceholder kit={kit} />;
+  }
+}
+
 function useStoredThread(next: LegalBodyMemory | null) {
   const tenant = next?.tenant ?? null;
   const companyId = next?.companyId ?? null;

@@ -126,6 +126,19 @@ export function DoneStep({ kit }: { kit: LegalBodyStepKit }) {
   );
 }
 
+/**
+ * Ruling R37: the company's pot of an order the flow does not bring to the done page (closed here:
+ * another deployment on this chain, replaced, superseded; or back on the pointer step, its pointer
+ * cleared), under that screen. Only for an order of the configured chain, and read with no public
+ * record (`read` undefined), so `potExitAt` places the exit card read against the birth's first
+ * key. With no note, nothing of the pot shows.
+ */
+export function PotBesideTheFlow({ kit }: { kit: LegalBodyStepKit }) {
+  const order = kit.order;
+  if (order === null || order.chainId !== kit.config.chainId) return null;
+  return <DonePot kit={kit} order={order} read={undefined} refetchRecord={() => {}} />;
+}
+
 /** "Set your agent's wallet", and what the record names today: the whole card is the button that
  *  opens the step. */
 function WalletCard({ card, onOpen }: { card: DoneWalletCard; onOpen: () => void }) {
