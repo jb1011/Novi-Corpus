@@ -857,6 +857,47 @@ describe("an address belongs to one legal body (Ruling R13)", () => {
     clock += 60_000;
     expect(await refusalOf(() => declare(body, V3_INPUT))).toMatchObject(refused("pot_taken", 409));
   });
+
+  test("the same address posted to two bodies at once (Ruling R29): both pass the early check and wait on the registry; one note is written, the other is pot_taken", async () => {
+    // Two linked bodies of G whose agents share one registry wallet: the same address, salt and
+    // ceiling recompute for both.
+    const first = linked();
+    const second = linked();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    registry.getAgentWallet.mockImplementation(async () => {
+      await gate;
+      return A;
+    });
+    const one = declare(first, V3_INPUT).then(
+      (view) => ({ view }),
+      (err: unknown) => ({ err }),
+    );
+    const two = declare(second, V3_INPUT).then(
+      (view) => ({ view }),
+      (err: unknown) => ({ err }),
+    );
+    // Both are past the early check (step 6) and wait at the registry read (step 9).
+    await vi.waitFor(() => expect(registry.getAgentWallet).toHaveBeenCalledTimes(2));
+    expect(rows()).toEqual([]);
+    release();
+    const outcomes = await Promise.all([one, two]);
+    const written = outcomes.filter((o) => "view" in o);
+    const refusedOnes = outcomes.filter((o) => "err" in o);
+    expect(written).toHaveLength(1);
+    expect(refusedOnes).toHaveLength(1);
+    expect((refusedOnes[0] as { err: unknown }).err).toMatchObject(refused("pot_taken", 409));
+    expect(rows()).toHaveLength(1);
+    const holders = pots.legalBodyIdsByAddress(V3_ADDRESS, 10);
+    expect(holders).toHaveLength(1);
+    expect([first.legalBodyId, second.legalBodyId]).toContain(holders[0]);
+    // The body refused wrote nothing, in its notes or in its event log.
+    const loser = holders[0] === first.legalBodyId ? second : first;
+    expect(pots.list(loser.legalBodyId)).toEqual([]);
+    expect(potEvents(loser)).toEqual([]);
+  });
 });
 
 describe("the ceiling under the agent's grant (Ruling R12)", () => {

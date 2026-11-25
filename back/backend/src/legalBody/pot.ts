@@ -404,7 +404,8 @@ function linkedBodyOf(
  *     USDC, the ceiling, the thirty-day period and the salt number, in any letter case: else 409
  *     `pot_address_mismatch`. No chain read before this;
  *  6. Ruling R13: another legal body, of any guardian, has noted this address: 409 `pot_taken`.
- *     A pot belongs to one legal body; moving it to another is not offered;
+ *     A pot belongs to one legal body; moving it to another is not offered. Checked again inside
+ *     the transaction of step 10 (Ruling R29);
  *  7. ONE POT FOR LIFE, before anything is answered: the code of every other address the body
  *     declared is read at once, through `chainCall`. When one holds code, a NEW POT is 409
  *     `pot_exists`; a note of an address the body declared before (the one on the record, or a
@@ -420,12 +421,13 @@ function linkedBodyOf(
  *     `agent_wallet_required`; not the first key in any letter case: 409 `pot_address_mismatch`.
  *     A PUT-BACK of an address the body declared before reads no registry: the same address
  *     means the same birth details, and the key may have changed since on the same pot;
- * 10. one transaction: the body read again (still `linked`, not revoked); the body's latest note
- *     read again, and when another note was written since step 7 read them, nothing is written and
- *     the note is checked again from step 7 (at most POT_NOTE_ATTEMPTS times, then the door's 429
- *     `rate_limited`); else the note appended (`declared`, the birth details, the declaration's
- *     version, at now) and the tenant's `pot_declared` note in the body's event log, naming the
- *     version only;
+ * 10. one transaction: the body read again (still `linked`, not revoked); step 6 again, so two
+ *     requests for two bodies at once never both note one address (Ruling R29): 409 `pot_taken`;
+ *     the body's latest note read again, and when another note was written since step 7 read them,
+ *     nothing is written and the note is checked again from step 7 (at most POT_NOTE_ATTEMPTS
+ *     times, then the door's 429 `rate_limited`); else the note appended (`declared`, the birth
+ *     details, the declaration's version, at now) and the tenant's `pot_declared` note in the
+ *     body's event log, naming the version only;
  * 11. one ops line, with the body's id only.
  * A read of the chain or the registry that fails is 503 `chain_unavailable`, and nothing is noted.
  * The real-human check, the door's throttle and the deployment check are the door's, before this.
@@ -534,6 +536,11 @@ export async function declarePot(
     const view = deps.bodies.transaction((): OrderPotView | undefined => {
       if (deps.bodies.findById(id)?.bindingState !== "linked") throw refusal("order_closed", 409);
       if (deps.bodies.isRevoked(id)) throw refusal("legal_body_revoked", 409);
+      // Ruling R29: the check of step 6 again, under the write lock. Between the two there were
+      // awaits (the code reads, the registry read), so another body's note of this address may
+      // have been written since: one address belongs to one legal body.
+      if (deps.repo.legalBodyIdsByAddress(address, 2).some((holder) => holder !== id))
+        throw refusal("pot_taken", 409);
       // Another note of this body was written since the notes were read: the checks were made
       // against notes that are no longer the body's, so they are made again.
       if (deps.repo.latest(id)?.declaredAt !== latest?.declaredAt) return undefined;
