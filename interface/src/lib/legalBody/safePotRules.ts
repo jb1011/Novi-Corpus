@@ -130,9 +130,10 @@ const sameHex = (a: unknown, b: Hex): boolean =>
  * 10. `tokens` is not exactly `[addresses.usdc]`: `other_token` (this closes an allowance on the
  *     native coin, token zero).
  * 11. `allowance[2]` is not 43200: `other_period`.
- * 12. Any of the five fields of `allowance` (amount, spent, resetTimeMin, lastResetMin, nonce) is
- *     not a bigint: `other_period` (the allowance was not read as five numbers; a resetTimeMin of
- *     another kind has already broken rule 11). Otherwise `ceiling_read`:
+ * 12. `allowance` is not a list of exactly five (checked before rule 11 reads its third field), or
+ *     any of its five fields (amount, spent, resetTimeMin, lastResetMin, nonce) is not a bigint:
+ *     `other_period` (the allowance was not read as five numbers; a resetTimeMin of another kind
+ *     has already broken rule 11). Otherwise `ceiling_read`:
  *     `ceilingUnits = allowance[0]`, `spentUnits = allowance[1]`,
  *     `periodEndsAt = Number((allowance[3] + 43200) * 60)` in unix seconds,
  *     `nonce = allowance[4]`.
@@ -196,8 +197,11 @@ export function potReading(
     return notRead("other_delegate");
   // 10.
   if (!isExactly(raw.tokens, a.usdc)) return notRead("other_token");
-  // 11.
-  const [amount, spent, resetTimeMin, lastResetMin, nonce] = raw.allowance;
+  // 11. Ruling R6: the allowance is read as a list of five before its fields are taken; anything
+  //     else breaks rule 12, and never throws.
+  const allowance: unknown = raw.allowance;
+  if (!Array.isArray(allowance) || allowance.length !== 5) return notRead("other_period");
+  const [amount, spent, resetTimeMin, lastResetMin, nonce] = allowance as readonly unknown[];
   if (resetTimeMin !== PERIOD) return notRead("other_period");
   // 12.
   if (

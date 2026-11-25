@@ -388,6 +388,26 @@ describe("potReading: what a pot's raw facts let the record say", () => {
     );
     expect(read(asRaw({ ...HEALTHY, delegates: { list: "", next: 0 } }))).toEqual(limitsNotRead("other_delegate"));
   });
+
+  test("Ruling R6: an allowance that is not a list of five reads other_period, and never throws", () => {
+    const asRaw = (r: unknown) => r as PotRaw;
+    const healthy = [...HEALTHY.allowance];
+    const cases: [string, unknown][] = [
+      ["missing", undefined],
+      ["null", null],
+      ["a number", BigInt(43200)],
+      ["an object", {}],
+      ["an object with five numbered fields", { 0: BigInt(1), 1: BigInt(0), 2: BigInt(43200), 3: BigInt(1), 4: BigInt(1), length: 5 }],
+      ["a set of the five", new Set(healthy)],
+      ["a list of six", [...healthy, BigInt(0)]],
+      ["a list of four", healthy.slice(0, 4)],
+      ["a string", "43200"],
+    ];
+    for (const [label, allowance] of cases)
+      expect(read(asRaw({ ...HEALTHY, allowance })), label).toEqual(limitsNotRead("other_period"));
+    // The list of five still reads its ceiling.
+    expect(read(asRaw({ ...HEALTHY, allowance: healthy }))).toMatchObject({ state: "ceiling_read" });
+  });
 });
 
 // ---------------------------------------------------------------------------------------------
