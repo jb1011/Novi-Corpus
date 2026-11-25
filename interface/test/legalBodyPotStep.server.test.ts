@@ -474,7 +474,7 @@ describe("the done page's pot card", () => {
     expect(text(done(kit()))).not.toContain(POT.cardTitle);
   });
 
-  test("a noted pot with code: the pot's card with the reading's lines only, read for the record's agent wallet", () => {
+  test("a noted pot with code: the pot's card with the reading's lines and the guardian's actions, read for the record's agent wallet", () => {
     calls.pot = { pot: NOTED };
     calls.raw = HEALTHY;
     const m = done(kit());
@@ -490,9 +490,9 @@ describe("the done page's pot card", () => {
       nowSeconds: NOW_S,
     });
     for (const line of reading.lines) expect(text(m)).toContain(line);
-    // No offer, and no action of Tasks 12 and 13 yet.
+    // No offer: the card is the pot's, with its actions (Task 12), each a click's.
     expect(button(m, POT.cardTitle)).toBeNull();
-    expect(text(m)).not.toContain(POT.changeTitle);
+    expect(text(m)).toContain(POT.changeTitle);
     nothingSent();
   });
 

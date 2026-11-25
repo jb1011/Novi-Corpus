@@ -31,7 +31,8 @@ import type {
   PotBirth,
   PotBlock,
 } from "@/lib/api/types";
-import { allowedCall, potSetupCall } from "@/lib/legalBody/chain";
+import { allowedCall, potExecCall, potSetupCall, type CallContext } from "@/lib/legalBody/chain";
+import type { AgentWalletRead } from "@/lib/legalBody/agentWallet";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import type { LegalBodyNotice } from "@/lib/legalBody/flow";
 import { formatDate } from "@/lib/format";
@@ -46,6 +47,7 @@ import {
   potAddresses,
   SAFE_PROXY_RUNTIME_CODE_HASH,
   SAFE_SENTINEL,
+  safeAbi,
   type PotAddresses,
 } from "@/lib/legalBody/safePot";
 import { potReading, type PotRaw, type PotReading } from "@/lib/legalBody/safePotRules";
@@ -76,7 +78,14 @@ import {
   type PotProblemSay,
 } from "@/lib/legalBody/safePotStep";
 import {
+  POT_ACTION_MOVED,
+  potActionAfter,
+  potActionContext,
+  potActionDoneView,
+  potActionFailureView,
+  potCeilingCheck,
   potCreateFailureView,
+  potExecSimulationOk,
   potFormBegin,
   potFormMoney,
   potFreshSalt,
@@ -85,10 +94,14 @@ import {
   potReadsAllowed,
   potRecordWallet,
   potReviewNote,
+  runPotAction,
   runPotCreate,
   runPotReview,
+  type PotActionDeps,
   type PotCreateDeps,
+  type PotExecContext,
   type PotReviewDeps,
+  type PotSafeAction,
 } from "@/lib/legalBody/safePotRun";
 import { ApiError } from "@/lib/api/types";
 
@@ -1719,5 +1732,591 @@ describe("what the done page reads of the pot", () => {
     expect(allowed({ order: order({ state: "deployed" }) })).toBe(false);
     expect(allowed({ order: order({ chainId: 5042 }) })).toBe(false);
     expect(allowed({ notice: { kind: "order_revoked" } })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+// The guardian's Safe actions on the same pot: change, stop, take back, start again, a new key
+// (`safePotRun.ts`). Every context is built from the click's own reads, never the card's.
+// ---------------------------------------------------------------------------------------------
+
+/** The deployment the allowlist reads: Arc testnet, the registry and the factory as served. */
+const CFG: CallContext["config"] = {
+  chainId: CHAIN,
+  identityRegistry: "0x8004A818BFB912233c491871b3d84c89A494BD9e",
+  factory: FACTORY,
+};
+/** A key the registry names in a click, where the card was drawn with another: an invention. */
+const Q = "0x00000000000000000000000000000000000a9e17" as const;
+/** An invention: some other Safe module. */
+const OTHER_MODULE = "0x00000000000000000000000000000000000c0de2" as const;
+/** The stopped Safe holding 3 USDC: V10's take back. */
+const STOPPED_3: PotRaw = { ...STOPPED, balanceUnits: USDC(3), balanceWei: WEI(USDC(3)) };
+const STOPPED_EMPTY: PotRaw = { ...STOPPED, balanceUnits: ZERO, balanceWei: ZERO };
+/** The add-on on, no key: stopped, `no_delegate`. */
+const NO_DELEGATE: PotRaw = { ...HEALTHY, delegates: { list: [], next: 0 } };
+/** The 32-byte word 1: Safe's execTransaction answering true. */
+const TRUE_WORD: Hex = `0x${"0".repeat(63)}1`;
+
+/** `potActionContext` for the real Safe, from a raw read and the registry's key of the click. */
+const ctxOf = (action: PotSafeAction, raw: PotRaw, agentWallet: Address = A, newCeilingUnits?: bigint) =>
+  potActionContext(action, {
+    pot: SAFE_CREATED,
+    guardian: G,
+    agentWallet,
+    raw,
+    reading: read(raw, agentWallet),
+    newCeilingUnits,
+  });
+const acceptedCtx = (c: ReturnType<typeof potActionContext>): PotExecContext => {
+  if ("problem" in c) throw new Error("the context was refused");
+  return c;
+};
+/** The calldata the allowlist accepts for an action's context, through potExecCall. */
+function acceptedData(ctx: PotExecContext): Hex {
+  const req = potExecCall(CFG, ctx, BigInt(200_000));
+  if ("ok" in req) throw new Error(`potExecCall refused: ${req.problem}`);
+  const allowed = allowedCall(req, { config: CFG, order: order(), pot: ctx });
+  if (!allowed.ok) throw new Error(`the allowlist refused: ${allowed.problem}`);
+  return allowed.data;
+}
+const REFUSED = { problem: "refused" };
+
+describe("potActionContext: each action's context from this click's own reads", () => {
+  test("change: on ceiling_read only, with the new ceiling; refused on any other reading", () => {
+    expect(ctxOf("change", HEALTHY, A, USDC(20))).toEqual({
+      kind: "change",
+      pot: SAFE_CREATED,
+      guardian: G,
+      agentWallet: A,
+      ceilingUnits: USDC(20),
+    });
+    for (const [what, raw, wallet] of [
+      ["stopped", STOPPED, A],
+      ["stopped, the add-on still on", NO_DELEGATE, A],
+      ["another key", HEALTHY, P],
+      ["a guard", { ...HEALTHY, guard: P }, A],
+      ["not the guardian's", { ...HEALTHY, owners: [P] }, A],
+      ["absent", { ...HEALTHY, codeHash: null }, A],
+    ] as [string, PotRaw, Address][])
+      expect(ctxOf("change", raw, wallet, USDC(20)), what).toEqual(REFUSED);
+  });
+
+  test("change, start again and a new key take a ceiling under the form's rules only: a whole number of USDC from 1 to 3,000,000,000", () => {
+    const bad = [undefined, ZERO, USDC(1) - BigInt(1), USDC(20) + BigInt(1), USDC(3_000_000_000) + USDC(1), -USDC(20)];
+    for (const ceiling of bad) {
+      expect(ctxOf("change", HEALTHY, A, ceiling), String(ceiling)).toEqual(REFUSED);
+      expect(ctxOf("start_again", STOPPED, A, ceiling), String(ceiling)).toEqual(REFUSED);
+      expect(ctxOf("new_key", HEALTHY, P, ceiling), String(ceiling)).toEqual(REFUSED);
+    }
+    expect(ctxOf("change", HEALTHY, A, USDC(3_000_000_000))).toMatchObject({ kind: "change" });
+    expect(ctxOf("change", HEALTHY, A, USDC(1))).toMatchObject({ kind: "change" });
+  });
+
+  test("stop: every delegate and every module of the raw read, for a pot whose delegate is another key as well; no amount", () => {
+    expect(ctxOf("stop", HEALTHY)).toEqual({
+      kind: "stop",
+      pot: SAFE_CREATED,
+      guardian: G,
+      delegates: [A],
+      modules: [T.allowanceModule],
+    });
+    // The registry names P; the pot's key is still A: the stop removes A, the key the pot lists.
+    expect(ctxOf("stop", HEALTHY, P)).toEqual(ctxOf("stop", HEALTHY, A));
+    const two: PotRaw = { ...HEALTHY, delegates: { list: [A, P], next: 0 } };
+    expect(ctxOf("stop", two)).toMatchObject({ delegates: [A, P], modules: [T.allowanceModule] });
+    expect(ctxOf("stop", NO_DELEGATE)).toMatchObject({ delegates: [], modules: [T.allowanceModule] });
+    expect(ctxOf("stop", { ...HEALTHY, guard: P })).toMatchObject({ kind: "stop", delegates: [A] });
+    // The stop carries no amount at all: nothing the agent does while the guardian signs can make it fail.
+    const stop = acceptedCtx(ctxOf("stop", HEALTHY));
+    expect(Object.keys(stop).sort()).toEqual(["delegates", "guardian", "kind", "modules", "pot"]);
+    // Copies of the read, never the read's own lists.
+    if (stop.kind === "stop") expect(stop.delegates).not.toBe(HEALTHY.delegates.list);
+    // Nothing to stop, or not a pot of the guardian's alone: refused.
+    for (const raw of [STOPPED, { ...HEALTHY, owners: [P] }, { ...HEALTHY, codeHash: null }])
+      expect(ctxOf("stop", raw)).toEqual(REFUSED);
+  });
+
+  test("take back: refused while a module is on and with a balance of 0; otherwise the pot's whole balance in wei, as read", () => {
+    expect(ctxOf("withdraw", STOPPED_3)).toEqual({
+      kind: "withdraw",
+      pot: SAFE_CREATED,
+      guardian: G,
+      modules: [],
+      balanceWei: WEI(USDC(3)),
+    });
+    expect(ctxOf("withdraw", STOPPED)).toMatchObject({ balanceWei: WEI(USDC(190)) });
+    for (const [what, raw] of [
+      ["the allowance on", HEALTHY],
+      ["the add-on still on, no key", NO_DELEGATE],
+      ["another add-on on", { ...STOPPED_3, modules: { list: [OTHER_MODULE], next: SAFE_SENTINEL } }],
+      ["a balance of 0", STOPPED_EMPTY],
+      ["not the guardian's", { ...STOPPED_3, owners: [P] }],
+      ["absent", { ...STOPPED_3, codeHash: null }],
+    ] as [string, PotRaw][])
+      expect(ctxOf("withdraw", raw), what).toEqual(REFUSED);
+  });
+
+  test("start again: only for a stopped pot, a restore for the registry's key of the click", () => {
+    expect(ctxOf("start_again", STOPPED, A, USDC(50))).toEqual({
+      kind: "restore",
+      pot: SAFE_CREATED,
+      guardian: G,
+      agentWallet: A,
+      ceilingUnits: USDC(50),
+      delegates: [],
+      modules: [],
+    });
+    expect(ctxOf("start_again", STOPPED, P, USDC(50))).toMatchObject({ agentWallet: P, delegates: [], modules: [] });
+    expect(ctxOf("start_again", NO_DELEGATE, A, USDC(50))).toMatchObject({ delegates: [], modules: [T.allowanceModule] });
+    for (const [what, raw, wallet] of [
+      ["running", HEALTHY, A],
+      ["another key", HEALTHY, P],
+      ["not the guardian's", { ...STOPPED, owners: [P] }, A],
+      ["the guardian's own key", STOPPED, G],
+    ] as [string, PotRaw, Address][])
+      expect(ctxOf("start_again", raw, wallet, USDC(50)), what).toEqual(REFUSED);
+  });
+
+  test("a new key: only for other_delegate with the registry's key absent from a complete list, a restore for that key", () => {
+    expect(ctxOf("new_key", HEALTHY, P, USDC(50))).toEqual({
+      kind: "restore",
+      pot: SAFE_CREATED,
+      guardian: G,
+      agentWallet: P,
+      ceilingUnits: USDC(50),
+      delegates: [A],
+      modules: [T.allowanceModule],
+    });
+    for (const [what, raw, wallet] of [
+      ["the registry's key is the pot's", HEALTHY, A],
+      ["stopped", STOPPED, P],
+      ["the registry's key among two", { ...HEALTHY, delegates: { list: [A, P], next: 0 } }, P],
+      ["a list that is not complete", { ...HEALTHY, delegates: { list: [A], next: 5 } }, P],
+      ["another limit first", { ...HEALTHY, guard: P }, Q],
+      ["the guardian's own key", HEALTHY, G],
+      ["not the guardian's", { ...HEALTHY, owners: [P] }, P],
+    ] as [string, PotRaw, Address][])
+      expect(ctxOf("new_key", raw, wallet, USDC(50)), what).toEqual(REFUSED);
+  });
+
+  test("each accepted context passes the allowlist with its vector's bytes: V6, V9, V10, V11, V12 and V13", () => {
+    const cases: [string, PotSafeAction, PotRaw, Address, bigint | undefined, number, Hex][] = [
+      ["V6 change", "change", HEALTHY, A, USDC(20), 676, "0xc615b5f6bca36df97bbcb1f78c3a6a5f5a4cfb3c0f932d529192511423f01944"],
+      ["V9 stop", "stop", HEALTHY, A, undefined, 900, "0xd709c6dfd342e50a6df9859f5063de95552f967b76c3281224a69a8c93507324"],
+      ["V10 take back", "withdraw", STOPPED_3, A, undefined, 484, "0xce7031830a444423e2440b3aa34c5e9bfd41e6606641d3deb24abb35961dd164"],
+      ["V11 start again", "start_again", STOPPED, A, USDC(50), 1092, "0x86747b4dd8d72f104246417a357650d86a7dd380fef6a438545ae98b453fdb76"],
+      ["V12 a new key on a running pot", "new_key", HEALTHY, P, USDC(50), 1124, "0xf8652af05b7d90febd332989e7aa09032325dac7467a629f72dc61fb28bed50c"],
+      // A stopped pot reads `stopped` whatever key the registry names: its start again is for the
+      // registry's key of the click, the new one, which is V13's shape.
+      ["V13 the new key on a stopped pot", "start_again", STOPPED, P, USDC(50), 1092, "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12"],
+    ];
+    for (const [name, action, raw, wallet, ceiling, bytes, hash] of cases) {
+      const data = acceptedData(acceptedCtx(ctxOf(action, raw, wallet, ceiling)));
+      expect(size(data), name).toBe(bytes);
+      expect(keccak256(data), name).toBe(hash);
+    }
+  });
+});
+
+describe("potExecSimulationOk: the simulated execTransaction answered true", () => {
+  test("true for the 32-byte word 1; false for 0, an empty answer, 31 or 33 bytes, or another word", () => {
+    expect(potExecSimulationOk(TRUE_WORD)).toBe(true);
+    expect(potExecSimulationOk(encodeFunctionResult({ abi: safeAbi, functionName: "execTransaction", result: true }))).toBe(true);
+    for (const answer of [
+      `0x${"0".repeat(64)}`,
+      encodeFunctionResult({ abi: safeAbi, functionName: "execTransaction", result: false }),
+      "0x",
+      `0x${"0".repeat(61)}1`,
+      `0x${"0".repeat(65)}1`,
+      `0x${"0".repeat(63)}2`,
+      `0x${"1".repeat(64)}`,
+      undefined,
+    ] as Hex[])
+      expect(potExecSimulationOk(answer), String(answer)).toBe(false);
+  });
+});
+
+describe("runPotAction: one transaction on the same pot, from the click's own reads", () => {
+  type Fresh = Awaited<ReturnType<PotActionDeps["read"]>>;
+  /** The click's read: the registry names `agentWallet`, and the pot is read for it. */
+  const fresh = (raw: PotRaw, agentWallet: Address = A): Fresh => ({ agentWallet, raw, reading: read(raw, agentWallet) });
+  const none = (agentWallet: AgentWalletRead): Fresh => ({ agentWallet, raw: null, reading: null });
+  const args = (newCeilingUnits?: bigint) => ({ pot: SAFE_CREATED, guardian: G, newCeilingUnits });
+  /** Hand-made dependencies that say yes, each recording its call; the allowlist is the real one,
+   *  as the card's closure asks it. `impl` replaces any. */
+  function harness(f: Fresh, impl: Partial<PotActionDeps> = {}) {
+    const calls: string[] = [];
+    const checked: PotExecContext[] = [];
+    const sent: PotExecContext[] = [];
+    const yes: PotActionDeps = {
+      alive: () => true,
+      read: async () => f,
+      preflight: () => ({ ok: true }),
+      check: (ctx) => {
+        const req = potExecCall(CFG, ctx, POT_EXEC_GAS_CAP);
+        if ("ok" in req) return req;
+        const allowed = allowedCall(req, { config: CFG, order: order(), pot: ctx });
+        return allowed.ok ? { ok: true, call: { to: req.address, data: allowed.data } } : allowed;
+      },
+      simulate: async () => TRUE_WORD,
+      estimate: async () => BigInt(118_984),
+      readBalance: async () => WEI(USDC(1000)),
+      account: () => G,
+      send: async () => ({ ok: true, hash: HASH }),
+    };
+    const use = { ...yes, ...impl };
+    const d: PotActionDeps = {
+      alive: () => use.alive(),
+      read: () => {
+        calls.push("read");
+        return use.read();
+      },
+      preflight: () => {
+        calls.push("preflight");
+        return use.preflight();
+      },
+      check: (ctx) => {
+        calls.push("check");
+        checked.push(ctx);
+        return use.check(ctx);
+      },
+      simulate: (call) => {
+        calls.push("simulate");
+        return use.simulate(call);
+      },
+      estimate: (call) => {
+        calls.push("estimate");
+        return use.estimate(call);
+      },
+      readBalance: () => {
+        calls.push("balance");
+        return use.readBalance();
+      },
+      account: () => {
+        calls.push("account");
+        return use.account();
+      },
+      send: (ctx, gas) => {
+        calls.push(`send ${gas}`);
+        sent.push(ctx);
+        return use.send(ctx, gas);
+      },
+    };
+    return { d, calls, checked, sent };
+  }
+  const ALL = ["read", "preflight", "check", "simulate", "estimate", "account", "send 154680"];
+  /** The step is gone after `n` asks of its lifetime. */
+  const goneAfter = (n: number) => {
+    let asked = 0;
+    return () => {
+      asked += 1;
+      return asked <= n;
+    };
+  };
+
+  test("all pass: the click's read, the page's checks, the allowlist, the simulation, the estimate, the account, then the one send, in that order, with potGasLimit of the estimate", async () => {
+    const cases: [PotSafeAction, Fresh, bigint | undefined][] = [
+      ["change", fresh(HEALTHY), USDC(20)],
+      ["stop", fresh(HEALTHY), undefined],
+      ["withdraw", fresh(STOPPED_3), undefined],
+      ["start_again", fresh(STOPPED), USDC(50)],
+      ["new_key", fresh(HEALTHY, P), USDC(50)],
+    ];
+    for (const [action, f, ceiling] of cases) {
+      const h = harness(f);
+      expect(await runPotAction(action, args(ceiling), h.d), action).toEqual({
+        ok: true,
+        hash: HASH,
+        agentWallet: f.agentWallet,
+      });
+      expect(h.calls, action).toEqual(ALL);
+      // What is sent is the context of the click's read, the one the allowlist accepted.
+      const want = potActionContext(action, {
+        ...args(ceiling),
+        agentWallet: f.agentWallet as Address,
+        raw: f.raw as PotRaw,
+        reading: f.reading as PotReading,
+      });
+      expect(h.sent, action).toEqual([want]);
+      expect(h.checked, action).toEqual([want]);
+    }
+    expect(potGasLimit(BigInt(118_984), POT_EXEC_GAS_CAP)).toBe(BigInt(154_680));
+  });
+
+  test("a read that throws is read_failed and nothing else is called; a registry that cannot be read is read_failed too", async () => {
+    const error = offlineError();
+    const thrown = harness(fresh(HEALTHY), { read: async () => Promise.reject(error) });
+    expect(await runPotAction("stop", args(), thrown.d)).toEqual({ ok: false, problem: "read_failed", cause: error });
+    expect(thrown.calls).toEqual(["read"]);
+    const unread = harness(none("unreadable"));
+    expect(await runPotAction("stop", args(), unread.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    expect(unread.calls).toEqual(["read"]);
+  });
+
+  test("a registry that names the guardian's wallet, none, or the zero address: agent_wallet, and nothing else is called", async () => {
+    for (const f of [fresh(HEALTHY, G), fresh(HEALTHY, G.toLowerCase() as Address), none("none"), fresh(HEALTHY, zeroAddress)]) {
+      const h = harness(f);
+      expect(await runPotAction("start_again", args(USDC(50)), h.d), String(f.agentWallet)).toEqual({
+        ok: false,
+        problem: "agent_wallet",
+      });
+      expect(h.calls).toEqual(["read"]);
+    }
+  });
+
+  test("a take back asked while the fresh read shows a module on is refused before any simulation, whatever the card showed", async () => {
+    // The card showed a stopped pot with money; the click reads the add-on on (started in another tab).
+    for (const raw of [HEALTHY, NO_DELEGATE]) {
+      const h = harness(fresh(raw));
+      expect(await runPotAction("withdraw", args(), h.d)).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
+      expect(h.calls).toEqual(["read"]);
+    }
+    // Emptied since: nothing to take back, refused the same way.
+    const emptied = harness(fresh(STOPPED_EMPTY));
+    expect(await runPotAction("withdraw", args(), emptied.d)).toMatchObject({ ok: false, problem: "refused" });
+    expect(emptied.calls).toEqual(["read"]);
+    // A change asked of a pot stopped since, a start again of a pot running since: the same.
+    for (const [action, raw, ceiling] of [
+      ["change", STOPPED, USDC(20)],
+      ["start_again", HEALTHY, USDC(50)],
+      ["new_key", HEALTHY, USDC(50)],
+    ] as [PotSafeAction, PotRaw, bigint][]) {
+      const h = harness(fresh(raw));
+      expect(await runPotAction(action, args(ceiling), h.d), action).toEqual({
+        ok: false,
+        problem: "refused",
+        cause: POT_ACTION_MOVED,
+      });
+      expect(h.calls, action).toEqual(["read"]);
+    }
+  });
+
+  test("a new key pressed on a card drawn with key P while the click's registry read names key Q builds the restore for Q", async () => {
+    const h = harness(fresh(HEALTHY, Q));
+    expect(await runPotAction("new_key", args(USDC(50)), h.d)).toEqual({ ok: true, hash: HASH, agentWallet: Q });
+    expect(h.sent).toEqual([
+      {
+        kind: "restore",
+        pot: SAFE_CREATED,
+        guardian: G,
+        agentWallet: Q,
+        ceilingUnits: USDC(50),
+        delegates: [A],
+        modules: [T.allowanceModule],
+      },
+    ]);
+    // A start again of a stopped pot is for the click's key too.
+    const again = harness(fresh(STOPPED, Q));
+    expect(await runPotAction("start_again", args(USDC(50)), again.d)).toMatchObject({ ok: true, agentWallet: Q });
+    expect(again.sent).toEqual([
+      { kind: "restore", pot: SAFE_CREATED, guardian: G, agentWallet: Q, ceilingUnits: USDC(50), delegates: [], modules: [] },
+    ]);
+  });
+
+  test("a simulation that answers false, or nothing, is would_revert and nothing is sent; one the chain refuses too; one the node could not answer is read_failed", async () => {
+    for (const impl of [
+      { simulate: async () => `0x${"0".repeat(64)}` as Hex },
+      { simulate: async () => "0x" as Hex },
+      { simulate: async () => Promise.reject(callRevertError()) },
+      { simulate: async () => Promise.reject(revertError()) },
+    ] as Partial<PotActionDeps>[]) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotAction("stop", args(), h.d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(h.calls).toEqual(["read", "preflight", "check", "simulate"]);
+    }
+    const offline = harness(fresh(HEALTHY), { simulate: async () => Promise.reject(offlineError()) });
+    expect(await runPotAction("stop", args(), offline.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    const est = harness(fresh(HEALTHY), { estimate: async () => Promise.reject(offlineError()) });
+    expect(await runPotAction("stop", args(), est.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    expect(est.calls).toEqual(["read", "preflight", "check", "simulate", "estimate"]);
+  });
+
+  test("an estimate above the cap, or none, is would_revert; at the cap the limit is the cap", async () => {
+    for (const impl of [
+      { estimate: async () => POT_EXEC_GAS_CAP + BigInt(1) },
+      { estimate: async () => ZERO },
+      { estimate: async () => Promise.reject(callRevertError("EstimateGasExecutionError")) },
+    ] as Partial<PotActionDeps>[]) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotAction("stop", args(), h.d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(h.calls).toEqual(["read", "preflight", "check", "simulate", "estimate"]);
+    }
+    const atCap = harness(fresh(HEALTHY), { estimate: async () => POT_EXEC_GAS_CAP });
+    expect((await runPotAction("stop", args(), atCap.d)).ok).toBe(true);
+    expect(atCap.calls.at(-1)).toBe(`send ${POT_EXEC_GAS_CAP}`);
+  });
+
+  test("money short at the simulation or the estimate: the guardian's balance read again and said; a balance that cannot be read is read_failed", async () => {
+    const short = BigInt("100000000000000");
+    for (const at of ["simulate", "estimate"] as const) {
+      const h = harness(fresh(HEALTHY), { [at]: async () => Promise.reject(moneyShortError()), readBalance: async () => short });
+      expect(await runPotAction("stop", args(), h.d), at).toEqual({ ok: false, problem: "no_gas", balanceWei: short });
+      expect(h.calls.at(-1), at).toBe("balance");
+      expect(h.calls.some((c) => c.startsWith("send")), at).toBe(false);
+    }
+    const unread = harness(fresh(HEALTHY), {
+      simulate: async () => Promise.reject(moneyShortError()),
+      readBalance: async () => Promise.reject(offlineError()),
+    });
+    expect(await runPotAction("stop", args(), unread.d)).toMatchObject({ ok: false, problem: "read_failed" });
+  });
+
+  test("the step's lifetime is asked after the read, the simulation and the estimate, and right before the send: a person who left gets no wallet prompt", async () => {
+    const cases: [number, string[]][] = [
+      [0, ["read"]],
+      [1, ["read", "preflight", "check", "simulate"]],
+      [2, ["read", "preflight", "check", "simulate", "estimate"]],
+      [3, ["read", "preflight", "check", "simulate", "estimate", "account"]],
+    ];
+    for (const [n, upTo] of cases) {
+      const h = harness(fresh(HEALTHY), { alive: goneAfter(n) });
+      expect(await runPotAction("stop", args(), h.d), String(n)).toEqual({ ok: false, problem: "left" });
+      expect(h.calls, String(n)).toEqual(upTo);
+    }
+    // A read or a simulation that threw while the person left is not said either.
+    for (const impl of [
+      { alive: goneAfter(0), read: async () => Promise.reject(offlineError()) },
+      { alive: goneAfter(1), simulate: async () => Promise.reject(callRevertError()) },
+      { alive: goneAfter(1), simulate: async () => Promise.reject(moneyShortError()) },
+    ] as Partial<PotActionDeps>[]) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotAction("stop", args(), h.d)).toEqual({ ok: false, problem: "left" });
+      expect(h.calls.some((c) => c.startsWith("send"))).toBe(false);
+    }
+  });
+
+  test("the account connected NOW is read right before the send: a switch refuses with wallet_is_not_the_guardian, and nothing is sent", async () => {
+    for (const account of [P, null]) {
+      const h = harness(fresh(HEALTHY), { account: () => account });
+      expect(await runPotAction("stop", args(), h.d), String(account)).toEqual({
+        ok: false,
+        problem: "refused",
+        cause: "wallet_is_not_the_guardian",
+      });
+      expect(h.calls).toEqual(["read", "preflight", "check", "simulate", "estimate", "account"]);
+    }
+    const lower = harness(fresh(HEALTHY), { account: () => G.toLowerCase() as Address });
+    expect((await runPotAction("stop", args(), lower.d)).ok).toBe(true);
+  });
+
+  test("the page's own checks and the allowlist come before the chain: a refusal is its problem, and nothing is simulated", async () => {
+    for (const problem of ["not_this_wallet", "wrong_network", "refused"] as const) {
+      const h = harness(fresh(HEALTHY), { preflight: () => ({ ok: false, problem }) });
+      expect(await runPotAction("stop", args(), h.d)).toEqual({ ok: false, problem });
+      expect(h.calls).toEqual(["read", "preflight"]);
+    }
+    // Another add-on alone and no key: the stop has nothing of the pot's to switch off.
+    const other: PotRaw = { ...NO_DELEGATE, modules: { list: [OTHER_MODULE], next: SAFE_SENTINEL } };
+    const h = harness(fresh(other));
+    expect(await runPotAction("stop", args(), h.d)).toEqual({ ok: false, problem: "refused", cause: "nothing_to_stop" });
+    expect(h.calls).toEqual(["read", "preflight", "check"]);
+  });
+
+  test("the send's outcomes, as Create the pot reads them: a refusal of the door, the wallet's no, a fee it cannot pay, a revert, any other throw", async () => {
+    const outcomes: [Partial<PotActionDeps>, object][] = [
+      [{ send: async () => ({ ok: false, problem: "wallet_on_another_chain" }) }, { problem: "refused", cause: "wallet_on_another_chain" }],
+      [{ send: async () => Promise.reject(rejectedError()) }, { problem: "declined" }],
+      [{ send: async () => Promise.reject(moneyShortError("TransactionExecutionError")) }, { problem: "no_gas" }],
+      [{ send: async () => Promise.reject(revertError()) }, { problem: "would_revert" }],
+      [{ send: async () => Promise.reject(callRevertError("TransactionExecutionError")) }, { problem: "would_revert" }],
+      [{ send: async () => Promise.reject(offlineError()) }, { problem: "refused" }],
+    ];
+    for (const [impl, want] of outcomes) {
+      const h = harness(fresh(HEALTHY), impl);
+      expect(await runPotAction("stop", args(), h.d)).toMatchObject({ ok: false, ...want });
+      expect(h.calls).toEqual(ALL);
+    }
+  });
+});
+
+describe("the actions' sentences, the ceiling field, and what the card shows after", () => {
+  const ENV = { environment: "sandbox" as const, guardian: G };
+  const CAP = { kind: "capped" as const, maxUsdc: 350, endsOn: null };
+
+  test("potActionFailureView: a pot not as the card showed it is said so and read again; every other problem is Task 10's sentence", () => {
+    expect(potActionFailureView({ ok: false, problem: "refused", cause: POT_ACTION_MOVED }, ENV)).toEqual({
+      lines: [P_.actionMoved],
+      reread: true,
+    });
+    expect(potActionFailureView({ ok: false, problem: "refused", cause: "nothing_to_stop" }, ENV)).toEqual({
+      lines: [potRefusalSentence("nothing_to_stop", ENV)],
+      reread: false,
+    });
+    expect(potActionFailureView({ ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" }, ENV).lines).toEqual([
+      fillCopy(P_.problems.not_this_wallet, { address: G }),
+    ]);
+    for (const cause of [undefined, offlineError()])
+      expect(potActionFailureView({ ok: false, problem: "refused", cause }, ENV).lines).toEqual([P_.problems.refused]);
+    for (const problem of ["read_failed", "agent_wallet", "would_revert", "declined"] as const)
+      expect(potActionFailureView({ ok: false, problem }, ENV), problem).toEqual({
+        lines: [potProblemSentence({ problem })],
+        reread: false,
+      });
+    expect(potActionFailureView({ ok: false, problem: "not_this_wallet" }, ENV).lines).toEqual([
+      fillCopy(P_.problems.not_this_wallet, { address: G }),
+    ]);
+    expect(potActionFailureView({ ok: false, problem: "wrong_network" }, ENV).lines).toEqual([
+      fillCopy(P_.problems.wrong_network, { network: "Arc testnet" }),
+    ]);
+    expect(potActionFailureView({ ok: false, problem: "no_gas", balanceWei: BigInt("100000000000000") }, ENV).lines).toEqual([
+      fillCopy(P_.feeShort, { balance: "0.0001" }),
+    ]);
+    expect(potActionFailureView({ ok: false, problem: "no_gas" }, ENV).lines).toEqual([P_.problems.no_gas]);
+    expect(potActionFailureView({ ok: false, problem: "left" }, ENV)).toEqual({ lines: [], reread: false });
+    for (const s of [P_.actionMoved, P_.feeShort]) {
+      expect(s).not.toMatch(/enforced|guarantee|free\b|—/i);
+    }
+  });
+
+  test("potActionDoneView: a change or a restore is done only when the chain reads its ceiling; a stop or a take back once the allowance reads switched off", () => {
+    expect(potActionDoneView("change", read(HEALTHY), USDC(50), A)).toEqual(potCreatedView(read(HEALTHY), USDC(50)));
+    expect(potActionDoneView("change", read(HEALTHY), USDC(50), A).ok).toBe(true);
+    expect(potActionDoneView("change", read(HEALTHY), USDC(20), A).ok).toBe(false);
+    // A restore that left the allowance off: the warning's own lines, and no key named.
+    expect(potActionDoneView("start_again", read(STOPPED), USDC(50), A)).toEqual({
+      ok: false,
+      lines: [P_.stoppedLine, fillCopy(P_.shownBalance, { balance: "190" })],
+    });
+    expect(potActionDoneView("new_key", read(HEALTHY, P), USDC(50), P).ok).toBe(false);
+    // A restore that is done names the key that may take now: the click's.
+    const moved = read({ ...HEALTHY, delegates: { list: [Q], next: 0 } }, Q);
+    expect(potActionDoneView("new_key", moved, USDC(50), Q)).toEqual({
+      ok: true,
+      lines: [fillCopy(P_.shownAgent, { address: Q }), ...potCreatedView(moved, USDC(50)).lines],
+    });
+    expect(potActionDoneView("start_again", read(HEALTHY), USDC(50), A).lines[0]).toBe(fillCopy(P_.shownAgent, { address: A }));
+    expect(potActionDoneView("stop", read(STOPPED), null, A)).toEqual({
+      ok: true,
+      lines: [P_.stoppedLine, fillCopy(P_.shownBalance, { balance: "190" })],
+    });
+    expect(potActionDoneView("stop", read(HEALTHY), null, A).ok).toBe(false);
+    expect(potActionDoneView("withdraw", read(STOPPED_EMPTY), null, A)).toEqual({
+      ok: true,
+      lines: [P_.stoppedLine, fillCopy(P_.shownBalance, { balance: "0" })],
+    });
+    expect(potActionDoneView("withdraw", read({ ...HEALTHY, owners: [P] }), null, A)).toEqual({ ok: false, lines: [P_.notYours] });
+  });
+
+  test("potActionAfter: onePot under the stop's result, and nothing under the others'", () => {
+    const done = { ok: true, lines: [], hash: HASH };
+    expect(potActionAfter({ at: "done", action: "stop", ...done })).toEqual([P_.onePot]);
+    expect(potActionAfter({ at: "done", action: "withdraw", ...done })).toEqual([]);
+    expect(potActionAfter({ at: "problem", action: "stop", lines: [], hash: null, again: null })).toEqual([]);
+    expect(potActionAfter({ at: "idle" })).toEqual([]);
+  });
+
+  test("potCeilingCheck: the form's ceiling rule, with the grant's cap", () => {
+    expect(potCeilingCheck("20", CAP)).toEqual({ ok: true, ceilingUnits: USDC(20) });
+    expect(potCeilingCheck("350", CAP)).toEqual({ ok: true, ceilingUnits: USDC(350) });
+    expect(potCeilingCheck("", CAP)).toEqual({ ok: false, line: P_.ceilingProblems.empty });
+    expect(potCeilingCheck("20.5", CAP)).toEqual({ ok: false, line: P_.ceilingProblems.not_whole });
+    expect(potCeilingCheck("0", CAP)).toEqual({ ok: false, line: P_.ceilingProblems.zero });
+    expect(potCeilingCheck("351", CAP)).toEqual({
+      ok: false,
+      line: fillCopy(P_.ceilingProblems.above_grant, { amount: "350" }),
+    });
+    expect(potCeilingCheck("20", { kind: "no_spending" })).toEqual({ ok: false, line: P_.grantNoSpending });
+    expect(potCeilingCheck("4000", { kind: "none" })).toEqual({ ok: true, ceilingUnits: USDC(4000) });
   });
 });

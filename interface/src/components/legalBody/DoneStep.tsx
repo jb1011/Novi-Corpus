@@ -13,15 +13,16 @@ import {
 import { formatDate } from "@/lib/format";
 import { doneWalletCard, type DoneWalletCard } from "@/lib/legalBody/agentWalletStep";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
-import { isFormedCompany, sameAddress } from "@/lib/legalBody/flow";
+import { isFormedCompany } from "@/lib/legalBody/flow";
 import { noticeSentence } from "@/lib/legalBody/notice";
 import { potAddresses } from "@/lib/legalBody/safePot";
 import { potCeilingCapFromGrant, potReading } from "@/lib/legalBody/safePotRules";
 import { potReadsAllowed, potRecordWallet, type PotCardShown } from "@/lib/legalBody/safePotRun";
-import { potCard, potReadingView } from "@/lib/legalBody/safePotStep";
+import { potCard } from "@/lib/legalBody/safePotStep";
 import { publicReadAllowed, publicRecordOf } from "@/lib/legalBody/standing";
 import { AgentWalletStep } from "./AgentWalletStep";
 import { LegalBodyRecord } from "./LegalBodyRecord";
+import { PotManage } from "./PotManage";
 import { PotCardView } from "./PotPanels";
 import { PotStep } from "./PotStep";
 import type { CompanyView, LegalBodyByAgent, LegalBodyOrderView } from "@/lib/api/types";
@@ -139,9 +140,10 @@ function WalletCard({ card, onOpen }: { card: DoneWalletCard; onOpen: () => void
  * page shows it, and again after a transaction (`reread`).
  *
  * `potCard` decides: nothing; the card while a read is out; the offer, whose click opens the setup
- * step here, in place, where it stays from then on; or the pot's card, which in this slice shows
- * its reading's lines only. A read that failed says so with Try again, never a spinner for ever.
- * A record read that names no agent wallet of its own shows nothing: the wallet card speaks then.
+ * step here, in place, where it stays from then on; or the pot's own card (`PotManage`): what the
+ * chain shows, and the guardian's actions on the same pot, each read again in its click. A read
+ * that failed says so with Try again, never a spinner for ever. A record read that names no agent
+ * wallet of its own shows nothing: the wallet card speaks then.
  */
 function DonePot({
   kit,
@@ -201,34 +203,38 @@ function DonePot({
     refetchRecord();
   };
 
+  const step = open && wallet !== null && (
+    <Card className="mb-6 p-6">
+      <PotStep kit={kit} order={order} agentWallet={wallet} onCreated={reread} />
+    </Card>
+  );
+  if (!failed && card === "manage" && reading !== null && raw !== undefined && noted && wallet !== null)
+    return (
+      <>
+        {step}
+        <PotManage
+          kit={kit}
+          order={order}
+          noted={noted}
+          agentWallet={wallet}
+          raw={raw}
+          reading={reading}
+          // The time the pot was read: what is left is said of the period it was read in.
+          nowSeconds={Math.floor(rawQuery.dataUpdatedAt / 1000)}
+          onChanged={reread}
+        />
+      </>
+    );
+
   let shown: Exclude<PotCardShown, { kind: "hidden" }> | null;
   if (failed) shown = { kind: "unreadable" };
-  else if (card === "manage" && reading !== null && raw !== undefined && noted && wallet !== null)
-    shown = {
-      kind: "manage",
-      lines: potReadingView(reading, raw, {
-        chainId: config.chainId,
-        pot: noted.address,
-        guardian: order.guardian,
-        agentWallet: wallet,
-        onRecord: noted.onRecord,
-        onThisDeployment:
-          order.chainId === config.chainId && sameAddress(order.factory, config.factory),
-        // The time the pot was read: what is left is said of the period it was read in.
-        nowSeconds: Math.floor(rawQuery.dataUpdatedAt / 1000),
-      }).lines,
-    };
   // While the step is open it is the offer, and its own reads speak for it.
   else if (open) shown = null;
   else shown = card === "offer" ? { kind: "offer" } : { kind: "checking" };
 
   return (
     <>
-      {open && wallet !== null && (
-        <Card className="mb-6 p-6">
-          <PotStep kit={kit} order={order} agentWallet={wallet} onCreated={reread} />
-        </Card>
-      )}
+      {step}
       {shown && (
         <PotCardView
           shown={shown}

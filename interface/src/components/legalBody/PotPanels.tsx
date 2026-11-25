@@ -1,5 +1,6 @@
 "use client";
 
+import { useState, type ReactNode } from "react";
 import {
   Button,
   Callout,
@@ -12,13 +13,19 @@ import {
 import type { Hex } from "@/lib/api/types";
 import { txUrl } from "@/lib/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
-import type { PotCardShown, PotFormMoney, PotProblemThen } from "@/lib/legalBody/safePotRun";
+import type {
+  PotActionStage,
+  PotCardShown,
+  PotFormMoney,
+  PotProblemThen,
+} from "@/lib/legalBody/safePotRun";
 import type { PotForm, PotFormCheck } from "@/lib/legalBody/safePotStep";
 
 /**
- * The company's pot's panels (`PotStep.tsx` and the done page's card): what they draw from the
- * values they are given, and nothing they decide. No panel reads the chain or the server, signs or
- * sends: every click is handed back to the step. Every word is the `pot` section's.
+ * The company's pot's panels (`PotStep.tsx`, the done page's card and the pot's own card,
+ * `PotManage.tsx`): what they draw from the values they are given, and nothing they decide. No
+ * panel reads the chain or the server, signs or sends: every click is handed back to the step or
+ * the card. Every word is the `pot` section's.
  */
 
 const POT = LEGAL_BODY_COPY.pot;
@@ -36,8 +43,9 @@ function Lines({ lines, className }: { lines: readonly string[]; className?: str
   );
 }
 
-/** The done page's pot card: the offer (the whole card is the button that opens the step), the
- *  read in progress, a read that failed with its retry, or the pot as read. */
+/** The done page's pot card before the pot exists or while it is read: the offer (the whole card
+ *  is the button that opens the step), the read in progress, or a read that failed with its retry.
+ *  Once the pot is read, the card is `PotManage`. */
 export function PotCardView({
   shown,
   onOpen,
@@ -82,16 +90,6 @@ export function PotCardView({
               {POT.retry}
             </Button>
           </div>
-        </Card>
-      );
-    case "manage":
-      return (
-        <Card className="mb-6 p-6">
-          <SectionTitle>{POT.title}</SectionTitle>
-          <Lines
-            lines={shown.lines}
-            className="mt-3 flex flex-col gap-1.5 break-all text-[13px] leading-[1.6] text-muted"
-          />
         </Card>
       );
   }
@@ -396,6 +394,248 @@ export function PotProblemPanel({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The pot's card once it exists: the guardian's actions and the agent's side
+// ---------------------------------------------------------------------------------------------
+
+/** The pot's card once it is read: its title, what the chain shows, then the actions and the
+ *  agent's side the card hands in. */
+export function PotManageFrame({ lines, children }: { lines: readonly string[]; children: ReactNode }) {
+  return (
+    <Card className="mb-6 p-6">
+      <SectionTitle>{POT.title}</SectionTitle>
+      <Lines
+        lines={lines}
+        className="mt-3 flex flex-col gap-1.5 break-all text-[13px] leading-[1.6] text-muted"
+      />
+      <div className="mt-6 flex flex-col gap-5">{children}</div>
+    </Card>
+  );
+}
+
+/** One of the guardian's actions on the pot: its title, its lines, what it asks (a field, or a
+ *  sentence in its place), and its one button, which hands the click to the card. */
+export function PotActionPanel({
+  title,
+  lines,
+  children,
+  sendLabel,
+  onSend,
+  disabled,
+  loading,
+  danger = false,
+}: {
+  title: string;
+  lines: readonly string[];
+  children?: ReactNode;
+  sendLabel: string;
+  onSend: () => void;
+  /** Another action is in flight, or what this one asks cannot be checked yet. */
+  disabled: boolean;
+  /** This one is in flight. */
+  loading: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <div className="border-t hairline pt-5">
+      <div className="text-[13.5px] font-medium text-ink">{title}</div>
+      <Lines lines={lines} className="mt-1.5 flex flex-col gap-1.5 text-[12.5px] leading-[1.6] text-muted" />
+      {children && <div className="mt-4">{children}</div>}
+      <div className="mt-4 flex justify-end">
+        <Button
+          variant={danger ? "danger" : "ghost"}
+          onClick={onSend}
+          disabled={disabled}
+          loading={loading}
+        >
+          {sendLabel}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+/** A ceiling typed for an action: EMPTY when the card opens, the grant's cap beside it, never in
+ *  it; or, while the grant cannot be read, the sentence that says so with its retry. */
+export function PotCeilingField({
+  id,
+  value,
+  hint,
+  error,
+  disabled,
+  onChange,
+  unreadable,
+  onRetry,
+  retrying,
+}: {
+  id: string;
+  value: string;
+  /** The line beside the field (`potCeilingHint`); null while the grant is read. */
+  hint: string | null;
+  error: string | undefined;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  /** The grant could not be read: no field, its sentence and Try again. */
+  unreadable: boolean;
+  onRetry: () => void;
+  retrying: boolean;
+}) {
+  if (unreadable)
+    return <PotNotice tone="warn" line={POT.grantUnreadable} onRetry={onRetry} retrying={retrying} />;
+  if (hint === null)
+    return (
+      <div className="flex items-center text-muted">
+        <Spinner className="h-3.5 w-3.5" />
+      </div>
+    );
+  return (
+    <div>
+      <Field label={POT.ceilingLabel} error={error} htmlFor={id}>
+        <TextInput
+          id={id}
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          invalid={error !== undefined}
+          inputMode="numeric"
+          autoComplete="off"
+          spellCheck={false}
+          disabled={disabled}
+        />
+      </Field>
+      <p className="mt-1.5 text-[12px] leading-[1.6] text-muted-2">{hint}</p>
+    </div>
+  );
+}
+
+/**
+ * Where the last action is: the checks before the wallet, the wallet open, the chain awaited (with
+ * the transaction's link); done, with what the chain shows now, or a warning in the reading's own
+ * sentences when it does not show what was asked; or a problem, with Check again only when the
+ * chain may still show the transaction. `after` comes under it (one pot for life, under the stop).
+ */
+export function PotActionResultPanel({
+  title,
+  stage,
+  after,
+  busy,
+  onCheckAgain,
+}: {
+  title: string;
+  stage: Exclude<PotActionStage, { at: "idle" }>;
+  after: readonly string[];
+  busy: boolean;
+  onCheckAgain: () => void;
+}) {
+  let body: ReactNode;
+  switch (stage.at) {
+    case "checking":
+      body = <PotStatusPanel text={POT.checkingSend} hash={null} />;
+      break;
+    case "sending":
+      body = <PotStatusPanel text={POT.sending} hash={null} />;
+      break;
+    case "waiting":
+      body = <PotStatusPanel text={POT.waitingChange} hash={stage.hash} />;
+      break;
+    case "done":
+      body = stage.ok ? (
+        <Callout tone="info" title={POT.done}>
+          <span className="flex flex-col gap-2">
+            <Lines lines={stage.lines} className="mt-1 flex flex-col gap-1.5 break-all" />
+            <TxLink hash={stage.hash} />
+          </span>
+        </Callout>
+      ) : (
+        <Callout tone="warn">
+          <span className="flex flex-col gap-2">
+            <Lines lines={stage.lines} />
+            <TxLink hash={stage.hash} />
+          </span>
+        </Callout>
+      );
+      break;
+    case "problem":
+      body = (
+        <div>
+          <Callout tone="warn">
+            <span className="flex flex-col gap-2">
+              <Lines lines={stage.lines} />
+              {stage.hash && <TxLink hash={stage.hash} />}
+            </span>
+          </Callout>
+          {stage.again && (
+            <div className="mt-4 flex justify-end">
+              <Button onClick={onCheckAgain} loading={busy}>
+                {POT.checkAgain}
+              </Button>
+            </div>
+          )}
+        </div>
+      );
+      break;
+  }
+  return (
+    <div className="border-t hairline pt-5">
+      <div className="text-[13.5px] font-medium text-ink">{title}</div>
+      <div className="mt-3">{body}</div>
+      {after.length > 0 && (
+        <Lines lines={after} className="mt-3 flex flex-col gap-1.5 text-[12.5px] leading-[1.6] text-muted" />
+      )}
+    </div>
+  );
+}
+
+/** A command to copy, shown whole and selectable, with its intro line and a Copy button. When the
+ *  clipboard is not there or refuses, the person is told to select the text instead. */
+export function PotCommandBox({ intro, command }: { intro: string; command: string }) {
+  const [state, setState] = useState<"idle" | "copied" | "by_hand">("idle");
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(command);
+      setState("copied");
+    } catch {
+      setState("by_hand");
+    }
+  }
+
+  return (
+    <div className="min-w-0">
+      <p className="text-[12.5px] leading-[1.6] text-muted">{intro}</p>
+      <pre className="mt-2 max-h-60 select-all overflow-auto whitespace-pre-wrap break-all rounded-xl border hairline bg-paper-2/60 p-3 font-mono text-[11.5px] leading-relaxed text-ink">
+        {command}
+      </pre>
+      <div className="mt-2 flex flex-wrap items-center gap-3">
+        <Button variant="ghost" onClick={() => void copy()}>
+          {state === "copied" ? POT.copied : POT.copy}
+        </Button>
+        {state === "by_hand" && <span className="text-[11.5px] text-muted-2">{POT.copyByHand}</span>}
+      </div>
+    </div>
+  );
+}
+
+/** "For your agent": the agent takes with its own key, the MCP tools by name, then the two
+ *  commands, filled with the pot, the agent's key and the site's RPC, each in its copy box. */
+export function PotAgentPanel({ take, read }: { take: string; read: string }) {
+  return (
+    <div className="border-t hairline pt-5">
+      <div className="text-[13.5px] font-medium text-ink">{POT.agentTitle}</div>
+      <div className="mt-1.5 flex flex-col gap-1.5 text-[12.5px] leading-[1.6] text-muted">
+        <p>{POT.agentLine}</p>
+        <p>{POT.agentMcp}</p>
+      </div>
+      <div className="mt-4 flex flex-col gap-5">
+        <PotCommandBox intro={POT.agentCommandIntro} command={take} />
+        <div>
+          <PotCommandBox intro={POT.agentReadIntro} command={read} />
+          <p className="mt-2 text-[12px] leading-[1.6] text-muted-2">{POT.agentReadLine}</p>
+        </div>
+      </div>
     </div>
   );
 }

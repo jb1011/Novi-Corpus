@@ -869,6 +869,13 @@ export const LEGAL_BODY_COPY = {
     newKeyLine:
       "Your agent's wallet in the registry is now {address}. This takes the old key off the pot and lets the new one take from it, with the ceiling you choose, in one transaction. A new thirty-day period starts now for the new key.",
     newKeySend: "Move the allowance to the new key",
+    /** An action's click read the pot again and found it other than the card showed it: another
+     *  tab, or a change made elsewhere. Nothing is sent, and the card reads it again. */
+    actionMoved:
+      "The pot is not as this page showed it, so nothing was sent. It is read again now: check what it shows, then try again.",
+    /** An action the guardian's wallet cannot pay the network fee of, its balance read again. */
+    feeShort:
+      "Your wallet holds {balance} USDC, which does not pay the network fee of this transaction. Nothing was sent.",
     addMoneyTitle: "Add money",
     addMoneyLine: "Sends USDC from your wallet to the pot, {address}. Nothing goes to Novi Corpus.",
     addMoneyLabel: "Amount, in USDC",
@@ -901,6 +908,9 @@ export const LEGAL_BODY_COPY = {
       'cast call {module} "getTokenAllowance(address,address,address)(uint256[5])" {pot} {agent} {token} --rpc-url {rpc}',
     agentReadLine:
       "The five numbers are the ceiling, what was taken in this period, the period in minutes, the minute the period started, and a counter.",
+    copy: "Copy",
+    copied: "Copied",
+    copyByHand: "Select the text above and copy it.",
 
     /* The public record's sentence, one per state the record serves beside a statement. */
     recordCeiling:
