@@ -22,7 +22,7 @@
  * transactions are built by small encoders of this file, lifted from the proven script of
  * 20-24 Nov (`msTx`, `multiSendData`, `ownerSig`, `execTxData` and the Multicall3 wrapper of its
  * `buildPlan`), in exactly the shapes the website sends: step 0 pins them to the same bytes the
- * website's encoders are pinned to (V2, V4 to V6, V9 to V13 and V16).
+ * website's encoders are pinned to (V2, V4 to V6, V9 to V13, V16 and V17).
  *
  * The module logic runs on the repository's 6-decimal `MockUSDC`, through a copy of the pot's table
  * whose `usdc` is the mock: an anvil fork cannot move Arc's USDC (its transfer calls a node-level
@@ -59,6 +59,7 @@ import {
   parseAbi,
   parseEventLogs,
   size,
+  toFunctionSelector,
   zeroAddress,
 } from "viem";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -140,6 +141,7 @@ const multicall3Abi = parseAbi([
 ]);
 const moduleExtraAbi = parseAbi([
   "function removeDelegate(address delegate, bool removeAllowances)",
+  "function deleteAllowance(address delegate, address token)",
 ]);
 
 const OP_CALL = 0;
@@ -220,6 +222,19 @@ const removeDelegatePart = (a: PotAddresses, delegate: Address): Hex =>
       abi: moduleExtraAbi,
       functionName: "removeDelegate",
       args: [low(delegate), true],
+    }),
+  );
+/** `deleteAllowance(delegate, token)`: its amount, spent, period and last reset to 0, the nonce
+ *  kept (Ruling R35). */
+const deleteAllowancePart = (a: PotAddresses, delegate: Address, token: Address): Hex =>
+  msTx(
+    OP_CALL,
+    a.allowanceModule,
+    0n,
+    encodeFunctionData({
+      abi: moduleExtraAbi,
+      functionName: "deleteAllowance",
+      args: [low(delegate), low(token)],
     }),
   );
 const setAllowanceData = (key: Address, token: Address, ceilingUnits: bigint): Hex =>
@@ -322,7 +337,9 @@ function stopTx(
 
 /** The restore (start again, or a new key): a delegatecall to MultiSendCallOnly of
  *  `removeDelegate(d, true)` for each listed delegate, `enableModule(module)` to the zero address
- *  when the module is off, `addDelegate(key)`, `setAllowance(key, token, amount, 43200, 0)`. */
+ *  when the module is off, `deleteAllowance(key, token)` when the key is not listed and
+ *  `clearAllowance` (Ruling R35), `addDelegate(key)`, `setAllowance(key, token, amount, 43200,
+ *  0)`. */
 function restoreTx(
   a: PotAddresses,
   guardian: Address,
@@ -332,10 +349,13 @@ function restoreTx(
     ceilingUnits: bigint;
     delegates: readonly Address[];
     modules: readonly Address[];
+    clearAllowance?: boolean;
   },
 ): Hex {
   const parts = p.delegates.map((d) => removeDelegatePart(a, d));
   if (p.modules.length === 0) parts.push(enableModulePart(a));
+  const listed = p.delegates.some((d) => d.toLowerCase() === p.key.toLowerCase());
+  if (p.clearAllowance === true && !listed) parts.push(deleteAllowancePart(a, p.key, p.token));
   parts.push(
     addDelegatePart(a, p.key),
     msTx(OP_CALL, a.allowanceModule, 0n, setAllowanceData(p.key, p.token, p.ceilingUnits)),
@@ -391,7 +411,7 @@ function clientsFor(rpcUrl: string) {
 /** Step 0 needs no chain: it runs whatever the flag, so every run of the suite pins this file's
  *  encoders to the website's vectors. */
 describe("the fork test's own encoders, pinned to the website's vectors (no chain, always run)", () => {
-  it("0. the test's own encoders give the bytes the website's encoders are pinned to (V2, V4 to V6, V9 to V13 and V16)", () => {
+  it("0. the test's own encoders give the bytes the website's encoders are pinned to (V2, V4 to V6, V9 to V13, V16 and V17)", () => {
     const T = potAddresses(ARC_TESTNET);
     if (T === null) throw new Error("no pot table");
     const v3 = { guardian: RUN_G, agentWallet: RUN_A, token: T.usdc, ceilingUnits: 50n * U };
@@ -457,6 +477,25 @@ describe("the fork test's own encoders, pinned to the website's vectors (no chai
       1252,
       "0x5cc5e16da50f1eaa12fa7f4a415b509af88d67e05b494e1fb809035362871c1f",
     );
+    // V17: a restore of an unlisted key with leftovers, the module on (deleteAllowance first).
+    pinned(
+      restoreTx(T, RUN_G, {
+        ...restore,
+        key: RUN_A,
+        delegates: [],
+        modules: [T.allowanceModule],
+        clearAllowance: true,
+      }),
+      1124,
+      "0x5df83fef2cd3e804490975a21e4f0eef03d743e6c8c799fbff13906b8d90959a",
+    );
+    // A false flag leaves V11 to V13 byte for byte; a listed key takes no leftover part.
+    expect(
+      restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [], modules: [], clearAllowance: false }),
+    ).toBe(restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [], modules: [] }));
+    expect(
+      restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [RUN_A], modules: [], clearAllowance: true }),
+    ).toBe(restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [RUN_A], modules: [] }));
   });
 });
 
@@ -1147,5 +1186,91 @@ run("the company's pot on a fork of Arc testnet, with Safe's real contracts", ()
     } finally {
       s.db.close();
     }
+  });
+
+  it("19. a key removed elsewhere with removeDelegate(key, false) after a take keeps its old period; the website's restore with the leftover part (V17's shape, deleteAllowance first) starts a new period with nothing taken, the nonce kept (Ruling R35)", async () => {
+    // The module's deployed code answers deleteAllowance(address,address).
+    const selector = toFunctionSelector("function deleteAllowance(address delegate, address token)");
+    expect(selector).toBe("0x885133e3");
+    const moduleCode = await c.pub.getCode({ address: REAL.allowanceModule });
+    expect(moduleCode?.toLowerCase()).toContain(selector.slice(2));
+
+    const setup = setupTx(M, {
+      guardian: G,
+      agentWallet: A,
+      token: mock,
+      ceilingUnits: 50n * U,
+      saltNonce: saltBase + 7n,
+      fundWei: 0n,
+      agentGasWei: 0n,
+    });
+    const created = await send(G, setup.to, setup.data, { gas: SETUP_GAS });
+    expect(created.status).toBe("success");
+    const start = await minuteOf(created.blockNumber);
+    const safe = setup.pot;
+    await mint(safe, 100n * U);
+    await takes(safe, A, 7n * U);
+    expect(await allowanceOf(safe, A)).toEqual([50n * U, 7n * U, PERIOD, start, 2n]);
+
+    // The guardian, outside the site: the key off the module's list, its allowance kept.
+    await guardianExec(
+      safe,
+      execTxData(G, {
+        to: M.allowanceModule,
+        data: encodeFunctionData({
+          abi: moduleExtraAbi,
+          functionName: "removeDelegate",
+          args: [A, false],
+        }),
+      }),
+    );
+    const removed = await readingOf(safe, A);
+    expect(removed.reading).toMatchObject({ state: "stopped", why: "no_delegate" });
+    expect(removed.raw.delegates.list).toEqual([]);
+    expect(removed.raw.modules.list).toEqual([M.allowanceModule]);
+    // The click's raw read of the key shows its leftovers: the website sets clearAllowance.
+    expect(removed.raw.allowance).toEqual([50n * U, 7n * U, PERIOD, start, 2n]);
+    await refusedTake(safe, A, 1n);
+
+    await atMinute(start + 1_000n);
+    const snapshot = await c.test.snapshot();
+    // The restore without the leftover part, on a copy of the chain: the old period and what was
+    // taken in it carry on, so "a new period starts now" would be false (the final review's I5).
+    await guardianExec(
+      safe,
+      restoreTx(M, G, {
+        key: A,
+        token: mock,
+        ceilingUnits: 50n * U,
+        delegates: removed.raw.delegates.list,
+        modules: removed.raw.modules.list,
+      }),
+    );
+    expect(await allowanceOf(safe, A)).toEqual([50n * U, 7n * U, PERIOD, start, 2n]);
+    await c.test.revert({ id: snapshot });
+    expect(await allowanceOf(safe, A)).toEqual([50n * U, 7n * U, PERIOD, start, 2n]);
+
+    // The website's restore for that key with the leftover flag: deleteAllowance first.
+    const r = await guardianExec(
+      safe,
+      restoreTx(M, G, {
+        key: A,
+        token: mock,
+        ceilingUnits: 50n * U,
+        delegates: removed.raw.delegates.list,
+        modules: removed.raw.modules.list,
+        clearAllowance: true,
+      }),
+    );
+    gasUsed.restoreClearingLeftovers = r.gasUsed.toString();
+    const mined = await minuteOf(r.blockNumber);
+    expect(mined).toBe(start + 1_000n);
+    expect(await allowanceOf(safe, A)).toEqual([50n * U, 0n, PERIOD, mined, 2n]);
+    const fresh = await ceilingOf(safe, A);
+    expect(fresh.spentUnits).toBe(0n);
+    expect(fresh.nonce).toBe(2n);
+    expect(fresh.periodEndsAt).toBe(Number((mined + PERIOD) * 60n));
+    expect((await readingOf(safe, A)).raw.tokens).toEqual([mock]);
+    await takes(safe, A, 1n * U);
   });
 });
