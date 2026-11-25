@@ -1768,6 +1768,13 @@ const sqlIsCanonicalDecimal = (column: string) => sqlIsAgentId(column);
  * not after the body's latest note, which also refuses one over an existing key: so a REPLACE
  * never reaches its conflict resolution, and the rows of a body are in the order they were made.
  *
+ * ONE LEGAL BODY PER ADDRESS (Ruling R29). A last trigger refuses a `declared` row of an address,
+ * compared in lower case, that another body has a `declared` row of: a second line behind the
+ * note door, which checks the same inside its own write (`legalBody/pot.ts`). A body's own
+ * address noted again (a put-back, a repeated note) is not refused. `IF NOT EXISTS`, like the
+ * others: a database made before it gains it at the next boot, and the rows it already holds are
+ * left as they are.
+ *
  * The shapes. The address and the first key are `0x` and 40 hex digits, never the zero address in
  * any casing. The salt number and the ceiling are whole numbers in canonical decimal, of at most
  * 78 digits; a ceiling is never 0. The declaration's version is 1 to 40 characters. `declared_at`
@@ -1814,6 +1821,15 @@ const POT_DECLARATIONS_DDL = `
                             WHERE legal_body_id = NEW.legal_body_id)
   BEGIN
     SELECT RAISE(ABORT, 'pot_declarations is append-only: a note comes after the body''s latest, in order');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_pot_declarations_one_body
+  BEFORE INSERT ON pot_declarations FOR EACH ROW
+  WHEN NEW.act = 'declared' AND EXISTS (SELECT 1 FROM pot_declarations
+                                         WHERE act = 'declared'
+                                           AND lower(address) = lower(NEW.address)
+                                           AND legal_body_id <> NEW.legal_body_id)
+  BEGIN
+    SELECT RAISE(ABORT, 'pot_declarations: an address belongs to one legal body');
   END;
 `;
 

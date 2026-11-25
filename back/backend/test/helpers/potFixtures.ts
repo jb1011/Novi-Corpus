@@ -1,3 +1,4 @@
+import type Database from "better-sqlite3";
 import { type Address, type Hex, getAddress, keccak256, toHex, zeroAddress } from "viem";
 import { type Mock, vi } from "vitest";
 import type { SafePotChainPort } from "../../src/adapters/arc/safePotChain";
@@ -15,6 +16,7 @@ import {
   predictPotAddress,
 } from "../../src/legalBody/safePot";
 import { CHARTER_LEGAL_TEXTS, octoberLegalTexts } from "../../src/legalBody/texts/sets";
+import { migrate } from "../../src/persistence/db";
 import {
   type LegalBodyPotRepository,
   type PotBirthNote,
@@ -329,6 +331,20 @@ export function potOf(ceilingUsdc: bigint): { address: Address; birth: PotBirthN
     address: potAddressOf({ ceilingUnits }),
     birth: { saltNonce: "1", agentWallet: A, ceilingUnits: ceilingUnits.toString() },
   };
+}
+
+/**
+ * Writes a record the database refuses today: `write` runs while the guard that keeps an address
+ * to one legal body (Ruling R29, `trg_pot_declarations_one_body` in db.ts) is dropped, as in a
+ * database written before the guard existed; the next migration puts it back, as a boot does.
+ */
+export function beforeTheOneBodyGuard(db: Database.Database, write: () => void): void {
+  db.exec("DROP TRIGGER trg_pot_declarations_one_body");
+  try {
+    write();
+  } finally {
+    migrate(db);
+  }
 }
 
 /** The pot's deps over the stores, the registry and the chain port given, on `POT_CHAIN_ID`. */

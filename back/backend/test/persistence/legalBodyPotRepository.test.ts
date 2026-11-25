@@ -22,7 +22,7 @@ import {
   customerCompany,
   openLegalBodyStores,
 } from "../helpers/legalBodyFixtures";
-import { A, G, P, V3_ADDRESS } from "../helpers/potFixtures";
+import { A, G, P, V3_ADDRESS, beforeTheOneBodyGuard } from "../helpers/potFixtures";
 
 /** A time on the record, in unix seconds. */
 const T = 1_795_000_000;
@@ -257,6 +257,70 @@ describe("the table holds itself", () => {
   });
 });
 
+describe("an address belongs to one legal body (Ruling R29)", () => {
+  test("a declared note of an address another body declared is refused by the database, in any letter case, and nothing is written", () => {
+    const one = body();
+    const two = body();
+    declared(one.legalBodyId, V3_ADDRESS, T);
+    for (const spelling of [
+      V3_ADDRESS,
+      V3_ADDRESS.toLowerCase(),
+      `0x${V3_ADDRESS.slice(2).toUpperCase()}`,
+    ])
+      expect(() => declared(two.legalBodyId, spelling as Address, T + 10), spelling).toThrow(
+        /one legal body/,
+      );
+    // A raw insert in lower case, around the repository's checksum, is refused the same way.
+    expect(() =>
+      s.db
+        .prepare(
+          `INSERT INTO pot_declarations
+             (legal_body_id, act, address, salt_nonce, birth_agent_wallet, birth_ceiling_units,
+              declaration_version, declared_at)
+           VALUES (?, 'declared', ?, '1', ?, '50000000', 'pot-declaration-1', ?)`,
+        )
+        .run(two.legalBodyId, V3_ADDRESS.toLowerCase(), A, T + 20),
+    ).toThrow(/one legal body/);
+    // Taken off the first body's record, the address is still the first body's.
+    removed(one.legalBodyId, V3_ADDRESS, T + 30);
+    expect(() => declared(two.legalBodyId, V3_ADDRESS, T + 40)).toThrow(/one legal body/);
+    expect(pots.list(two.legalBodyId)).toEqual([]);
+    expect(pots.legalBodyIdsByAddress(V3_ADDRESS, 10)).toEqual([one.legalBodyId]);
+    // Another address is the second body's to note.
+    declared(two.legalBodyId, OTHER_POT, T + 50);
+    expect(pots.legalBodyIdsByAddress(OTHER_POT, 10)).toEqual([two.legalBodyId]);
+  });
+
+  test("a body notes its own address again: after a removal, after another pot of its own, and twice in a row", () => {
+    const b = body();
+    declared(b.legalBodyId, V3_ADDRESS, T);
+    removed(b.legalBodyId, V3_ADDRESS, T + 10);
+    // Put back.
+    declared(b.legalBodyId, V3_ADDRESS, T + 20);
+    declared(b.legalBodyId, OTHER_POT, T + 30);
+    // Back to the first, then the same note again.
+    declared(b.legalBodyId, V3_ADDRESS.toLowerCase() as Address, T + 40);
+    declared(b.legalBodyId, V3_ADDRESS, T + 50);
+    expect(pots.list(b.legalBodyId).map((n) => [n.act, n.address])).toEqual([
+      ["declared", V3_ADDRESS],
+      ["removed", V3_ADDRESS],
+      ["declared", V3_ADDRESS],
+      ["declared", OTHER_POT],
+      ["declared", V3_ADDRESS],
+      ["declared", V3_ADDRESS],
+    ]);
+  });
+
+  test("a database that lacks the guard gains it at the next migration", () => {
+    const one = body();
+    const two = body();
+    declared(one.legalBodyId, V3_ADDRESS, T);
+    s.db.exec("DROP TRIGGER trg_pot_declarations_one_body");
+    migrate(s.db);
+    expect(() => declared(two.legalBodyId, V3_ADDRESS, T + 10)).toThrow(/one legal body/);
+  });
+});
+
 describe("legalBodyIdsByAddress", () => {
   test("finds a body by any declared note of the address, its latest or an older one, in any letter case, distinct, the newest note first", () => {
     const older = body();
@@ -266,8 +330,9 @@ describe("legalBodyIdsByAddress", () => {
     removed(older.legalBodyId, V3_ADDRESS, T + 10);
     declared(older.legalBodyId, V3_ADDRESS, T + 20);
     declared(older.legalBodyId, OTHER_POT, T + 30);
-    // The newer body: the address, declared later than any note of the older one.
-    declared(newer.legalBodyId, V3_ADDRESS, T + 100);
+    // The newer body: the address, declared later than any note of the older one, in a record
+    // written before the database refused a second body's note of an address (Ruling R29).
+    beforeTheOneBodyGuard(s.db, () => declared(newer.legalBodyId, V3_ADDRESS, T + 100));
     for (const spelling of [
       V3_ADDRESS,
       V3_ADDRESS.toLowerCase(),

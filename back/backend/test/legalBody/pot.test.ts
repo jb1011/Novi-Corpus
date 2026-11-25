@@ -69,6 +69,7 @@ import {
   T,
   V3_ADDRESS,
   V3_INPUT,
+  beforeTheOneBodyGuard,
   fakePotChain,
   fakeRegistry,
   inputFor,
@@ -825,16 +826,19 @@ describe("an address belongs to one legal body (Ruling R13)", () => {
       declarationVersion: null,
       at: Math.floor(clock / 1000),
     });
-    // A note of the same address on another guardian's body, written around the door.
+    // A note of the same address on another guardian's body, written around the door, in a record
+    // written before the database refused it (Ruling R29).
     const elsewhere = potBody(s, { nowMs: clock, tenant: STRANGER });
-    pots.append({
-      legalBodyId: elsewhere.legalBodyId,
-      act: "declared",
-      address: V3_ADDRESS,
-      birth: BIRTH_V3,
-      declarationVersion: "pot-declaration-1",
-      at: Math.floor(clock / 1000),
-    });
+    beforeTheOneBodyGuard(s.db, () =>
+      pots.append({
+        legalBodyId: elsewhere.legalBodyId,
+        act: "declared",
+        address: V3_ADDRESS,
+        birth: BIRTH_V3,
+        declarationVersion: "pot-declaration-1",
+        at: Math.floor(clock / 1000),
+      }),
+    );
     const fresh = linked();
     registry.getAgentWallet.mockClear();
     clock += 60_000;
@@ -846,14 +850,16 @@ describe("an address belongs to one legal body (Ruling R13)", () => {
     expect(pots.list(body.legalBodyId).map((n) => n.act)).toEqual(["declared", "removed"]);
     expect(pots.list(fresh.legalBodyId)).toEqual([]);
     // Even when this body holds the newer note of the address (both written around the door).
-    pots.append({
-      legalBodyId: body.legalBodyId,
-      act: "declared",
-      address: V3_ADDRESS,
-      birth: BIRTH_V3,
-      declarationVersion: "pot-declaration-1",
-      at: Math.floor(clock / 1000),
-    });
+    beforeTheOneBodyGuard(s.db, () =>
+      pots.append({
+        legalBodyId: body.legalBodyId,
+        act: "declared",
+        address: V3_ADDRESS,
+        birth: BIRTH_V3,
+        declarationVersion: "pot-declaration-1",
+        at: Math.floor(clock / 1000),
+      }),
+    );
     clock += 60_000;
     expect(await refusalOf(() => declare(body, V3_INPUT))).toMatchObject(refused("pot_taken", 409));
   });
@@ -1763,10 +1769,11 @@ describe("the lookup by a pot's address (statementForPotAddress)", () => {
     expect(chain.port.readPot).not.toHaveBeenCalled();
     stChain.beforeSnapshot = () => {};
 
-    // Two bodies noted the same address, written around the door: the newest note's body is
-    // inactive, the other active. The active one is answered.
+    // Two bodies noted the same address, written around the door in a record written before the
+    // database refused it (Ruling R29): the newest note's body is inactive, the other active. The
+    // active one is answered.
     const inactive = statedPotBody(s, stChain, { agentId: "43", status: "winding_down" });
-    notePot(pots, inactive, { at: DECLARED_AT + 60 });
+    beforeTheOneBodyGuard(s.db, () => notePot(pots, inactive, { at: DECLARED_AT + 60 }));
     proxyAt(V3_ADDRESS);
     const found = await lookup(V3_ADDRESS);
     expect(found.outcome).toMatchObject({ kind: "statement", legalBodyId: row.legalBodyId });
@@ -1921,18 +1928,28 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
 
   test("refuses pot_take_body_not_in_force for a revoked body and a body not linked, before any chain read; get_pot still answers for them (Ruling R17)", async () => {
     answer(HEALTHY);
-    const revoked = withPot();
+    // Each body its own pot: an address belongs to one legal body (Ruling R29).
+    const own = new Map<LegalBodyRecord, Address>();
+    const withOwnPot = (ceilingUsdc: bigint): LegalBodyRecord => {
+      const pot = potOf(ceilingUsdc);
+      const row = withPot(pot);
+      own.set(row, pot.address);
+      return row;
+    };
+    const revoked = withOwnPot(60n);
     s.repo.recordEvent(revoked.legalBodyId, "revoked", "operator:ops.example", null, {
       reason: "Recorded for a test.",
     });
-    const broken = withPot();
+    const broken = withOwnPot(70n);
     expect(s.repo.markBroken(broken.legalBodyId, { reason: "a test" })).toBe(true);
-    const superseded = withPot();
+    const superseded = withOwnPot(80n);
     expect(s.repo.markBroken(superseded.legalBodyId, { reason: "a test" })).toBe(true);
     expect(s.repo.supersede(superseded.legalBodyId, revoked.legalBodyId)).toBe(true);
     const deployed = potBody(s, { nowMs: clock, state: "deployed" });
     registry.wallets.set(deployed.agentId as string, A);
-    notePot(pots, deployed, { at: NOW_S - 3_600 });
+    const deployedPot = potOf(90n);
+    notePot(pots, deployed, { at: NOW_S - 3_600, ...deployedPot });
+    own.set(deployed, deployedPot.address);
     // A draft abandoned, with a note written straight into the record: no door makes one.
     const companyId = customerCompany(s, G, { filingNumber: "TEST-P9001" });
     const draft = s.repo.create({
@@ -1943,7 +1960,7 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
       amendmentDelay: 172_800,
     });
     expect(s.repo.abandon(draft.legalBodyId, "a test")).toBe(true);
-    notePot(pots, draft, { at: NOW_S - 3_600 });
+    notePot(pots, draft, { at: NOW_S - 3_600, ...potOf(100n) });
 
     const states: [LegalBodyRecord, string][] = [
       [revoked, "linked"],
@@ -1962,7 +1979,7 @@ describe("the agent's pot: what is left (potForAgent) and a take to send (prepar
     expectNoChainRead();
     // The read answers for a body in any state that has its agent.
     for (const row of [revoked, broken, superseded, deployed])
-      expect(await read(row)).toMatchObject({ pot: V3_ADDRESS, state: "ceiling_read" });
+      expect(await read(row)).toMatchObject({ pot: own.get(row), state: "ceiling_read" });
     // A linked body that was not revoked: the take is prepared.
     expect(await take(withPot(), { to: P, amountUnits: "1000000" })).toMatchObject({
       data: V3_TAKE,
