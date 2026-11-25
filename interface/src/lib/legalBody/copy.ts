@@ -41,6 +41,9 @@ const POT_NOT_THIS_WALLET =
 const POT_WRONG_NETWORK = "Your wallet is on another network. Switch it to {network}.";
 const POT_BUILT_WRONG =
   "This page built the transaction with values it does not take, so it will not send it. Nothing was sent.";
+/** The pot as the server or the record could not serve it just now: the record's sentence, and a
+ *  click's read of the noted pot that failed. */
+const POT_UNAVAILABLE = "The company's pot could not be read just now.";
 /** One rule, two codes: the setup's and Send fee money's (Ruling R10). */
 const POT_FEE_PLAIN_KEY =
   "Fee money goes only to a plain key, and your agent's wallet holds code, so nothing was sent to it.";
@@ -715,6 +718,9 @@ export const LEGAL_BODY_COPY = {
     declarationNeeded: "Tick the declaration to go on.",
     create: "Create the pot",
     back: "Change something",
+    /** "Create the pot" before the wallet opens: the simulation, the estimate, the reads again and
+     *  the note. */
+    checkingSend: "Checking the transaction before your wallet opens.",
     sending: "Waiting for your wallet.",
     waiting: "Waiting for the pot to appear on the chain.",
     waitingChange: "Waiting for the chain.",
@@ -736,6 +742,14 @@ export const LEGAL_BODY_COPY = {
         "No answer from the chain after three minutes. Check again before you start over: the transaction may have gone through.",
       read_failed: "The chain could not be read just now. Nothing was changed.",
       refused: "This transaction is not one this page may send, so nothing was sent.",
+      /** A click's read of the noted pot from the server that failed. */
+      pot_unreadable: POT_UNAVAILABLE,
+      /** Read again before the note: the noted pot or the agent's wallet is not the review's. */
+      stale_plan:
+        "Something changed since your review: the pot noted for this legal body, or your agent's wallet in the registry. Nothing was sent. Review it again.",
+      /** The wallet could not pay the transaction's network fee. */
+      no_gas:
+        "Your wallet does not hold enough USDC to pay the network fee of this transaction. Nothing was sent.",
       /** One pot for life: the noted address that never got code is set up again only as noted. */
       noted_pot:
         "A pot with a ceiling of {amount} USDC was noted for this legal body and is not on the chain yet. Keep that ceiling to create it: another ceiling would make a second pot. Nothing was sent.",
@@ -895,7 +909,7 @@ export const LEGAL_BODY_COPY = {
       "The guardian declared this pot for the company: {address}. The agent's key cannot take from it: its allowance is switched off. It holds {balance} USDC. Read from the chain on {date}.",
     recordNotRead:
       "The guardian declared this pot for the company: {address}. Its limits were not read.",
-    recordUnavailable: "The company's pot could not be read just now.",
+    recordUnavailable: POT_UNAVAILABLE,
   },
 
   link: {

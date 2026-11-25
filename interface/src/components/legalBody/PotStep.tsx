@@ -9,6 +9,7 @@ import {
   useOrderGrantQuery,
   useOrderPotQuery,
   useReadOrderPotNow,
+  useWalletNow,
 } from "@/lib/api/legalBodyHooks";
 import type { Address, Hex, LegalBodyOrderView } from "@/lib/api/types";
 import { readAgentWallet } from "@/lib/legalBody/agentWallet";
@@ -120,6 +121,8 @@ export function PotStep({
   const writeAllowed = useAllowedWrite();
   const declarePot = useDeclarePotMutation(order.id);
   const readPotNow = useReadOrderPotNow(order.id);
+  // The connected account at the moment of asking, never the click's.
+  const walletNow = useWalletNow();
   const grantQuery = useOrderGrantQuery(order.id, true);
   // The done page's answer from the cache, never asked of the server here: the form shows it, and
   // the click reads it again before it plans anything.
@@ -160,6 +163,18 @@ export function PotStep({
     setFieldProblems((p) => (p === null ? null : { ...p, [field]: undefined }));
   }
 
+  /** The registry's agent wallet for this identity, read now: "unreadable" when the read failed. */
+  function readRegistry(client: Client, agentId: string) {
+    return readAgentWallet(() =>
+      client.readContract({
+        address: config.identityRegistry,
+        abi: identityRegistryAbi,
+        functionName: "getAgentWallet",
+        args: [BigInt(agentId)],
+      }),
+    );
+  }
+
   /** "Review": the form's check, then every read of the plan, fresh, then the review. */
   async function onReview() {
     if (inFlight.current || stage.at !== "form" || cap === null || !potGrantView(cap).form) return;
@@ -187,15 +202,7 @@ export function PotStep({
         { chainId: config.chainId, guardian, checked: check },
         {
           readNoted: () => readPotNow(),
-          readRegistryWallet: () =>
-            readAgentWallet(() =>
-              client.readContract({
-                address: config.identityRegistry,
-                abi: identityRegistryAbi,
-                functionName: "getAgentWallet",
-                args: [BigInt(agentId)],
-              }),
-            ),
+          readRegistryWallet: () => readRegistry(client, agentId),
           readCode: (at) => client.getCode({ address: at }),
           readBalance: () => client.getBalance({ address: guardian }),
           freshSalt: () => potFreshSalt(crypto.getRandomValues(new Uint8Array(16))),
@@ -210,7 +217,7 @@ export function PotStep({
         if (result.say.problem === "pot_exists") latestOnCreated.current();
         return;
       }
-      setStage({ at: "review", plan: result.plan, declared: false });
+      setStage({ at: "review", plan: result.plan, noted: result.noted, declared: false });
     } finally {
       inFlight.current = false;
       setBusy(false);
@@ -221,11 +228,16 @@ export function PotStep({
    *  then the receipt, and the pot read back. */
   async function onCreate() {
     if (inFlight.current || stage.at !== "review" || !stage.declared) return;
-    const plan = stage.plan;
+    const { plan, noted: reviewed } = stage;
     setLines([]);
     const client = publicClient;
+    const agentId = order.agentId;
     if (!client) {
       setLines([potRefusalSentence("chain_not_configured", say)]);
+      return;
+    }
+    if (agentId === null) {
+      setLines([potProblemSentence({ problem: "refused" })]);
       return;
     }
     const context = potSetupContext(plan);
@@ -244,9 +256,11 @@ export function PotStep({
     }
     inFlight.current = true;
     setBusy(true);
-    setStage({ at: "sending", plan });
+    // Until the wallet opens: the checks, the simulation, the estimate, the reads and the note.
+    setStage({ at: "checking", plan });
     try {
-      const result = await runPotCreate(plan, {
+      const result = await runPotCreate(plan, reviewed, {
+        alive: () => life.alive(),
         preflight: () =>
           potSendPreflight({
             order,
@@ -272,6 +286,9 @@ export function PotStep({
             data: allowed.data,
             value: built.value,
           }),
+        readBalance: () => client.getBalance({ address: plan.guardian }),
+        readNoted: () => readPotNow(),
+        readRegistryWallet: () => readRegistry(client, agentId),
         declare: async () => {
           await declarePot.mutateAsync({
             address: plan.pot,
@@ -281,19 +298,29 @@ export function PotStep({
             declarationVersion: POT_DECLARATION_VERSION,
           });
         },
+        account: () => walletNow().address,
         send: (gas) => {
           const req = potSetupCall(config, context, gas);
-          return "ok" in req ? Promise.resolve(req) : writeAllowed(req, ctx);
+          if ("ok" in req) return Promise.resolve(req);
+          setStage({ at: "sending", plan });
+          return writeAllowed(req, ctx);
         },
       });
       if (!life.alive()) return;
       if (!result.ok) {
-        if (result.problem === "record_failed" && kit.routeSignIn(result.cause)) return;
+        // The step was gone at one of the runner's awaits: nothing more was done.
+        if (result.problem === "left") return;
+        // A refusal of the server that means "sign in" goes there.
+        if (
+          (result.problem === "record_failed" || result.problem === "pot_unreadable") &&
+          kit.routeSignIn(result.cause)
+        )
+          return;
         const view = potCreateFailureView(result, say);
         setLines(view.lines);
         if (view.reread === "grant") void grantQuery.refetch();
         else if (view.reread !== undefined) latestOnCreated.current();
-        if (view.to === "review") setStage({ at: "review", plan, declared: true });
+        if (view.to === "review") setStage({ at: "review", plan, noted: reviewed, declared: true });
         else if (view.to === "form") setStage({ at: "form" });
         else setStage({ at: "problem", problem: result.problem, plan, then: view.then ?? "none" });
         return;
@@ -450,6 +477,8 @@ export function PotStep({
           />
         );
       }
+      case "checking":
+        return <PotStatusPanel text={POT.checkingSend} hash={null} />;
       case "sending":
         return <PotStatusPanel text={POT.sending} hash={null} />;
       case "waiting":

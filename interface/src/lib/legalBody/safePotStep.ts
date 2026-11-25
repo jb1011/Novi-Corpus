@@ -306,7 +306,13 @@ export type PotProblem =
   | "read_failed"
   | "refused"
   /** The noted pot that never got code, asked with another ceiling: a second pot. */
-  | "noted_pot";
+  | "noted_pot"
+  /** The click's read of the noted pot from the server failed. */
+  | "pot_unreadable"
+  /** Read again right before the note, the noted pot or the registry's key is not the review's. */
+  | "stale_plan"
+  /** The wallet could not pay the network fee of the transaction. */
+  | "no_gas";
 
 /** A noted pot's birth details as numbers, or null when they do not read. */
 type NotedBirth = { saltNonce: bigint; agentWallet: Address; ceilingUnits: bigint };
@@ -626,6 +632,7 @@ export const POT_SERVER_CODES = [
   "pot_not_offered",
   "pot_exists",
   "pot_taken",
+  "pot_pending",
   "pot_address_mismatch",
   "ceiling_above_grant",
   "grant_allows_no_spending",
@@ -643,7 +650,8 @@ export const POT_SERVER_CODES = [
 export type PotServerCode = (typeof POT_SERVER_CODES)[number];
 
 /** What the screen does after a refusal of the server: read the noted pot again (a body that
- *  already has its pot, or a retry of a removal whose answer was lost), the grant again, or the
+ *  already has its pot, one whose noted pot is still being set up, or a retry of a removal whose
+ *  answer was lost), the grant again, or the
  *  record again (the agent's wallet changed); go back to the form (an address the server will not
  *  note); try again; or stop, where no retry can ever work (the pot is not offered here, the body
  *  is revoked, closed, of another deployment or not this tenant's, or this page sent what the door
@@ -660,6 +668,8 @@ const SERVER_NEXT: Readonly<Record<PotServerCode, PotServerNext>> = {
   pot_not_offered: "stop",
   pot_exists: "reread_pot",
   pot_taken: "back_to_form",
+  // Ruling R22: the body's noted pot is still being set up; read it, and the card plans THAT address.
+  pot_pending: "reread_pot",
   pot_address_mismatch: "back_to_form",
   ceiling_above_grant: "reread_grant",
   grant_allows_no_spending: "reread_grant",

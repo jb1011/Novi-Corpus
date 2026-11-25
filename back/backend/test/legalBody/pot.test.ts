@@ -147,6 +147,24 @@ async function refusalOf(run: () => unknown): Promise<ApiError> {
   throw new Error("no refusal");
 }
 
+/**
+ * A record written before Ruling R22: a declared note of `input`'s address and birth details,
+ * written straight into the record, as the note door wrote a second address while the first held
+ * no code. The door refuses that now (`pot_pending`); a body may still hold such a record, and
+ * every rule after it still reads it.
+ */
+function noteBeforeR22(body: LegalBodyRecord, input: Record<string, string>): void {
+  notePot(pots, body, {
+    at: Math.floor(clock / 1000),
+    address: input.address as Address,
+    birth: {
+      saltNonce: input.saltNonce as string,
+      agentWallet: input.agentWallet as Address,
+      ceilingUnits: input.ceilingUnits as string,
+    },
+  });
+}
+
 /** The refusal's code, status and sentence. */
 const refused = (code: string, status: number) => ({
   code,
@@ -417,31 +435,71 @@ describe("one pot for life", () => {
     expectNoChainRead();
   });
 
-  test("refuses pot_exists when the latest declared address holds code, and accepts a new pot when it holds none", async () => {
+  test("Ruling R22: a new address while the latest declared note holds no code is pot_pending, before the registry, and nothing is written; once it holds code, pot_exists", async () => {
     const body = linked();
     await declare(body, V3_INPUT);
     clock += 60_000;
-    // The first pot was never created: a new one may take its place.
+    registry.getAgentWallet.mockClear();
+    // The first pot was never created: it is still being set up, and it is finished at its own
+    // address. A second address never takes its place.
     const second = inputFor(60n);
-    const replaced = await declare(body, second);
-    expect(replaced).toMatchObject({ address: second.address, onRecord: true });
+    expect(await refusalOf(() => declare(body, second))).toMatchObject(refused("pot_pending", 409));
     expect(chain.port.codeHash.mock.calls).toEqual([[V3_ADDRESS]]);
-    // The second was created: no third.
-    chain.codes.set((second.address as string).toLowerCase(), SOME_CODE);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(pots.list(body.legalBodyId)).toHaveLength(1);
+    expect(potEvents(body)).toHaveLength(1);
+    // The noted address itself is answered as stored.
+    expect(await declare(body, V3_INPUT)).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+    // Once it holds code, another address is pot_exists.
+    chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
     clock += 60_000;
-    expect(await refusalOf(() => declare(body, inputFor(70n)))).toMatchObject(
-      refused("pot_exists", 409),
-    );
-    expect(pots.list(body.legalBodyId)).toHaveLength(2);
-    expect(potEvents(body)).toHaveLength(2);
+    expect(await refusalOf(() => declare(body, second))).toMatchObject(refused("pot_exists", 409));
+    expect(pots.list(body.legalBodyId)).toHaveLength(1);
+    expect(potEvents(body)).toHaveLength(1);
   });
 
-  test("a former pot that got its code after it was replaced still holds the body to it: no other pot, but it can be put back", async () => {
+  test("Ruling R22: taken off the record, the code-less noted pot is still the one being set up: a new address is pot_pending, and its put-back stands", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    removePot(deps(), G, body.legalBodyId);
+    clock += 60_000;
+    expect(await refusalOf(() => declare(body, inputFor(60n)))).toMatchObject(
+      refused("pot_pending", 409),
+    );
+    clock += 60_000;
+    expect(await declare(body, V3_INPUT)).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+    expect(pots.list(body.legalBodyId).map((n) => n.act)).toEqual([
+      "declared",
+      "removed",
+      "declared",
+    ]);
+  });
+
+  test("Ruling R22 on a record written before it: two code-less notes, a third address is pot_pending; the latest one's put-back is answered, and the earlier one's is written again", async () => {
     const body = linked();
     await declare(body, V3_INPUT);
     clock += 60_000;
     const second = inputFor(60n);
-    await declare(body, second);
+    noteBeforeR22(body, second);
+    clock += 60_000;
+    expect(await refusalOf(() => declare(body, inputFor(70n)))).toMatchObject(
+      refused("pot_pending", 409),
+    );
+    expect(await declare(body, second)).toMatchObject({ address: second.address, onRecord: true });
+    expect(pots.list(body.legalBodyId)).toHaveLength(2);
+    // An address the body declared before is a put-back, never a new pot: R22 leaves it alone.
+    clock += 60_000;
+    expect(await declare(body, V3_INPUT)).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+    expect(pots.list(body.legalBodyId)).toHaveLength(3);
+  });
+
+  test("a former pot that got its code after it was replaced (a record written before Ruling R22) still holds the body to it: no other pot, but it can be put back", async () => {
+    const body = linked();
+    await declare(body, V3_INPUT);
+    clock += 60_000;
+    const second = inputFor(60n);
+    noteBeforeR22(body, second);
     // The first pot's setup, sent from a tab before the replacement, lands now.
     chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
     clock += 60_000;
@@ -533,14 +591,14 @@ describe("one pot for life", () => {
     expect(printed.filter((line) => line.includes("legal_body_pot_declared"))).toHaveLength(1);
   });
 
-  test("a former pot that lands after it was replaced: the replacement posted again is pot_exists, not answered", async () => {
+  test("a former pot that lands after it was replaced (a record written before Ruling R22): the replacement posted again is pot_exists, not answered", async () => {
     // Y noted, its setup sent from a tab that was lost; X noted in its place while Y had no code.
     const body = linked();
     const y = V3_INPUT;
     const x = inputFor(60n);
     await declare(body, y);
     clock += 60_000;
-    await declare(body, x);
+    noteBeforeR22(body, x);
     // Y's setup lands. X posted again, as the website would before offering X's setup.
     chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
     chain.port.codeHash.mockClear();
@@ -553,13 +611,13 @@ describe("one pot for life", () => {
     expect(await declare(body, y)).toMatchObject({ address: V3_ADDRESS, onRecord: true });
   });
 
-  test("two pots that both hold code: with the latest taken off, each can be put back, and a new pot cannot", async () => {
+  test("two pots that both hold code (a record written before Ruling R22): with the latest taken off, each can be put back, and a new pot cannot", async () => {
     const body = linked();
     const y = V3_INPUT;
     const x = inputFor(60n);
     await declare(body, y);
     clock += 60_000;
-    await declare(body, x);
+    noteBeforeR22(body, x);
     // Both setups landed: the body holds two pots.
     chain.codes.set(V3_ADDRESS.toLowerCase(), SOME_CODE);
     chain.codes.set((x.address as string).toLowerCase(), SOME_CODE);
@@ -604,13 +662,13 @@ describe("one pot for life", () => {
     ]);
   });
 
-  test("declared X, declared Y, Y taken off, then X gets its code: the put-back of Y, which holds none, is pot_exists, and the put-back of X stands", async () => {
+  test("declared X, declared Y (a record written before Ruling R22), Y taken off, then X gets its code: the put-back of Y, which holds none, is pot_exists, and the put-back of X stands", async () => {
     const body = linked();
     const x = V3_INPUT;
     const y = inputFor(60n);
     await declare(body, x);
     clock += 60_000;
-    await declare(body, y);
+    noteBeforeR22(body, y);
     clock += 60_000;
     removePot(deps(), G, body.legalBodyId);
     // X's setup, sent from a tab before Y replaced it, lands now.
@@ -650,7 +708,7 @@ describe("one pot for life", () => {
     const body = linked();
     await declare(body, V3_INPUT);
     clock += 60_000;
-    await declare(body, inputFor(60n));
+    noteBeforeR22(body, inputFor(60n));
     clock += 60_000;
     let release: () => void = () => {};
     const gate = new Promise<void>((r) => {
@@ -661,13 +719,14 @@ describe("one pot for life", () => {
       await gate;
       return null;
     });
-    const pending = declare(body, inputFor(70n));
+    const pending = refusalOf(() => declare(body, inputFor(70n)));
     await vi.waitFor(() => expect(chain.port.codeHash).toHaveBeenCalledTimes(2));
     release();
-    expect((await pending).birth.ceilingUnits).toBe("70000000");
+    // Both hold none: the latest one is still being set up (Ruling R22).
+    expect(await pending).toMatchObject(refused("pot_pending", 409));
   });
 
-  test("two different addresses posted at once: the later write checks again against the note written first", async () => {
+  test("two different addresses posted at once: the later write checks again against the note written first, and is pot_pending while that one holds no code (Ruling R22)", async () => {
     const body = linked();
     const first = inputFor(60n);
     // The other request lands while this one reads the registry.
@@ -675,12 +734,13 @@ describe("one pot for life", () => {
       await declarePot(deps(), G, body.legalBodyId, first);
       return A;
     });
-    const second = await declare(body, V3_INPUT);
-    expect(second).toMatchObject({ address: V3_ADDRESS, onRecord: true });
+    expect(await refusalOf(() => declare(body, V3_INPUT))).toMatchObject(
+      refused("pot_pending", 409),
+    );
     // The check was made again with the other request's note: its code was read.
     expect(chain.port.codeHash.mock.calls).toEqual([[first.address]]);
-    expect(pots.list(body.legalBodyId).map((n) => n.address)).toEqual([first.address, V3_ADDRESS]);
-    expect(potEvents(body)).toHaveLength(2);
+    expect(pots.list(body.legalBodyId).map((n) => n.address)).toEqual([first.address]);
+    expect(potEvents(body)).toHaveLength(1);
   });
 
   test("two different addresses posted at once, the first created at once: the later one is pot_exists", async () => {
@@ -706,12 +766,15 @@ describe("one pot for life", () => {
     expect(await refusalOf(() => declare(body, inputFor(60n)))).toMatchObject(
       refused("chain_unavailable", 503),
     );
+    // The registry is read for a new pot of a body with no note being set up.
+    const fresh = linked();
     registry.getAgentWallet.mockRejectedValueOnce(new Error("the node did not answer"));
     clock += 60_000;
-    expect(await refusalOf(() => declare(body, inputFor(70n)))).toMatchObject(
+    expect(await refusalOf(() => declare(fresh, inputFor(70n)))).toMatchObject(
       refused("chain_unavailable", 503),
     );
     expect(pots.list(body.legalBodyId)).toHaveLength(1);
+    expect(pots.list(fresh.legalBodyId)).toHaveLength(0);
   });
 });
 
@@ -864,7 +927,7 @@ describe("orderPot", () => {
     await declare(body, V3_INPUT);
     clock += 60_000;
     const second = inputFor(60n);
-    await declare(body, second);
+    noteBeforeR22(body, second);
     expect(orderPot(deps(), G, body.legalBodyId)).toEqual({
       pot: {
         address: second.address,
@@ -949,12 +1012,12 @@ describe("taking the pot off the public record", () => {
     expect(removedLines()).toHaveLength(1);
   });
 
-  test("with a former pot, the one taken off is the address on the record, with its own birth details", async () => {
+  test("with a former pot (a record written before Ruling R22), the one taken off is the address on the record, with its own birth details", async () => {
     const body = linked();
     await declare(body, V3_INPUT);
     clock += 60_000;
     const second = inputFor(60n);
-    await declare(body, second);
+    noteBeforeR22(body, second);
     chain.port.codeHash.mockClear();
     registry.getAgentWallet.mockClear();
     clock += 60_000;

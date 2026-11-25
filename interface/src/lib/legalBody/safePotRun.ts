@@ -73,10 +73,14 @@ const SALT_BYTES = 16;
  *  to the form, or nothing (no retry can work). */
 export type PotProblemThen = "check_again" | "form" | "none";
 
-/** The setup step's stage. The sentences of the last answer live beside it, in the step. */
+/** The setup step's stage. The sentences of the last answer live beside it, in the step. The
+ *  review keeps the note its plan was made from (null for none): "Create the pot" reads the noted
+ *  pot again and stops when it is not that one. `checking` is "Create the pot" before the wallet
+ *  opens; `sending` is the wallet open. */
 export type PotStage =
   | { at: "form" }
-  | { at: "review"; plan: PotPlan; declared: boolean }
+  | { at: "review"; plan: PotPlan; noted: OrderPotView | null; declared: boolean }
+  | { at: "checking"; plan: PotPlan }
   | { at: "sending"; plan: PotPlan }
   | { at: "waiting"; plan: PotPlan; hash: Hex }
   | { at: "created"; plan: PotPlan; lines: string[]; ok: boolean }
@@ -106,6 +110,13 @@ export type PotReviewDeps = {
 export type PotReviewResult =
   | { ok: true; plan: PotPlan; noted: OrderPotView | null; kind: WalletKind | null }
   | { ok: false; say: PotProblemSay; kind: WalletKind | null; cause?: unknown };
+
+/** A read's answer or its error, never a throw. */
+const settle = <T,>(read: Promise<T>): Promise<{ ok: true; value: T } | { ok: false; cause: unknown }> =>
+  read.then(
+    (value) => ({ ok: true as const, value }),
+    (cause: unknown) => ({ ok: false as const, cause }),
+  );
 
 const readFailed = (cause: unknown): PotReviewResult => ({
   ok: false,
@@ -158,19 +169,20 @@ export async function runPotReview(
   p: { chainId: number; guardian: Address; checked: Extract<PotFormCheck, { ok: true }> },
   d: PotReviewDeps,
 ): Promise<PotReviewResult> {
-  // 1.
-  let noted: OrderPotView | null;
-  let wallet: AgentWalletRead;
-  let balanceWei: bigint;
-  try {
-    [noted, wallet, balanceWei] = await Promise.all([
-      d.readNoted(),
-      d.readRegistryWallet(),
-      d.readBalance(),
-    ]);
-  } catch (cause) {
-    return readFailed(cause);
-  }
+  // 1. A failed read of the noted pot is the server's, said as such (`pot_unreadable`); the
+  // others are the chain's.
+  const [notedRead, walletRead, balanceRead] = await Promise.all([
+    settle(d.readNoted()),
+    settle(d.readRegistryWallet()),
+    settle(d.readBalance()),
+  ]);
+  if (!notedRead.ok)
+    return { ok: false, say: { problem: "pot_unreadable" }, kind: null, cause: notedRead.cause };
+  if (!walletRead.ok) return readFailed(walletRead.cause);
+  if (!balanceRead.ok) return readFailed(balanceRead.cause);
+  const noted = notedRead.value;
+  const wallet = walletRead.value;
+  const balanceWei = balanceRead.value;
   if (noted !== null && !isAddress(noted.address))
     return { ok: false, say: { problem: "refused" }, kind: null };
   // 2.
@@ -242,15 +254,27 @@ export type PotPreflightProblem = "not_this_wallet" | "wrong_network" | "refused
 /** What "Create the pot" does before and at the wallet. Each is the component's own closure over
  *  the plan. */
 export type PotCreateDeps = {
+  /** Whether the step is still on screen (its lifetime): asked after every await, so a person who
+   *  left gets no note and no wallet prompt. */
+  alive(): boolean;
   preflight(): { ok: true } | { ok: false; problem: PotPreflightProblem };
   /** The eth_call of the request from the guardian, with its value: the return data. Throws on a
    *  revert. */
   simulate(): Promise<Hex>;
   /** eth_estimateGas of the same request, with NO fee field. Throws on a revert. */
   estimate(): Promise<bigint>;
+  /** The guardian's balance in native wei, read again when the simulation or the estimate found
+   *  the money short. Throws when it fails. */
+  readBalance(): Promise<bigint>;
+  /** `GET /pot`, a request made now, right before the note. Throws when it fails. */
+  readNoted(): Promise<OrderPotView | null>;
+  /** `getAgentWallet(agentId)` read now, right before the note, through `readAgentWallet`. */
+  readRegistryWallet(): Promise<AgentWalletRead>;
   /** The note to the server (`declareOrderPot`, with the birth details and
    *  POT_DECLARATION_VERSION). Throws when it is refused or fails. */
   declare(): Promise<void>;
+  /** The account connected NOW, right before the send: never the one of the click's start. */
+  account(): Address | null;
   /** The allowlist's door to the wallet, with the gas limit decided here. */
   send(gas: bigint): Promise<{ ok: true; hash: Hex } | { ok: false; problem: string }>;
 };
@@ -260,9 +284,19 @@ export type PotCreateProblem =
   | "would_revert"
   | "read_failed"
   | "record_failed"
-  | "declined";
+  | "declined"
+  | "pot_unreadable"
+  | "stale_plan"
+  | "no_gas"
+  /** The step was gone: nothing more was done, and nothing is shown. */
+  | "left";
 
-export type PotCreateFailure = { ok: false; problem: PotCreateProblem; cause?: unknown };
+export type PotCreateFailure =
+  | { ok: false; problem: PotCreateProblem; cause?: unknown }
+  /** The money fell short since the review: the balance read again, and the plan's own value. */
+  | { ok: false; problem: "not_enough"; balanceWei: bigint; totalWei: bigint };
+
+const LEFT: PotCreateFailure = { ok: false, problem: "left" };
 
 /** Each error of a cause chain, the first one included; a chain that loops ends. */
 function causesOf(e: unknown): unknown[] {
@@ -275,9 +309,18 @@ function causesOf(e: unknown): unknown[] {
   return chain;
 }
 
+/** Whether an error of `e`'s causes carries viem's `name`. */
+const causeNamed = (e: unknown, name: string): boolean =>
+  causesOf(e).some(
+    (x) => typeof x === "object" && x !== null && (x as { name?: unknown }).name === name,
+  );
+
 /** viem's name for a node's refusal of a plain call, an estimate or a send: its code 3, or its
  *  words "execution reverted". A node that could not answer never carries it. */
 const NODE_REVERT = "ExecutionRevertedError";
+/** viem's name for a node's answer that the sender's balance does not cover the value (and the
+ *  fee, when it asks one). */
+const MONEY_SHORT = "InsufficientFundsError";
 
 /**
  * Whether the chain refused what was asked. viem names a revert two ways: through a contract call
@@ -287,65 +330,136 @@ const NODE_REVERT = "ExecutionRevertedError";
  * `isRevert` alone does not see. A network failure or a timeout is neither.
  */
 function chainRefused(cause: unknown): boolean {
-  if (isRevert(cause)) return true;
-  return causesOf(cause).some(
-    (x) => typeof x === "object" && x !== null && (x as { name?: unknown }).name === NODE_REVERT,
-  );
+  return isRevert(cause) || causeNamed(cause, NODE_REVERT);
 }
 
-/** A simulation or an estimate that threw: the chain refused it only when the error says it
- *  reverted; a node that could not answer is a read that failed, never a refusal. */
-const chainAnswer = (cause: unknown): "would_revert" | "read_failed" =>
-  chainRefused(cause) ? "would_revert" : "read_failed";
+/**
+ * Whether the plan still holds, read again right before the note: the noted pot is the one the
+ * review planned from (none, when it planned with none; else a note of the plan's own address),
+ * and the registry still names the key the review read (`plan.registryWallet`), in any letter
+ * case. A registry that names none, or another key, does not hold.
+ */
+export function potPlanHolds(p: {
+  plan: PotPlan;
+  reviewed: OrderPotView | null;
+  latest: OrderPotView | null;
+  registry: AgentWalletRead;
+}): boolean {
+  const note =
+    p.reviewed === null
+      ? p.latest === null
+      : p.latest !== null && sameAddress(p.latest.address, p.plan.pot);
+  return note && isAddress(p.registry) && sameAddress(p.registry, p.plan.registryWallet);
+}
+
+/** A simulation or an estimate that threw: the money short (the guardian's balance read again,
+ *  `not_enough` with the plan's own value), a refusal of the chain (`would_revert`), or a node
+ *  that did not answer (`read_failed`). */
+async function chainFailure(
+  plan: PotPlan,
+  cause: unknown,
+  d: PotCreateDeps,
+): Promise<PotCreateFailure> {
+  if (causeNamed(cause, MONEY_SHORT)) {
+    let balanceWei: bigint;
+    try {
+      balanceWei = await d.readBalance();
+    } catch (e) {
+      return d.alive() ? { ok: false, problem: "read_failed", cause: e } : LEFT;
+    }
+    if (!d.alive()) return LEFT;
+    return { ok: false, problem: "not_enough", balanceWei, totalWei: plan.value };
+  }
+  return { ok: false, problem: chainRefused(cause) ? "would_revert" : "read_failed", cause };
+}
 
 /**
- * "Create the pot", in this order, stopping at the first that fails: the page's own checks
- * (their problem); the simulation, and `potSimulationOk` (`would_revert`); the estimate, and
- * `potGasLimit` under POT_SETUP_GAS_CAP (`would_revert`); the note of the pot and its declaration
- * on the server (`record_failed`, with the error as `cause`); the one transaction through the
- * allowlist (a refusal is `refused`, with its code as `cause`; the wallet's no, read with
- * `registerSendFailure`, is `declined`; any other throw is `would_revert` only if the chain refused
- * it, else `refused`). A simulation or an estimate that threw without a revert is `read_failed`:
- * the node did not answer, and the chain refused nothing. "The chain refused it" is `isRevert`, or
- * viem's `ExecutionRevertedError` anywhere in the error's causes (`chainRefused`).
+ * "Create the pot", in this order, stopping at the first that fails, and asking the step's
+ * lifetime after EVERY await (`left`: a person who left gets no note and no wallet prompt):
+ *  1. the page's own checks (their problem);
+ *  2. the simulation, and `potSimulationOk` (`would_revert`);
+ *  3. the estimate, and `potGasLimit` under POT_SETUP_GAS_CAP (`would_revert`). For 2 and 3, a
+ *     throw is `not_enough` when the node says the money is short (the balance read again), else
+ *     `would_revert` only when the chain refused it (`chainRefused`), else `read_failed`;
+ *  4. the noted pot (`GET /pot`) and the registry's key read again, together: a failed read of the
+ *     note is `pot_unreadable`, of the registry `read_failed`; a note that is not the review's, or
+ *     a key that is not the plan's, is `stale_plan` (`potPlanHolds`), and nothing is noted; and the
+ *     account connected now is the guardian's (as in 6), so a switched wallet leaves no note;
+ *  5. the note of the pot and its declaration on the server (`record_failed`, with the error as
+ *     `cause`): the server holds the declaration and the address before anything reaches the
+ *     wallet;
+ *  6. the account connected now is the guardian's, else `refused` with the allowlist's
+ *     `wallet_is_not_the_guardian` as `cause`, and nothing is sent;
+ *  7. the one transaction through the allowlist: a refusal is `refused`, with its code as `cause`;
+ *     the wallet's no (`registerSendFailure`) is `declined`; a wallet that cannot pay the fee is
+ *     `no_gas`; any other throw is `would_revert` only if the chain refused it, else `refused`.
+ * `reviewed` is the note the plan was made from (null for none).
  */
 export async function runPotCreate(
   plan: PotPlan,
+  reviewed: OrderPotView | null,
   d: PotCreateDeps,
 ): Promise<{ ok: true; hash: Hex } | PotCreateFailure> {
+  // 1.
   const pre = d.preflight();
   if (!pre.ok) return { ok: false, problem: pre.problem };
 
+  // 2.
   let returned: Hex;
   try {
     returned = await d.simulate();
   } catch (cause) {
-    return { ok: false, problem: chainAnswer(cause), cause };
+    return d.alive() ? chainFailure(plan, cause, d) : LEFT;
   }
+  if (!d.alive()) return LEFT;
   if (!potSimulationOk(plan, returned)) return { ok: false, problem: "would_revert" };
 
+  // 3.
   let estimate: bigint;
   try {
     estimate = await d.estimate();
   } catch (cause) {
-    return { ok: false, problem: chainAnswer(cause), cause };
+    return d.alive() ? chainFailure(plan, cause, d) : LEFT;
   }
+  if (!d.alive()) return LEFT;
   const gas = potGasLimit(estimate, POT_SETUP_GAS_CAP);
   if (gas === null) return { ok: false, problem: "would_revert" };
 
-  // The server holds the declaration and the address before anything reaches the wallet.
+  // 4.
+  const [latest, registry] = await Promise.all([
+    settle(d.readNoted()),
+    settle(d.readRegistryWallet()),
+  ]);
+  if (!d.alive()) return LEFT;
+  if (!latest.ok) return { ok: false, problem: "pot_unreadable", cause: latest.cause };
+  if (!registry.ok) return { ok: false, problem: "read_failed", cause: registry.cause };
+  if (registry.value === "unreadable") return { ok: false, problem: "read_failed" };
+  if (!potPlanHolds({ plan, reviewed, latest: latest.value, registry: registry.value }))
+    return { ok: false, problem: "stale_plan" };
+  // An account switched since the click leaves no note either.
+  if (!sameAddress(d.account(), plan.guardian))
+    return { ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" };
+
+  // 5.
   try {
     await d.declare();
   } catch (cause) {
-    return { ok: false, problem: "record_failed", cause };
+    return d.alive() ? { ok: false, problem: "record_failed", cause } : LEFT;
   }
+  if (!d.alive()) return LEFT;
 
+  // 6.
+  if (!sameAddress(d.account(), plan.guardian))
+    return { ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" };
+
+  // 7.
   let sent: { ok: true; hash: Hex } | { ok: false; problem: string };
   try {
     sent = await d.send(gas);
   } catch (cause) {
-    if (registerSendFailure(cause).kind === "rejected")
-      return { ok: false, problem: "declined", cause };
+    const failure = registerSendFailure(cause);
+    if (failure.kind === "rejected") return { ok: false, problem: "declined", cause };
+    if (failure.kind === "no_gas") return { ok: false, problem: "no_gas", cause };
     return { ok: false, problem: chainRefused(cause) ? "would_revert" : "refused", cause };
   }
   if (!sent.ok) return { ok: false, problem: "refused", cause: sent.problem };
@@ -374,14 +488,16 @@ export function potNoteFailure(e: unknown): { next: PotServerNext; line: string 
 /**
  * Where the screen goes after "Create the pot" failed, and what it says:
  *  - review, the plan and the tick kept, for what the guardian can change in the wallet or by
- *    trying again: another account or network, the wallet's no, a node that did not answer, a
- *    refusal of the allowlist (its own sentence), a note the server will take on a retry;
+ *    trying again: another account or network, the wallet's no, a node or a server that did not
+ *    answer, a wallet that cannot pay the fee, a refusal of the allowlist (its own sentence), a
+ *    note the server will take on a retry;
  *  - form, for a note the server refuses for what was chosen (and the grant or the record read
- *    again first when its code says so);
+ *    again first when its code says so), for money that fell short since the review, and for a
+ *    plan that no longer holds (the noted pot read again: review again);
  *  - problem, with Change something, for a chain that would refuse the transaction, or a pot the
  *    server already holds (the noted pot read again);
  *  - problem with nothing to click, where no retry can work: the page's own refusal before the
- *    wallet, or the server's stop.
+ *    wallet, or the server's stop. (`left` is never shown: the step is gone.)
  */
 export type PotFailureView = {
   to: "review" | "form" | "problem";
@@ -415,6 +531,24 @@ export function potCreateFailureView(
       return { to: "problem", then: "none", lines: [POT.problems.refused] };
     case "would_revert":
       return { to: "problem", then: "form", lines: [POT.problems.would_revert] };
+    case "not_enough":
+      return {
+        to: "form",
+        lines: [
+          potProblemSentence({
+            problem: "not_enough",
+            balanceWei: f.balanceWei,
+            totalWei: f.totalWei,
+          }),
+        ],
+      };
+    case "pot_unreadable":
+    case "no_gas":
+      return { to: "review", lines: [potProblemSentence({ problem: f.problem })] };
+    case "stale_plan":
+      return { to: "form", lines: [POT.problems.stale_plan], reread: "pot" };
+    case "left":
+      return { to: "problem", then: "none", lines: [] };
     case "record_failed": {
       const { next, line } = potNoteFailure(f.cause);
       switch (next) {

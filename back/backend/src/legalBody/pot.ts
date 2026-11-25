@@ -406,10 +406,12 @@ function linkedBodyOf(
  *  7. ONE POT FOR LIFE, before anything is answered: the code of every other address the body
  *     declared is read at once, through `chainCall`. When one holds code, a NEW POT is 409
  *     `pot_exists`; a note of an address the body declared before (the one on the record, or a
- *     put-back) stands only if this address holds code itself, else 409 `pot_exists`. So a noted
- *     address that never got code may be replaced, a former pot that landed late still holds the
- *     body to it, and a pot that holds code can always come back. A body with no other address
- *     reads nothing here;
+ *     put-back) stands only if this address holds code itself, else 409 `pot_exists`. Ruling R22:
+ *     a NEW POT while the body's latest declared note is of another address that holds no code is
+ *     409 `pot_pending`: that pot is still being set up, and it is finished at the address already
+ *     noted. So a noted address that never got code is never replaced by another, a former pot
+ *     that landed late (from a record written before R22) still holds the body to it, and a pot
+ *     that holds code can always come back. A body with no other address reads nothing here;
  *  8. the body's latest note is a declared note of this address: it is answered, nothing written;
  *  9. a NEW POT (no declared note of this address yet): the registry's wallet of the body's agent,
  *     read now through `chainCall`, is not the agent's own (`ownAgentWallet`): 409
@@ -504,6 +506,13 @@ export async function declarePot(
         if (!declaredBefore) throw refusal("pot_exists", 409);
         const own = await chainCall(id, "pot_code", () => deps.chain.codeHash(address));
         if (own === null) throw refusal("pot_exists", 409);
+      }
+      // Ruling R22: a NEW address while the body's latest declared note is of another address
+      // that holds no code: that pot is still being set up, and it is created at its own address.
+      const lastDeclared = notes.filter((n) => n.act === "declared").at(-1);
+      if (!declaredBefore && lastDeclared !== undefined) {
+        const at = others.findIndex((other) => sameAddress(other, lastDeclared.address));
+        if (at >= 0 && codes[at] === null) throw refusal("pot_pending", 409);
       }
     }
 

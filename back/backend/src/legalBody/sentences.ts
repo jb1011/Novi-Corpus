@@ -191,6 +191,10 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // …an address another legal body has noted, of any guardian (Ruling R13).
   pot_taken:
     "This pot is already noted for another legal body, and a pot belongs to one legal body only. Nothing was noted.",
+  // …a new address while the body's latest declared note is of another address that holds no
+  // code yet (Ruling R22).
+  pot_pending:
+    "This legal body already has a pot being set up. Finish that one: it is created at the address already noted.",
   // `POST /legal-body-orders/:id/pot/off-record`, for a body with no note, or whose latest note
   // already took the pot off the record.
   pot_not_on_record: "This legal body's pot is not on the public record, so nothing was taken off.",

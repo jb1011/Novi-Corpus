@@ -32,6 +32,8 @@ const calls = vi.hoisted(() => ({
   chainReads: 0,
   declares: 0,
   freshPotReads: 0,
+  /** The wallet's account asked at a moment of the click. */
+  walletReads: 0,
   /** Each pot hook asked, with whether it may read. */
   potQueries: [] as boolean[],
   grantQueries: [] as boolean[],
@@ -96,6 +98,10 @@ vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
   useReadOrderPotNow: () => async () => {
     calls.freshPotReads += 1;
     throw new Error("not in this test");
+  },
+  useWalletNow: () => () => {
+    calls.walletReads += 1;
+    return { address: "0x15D4EE6F84b6bf8ceE5A24cCb19FDF8257c22b0A", chainId: 5042002 };
   },
 }));
 
@@ -381,6 +387,7 @@ beforeEach(() => {
   calls.chainReads = 0;
   calls.declares = 0;
   calls.freshPotReads = 0;
+  calls.walletReads = 0;
   calls.potQueries = [];
   calls.grantQueries = [];
   calls.rawQueries = [];
@@ -399,6 +406,7 @@ function nothingSent() {
   expect(calls.allowedWrites).toBe(0);
   expect(calls.declares).toBe(0);
   expect(calls.freshPotReads).toBe(0);
+  expect(calls.walletReads).toBe(0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -878,8 +886,8 @@ describe("the step's source", () => {
     const sendKey = code.indexOf("send: ", run);
     expect(sendKey).toBeGreaterThan(run);
     expect(at).toBeGreaterThan(sendKey);
-    // The send closure is the last of the five: the object closes after it.
-    expect(at).toBeLessThan(code.indexOf("});", sendKey));
+    // The send closure is the last of the runner's closures: the call ends after it.
+    expect(at).toBeLessThan(code.indexOf("if (!life.alive()) return;", sendKey));
   });
 
   test("the declaration is noted by runPotCreate's declare closure, before its send", () => {
@@ -899,10 +907,51 @@ describe("the step's source", () => {
 
   test("every read the click decides on is made in the click: the noted pot fresh, the registry, the codes, the balance", () => {
     const review = code.slice(code.indexOf("async function onReview"), code.indexOf("async function onCreate"));
-    for (const read of ["readPotNow()", "getAgentWallet", "getCode(", "getBalance(", "crypto.getRandomValues(new Uint8Array(16))", "runPotReview("])
+    for (const read of ["readPotNow()", "readRegistry(client, agentId)", "getCode(", "getBalance(", "crypto.getRandomValues(new Uint8Array(16))", "runPotReview("])
       expect(review, read).toContain(read);
+    // The registry's read is getAgentWallet, through readAgentWallet (unreadable, never "none").
+    const registry = code.slice(code.indexOf("function readRegistry"), code.indexOf("async function onReview"));
+    expect(registry).toContain("readAgentWallet(");
+    expect(registry).toContain('functionName: "getAgentWallet"');
     // The click never plans from the card's cached note.
     expect(review).not.toContain("notedQuery.data");
+  });
+
+  test("Create the pot reads the noted pot and the registry again, asks the step's lifetime, and takes the account at the send", () => {
+    const create = code.slice(code.indexOf("async function onCreate"), code.indexOf("function refusedBefore"));
+    const run = create.indexOf("await runPotCreate(plan, reviewed, {");
+    expect(run).toBeGreaterThan(0);
+    for (const dep of [
+      "alive: () => life.alive()",
+      "readNoted: () => readPotNow()",
+      "readRegistryWallet: () => readRegistry(client, agentId)",
+      "readBalance: () => client.getBalance({ address: plan.guardian })",
+      "account: () => walletNow().address",
+    ])
+      expect(create.slice(run), dep).toContain(dep);
+    expect(create).not.toContain("notedQuery.data");
+    // "Checking" until the wallet opens; "Waiting for your wallet" set inside the send, right before it.
+    const checking = create.indexOf('setStage({ at: "checking", plan })');
+    expect(checking).toBeGreaterThan(0);
+    expect(checking).toBeLessThan(run);
+    expect(create.slice(0, run)).not.toContain('at: "sending"');
+    const sendKey = create.indexOf("send: ", run);
+    const sending = create.indexOf('setStage({ at: "sending", plan })', sendKey);
+    expect(sending).toBeGreaterThan(sendKey);
+    expect(sending).toBeLessThan(create.indexOf("writeAllowed(", sendKey));
+    // A person who left: nothing more is said.
+    expect(create).toContain('if (result.problem === "left") return;');
+  });
+
+  test("the allowlist's door reads the account and the chain AT THE SEND, never from the render that made it", () => {
+    const hooks = readFileSync(fileURLToPath(new URL("../src/lib/api/legalBodyHooks.ts", import.meta.url)), "utf8");
+    const door = hooks.slice(hooks.indexOf("export function useAllowedWrite"), hooks.indexOf("export function useWalletNow"));
+    expect(door).toMatch(/\(req: WriteRequest, ctx: CallContext\) => \{\s*const \{ address, chainId \} = getConnection\(config\);/);
+    expect(door).toContain("walletAddress: address");
+    expect(door).toContain("walletChainId: chainId");
+    expect(hooks).not.toMatch(/useConnection\(/);
+    const now = hooks.slice(hooks.indexOf("export function useWalletNow"));
+    expect(now).toMatch(/\(\): \{ address: Address \| null; chainId: number \| undefined \} => \{\s*const \{ address, chainId \} = getConnection\(config\);/);
   });
 
   test("the setup is simulated and estimated from the guardian, with no fee field", () => {

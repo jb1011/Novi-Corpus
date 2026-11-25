@@ -17,6 +17,7 @@ import {
   encodeFunctionResult,
   ExecutionRevertedError,
   HttpRequestError,
+  InsufficientFundsError,
   keccak256,
   size,
   zeroAddress,
@@ -80,6 +81,7 @@ import {
   potFormMoney,
   potFreshSalt,
   potNoteFailure,
+  potPlanHolds,
   potReadsAllowed,
   potRecordWallet,
   potReviewNote,
@@ -622,6 +624,9 @@ describe("the sentences of a click's problems", () => {
       read_failed: { problem: "read_failed" },
       refused: { problem: "refused" },
       noted_pot: { problem: "noted_pot", notedCeilingUnits: USDC(50) },
+      pot_unreadable: { problem: "pot_unreadable" },
+      stale_plan: { problem: "stale_plan" },
+      no_gas: { problem: "no_gas" },
     };
     expect(Object.keys(every).sort()).toEqual(Object.keys(P_.problems).sort());
     for (const say of Object.values(every)) {
@@ -666,7 +671,7 @@ describe("the sentences of a click's problems", () => {
   test("the server's pot codes choose the next step: a re-read of the pot after pot_exists and pot_not_on_record", () => {
     expect([...POT_SERVER_CODES].sort()).toEqual(
       [
-        "pot_not_offered", "pot_exists", "pot_taken", "pot_address_mismatch", "ceiling_above_grant",
+        "pot_not_offered", "pot_exists", "pot_taken", "pot_pending", "pot_address_mismatch", "ceiling_above_grant",
         "grant_allows_no_spending", "pot_not_on_record", "agent_wallet_required", "rate_limited",
         "other_deployment", "legal_body_revoked", "order_closed", "pot_chain_unsupported", "not_found",
         "pot_declaration_required", "pot_invalid",
@@ -674,6 +679,8 @@ describe("the sentences of a click's problems", () => {
     );
     expect(potServerNext("pot_exists")).toBe("reread_pot");
     expect(potServerNext("pot_not_on_record")).toBe("reread_pot");
+    // Ruling R22: a second address while the noted pot is being set up: read the note, plan THAT address.
+    expect(potServerNext("pot_pending")).toBe("reread_pot");
     expect(potServerNext("pot_not_offered")).toBe("stop");
     expect(potServerNext("other_deployment")).toBe("stop");
     expect(potServerNext("pot_taken")).toBe("back_to_form");
@@ -1052,6 +1059,13 @@ const offlineError = () =>
     name: "CallExecutionError",
     cause: new HttpRequestError({ url: "https://rpc.example.test", status: 502 }),
   });
+/** The node says the sender's balance does not cover the value (and the fee): viem's
+ *  `InsufficientFundsError`, inside the wrapper of a call, an estimate or a send. */
+const moneyShortError = (wrapper = "CallExecutionError") =>
+  Object.assign(new Error("The total cost exceeds the balance of the account."), {
+    name: wrapper,
+    cause: new InsufficientFundsError(),
+  });
 /** The wallet's no (EIP-1193 4001). */
 const rejectedError = () => Object.assign(new Error("User rejected the request."), { code: 4001 });
 
@@ -1064,18 +1078,25 @@ function simulated(p: PotPlan, over: { pot?: Address; failed?: boolean } = {}): 
 }
 
 describe("runPotCreate: what Create the pot does before and at the wallet", () => {
-  /** Hand-made dependencies that say yes, each recording its call; `impl` replaces any of them. */
+  /** Hand-made dependencies that say yes, each recording its call: the step on screen, the note
+   *  and the registry as the review read them, the guardian connected; `impl` replaces any. */
   function harness(p: PotPlan, impl: Partial<PotCreateDeps> = {}) {
     const calls: string[] = [];
     const yes: PotCreateDeps = {
+      alive: () => true,
       preflight: () => ({ ok: true }),
       simulate: async () => simulated(p),
       estimate: async () => BigInt(499_083),
+      readBalance: async () => WEI(USDC(1000)),
+      readNoted: async () => null,
+      readRegistryWallet: async () => p.registryWallet,
       declare: async () => {},
+      account: () => p.guardian,
       send: async () => ({ ok: true, hash: HASH }),
     };
     const use = { ...yes, ...impl };
     const d: PotCreateDeps = {
+      alive: () => use.alive(),
       preflight: () => {
         calls.push("preflight");
         return use.preflight();
@@ -1088,9 +1109,25 @@ describe("runPotCreate: what Create the pot does before and at the wallet", () =
         calls.push("estimate");
         return use.estimate();
       },
+      readBalance: () => {
+        calls.push("balance");
+        return use.readBalance();
+      },
+      readNoted: () => {
+        calls.push("pot");
+        return use.readNoted();
+      },
+      readRegistryWallet: () => {
+        calls.push("registry");
+        return use.readRegistryWallet();
+      },
       declare: () => {
         calls.push("declare");
         return use.declare();
+      },
+      account: () => {
+        calls.push("account");
+        return use.account();
       },
       send: (gas) => {
         calls.push(`send ${gas}`);
@@ -1101,23 +1138,74 @@ describe("runPotCreate: what Create the pot does before and at the wallet", () =
   }
   const funded = () =>
     planOf(plan({ checked: { ok: true, ceilingUnits: USDC(50), fundWei: WEI(USDC(60)), agentGasWei: WEI(BigInt(100_000)) } }));
+  /** Everything up to the note, in order: the reads again, the account, then the note. */
+  const UP_TO_NOTE = ["preflight", "simulate", "estimate", "pot", "registry", "account", "declare"];
+  const ALL = [...UP_TO_NOTE, "account", "send 648808"];
+  /** The step is gone after `n` asks of its lifetime. */
+  const goneAfter = (n: number) => {
+    let asked = 0;
+    return () => {
+      asked += 1;
+      return asked <= n;
+    };
+  };
 
-  test("all pass: the calls are preflight, simulate, estimate, declare, send, in that order, and send gets potGasLimit of the estimate", async () => {
+  test("all pass: preflight, simulate, estimate, the note and the registry read again, the account, declare, the account again, send, in that order, and send gets potGasLimit of the estimate", async () => {
     for (const p of [planOf(plan()), funded()]) {
       const { d, calls } = harness(p);
-      expect(await runPotCreate(p, d)).toEqual({ ok: true, hash: HASH });
+      expect(await runPotCreate(p, null, d)).toEqual({ ok: true, hash: HASH });
       // The server holds the declaration and the address before anything reaches the wallet.
-      expect(calls).toEqual(["preflight", "simulate", "estimate", "declare", "send 648808"]);
+      expect(calls).toEqual(ALL);
       expect(potGasLimit(BigInt(499_083), POT_SETUP_GAS_CAP)).toBe(BigInt(648_808));
     }
+    // A plan made from a note: the note read again is that one.
+    const again = planOf(plan({ noted: NOTED }));
+    const { d } = harness(again, { readNoted: async () => NOTED });
+    expect(await runPotCreate(again, NOTED, d)).toEqual({ ok: true, hash: HASH });
   });
 
   test("a preflight refusal: its problem, and nothing else is called", async () => {
     for (const problem of ["not_this_wallet", "wrong_network", "refused"] as const) {
       const { d, calls } = harness(planOf(plan()), { preflight: () => ({ ok: false, problem }) });
-      expect(await runPotCreate(planOf(plan()), d)).toEqual({ ok: false, problem });
+      expect(await runPotCreate(planOf(plan()), null, d)).toEqual({ ok: false, problem });
       expect(calls).toEqual(["preflight"]);
     }
+  });
+
+  test("a lifetime ended during the simulation calls neither declare nor send, and reads nothing after it", async () => {
+    const p = planOf(plan());
+    for (const impl of [
+      { alive: goneAfter(0) },
+      // A simulation that threw while the person left is not said either.
+      { alive: goneAfter(0), simulate: async () => Promise.reject(callRevertError()) },
+    ] as Partial<PotCreateDeps>[]) {
+      const { d, calls } = harness(p, impl);
+      expect(await runPotCreate(p, null, d)).toEqual({ ok: false, problem: "left" });
+      expect(calls).toEqual(["preflight", "simulate"]);
+    }
+  });
+
+  test("a lifetime ended at each later await: the estimate, the reads again, the note; nothing after it, and never the wallet", async () => {
+    const p = planOf(plan());
+    const cases: [number, string[]][] = [
+      [1, ["preflight", "simulate", "estimate"]],
+      [2, ["preflight", "simulate", "estimate", "pot", "registry"]],
+      // One ended after declare calls no send.
+      [3, UP_TO_NOTE],
+    ];
+    for (const [n, upTo] of cases) {
+      const { d, calls } = harness(p, { alive: goneAfter(n) });
+      expect(await runPotCreate(p, null, d), String(n)).toEqual({ ok: false, problem: "left" });
+      expect(calls, String(n)).toEqual(upTo);
+      expect(calls.some((c) => c.startsWith("send")), String(n)).toBe(false);
+    }
+    // A note refused while the person left is not said either, and nothing is sent.
+    const refusedGone = harness(p, {
+      alive: goneAfter(3),
+      declare: async () => Promise.reject(new ApiError(409, { code: "pot_taken", message: "x" })),
+    });
+    expect(await runPotCreate(p, null, refusedGone.d)).toEqual({ ok: false, problem: "left" });
+    expect(refusedGone.calls).toEqual(UP_TO_NOTE);
   });
 
   test("a simulation that throws, or that answers another address than the plan's pot: would_revert, and neither declare nor send is called", async () => {
@@ -1133,7 +1221,7 @@ describe("runPotCreate: what Create the pot does before and at the wallet", () =
     ];
     for (const impl of cases) {
       const { d, calls } = harness(p, impl);
-      expect(await runPotCreate(p, d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(await runPotCreate(p, null, d)).toMatchObject({ ok: false, problem: "would_revert" });
       expect(calls).toEqual(["preflight", "simulate"]);
     }
   });
@@ -1141,11 +1229,35 @@ describe("runPotCreate: what Create the pot does before and at the wallet", () =
   test("a simulation or an estimate the node could not answer: read_failed, never said as a refusal of the chain, and neither declare nor send is called", async () => {
     const p = planOf(plan());
     const sim = harness(p, { simulate: async () => Promise.reject(offlineError()) });
-    expect(await runPotCreate(p, sim.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    expect(await runPotCreate(p, null, sim.d)).toMatchObject({ ok: false, problem: "read_failed" });
     expect(sim.calls).toEqual(["preflight", "simulate"]);
     const est = harness(p, { estimate: async () => Promise.reject(offlineError()) });
-    expect(await runPotCreate(p, est.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    expect(await runPotCreate(p, null, est.d)).toMatchObject({ ok: false, problem: "read_failed" });
     expect(est.calls).toEqual(["preflight", "simulate", "estimate"]);
+  });
+
+  test("money that fell short since the review: the balance read again, not_enough with it and the plan's own value; nothing noted or sent", async () => {
+    const p = funded();
+    const short = WEI(USDC(10));
+    for (const at of ["simulate", "estimate"] as const) {
+      const fail = async () => Promise.reject(moneyShortError());
+      const { d, calls } = harness(p, { [at]: fail, readBalance: async () => short });
+      const result = await runPotCreate(p, null, d);
+      expect(result, at).toEqual({ ok: false, problem: "not_enough", balanceWei: short, totalWei: p.value });
+      expect(calls.at(-1), at).toBe("balance");
+      expect(calls, at).not.toContain("declare");
+      if (!result.ok)
+        expect(potCreateFailureView(result, { environment: "sandbox", guardian: G })).toEqual({
+          to: "form",
+          lines: [fillCopy(P_.problems.not_enough, { balance: "10", total: "60.1" })],
+        });
+    }
+    // The balance itself could not be read: read_failed.
+    const unread = harness(p, {
+      simulate: async () => Promise.reject(moneyShortError()),
+      readBalance: async () => Promise.reject(offlineError()),
+    });
+    expect(await runPotCreate(p, null, unread.d)).toMatchObject({ ok: false, problem: "read_failed" });
   });
 
   test("an estimate above the cap: would_revert, and neither declare nor send is called", async () => {
@@ -1157,13 +1269,99 @@ describe("runPotCreate: what Create the pot does before and at the wallet", () =
       { estimate: async () => Promise.reject(revertError()) },
     ] as Partial<PotCreateDeps>[]) {
       const { d, calls } = harness(p, impl);
-      expect(await runPotCreate(p, d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(await runPotCreate(p, null, d)).toMatchObject({ ok: false, problem: "would_revert" });
       expect(calls).toEqual(["preflight", "simulate", "estimate"]);
     }
     // At the cap itself, the limit is the cap.
     const atCap = harness(p, { estimate: async () => POT_SETUP_GAS_CAP });
-    expect((await runPotCreate(p, atCap.d)).ok).toBe(true);
+    expect((await runPotCreate(p, null, atCap.d)).ok).toBe(true);
     expect(atCap.calls.at(-1)).toBe(`send ${POT_SETUP_GAS_CAP}`);
+  });
+
+  test("right before the note, the noted pot and the registry are read again: a note that is not the plan's, or a key that is not, is stale_plan, and nothing is noted or sent", async () => {
+    const fresh = planOf(plan());
+    const again = planOf(plan({ noted: NOTED }));
+    const another: OrderPotView = { ...NOTED, address: SAFE_CREATED };
+    const cases: [string, PotPlan, OrderPotView | null, Partial<PotCreateDeps>][] = [
+      // The plan had no note, and one was noted since (another tab).
+      ["a note appeared", fresh, null, { readNoted: async () => NOTED }],
+      // The plan had a note, and the latest note is of another address.
+      ["another address noted", again, NOTED, { readNoted: async () => another }],
+      // The plan had a note, and none is there now.
+      ["the note is gone", again, NOTED, { readNoted: async () => null }],
+      // The registry names another key, or none.
+      ["another key", fresh, null, { readRegistryWallet: async () => P }],
+      ["no key", fresh, null, { readRegistryWallet: async () => "none" }],
+    ];
+    for (const [what, p, reviewed, impl] of cases) {
+      const { d, calls } = harness(p, impl);
+      expect(await runPotCreate(p, reviewed, d), what).toEqual({ ok: false, problem: "stale_plan" });
+      expect(calls, what).toEqual(["preflight", "simulate", "estimate", "pot", "registry"]);
+    }
+    // In any letter case, the same note and the same key hold.
+    const sameCase = harness(again, {
+      readNoted: async () => ({ ...NOTED, address: V3_POT.toLowerCase() as Address }),
+      readRegistryWallet: async () => A.toLowerCase() as Address,
+    });
+    expect((await runPotCreate(again, NOTED, sameCase.d)).ok).toBe(true);
+    // The view: back to the form, review again, the noted pot read again.
+    expect(potCreateFailureView({ ok: false, problem: "stale_plan" }, { environment: "sandbox", guardian: G })).toEqual({
+      to: "form",
+      lines: [P_.problems.stale_plan],
+      reread: "pot",
+    });
+  });
+
+  test("a read again that failed: GET /pot is pot_unreadable with the server's sentence for it, the registry read_failed; nothing noted or sent", async () => {
+    const p = planOf(plan());
+    const server = new ApiError(503, { code: "chain_unavailable", message: "x" });
+    const pot = harness(p, { readNoted: async () => Promise.reject(server) });
+    expect(await runPotCreate(p, null, pot.d)).toEqual({ ok: false, problem: "pot_unreadable", cause: server });
+    expect(pot.calls).not.toContain("declare");
+    expect(potCreateFailureView({ ok: false, problem: "pot_unreadable", cause: server }, { environment: "sandbox", guardian: G })).toEqual({
+      to: "review",
+      lines: [P_.recordUnavailable],
+    });
+    const registry = harness(p, { readRegistryWallet: async () => "unreadable" });
+    expect(await runPotCreate(p, null, registry.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    expect(registry.calls).not.toContain("declare");
+  });
+
+  test("the account connected NOW is read right before the note and right before the send: a switch refuses with wallet_is_not_the_guardian, and nothing is sent", async () => {
+    const p = planOf(plan());
+    // Switched before the note: no note either.
+    const before = harness(p, { account: () => P });
+    expect(await runPotCreate(p, null, before.d)).toEqual({
+      ok: false,
+      problem: "refused",
+      cause: "wallet_is_not_the_guardian",
+    });
+    expect(before.calls).not.toContain("declare");
+    // Switched while the note was written: the note stands, the wallet is never asked.
+    let switched = false;
+    const after = harness(p, {
+      declare: async () => {
+        switched = true;
+      },
+      account: () => (switched ? P : G),
+    });
+    expect(await runPotCreate(p, null, after.d)).toEqual({
+      ok: false,
+      problem: "refused",
+      cause: "wallet_is_not_the_guardian",
+    });
+    expect(after.calls).toEqual([...UP_TO_NOTE, "account"]);
+    // Disconnected: the same.
+    const none = harness(p, { account: () => null });
+    expect((await runPotCreate(p, null, none.d)).ok).toBe(false);
+    expect(none.calls.some((c) => c.startsWith("send"))).toBe(false);
+    // Any letter case of the guardian is the guardian.
+    const lower = harness(p, { account: () => G.toLowerCase() as Address });
+    expect((await runPotCreate(p, null, lower.d)).ok).toBe(true);
+    expect(potCreateFailureView({ ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" }, { environment: "sandbox", guardian: G })).toEqual({
+      to: "review",
+      lines: [potRefusalSentence("wallet_is_not_the_guardian", { environment: "sandbox", guardian: G })],
+    });
   });
 
   test("a note the server refuses: record_failed with the error as cause, and send is not called", async () => {
@@ -1173,33 +1371,52 @@ describe("runPotCreate: what Create the pot does before and at the wallet", () =
       offlineError(),
     ]) {
       const { d, calls } = harness(p, { declare: async () => Promise.reject(error) });
-      const result = await runPotCreate(p, d);
-      expect(result).toEqual({ ok: false, problem: "record_failed", cause: error });
-      if (!result.ok) expect(result.cause).toBe(error);
-      expect(calls).toEqual(["preflight", "simulate", "estimate", "declare"]);
+      expect(await runPotCreate(p, null, d)).toEqual({ ok: false, problem: "record_failed", cause: error });
+      expect(calls).toEqual(UP_TO_NOTE);
     }
   });
 
-  test("a refusal of the allowlist: refused; a rejection in the wallet: declined", async () => {
+  test("a refusal of the allowlist: refused; a rejection in the wallet: declined; a wallet that cannot pay the fee: no_gas, said as the fee", async () => {
     const p = planOf(plan());
     const refusal = harness(p, { send: async () => ({ ok: false, problem: "wallet_on_another_chain" }) });
-    expect(await runPotCreate(p, refusal.d)).toEqual({ ok: false, problem: "refused", cause: "wallet_on_another_chain" });
+    expect(await runPotCreate(p, null, refusal.d)).toEqual({ ok: false, problem: "refused", cause: "wallet_on_another_chain" });
     const no = harness(p, { send: async () => Promise.reject(rejectedError()) });
-    expect(await runPotCreate(p, no.d)).toMatchObject({ ok: false, problem: "declined" });
+    expect(await runPotCreate(p, null, no.d)).toMatchObject({ ok: false, problem: "declined" });
     // Wrapped as viem wraps it, the wallet's no is still the wallet's no.
     const wrapped = harness(p, {
       send: async () => Promise.reject(Object.assign(new Error("request failed"), { cause: rejectedError() })),
     });
-    expect(await runPotCreate(p, wrapped.d)).toMatchObject({ ok: false, problem: "declined" });
+    expect(await runPotCreate(p, null, wrapped.d)).toMatchObject({ ok: false, problem: "declined" });
+    const fee = harness(p, { send: async () => Promise.reject(moneyShortError("TransactionExecutionError")) });
+    expect(await runPotCreate(p, null, fee.d)).toMatchObject({ ok: false, problem: "no_gas" });
+    expect(potCreateFailureView({ ok: false, problem: "no_gas" }, { environment: "sandbox", guardian: G })).toEqual({
+      to: "review",
+      lines: [P_.problems.no_gas],
+    });
     // Any other throw: would_revert only for a revert, else refused.
     const revert = harness(p, { send: async () => Promise.reject(revertError()) });
-    expect(await runPotCreate(p, revert.d)).toMatchObject({ ok: false, problem: "would_revert" });
+    expect(await runPotCreate(p, null, revert.d)).toMatchObject({ ok: false, problem: "would_revert" });
     const nodeRevert = harness(p, { send: async () => Promise.reject(callRevertError("TransactionExecutionError")) });
-    expect(await runPotCreate(p, nodeRevert.d)).toMatchObject({ ok: false, problem: "would_revert" });
+    expect(await runPotCreate(p, null, nodeRevert.d)).toMatchObject({ ok: false, problem: "would_revert" });
     const other = harness(p, { send: async () => Promise.reject(offlineError()) });
-    expect(await runPotCreate(p, other.d)).toMatchObject({ ok: false, problem: "refused" });
-    for (const h of [refusal, no, wrapped, revert, nodeRevert, other])
-      expect(h.calls).toEqual(["preflight", "simulate", "estimate", "declare", "send 648808"]);
+    expect(await runPotCreate(p, null, other.d)).toMatchObject({ ok: false, problem: "refused" });
+    for (const h of [refusal, no, wrapped, fee, revert, nodeRevert, other]) expect(h.calls).toEqual(ALL);
+  });
+
+  test("potPlanHolds: the review's note (or none) and the plan's key, in any letter case", () => {
+    const fresh = planOf(plan());
+    const again = planOf(plan({ noted: NOTED }));
+    expect(potPlanHolds({ plan: fresh, reviewed: null, latest: null, registry: A })).toBe(true);
+    expect(potPlanHolds({ plan: fresh, reviewed: null, latest: NOTED, registry: A })).toBe(false);
+    expect(potPlanHolds({ plan: again, reviewed: NOTED, latest: NOTED, registry: A })).toBe(true);
+    expect(potPlanHolds({ plan: again, reviewed: NOTED, latest: null, registry: A })).toBe(false);
+    expect(potPlanHolds({ plan: again, reviewed: NOTED, latest: { ...NOTED, address: SAFE_CREATED }, registry: A })).toBe(false);
+    for (const registry of [P, "none", "unreadable"] as const)
+      expect(potPlanHolds({ plan: fresh, reviewed: null, latest: null, registry }), registry).toBe(false);
+    // A changed key's plan holds while the registry still names the key the review read.
+    const changed = planOf(plan({ noted: NOTED, agentWallet: P }));
+    expect(potPlanHolds({ plan: changed, reviewed: NOTED, latest: NOTED, registry: P })).toBe(true);
+    expect(potPlanHolds({ plan: changed, reviewed: NOTED, latest: NOTED, registry: A })).toBe(false);
   });
 });
 
@@ -1281,9 +1498,19 @@ describe("runPotReview: the review's reads, every one fresh in the click", () =>
     expect(await review(fresh.d)).toMatchObject({ ok: false, say: { problem: "pot_exists" } });
   });
 
-  test("a failed read stops the click with read_failed, and nothing after it is read or planned", async () => {
+  test("a failed GET /pot stops the click with pot_unreadable, said as the pot that could not be read, never as the chain", async () => {
+    const server = new ApiError(503, { code: "chain_unavailable", message: "x" });
+    const { d, asked } = reads({ readNoted: async () => Promise.reject(server) });
+    const result = await review(d);
+    expect(result).toEqual({ ok: false, say: { problem: "pot_unreadable" }, kind: null, cause: server });
+    if (!result.ok) expect(potProblemSentence(result.say)).toBe(P_.recordUnavailable);
+    expect(P_.problems.pot_unreadable).toBe(P_.recordUnavailable);
+    expect(asked.some((x) => x.startsWith("code "))).toBe(false);
+  });
+
+  test("a failed read of the chain stops the click with read_failed, and nothing after it is read or planned", async () => {
     const failures: [Partial<PotReviewDeps>, string][] = [
-      [{ readNoted: async () => Promise.reject(new ApiError(503, { code: "chain_unavailable", message: "x" })) }, "pot"],
+      [{ readRegistryWallet: async () => Promise.reject(offlineError()) }, "registry"],
       [{ readBalance: async () => Promise.reject(offlineError()) }, "balance"],
       [{ readCode: async () => Promise.reject(offlineError()) }, "code"],
     ];

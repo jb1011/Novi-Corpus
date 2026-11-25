@@ -15,7 +15,8 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { useConnection, usePublicClient, useWriteContract } from "wagmi";
+import { useConfig, usePublicClient, useWriteContract } from "wagmi";
+import { getConnection } from "wagmi/actions";
 import { arcTestnet } from "@/lib/chain";
 import { sendAllowedCall, type CallContext, type WriteRequest } from "@/lib/legalBody/chain";
 import { orderPollInterval, retryRead } from "@/lib/legalBody/polling";
@@ -410,32 +411,49 @@ const CONFIGURED_CHAIN_IDS: readonly number[] = [arcTestnet.id];
  * The one way the flow asks a wallet to write: `sendAllowedCall`, so the allowlist and the chain
  * checks come first, then one `writeContract` of the request it checked.
  *
- * The wallet's chain is `useConnection().chainId`, never `useChainId()`. wagmi's store adopts a
- * connection's chain only when that chain is configured, so with `[arcTestnet]` alone
- * `useChainId()` reports Arc testnet whatever network the wallet sits on: the
- * `wallet_on_another_chain` sentence would never show, and wagmi would refuse the send itself with
- * its own error instead. The connection's chain tracks the wallet. The connected account is read
- * from the same connection: a pot call is sent only from the order's guardian's own account.
+ * The wallet's chain is the connection's (`getConnection(config).chainId`, the chain wagmi's
+ * `useConnection` reports), never `useChainId()`. wagmi's store adopts a connection's
+ * chain only when that chain is configured, so with `[arcTestnet]` alone `useChainId()` reports
+ * Arc testnet whatever network the wallet sits on: the `wallet_on_another_chain` sentence would
+ * never show, and wagmi would refuse the send itself with its own error instead. The connection's
+ * chain tracks the wallet. The connected account is read from the same connection: a pot call is
+ * sent only from the order's guardian's own account.
+ *
+ * Both are read AT THE SEND, from wagmi's store, never from the render that made this function: a
+ * click's continuation calls it after its own awaits, and an account switched meanwhile is the one
+ * the wallet would send from, so it is the one the allowlist checks.
  *
  * The cast is the only one of the flow: wagmi resolves the `register` overloads from literal
  * argument tuples, and the request here carries the arguments the allowlist checked as a wide
  * array.
  */
 export function useAllowedWrite() {
+  const config = useConfig();
   const { writeContractAsync } = useWriteContract();
-  const { address, chainId } = useConnection();
   const writeContract = useCallback(
     (req: WriteRequest) => writeContractAsync(req as Parameters<typeof writeContractAsync>[0]),
     [writeContractAsync],
   );
   return useCallback(
-    (req: WriteRequest, ctx: CallContext) =>
-      sendAllowedCall(req, ctx, {
+    (req: WriteRequest, ctx: CallContext) => {
+      const { address, chainId } = getConnection(config);
+      return sendAllowedCall(req, ctx, {
         walletChainId: chainId,
         walletAddress: address,
         configuredChainIds: CONFIGURED_CHAIN_IDS,
         writeContract,
-      }),
-    [address, chainId, writeContract],
+      });
+    },
+    [config, writeContract],
   );
+}
+
+/** The wallet's account and chain at the moment of asking, from wagmi's store: never those of the
+ *  render that made the function. A click's continuation asks it after its own awaits. */
+export function useWalletNow() {
+  const config = useConfig();
+  return useCallback((): { address: Address | null; chainId: number | undefined } => {
+    const { address, chainId } = getConnection(config);
+    return { address: address ?? null, chainId };
+  }, [config]);
 }
