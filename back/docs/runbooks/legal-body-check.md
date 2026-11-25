@@ -108,9 +108,11 @@ Safe's address and reads the Safe from the chain. The `pot` block of a lookup is
 statement's own block: it sits beside the signed statement, outside it, and is not signed.
 
 It is served by `GET /legal-bodies/by-agent/<agentId>` and by `GET /legal-bodies/<agent's wallet>` (the body's pot on
-the record), and `GET /legal-bodies/<pot address>` answers the same legal body for any pot that body declared once
+the record), and `GET /legal-bodies/<pot address>` answers the same legal body for a pot that body declared once
 that address holds a pot's code (an address noted and never created leads nowhere; the ops line says
-`"matchedBy":"pot"`). Its states:
+`"matchedBy":"pot"`), unless the body's agent now states a newer legal body (a replaced body's pot leads nowhere by
+its address) or the pot, still on the record, no longer reads as the guardian's alone. An answer found by a pot's
+address carries `treasury: null`: the treasury block is always about the address asked. Its states:
 
 - `ceiling_read`: the ceiling (`ceilingUnits`), what was taken in the current period (`spentUnits`), the period's
   end (`periodEndsAt`, unix seconds), what the pot holds (`balanceUnits`), `readAtBlock`, `readAt`, `declaredAt`
@@ -132,7 +134,11 @@ in force.
 ceiling was first set (the module's `lastResetMin`); what was not taken does not carry over. So the agent's key can
 take the whole ceiling in the last minutes of one period and the whole ceiling again at the start of the next: twice
 the ceiling within a few minutes is possible around a period's end. A change of the ceiling keeps the current period
-and what was taken in it; "Start again" and a new key start a new period at the minute they are mined.
+and what was taken in it; "Start again" and a new key start a new period at the minute they are mined, with
+nothing taken yet. That holds even for a key someone removed outside the site with `removeDelegate(key, false)`
+(which keeps the key's allowance, its period's start and what was taken in it): the guardian's click reads that key's
+allowance, and when any of its amount, spent, period or last reset is not 0, the restore deletes it first
+(`deleteAllowance`, the nonce kept). A key still listed is removed with its allowance first, as before.
 
 **The reading rules**, in this order, the first that applies decides (`potReading` in
 `back/backend/src/legalBody/safePot.ts`; the website holds the same list):
@@ -213,9 +219,13 @@ switched on or off. The boot log says which:
   tried again once a minute; it turns on by itself once the seven hashes verify (the verified line follows).
 - `[boot] pot contracts NOT verified: mismatch: ...`: a contract holds no code or other code (the line names it, its
   address and both hashes). The pot stays off until a restart. Investigate first: a restart only checks again.
+- `[boot] pot contracts NOT verified: unexpected <Name>: ...`: the check threw an error of another kind (its name
+  and the first line of its message follow; a line ending in "not an error" means it threw something else). The
+  pot stays off until a restart, with no retry: it is a bug or an environment fault, never a verdict on the
+  contracts. Investigate first.
 
 While the pot is off: `/config.legalBodies.pot` is `false` and the website offers no pot and no action on one, apart
-from a card to take a pot that is on the record off it; the note door
+from the exit card below; the note door
 and the agent's two MCP tools answer 409 `pot_not_offered`; the guardian's read of the body's notes
 (`GET /legal-body-orders/:id/pot`) and the take-off door still answer, so a pot on the record can always be taken
 off it; and the record still names a pot that holds a pot's code, with "Its limits were not read." and no amount.
@@ -239,6 +249,28 @@ off it; and the record still names a pot that holds a pot's code, with "Its limi
   `internal_error` (a note whose birth details do not give its address); 503 `chain_unavailable`. `get_pot` is a
   read and answers for a body in any state; a take is prepared only for a body in force. The prepared take is sent by
   the agent's key itself, to the AllowanceModule, with an empty signature and a gas limit of 200,000.
+
+**The exit card: Stop the allowance and Take the money back are always reachable.** They only remove rights or
+pay the guardian's own wallet, so the done page keeps them whatever happens to the legal body (revoked, broken,
+winding down, dissolved, replaced), whatever the registry now names as the agent's wallet (none, the zero address,
+the guardian's, a new key) and whatever the pot's switch says. Wherever the full card is not shown (the switch off,
+an order not linked or revoked, a notice, another deployment on the same chain, a record naming no wallet of the
+agent's own), the page shows the exit card instead: "Stop the allowance" while a key or the pot's module is listed,
+"Take the money back" while no module is on and the pot holds money, and "Take the pot off the public record" while
+it is on the record. What it needs: a noted pot (on the record or taken off it) whose address the browser recomputes
+itself from the note's birth details and the guardian, on the configured chain, holding a pot's code and reading as
+the guardian's alone. Its chain reads are the browser's own, whatever the switch; of the server it asks only the
+noted pot (`GET /legal-body-orders/:id/pot`). The website's allowlist takes the two exits for any such order of this
+chain with the same guardian, and refuses every other pot call for it. A noted address the browser does not
+recompute shows "The address noted for this legal body is not a pot that only your wallet owns." and offers no wallet
+action at all, only the take off while it is on the record.
+
+**A guardian who declined the setup in the wallet.** The note is written before the wallet opens, so a guardian who
+declined (or whose setup was dropped) keeps the noted pot, its address and its first ceiling: the page then asks for
+that same ceiling, because another would make a second pot. The way out, said on the page: create the pot with that
+ceiling and no money, then use "Change the allowance" to set the ceiling wanted, then add money. No operator can clear
+or change a note: the notes are append-only on purpose (one pot for life), and the database refuses a note of an
+address another legal body declared.
 
 **One action at a time on the card.** While any wallet action or record action of the pot's card is in flight, every
 other button of the card is disabled. A wallet prompt that never answers holds that lock until the prompt settles
