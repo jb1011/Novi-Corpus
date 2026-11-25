@@ -1267,7 +1267,7 @@ describe("the allowlist takes the pot's setup", () => {
     );
   });
 
-  test("an order that is deployed, broken, or linked and revoked: order_not_linked", () => {
+  test("an order that is deployed, broken, or linked and revoked: order_not_linked for the setup and a change; the stop is an exit (Ruling R33)", () => {
     const orders = [
       linked({ state: "deployed" }),
       linked({ state: "broken", brokenReason: "not_linked" }),
@@ -1281,9 +1281,11 @@ describe("the allowlist takes the pot's setup", () => {
     ];
     for (const o of orders) {
       expect(allowedCall(setupReq(), potCtx(SETUP_V5, { order: o }))).toEqual(refused("order_not_linked"));
-      expect(allowedCall(execReq(STOP_V9), potCtx(STOP_V9, { order: o }))).toEqual(
+      expect(allowedCall(execReq(CHANGE_V6), potCtx(CHANGE_V6, { order: o }))).toEqual(
         refused("order_not_linked"),
       );
+      // Ruling R33: the stop only removes rights, so it goes whatever the order's state.
+      expect(allowedCall(execReq(STOP_V9), potCtx(STOP_V9, { order: o })).ok).toBe(true);
     }
   });
 
@@ -1485,6 +1487,72 @@ describe("the allowlist takes the guardian's Safe actions", () => {
   });
 });
 
+describe("Stop the allowance and Take the money back are exits, whatever happened to the legal body (Ruling R33)", () => {
+  /** The orders a guardian may meet after the pot was created: revoked, broken for each reason,
+   *  replaced, superseded, and one of another factory on this chain. */
+  const fallen: [string, LegalBodyOrderView][] = [
+    ["revoked", linked({ revoked: true })],
+    ["broken, not linked", linked({ state: "broken", brokenReason: "not_linked" })],
+    ["broken, winding down", linked({ state: "broken", brokenReason: "winding_down" })],
+    ["broken, dissolved", linked({ state: "broken", brokenReason: "dissolved" })],
+    ["broken, replaced", linked({ state: "broken", brokenReason: "replaced" })],
+    ["broken and revoked", linked({ state: "broken", brokenReason: "dissolved", revoked: true })],
+    ["superseded", linked({ state: "superseded" })],
+    ["deployed", linked({ state: "deployed" })],
+  ];
+
+  test("the stop (V9) and the take back (V10) are accepted for each, with their vectors' bytes", () => {
+    for (const [name, o] of fallen) {
+      pinned(accepted(execReq(STOP_V9), potCtx(STOP_V9, { order: o })), 900, "0xd709c6dfd342e50a6df9859f5063de95552f967b76c3281224a69a8c93507324");
+      pinned(accepted(execReq(WITHDRAW_V10), potCtx(WITHDRAW_V10, { order: o })), 484, "0xce7031830a444423e2440b3aa34c5e9bfd41e6606641d3deb24abb35961dd164");
+      expect(allowedCall(execReq(STOP_V9), potCtx(STOP_V9, { order: o })).ok, name).toBe(true);
+    }
+    // An order of another factory on this chain: the exits still go.
+    const elsewhere = linked({ factory: ANOTHER_FACTORY, state: "broken", brokenReason: "replaced" });
+    expect(allowedCall(execReq(STOP_V9), potCtx(STOP_V9, { order: elsewhere })).ok).toBe(true);
+    expect(allowedCall(execReq(WITHDRAW_V10), potCtx(WITHDRAW_V10, { order: elsewhere })).ok).toBe(true);
+  });
+
+  test("every other pot call for the same orders is refused order_not_linked, as before", () => {
+    const others: [string, WriteRequest, PotCallContext][] = [
+      ["change", execReq(CHANGE_V6), CHANGE_V6],
+      ["restore", execReq(RESTORE_V11), RESTORE_V11],
+      ["new key", execReq(RESTORE_V12), RESTORE_V12],
+      ["setup", setupReq(), SETUP_V5],
+      ["add money", transferReq(ADD_V14), ADD_V14],
+      ["fee money", transferReq(FEE_V15), FEE_V15],
+    ];
+    for (const [kind, req, p] of others)
+      for (const [name, o] of fallen)
+        expect(allowedCall(req, potCtx(p, { order: o })), `${kind}, ${name}`).toEqual(refused("order_not_linked"));
+    // …and of another factory: order_on_another_deployment.
+    for (const [kind, req, p] of others)
+      expect(allowedCall(req, potCtx(p, { order: linked({ factory: ANOTHER_FACTORY }) })), kind).toEqual(
+        refused("order_on_another_deployment"),
+      );
+  });
+
+  test("what the exits keep: the configured chain in the pot's table, an order of this chain, its guardian, the gas, the rebuild", () => {
+    const stop = execReq(STOP_V9);
+    const withdraw = execReq(WITHDRAW_V10);
+    const fallenOrder = linked({ state: "broken", brokenReason: "dissolved", revoked: true });
+    const on1: CallContext = { config: { ...config, chainId: 1 }, order: linked({ chainId: 1 }) };
+    const kept: [string, WriteRequest, CallContext, string][] = [
+      ["another chain", { ...stop, chainId: OTHER_CHAIN }, potCtx(STOP_V9, { order: fallenOrder }), "wrong_chain"],
+      ["a chain the table does not know", { ...withdraw, chainId: 1 }, { ...on1, pot: WITHDRAW_V10 }, "pot_chain_unsupported"],
+      ["no order", stop, potCtx(STOP_V9, { order: null }), "no_order"],
+      ["an order of another chain", withdraw, potCtx(WITHDRAW_V10, { order: { ...fallenOrder, chainId: OTHER_CHAIN } }), "order_on_another_deployment"],
+      ["another guardian", stop, potCtx(STOP_V9, { order: { ...fallenOrder, guardian: GUARDIAN } }), "guardian_is_not_the_orders"],
+      ["a context built for another guardian", withdraw, potCtx({ ...WITHDRAW_V10, guardian: GUARDIAN }, { order: fallenOrder }), "guardian_is_not_the_orders"],
+      ["gas above the cap", { ...stop, gas: BigInt(500_001) }, potCtx(STOP_V9, { order: fallenOrder }), "gas_out_of_bounds"],
+      ["another pot", execReq({ ...STOP_V9, pot: V3_POT }), potCtx(STOP_V9, { order: fallenOrder }), "not_the_pot"],
+      ["a take back to another wallet", { ...withdraw, args: execReq({ ...WITHDRAW_V10, guardian: GUARDIAN }).args }, potCtx(WITHDRAW_V10, { order: fallenOrder }), "exec_args"],
+      ["a take back while the allowance is on", execReq(WITHDRAW_V10), potCtx({ ...WITHDRAW_V10, modules: [T.allowanceModule] }, { order: fallenOrder }), "allowance_still_on"],
+    ];
+    for (const [name, req, c, problem] of kept) expect(allowedCall(req, c), name).toEqual(refused(problem));
+  });
+});
+
 describe("the allowlist refuses a pot call", () => {
   const setup = setupReq();
   const change = execReq(CHANGE_V6);
@@ -1529,7 +1597,7 @@ describe("the allowlist refuses a pot call", () => {
     ["an order on another chain", setup, potCtx(SETUP_V5, { order: linked({ chainId: OTHER_CHAIN }) }), "order_on_another_deployment"],
     ["an order of another factory", change, potCtx(CHANGE_V6, { order: linked({ factory: ANOTHER_FACTORY }) }), "order_on_another_deployment"],
     ["a body not linked yet", setup, potCtx(SETUP_V5, { order: linked({ state: "deployed" }) }), "order_not_linked"],
-    ["a revoked body", withdraw, potCtx(WITHDRAW_V10, { order: linked({ revoked: true }) }), "order_not_linked"],
+    ["a revoked body", restore, potCtx(RESTORE_V11, { order: linked({ revoked: true }) }), "order_not_linked"],
     ["another guardian", restore, potCtx(RESTORE_V11, { order: linked({ guardian: GUARDIAN }) }), "guardian_is_not_the_orders"],
     ["a setup with no gas", { ...setup, gas: undefined }, potCtx(SETUP_V5), "gas_out_of_bounds"],
     ["a setup with gas 1,500,001", { ...setup, gas: BigInt(1_500_001) }, potCtx(SETUP_V5), "gas_out_of_bounds"],

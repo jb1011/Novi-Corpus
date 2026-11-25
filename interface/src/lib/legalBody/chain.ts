@@ -827,6 +827,12 @@ function readPotContext(
  * has the pot's contracts; a complete context of the function's kinds; an order on this
  * deployment, linked and not revoked, whose guardian is the context's; a gas from 1 to the
  * function's cap. Then the function's own rules (`checkSetup`, `checkExec`, `checkTransfer`).
+ *
+ * THE EXITS (Ruling R33). Stop the allowance and Take the money back only remove rights or pay the
+ * guardian's own wallet, so the guardian keeps them whatever happened to the legal body: for those
+ * two kinds the order need not be linked, may be revoked, and may be of another factory on this
+ * chain. Every other rule holds for them as for the rest: the configured chain in the pot's table,
+ * an order of this chain whose guardian is the context's, the gas, and the rebuild compared.
  */
 function checkPotCall(req: WriteRequest, ctx: CallContext, fn: PotFunction): Checked | Refusal {
   const { config } = ctx;
@@ -838,9 +844,10 @@ function checkPotCall(req: WriteRequest, ctx: CallContext, fn: PotFunction): Che
   const order: unknown = ctx.order;
   if (typeof order !== "object" || order === null) return refuse("no_order");
   const o = order as LegalBodyOrderView;
-  if (o.chainId !== config.chainId || !sameAddress(o.factory, config.factory))
+  const exit = p.kind === "stop" || p.kind === "withdraw";
+  if (o.chainId !== config.chainId || (!exit && !sameAddress(o.factory, config.factory)))
     return refuse("order_on_another_deployment");
-  if (o.state !== "linked" || o.revoked !== false) return refuse("order_not_linked");
+  if (!exit && (o.state !== "linked" || o.revoked !== false)) return refuse("order_not_linked");
   if (!sameAddr(o.guardian, p.guardian)) return refuse("guardian_is_not_the_orders");
   const gas: unknown = req.gas;
   const cap =
