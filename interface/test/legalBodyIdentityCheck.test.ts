@@ -291,7 +291,7 @@ describe("the wait and the return", () => {
   // for (the card's mount, a click), nor over one that says the session is held, closed or gone.
   test("a read at the provider goes out only over a fresh read of the session that says it is open and not held", () => {
     const fresh = (session: Parameters<typeof providerReadStep>[0]["session"]) =>
-      providerReadStep({ session, readAt: NOW + 1, after: NOW });
+      providerReadStep({ session, readAt: NOW + 1, after: NOW, by: "arrival" });
     expect(fresh(open())).toBe("sync");
     expect(fresh(open({ reading: true }))).toBe("sync");
     expect(fresh(open({ lastErrorCode: "document_expired", attemptsLeft: 2 }))).toBe("sync");
@@ -300,12 +300,29 @@ describe("the wait and the return", () => {
     expect(fresh(open({ held: "operator" }))).toBe("show");
     expect(fresh({ status: "none" })).toBe("show");
     // Only a read from before (the cache when the card mounted, or a read again that failed): wait.
-    expect(providerReadStep({ session: open(), readAt: NOW, after: NOW })).toBe("wait");
-    expect(providerReadStep({ session: open(), readAt: NOW - 1, after: NOW })).toBe("wait");
-    expect(providerReadStep({ session: { status: "none" }, readAt: NOW, after: NOW })).toBe("wait");
+    expect(providerReadStep({ session: open(), readAt: NOW, after: NOW, by: "arrival" })).toBe("wait");
+    expect(providerReadStep({ session: open(), readAt: NOW - 1, after: NOW, by: "arrival" })).toBe("wait");
+    expect(providerReadStep({ session: { status: "none" }, readAt: NOW, after: NOW, by: "wait" })).toBe("wait");
     // No read yet.
-    expect(providerReadStep({ session: "loading", readAt: 0, after: 0 })).toBe("wait");
-    expect(providerReadStep({ session: "unreadable", readAt: 0, after: 0 })).toBe("wait");
+    expect(providerReadStep({ session: "loading", readAt: 0, after: 0, by: "arrival" })).toBe("wait");
+    expect(providerReadStep({ session: "unreadable", readAt: 0, after: 0, by: "wait" })).toBe("wait");
+    // The same fresh read decides the same, whoever asks.
+    for (const by of ["arrival", "wait", "click"] as const)
+      expect(providerReadStep({ session: open(), readAt: NOW + 1, after: NOW, by })).toBe("sync");
+  });
+
+  // Follow-up U2: a click whose read again fails says so, like a read-back that failed, where
+  // the wait's own tick keeps waiting quietly.
+  test("on a click, no fresh read leaves the check unread, never a quiet wait", () => {
+    for (const read of [
+      { session: open(), readAt: NOW, after: NOW },
+      { session: open({ reading: true }), readAt: NOW - 1, after: NOW },
+      { session: "unreadable" as const, readAt: 0, after: 0 },
+      { session: "loading" as const, readAt: 0, after: 0 },
+    ]) {
+      expect(providerReadStep({ ...read, by: "click" })).toBe("unreadable");
+      expect(providerReadStep({ ...read, by: "wait" })).toBe("wait");
+    }
   });
 
   test("the read-back tried again settles as the read did, as done when the fresh read showed the session held or gone, and unread with no fresh read", () => {
@@ -315,6 +332,10 @@ describe("the wait and the return", () => {
     ).toBe("failed");
     expect(arrivalAfter({ sent: false, step: "show" })).toBe("done");
     expect(arrivalAfter({ sent: false, step: "wait" })).toBe("failed");
+    // A click's read again that failed: unread, with Try again.
+    expect(arrivalAfter({ sent: false, step: "unreadable" })).toBe("failed");
+    // Another read at the provider under way or cooling: this one did not go out.
+    expect(arrivalAfter({ sent: false, step: "busy" })).toBe("failed");
   });
 
   test("a sync the card asks for is never inside the server's throttle", () => {

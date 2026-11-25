@@ -34,10 +34,11 @@ import {
 } from "@/lib/legalBody/identityCheck";
 import {
   SYSTEM_TIMERS,
+  createFreshSync,
   createReadingWait,
   createSyncGate,
-  syncOverFreshRead,
   type FreshRead,
+  type FreshSync,
   type ReadingWait,
   type SyncGate,
 } from "@/lib/legalBody/identityCheckTimers";
@@ -61,8 +62,10 @@ const A = LEGAL_BODY_COPY.human.guardianIdentity.automatic;
  * No read at the provider goes out over a read of the session older than the moment it is for
  * (ruling R35, `providerReadStep`): the read-back waits for a read made after the mount, not the
  * cache the card mounted on; Check again, Try again and the wait's own reads at the provider read
- * both reads again first (`syncOverFreshRead`). A session held, closed or gone on that read is
- * shown, never read at the provider.
+ * both reads again first (`createFreshSync`, one under way at most, none sent while another read
+ * at the provider is in flight or cooling). A session held, closed or gone on that read is shown,
+ * never read at the provider. A click whose read again fails leaves the check unread, with Try
+ * again, like a read-back that failed; the wait's own tick keeps waiting quietly.
  *
  * Check again and Try again wait on the gate's cooling: a click within the server's interval
  * would be refused as too soon, and a refusal that reads as "read a moment ago" must not stand
@@ -141,7 +144,7 @@ export function useIdentityCheck(p: {
   const [cooling, setCooling] = useState(false);
   const [longWait, setLongWait] = useState(false);
   // Made on first use, from an effect or a click, never during a render, and kept for the mount.
-  const timed = useRef<{ gate: SyncGate; wait: ReadingWait } | null>(null);
+  const timed = useRef<{ gate: SyncGate; fresh: FreshSync; wait: ReadingWait } | null>(null);
   const timedRules = useCallback(() => {
     if (timed.current === null) {
       const gate = createSyncGate({
@@ -149,15 +152,17 @@ export function useIdentityCheck(p: {
         onCoolingChange: setCooling,
         timers: SYSTEM_TIMERS,
       });
+      const fresh = createFreshSync({ read: () => calls.current.readAgain(), gate });
       const wait = createReadingWait({
-        // Over a fresh read of the session, like a click's.
-        sync: () => void syncOverFreshRead({ read: () => calls.current.readAgain(), gate }),
+        // Over a fresh read of the session, like a click's; a tick that finds one under way
+        // starts none.
+        sync: () => void fresh.run("wait"),
         lastSyncAt: gate.lastSyncAt,
         poll: () => void calls.current.poll(),
         onLongWait: () => setLongWait(true),
         timers: SYSTEM_TIMERS,
       });
-      timed.current = { gate, wait };
+      timed.current = { gate, fresh, wait };
     }
     return timed.current;
   }, []);
@@ -173,13 +178,22 @@ export function useIdentityCheck(p: {
     session,
     readAt: sessionQuery.dataUpdatedAt,
     after: mountReadAt,
+    by: "arrival",
   });
   if (firstRead === null && arrivalStep !== "wait")
     setFirstRead(arrivalStep === "sync" ? "read_back" : "nothing");
   const wantsReadBack = firstRead === null ? shouldReadBack(session) : firstRead === "read_back";
-  const [readBack, setReadBack] = useState<Arrival>("pending");
+  // The card's last read at the provider, as it settled: the read-back, a Try again, or a click
+  // whose read again failed (follow-up U2). Null before any: pending for a read-back still to
+  // settle, done where there was none to make.
+  const [lastRead, setLastRead] = useState<Arrival | null>(null);
   const undecided: Arrival = sessionQuery.isFetchedAfterMount ? "failed" : "pending";
-  const arrival: Arrival = !wantsReadBack ? "done" : firstRead === null ? undecided : readBack;
+  const arrival: Arrival =
+    firstRead === null
+      ? wantsReadBack
+        ? undecided
+        : "done"
+      : (lastRead ?? (firstRead === "read_back" ? "pending" : "done"));
 
   const readBackSent = useRef(false);
   useEffect(() => {
@@ -187,7 +201,7 @@ export function useIdentityCheck(p: {
     readBackSent.current = true;
     void timedRules()
       .gate.run()
-      .then((result) => setReadBack(arrivalOf(result)));
+      .then((result) => setLastRead(arrivalOf(result)));
   }, [firstRead, timedRules]);
 
   /* ── The card's state ────────────────────────────────────────────────────────────────────── */
@@ -287,32 +301,38 @@ export function useIdentityCheck(p: {
   /* ── Check again, and the retry of a failed read ─────────────────────────────────────────── */
 
   function checkAgain() {
-    const { gate } = timedRules();
+    const { gate, fresh } = timedRules();
     if (gate.cooling()) return;
     const kind = view.kind;
-    void syncOverFreshRead({ read: readAgain, gate }).then((out) => {
+    void fresh.run("click").then((out) => {
       if (out.sent) say(kind, out.result.ok ? null : syncRefusal(out.result.error).sentence);
+      // Its read again failed: the check is unread, with Try again, and the wait does not start
+      // again (follow-up U2).
+      if (!out.sent && out.step === "unreadable") {
+        setLastRead("failed");
+        return;
+      }
       // The wait starts again while the provider is still processing.
       setLongWait(false);
     });
   }
 
   // Both reads: an unreadable card may come from either, the session or `/world-id/me`. Before
-  // the read-back is decided, the fresh read decides it; a read-back that failed goes out again
-  // only over this click's read.
+  // the read-back is decided, the fresh read decides it. A read at the provider that failed, or a
+  // click's read again that failed, is tried again over this click's read.
   function retryRead() {
-    const reading = readAgain();
-    const { gate } = timedRules();
-    if (firstRead !== "read_back" || readBack !== "failed" || gate.cooling()) return;
-    setReadBack("pending");
-    void syncOverFreshRead({ read: () => reading, gate }).then((out) =>
-      setReadBack(arrivalAfter(out)),
-    );
+    const { gate, fresh } = timedRules();
+    if (firstRead === null || lastRead !== "failed" || gate.cooling()) {
+      void readAgain();
+      return;
+    }
+    setLastRead("pending");
+    void fresh.run("click").then((out) => setLastRead(arrivalAfter(out)));
   }
 
   const underWay = cardUnderWay({
     session,
-    readBackRunning: firstRead === "read_back" && readBack === "pending",
+    readBackRunning: firstRead !== null && arrival === "pending",
     waiting,
   });
 

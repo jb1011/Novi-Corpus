@@ -15,6 +15,7 @@ import {
 } from "@/lib/legalBody/identityCheck";
 import {
   SYSTEM_TIMERS,
+  createFreshSync,
   createReadingWait,
   createSyncGate,
   syncOverFreshRead,
@@ -114,10 +115,10 @@ describe("a read at the provider over a fresh read of the session", () => {
   };
   const BEFORE = Date.UTC(2026, 10, 24) - 10_000;
 
-  function over(read: () => Promise<FreshRead>) {
+  function over(read: () => Promise<FreshRead>, by: "wait" | "click" = "wait") {
     const send = vi.fn(async () => ({}));
     const gate = createSyncGate({ send, onCoolingChange() {}, timers: SYSTEM_TIMERS });
-    return { send, run: () => syncOverFreshRead({ read, gate }) };
+    return { send, gate, run: () => syncOverFreshRead({ read, gate, by }) };
   }
   const freshly = (session: FreshRead["session"]) => async (): Promise<FreshRead> => ({
     session,
@@ -150,6 +151,101 @@ describe("a read at the provider over a fresh read of the session", () => {
     const thrown = over(() => Promise.reject(new Error("network")));
     await expect(thrown.run()).resolves.toEqual({ sent: false, step: "wait" });
     expect(thrown.send).not.toHaveBeenCalled();
+  });
+
+  // Follow-up U2.
+  test("a click whose read again fails is unread, not a quiet wait, and nothing goes out", async () => {
+    for (const read of [
+      async (): Promise<FreshRead> => ({ session: OPEN, readAt: BEFORE, after: BEFORE }),
+      () => Promise.reject(new Error("network")),
+    ]) {
+      const click = over(read, "click");
+      await expect(click.run()).resolves.toEqual({ sent: false, step: "unreadable" });
+      expect(click.send).not.toHaveBeenCalled();
+    }
+  });
+
+  // Follow-up U1: no queueing and no sharing after the read: a gate in flight or cooling sends
+  // nothing, and the next tick tries again.
+  test("after the fresh read, a gate with a read in flight or cooling sends nothing", async () => {
+    let finish!: () => void;
+    const send = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          finish = () => resolve({});
+        }),
+    );
+    const gate = createSyncGate({ send, onCoolingChange() {}, timers: SYSTEM_TIMERS });
+    const run = () => syncOverFreshRead({ read: freshly(OPEN), gate, by: "wait" });
+
+    void gate.run(); // the read-back, in flight
+    await expect(run()).resolves.toEqual({ sent: false, step: "busy" });
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(gate.cooling()).toBe(true);
+    await expect(run()).resolves.toEqual({ sent: false, step: "busy" });
+    expect(send).toHaveBeenCalledTimes(1);
+
+    // Cooled: the next one goes out.
+    await vi.advanceTimersByTimeAsync(SYNC_MIN_INTERVAL_MS);
+    const next = run();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(send).toHaveBeenCalledTimes(2);
+    finish();
+    await expect(next).resolves.toEqual({ sent: true, result: { ok: true } });
+  });
+
+  test("the wait with a read at the provider slower than a tick: the next tick starts nothing while it is under way, one POST only", async () => {
+    const READ_MS = 300;
+    const SEND_MS = 4_900;
+    const read = vi.fn((): Promise<FreshRead> => {
+      const after = Date.now();
+      return new Promise((resolve) =>
+        setTimeout(() => resolve({ session: OPEN, readAt: Date.now(), after }), READ_MS),
+      );
+    });
+    const send = vi.fn(() => new Promise<unknown>((resolve) => setTimeout(() => resolve({}), SEND_MS)));
+    const gate = createSyncGate({ send, onCoolingChange() {}, timers: SYSTEM_TIMERS });
+    const fresh = createFreshSync({ read, gate });
+    const loop = createReadingWait({
+      sync: () => void fresh.run("wait"),
+      lastSyncAt: gate.lastSyncAt,
+      poll() {},
+      onLongWait() {},
+      timers: SYSTEM_TIMERS,
+    });
+    loop.start();
+
+    // 20 s: the first read at the provider, its read again then its POST, 5.2 s in all.
+    await vi.advanceTimersByTimeAsync(READ_SYNC_EVERY_MS);
+    expect(read).toHaveBeenCalledTimes(1);
+    // 25 s: still under way. This tick reads nothing and sends nothing.
+    await vi.advanceTimersByTimeAsync(READ_POLL_MS + READ_MS);
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    // The POST finished at 25.2 s; the next read at the provider is 20 s after it, at 50 s.
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(send).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(send).toHaveBeenCalledTimes(2);
+    loop.stop();
+  });
+
+  test("a second run while one is under way shares it: no second read, no second POST", async () => {
+    const read = vi.fn(freshly(OPEN));
+    const send = vi.fn(async () => ({}));
+    const gate = createSyncGate({ send, onCoolingChange() {}, timers: SYSTEM_TIMERS });
+    const fresh = createFreshSync({ read, gate });
+    const first = fresh.run("wait");
+    const second = fresh.run("click");
+    expect(second).toBe(first);
+    await expect(first).resolves.toEqual({ sent: true, result: { ok: true } });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+    // Once it settled, a run is a new one.
+    await vi.advanceTimersByTimeAsync(SYNC_MIN_INTERVAL_MS);
+    await fresh.run("click");
+    expect(read).toHaveBeenCalledTimes(2);
   });
 });
 

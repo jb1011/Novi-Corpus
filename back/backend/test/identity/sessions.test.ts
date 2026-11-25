@@ -607,7 +607,7 @@ describe("startSession", () => {
     ["a blank last name", { ...TYPED, lastName: "   " }],
     ["a name of 101 characters", { ...TYPED, firstName: "a".repeat(101) }],
     ["a control character", { ...TYPED, firstName: "Otti\u0000lie" }],
-    ["an invisible format character", { ...TYPED, lastName: "Brand​wick" }],
+    ["an invisible format character", { ...TYPED, lastName: "Brand\u200Bwick" }],
     ["a return path off the site", { ...TYPED, returnPath: "https://elsewhere.example/x" }],
     ["a return path with a query", { ...TYPED, returnPath: "/legal-body?x=1" }],
   ])(

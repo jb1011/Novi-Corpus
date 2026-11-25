@@ -110,18 +110,46 @@ export type FreshRead = { session: SessionRead; readAt: number; after: number };
  * Check again, Try again and the wait's own reads at the provider (ruling R35): the session is
  * read again first (`read`), and the gate is asked only when that read is fresh and says the
  * session is open and not held. A session held since the card last read it is never read at the
- * provider by the card: the server's job, or an operator, finishes it. Never rejects: a read again
- * that throws is no fresh read.
+ * provider by the card: the server's job, or an operator, finishes it. After the read, a gate
+ * with a read in flight or cooling sends nothing: no queue, no share (follow-up U1), and the next
+ * tick or click tries again. Never rejects: a read again that throws is no fresh read.
  */
 export async function syncOverFreshRead(p: {
   read(): Promise<FreshRead>;
   gate: SyncGate;
+  by: "wait" | "click";
 }): Promise<CheckedSync> {
   const read = await p.read().catch(() => null);
-  if (read === null) return { sent: false, step: "wait" };
-  const step = providerReadStep(read);
+  const step = providerReadStep(
+    read === null ? { session: "unreadable", readAt: 0, after: 0, by: p.by } : { ...read, by: p.by },
+  );
   if (step !== "sync") return { sent: false, step };
+  if (p.gate.cooling()) return { sent: false, step: "busy" };
   return { sent: true, result: await p.gate.run() };
+}
+
+export type FreshSync = {
+  /** A read at the provider over a fresh read (`syncOverFreshRead`), or the one under way. */
+  run(by: "wait" | "click"): Promise<CheckedSync>;
+};
+
+/**
+ * The card's reads at the provider over a fresh read, one under way at most (follow-up U1): a
+ * tick or a click that finds one under way, its read again or its read at the provider, starts no
+ * new one and shares its outcome.
+ */
+export function createFreshSync(p: { read(): Promise<FreshRead>; gate: SyncGate }): FreshSync {
+  let underWay: Promise<CheckedSync> | null = null;
+  return {
+    run(by) {
+      if (underWay) return underWay;
+      const run = syncOverFreshRead({ read: p.read, gate: p.gate, by }).finally(() => {
+        underWay = null;
+      });
+      underWay = run;
+      return run;
+    },
+  };
 }
 
 /* ── The wait ──────────────────────────────────────────────────────────────────────────────── */

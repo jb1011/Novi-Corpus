@@ -393,34 +393,41 @@ export function arrivalOf(result: SyncResult): Arrival {
 }
 
 /** What a read at the provider may do over a read of the session. */
-export type ProviderReadStep = "sync" | "show" | "wait";
+export type ProviderReadStep = "sync" | "show" | "wait" | "unreadable";
 
 /**
  * Whether the card may ask for a read at the provider (ruling R35): only over a read of the
  * session newer than `after` (the card's mount for the read-back on arrival; the read before it
  * for Check again, Try again and the wait's own reads at the provider), and only when that read
  * says the session is open and not held. Over a fresh read that says it is held, closed or gone,
- * none goes out, and the card shows what the read says. Over an older read (the cache the card
- * mounted on, or a read again that failed), or none yet, the card waits for a fresh one.
+ * none goes out, and the card shows what the read says.
+ *
+ * With no fresh read (the cache the card mounted on, a read again that failed, or none yet), who
+ * asked decides (follow-up U2): the read-back on arrival and the wait's own tick wait quietly for
+ * a fresh one; a click (Check again, Try again) leaves the check unread, and the card says so,
+ * with Try again, like a read-back that failed.
  */
 export function providerReadStep(p: {
   session: SessionRead;
   readAt: number;
   after: number;
+  by: "arrival" | "wait" | "click";
 }): ProviderReadStep {
-  if (typeof p.session !== "object" || !(p.readAt > p.after)) return "wait";
+  if (typeof p.session !== "object" || !(p.readAt > p.after))
+    return p.by === "click" ? "unreadable" : "wait";
   return shouldReadBack(p.session) ? "sync" : "show";
 }
 
 /** A read at the provider asked for over a fresh read of the session: sent, and how it settled;
- *  or not sent, and why (`providerReadStep`). */
+ *  or not sent, and why: the read's step (`providerReadStep`), or `busy`, another read at the
+ *  provider in flight or cooling (follow-up U1). */
 export type CheckedSync =
   | { sent: true; result: SyncResult }
-  | { sent: false; step: Exclude<ProviderReadStep, "sync"> };
+  | { sent: false; step: Exclude<ProviderReadStep, "sync"> | "busy" };
 
 /** The read-back tried again, once it settled: as `arrivalOf` when it went out; done when the
  *  fresh read showed the session held, closed or gone, which the card then shows; still unread
- *  with no fresh read. */
+ *  otherwise (no fresh read, or another read at the provider in the way), with Try again. */
 export function arrivalAfter(out: CheckedSync): Arrival {
   if (out.sent) return arrivalOf(out.result);
   return out.step === "show" ? "done" : "failed";

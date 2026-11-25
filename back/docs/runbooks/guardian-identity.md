@@ -75,11 +75,13 @@ of its own, and the job never writes over it (0.4).
 
 Set the block only on a box whose backend answers `held` in `GET /identity-check/session`: the
 site's card needs it (0.7). On an older backend the card says "being read" for a session that waits
-for the search or for an operator, and its reads of a session that waits for the search run the
-search again. Where the block is already set, update the box to a backend that answers `held`
-before the site's card goes live (the site goes live when it is merged, the box only when it is
-updated): in front of an older backend the card also skips its read-back when the guardian comes
-back.
+for the search or for an operator, and it sends no read at the provider at all: no read-back when
+the guardian comes back, none while it waits, none on Check again or Try again. The card reads a
+session at the provider only when `held` is null, and an older backend sends no `held`. The result
+then shows only once the server reads the session by itself: the webhook's wake-up, or the job's
+pass. That is why, where the block is already set, the box is updated to a backend that answers
+`held` before the site's card goes live (the site goes live when it is merged, the box only when it
+is updated).
 
 In the Stripe dashboard, in the mode of the box (the founder who holds the account does it):
 
