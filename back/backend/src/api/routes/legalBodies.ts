@@ -47,9 +47,9 @@ import { TokenBucket } from "./agentBook";
  *
  * Beside that statement, outside it and unsigned, a Minimal answer carries `treasury`: the
  * treasury of record its guardian declared (`legalBody/treasury.ts`), only while its address is the
- * agent's wallet the statement signs (the address asked about, on an answer by that wallet), and
- * only while that statement is in force (`active` or `pending`); null otherwise, and null whenever
- * there is no statement.
+ * agent's wallet the statement signs, so always the address asked about, and only while that
+ * statement is in force (`active` or `pending`); null otherwise, null whenever there is no
+ * statement, and null on an answer found by a pot's address (Ruling R30).
  *
  * After `treasury`, a Minimal answer carries `pot`, outside the statement and NOT SIGNED: the
  * company's pot its guardian declared (`legalBody/pot.ts`, `PotBlock`), as read from the chain at
@@ -560,8 +560,10 @@ export function mountLegalBodyRoutes(app: Hono<{ Variables: AuthVars }>, deps: A
           byPot = minimal.kind !== "none";
         }
         // The record, read only beside a statement, against the wallet that statement signs: no
-        // chain read of its own. A failed read is the database's, so this route's 503.
-        if (minimal.kind === "statement")
+        // chain read of its own. A failed read is the database's, so this route's 503. Never on
+        // an answer found by a pot's address (Ruling R30): the treasury block is always about the
+        // address asked, and a pot is not the agent's wallet.
+        if (minimal.kind === "statement" && !byPot)
           treasury = treasuryOfStatement(deps.legalBodyTreasury?.repo, minimal);
       } catch (e) {
         opsLog("legal_body_statement_db_failed", { errorName: errorNameOf(e) });

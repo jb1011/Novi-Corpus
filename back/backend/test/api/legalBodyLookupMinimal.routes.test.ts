@@ -16,6 +16,7 @@ import { verifyPublicStatement } from "../../src/legalBody/publicStatement";
 import { SAFE_PROXY_RUNTIME_CODE_HASH } from "../../src/legalBody/safePot";
 import type { LegalBodyResolution, LegalBodyStanding } from "../../src/payments/legalBody";
 import { SqliteLegalBodyPotRepository } from "../../src/persistence/legalBodyPotRepository";
+import { SqliteLegalBodyTreasuryRepository } from "../../src/persistence/legalBodyTreasuryRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import type { EntityRecord } from "../../src/types";
 import { CHAIN_ID } from "../helpers/customerCompanyFixtures";
@@ -138,6 +139,8 @@ interface AppOptions {
   network?: "testnet" | "mainnet";
   /** The company's pot: none unless given. */
   pot?: LegalBodyPotDeps;
+  /** The treasury of record: none unless given. */
+  treasury?: SqliteLegalBodyTreasuryRepository;
 }
 
 function makeApp(o: AppOptions = {}) {
@@ -147,6 +150,10 @@ function makeApp(o: AppOptions = {}) {
     jwtSecret: "s",
     now: () => clock,
     legalBodyPot: o.pot,
+    legalBodyTreasury:
+      o.treasury === undefined
+        ? undefined
+        : { repo: o.treasury, registry: { getAgentWallet: fakeRegistry().getAgentWallet } },
     legalBody: {
       resolver: { resolve: o.resolve ?? (async () => ({ kind: "none" })) },
       readBudget,
@@ -547,6 +554,32 @@ describe("the company's pot", () => {
     expect(await (await get(app, V3_ADDRESS)).json()).toEqual(body);
     expect(potChain.port.readPot).toHaveBeenCalledTimes(1);
     expect(budget.calls).toBe(1);
+  });
+
+  test("a treasury of record is served by the agent's wallet, never on an answer found by the pot's address (Ruling R30)", async () => {
+    const row = withPot();
+    const treasuries = new SqliteLegalBodyTreasuryRepository(s.db);
+    // The guardian declared the agent's wallet A as the treasury of record.
+    treasuries.append({
+      legalBodyId: row.legalBodyId,
+      address: A,
+      provider: "own_key",
+      providerName: null,
+      limitsReadableAt: null,
+      registryTxHash: null,
+      at: DECLARED_AT,
+    });
+    potChain.port.readPot.mockResolvedValue(HEALTHY);
+    const app = makeApp({ pot: pot(), treasury: treasuries });
+    const byWallet = await (await get(app, A)).json();
+    expect(byWallet).toMatchObject({ address: A, legalBody: true, standing: "active" });
+    expect(byWallet.treasury).toMatchObject({ address: A, provider: "own_key" });
+    const byPot = await (await get(app, V3_ADDRESS)).json();
+    expect(byPot).toMatchObject({ address: V3_ADDRESS, legalBody: true, standing: "active" });
+    expect(byPot.pot).toMatchObject({ state: "ceiling_read", address: V3_ADDRESS });
+    // The treasury block is always about the address asked: the pot's is not the agent's wallet.
+    expect(byPot.treasury).toBeNull();
+    expect(Object.keys(byPot)).toEqual(MINIMAL_KEYS);
   });
 
   test("by a former pot's address: the body's statement with the former pot, its declared and ended times", async () => {
