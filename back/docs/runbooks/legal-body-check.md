@@ -98,6 +98,165 @@ cast call 0x8004A818BFB912233c491871b3d84c89A494BD9e "getAgentWallet(uint256)(ad
 # any other address: the agent has a wallet of its own
 ```
 
+## The company's pot
+
+**What the `pot` block says.** The guardian of a linked legal body may create the company's pot: a Safe
+(v1.4.1) whose only owner is the guardian, with Safe's AllowanceModule (v0.1.1) letting the agent's own key take USDC
+from it up to a ceiling in each thirty-day period. The guardian's wallet signs and sends every transaction from the
+web app; Novi Corpus holds no key to the Safe or to the agent's key, holds none of the money, and only notes the
+Safe's address and reads the Safe from the chain. The `pot` block of a lookup is what that read found, at the
+statement's own block: it sits beside the signed statement, outside it, and is not signed.
+
+It is served by `GET /legal-bodies/by-agent/<agentId>` and by `GET /legal-bodies/<agent's wallet>` (the body's pot on
+the record), and `GET /legal-bodies/<pot address>` answers the same legal body for any pot that body declared once
+that address holds a pot's code (an address noted and never created leads nowhere; the ops line says
+`"matchedBy":"pot"`). Its states:
+
+- `ceiling_read`: the ceiling (`ceilingUnits`), what was taken in the current period (`spentUnits`), the period's
+  end (`periodEndsAt`, unix seconds), what the pot holds (`balanceUnits`), `readAtBlock`, `readAt`, `declaredAt`
+  and `birth`. Units are USDC's 6 decimals, as decimal strings.
+- `stopped`: the allowance is switched off (the module is off, or the agent's key is no longer listed); what it holds.
+- `limits_not_read`: a pot of the guardian's alone with something the rules do not read past (another add-on, a
+  guard, another fallback handler, an approval to the agent's key, another key, another token, another period), or
+  any pot while the pot is switched off on this deployment (below). No amount.
+- `former`: a pot the body declared that is no longer the one on the record (taken off it, or replaced by a later
+  note), with `declaredAt` and `endedAt`. Served only by a lookup by that pot's own address, which still leads to the
+  body.
+- `unavailable`: the chain could not be read just now. No claim at all, never memoised.
+
+`pot` is null when no pot is on the record (none noted, or taken off), when the noted address holds no code yet,
+when the Safe is not the guardian's alone (another owner, another threshold, other code), and beside a statement not
+in force.
+
+**The periods are fixed.** Each thirty-day period starts where the last one ended, counted from the minute the
+ceiling was first set (the module's `lastResetMin`); what was not taken does not carry over. So the agent's key can
+take the whole ceiling in the last minutes of one period and the whole ceiling again at the start of the next: twice
+the ceiling within a few minutes is possible around a period's end. A change of the ceiling keeps the current period
+and what was taken in it; "Start again" and a new key start a new period at the minute they are mined.
+
+**The reading rules**, in this order, the first that applies decides (`potReading` in
+`back/backend/src/legalBody/safePot.ts`; the website holds the same list):
+
+1. No code at the address: `absent` (the record serves nothing).
+2. The code is not a Safe proxy's, or its singleton is not SafeL2 v1.4.1, or its owners are not exactly the
+   guardian, or its threshold is not 1: `not_the_guardians` (the record serves nothing).
+3. Its modules are neither none nor exactly the AllowanceModule, or the list goes on: `limits_not_read`
+   (`other_module`).
+4. A guard is set: `limits_not_read` (`guard_set`).
+5. The fallback handler is not Safe's CompatibilityFallbackHandler v1.4.1: `limits_not_read` (`other_handler`).
+6. The pot has approved the agent's key on USDC: `limits_not_read` (`usdc_approved`).
+7. No module: `stopped` (`module_off`).
+8. No delegate, and the list ends there: `stopped` (`no_delegate`).
+9. The delegates are not exactly the agent's wallet, or the list goes on, or the agent's wallet is the guardian's:
+   `limits_not_read` (`other_delegate`).
+10. The key's tokens are not exactly USDC: `limits_not_read` (`other_token`). This also closes an allowance on the
+    native coin.
+11. The period is not 43,200 minutes: `limits_not_read` (`other_period`).
+12. Any of the allowance's five fields is not a number: `limits_not_read` (`other_period`). Otherwise
+    `ceiling_read`.
+
+The module's own answers are never enough: after `disableModule` it still answers the key and a live-looking
+allowance, and after `removeDelegate` it still lists the token. Rules 3 and 7 read the Safe's own module list first
+for that reason. The rules are applied only to an address the server recomputed itself from the birth details.
+
+**Recomputing a pot's address from `birth`, without trusting Novi Corpus.** `birth` gives the guardian, the agent's
+wallet it was set up for (its first key), the token, the first ceiling in units, the period (43,200), the salt
+number, and the five contracts. The initializer is
+`setup([guardian], 1, multiSendCallOnly, multiSend(enableModule(allowanceModule) to the zero address, addDelegate(agentWallet), setAllowance(agentWallet, token, ceilingUnits, 43200, 0)), fallbackHandler, 0x0, 0, 0x0)`,
+each part of the batch packed as operation 0 (uint8), to (address), value 0 (uint256), the data's length (uint256)
+and the data. The salt is keccak256 of keccak256(initializer) followed by the salt number as 32 bytes. The address is
+CREATE2 of `proxyFactory` with that salt and keccak256 of the factory's `proxyCreationCode()` followed by `singleton`
+as a 32-byte word. With `cast` alone (these values are vector V3, whose address is
+`0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D`; put the `birth` values in their place):
+
+```bash
+GUARDIAN=0x15D4EE6F84b6bf8ceE5A24cCb19FDF8257c22b0A AGENT=0x2dDcf8da463526614b9FA5E87Db259a3Bf06667C
+TOKEN=0x3600000000000000000000000000000000000000 CEILING=50000000 SALT=1
+FACTORY=0x4e1DCf7AD4e460CfD30791CCC4F9c8a4f820ec67 SINGLETON=0x29fcB43b46531BcA003ddC8FCB67FFE91900C762
+HANDLER=0xfd0732Dc9E303f09fCEf3a7388Ad10A83459Ec99 MULTISEND=0xA83c336B20401Af773B6219BA5027174338D1836
+MODULE=0xAA46724893dedD72658219405185Fb0Fc91e091C RPC=https://rpc.testnet.arc.io
+ZERO=0x0000000000000000000000000000000000000000
+part() { local data=$(cast calldata "$2" "${@:3}"); cast abi-encode --packed "f(uint8,address,uint256,uint256,bytes)" 0 "$1" 0 $(( (${#data} - 2) / 2 )) "$data"; }
+BATCH=$(cast calldata "multiSend(bytes)" $(cast concat-hex \
+  $(part $ZERO "enableModule(address)" $MODULE) \
+  $(part $MODULE "addDelegate(address)" $AGENT) \
+  $(part $MODULE "setAllowance(address,address,uint96,uint16,uint32)" $AGENT $TOKEN $CEILING 43200 0)))
+INIT=$(cast calldata "setup(address[],uint256,address,bytes,address,address,uint256,address)" \
+  "[$GUARDIAN]" 1 $MULTISEND $BATCH $HANDLER $ZERO 0 $ZERO)
+SALTHASH=$(cast keccak $(cast concat-hex $(cast keccak $INIT) $(cast to-uint256 $SALT)))
+INITCODEHASH=$(cast keccak $(cast concat-hex $(cast call $FACTORY "proxyCreationCode()(bytes)" --rpc-url $RPC) \
+  $(cast abi-encode "f(address)" $SINGLETON)))
+cast compute-address $FACTORY --salt $SALTHASH --init-code-hash $INITCODEHASH
+# Computed Address: 0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D
+# INITCODEHASH is 0xe298282cefe913ab5d282047161268a8222e4bd4ed106300c547894bbefd31ee on Arc testnet and mainnet
+```
+
+**The read for an operator** (run on 24 Nov against the real Safe of the testnet run): the five numbers are the
+ceiling, what was taken in the current period, the period in minutes, the minute the period started, and a counter.
+The module answers them even when the Safe has switched it off, so read the Safe's modules too
+(`getModulesPaginated(0x0000000000000000000000000000000000000001,10)`).
+
+```bash
+cast call 0xAA46724893dedD72658219405185Fb0Fc91e091C "getTokenAllowance(address,address,address)(uint256[5])" \
+  <pot> <agent wallet> 0x3600000000000000000000000000000000000000 --rpc-url <rpc>
+```
+
+**The start-up check, and the pot's switch.** At boot the server reads the code of the seven contracts the pot is
+built from (SafeL2, the proxy factory, the fallback handler, MultiSendCallOnly v1.5.0, the AllowanceModule,
+Multicall3, and USDC's proxy) and compares keccak256 of each with the pinned hash. It never stops the server: it is
+started and not awaited, so legal bodies, formation and everything else run whatever it finds, and only the pot is
+switched on or off. The boot log says which:
+
+- `[boot] pot contracts verified on-chain: 7 code hashes on chain <id>`: the pot is offered,
+  `/config.legalBodies.pot` is `true`.
+- `[boot] pot contracts NOT verified: unreadable: ...`: a node could not be read. The pot is off, and the check is
+  tried again once a minute; it turns on by itself once the seven hashes verify (the verified line follows).
+- `[boot] pot contracts NOT verified: mismatch: ...`: a contract holds no code or other code (the line names it, its
+  address and both hashes). The pot stays off until a restart. Investigate first: a restart only checks again.
+
+While the pot is off: `/config.legalBodies.pot` is `false` and the website offers no pot and no action on one, apart
+from a card to take a pot that is on the record off it; the note door
+and the agent's two MCP tools answer 409 `pot_not_offered`; the guardian's read of the body's notes
+(`GET /legal-body-orders/:id/pot`) and the take-off door still answer, so a pot on the record can always be taken
+off it; and the record still names a pot that holds a pot's code, with "Its limits were not read." and no amount.
+
+**The doors and their refusal codes.** The sentences are in `back/backend/src/legalBody/sentences.ts`.
+
+- `POST /legal-body-orders/:id/pot`, the note, before the setup transaction (after the real-human check and the
+  doors' throttle): 409 `pot_not_offered`; 404 `not_found`; 409 `order_closed`, `legal_body_revoked`,
+  `other_deployment`; 400 `pot_invalid`, `pot_declaration_required`; 409 `pot_chain_unsupported`,
+  `grant_allows_no_spending`, `ceiling_above_grant`, `pot_address_mismatch` (also a first key that is not the
+  registry's), `pot_taken` (another legal body noted this address), `pot_exists` (one pot for life: another noted
+  pot of this body holds code), `pot_pending` (a pot noted earlier is still being set up: it is finished at its own
+  address), `agent_wallet_required`; 503 `chain_unavailable`; 429 `rate_limited`.
+- `GET /legal-body-orders/:id/pot`: 404 `not_found`; otherwise `{ "pot": null }` or the latest note.
+- `POST /legal-body-orders/:id/pot/off-record`: 404 `not_found`; 409 `pot_not_on_record`. Any state, any deployment,
+  whatever the switch: a guardian may always take a claim back. The pot itself, its money and its allowance are
+  untouched.
+- MCP `get_pot` and `prepare_pot_take`: 409 `pot_not_offered`; 404 `not_found`; 409 `pot_not_declared`; 400
+  `pot_take_invalid`; 409 `pot_take_body_not_in_force`, `pot_chain_unsupported`, `pot_take_bad_payee`,
+  `pot_not_readable` (the reading is not `ceiling_read`), `pot_take_over_ceiling`, `pot_take_over_balance`; 500
+  `internal_error` (a note whose birth details do not give its address); 503 `chain_unavailable`. `get_pot` is a
+  read and answers for a body in any state; a take is prepared only for a body in force. The prepared take is sent by
+  the agent's key itself, to the AllowanceModule, with an empty signature and a gas limit of 200,000.
+
+**One action at a time on the card.** While any wallet action or record action of the pot's card is in flight, every
+other button of the card is disabled. A wallet prompt that never answers holds that lock until the prompt settles
+(the person approves or rejects it in the wallet) or the page is reloaded: tell a guardian whose buttons stay grey to
+look for an open prompt in the wallet, then reload.
+
+**Wording rules of the record.** Never "enforced", "guarantee" or "guaranteed" about the pot: the ceiling is "read
+from the chain". Every sentence about the pot's ceiling says "in each thirty-day period" (or "the current period"),
+never "per thirty days", which stays for a grant's own amounts. The stopped sentence is exactly "The agent's key
+cannot take from it: its allowance is switched off." and never more: no read can show that no key at all can move
+the pot's money.
+
+**What to watch.** `legal_body_pot_declared` and `legal_body_pot_removed` (`{"legalBodyId"}`), one per note;
+`legal_body_pot_unavailable` (`{"legalBodyId","errorName"}`), a chain read of the record failed;
+`legal_body_pot_note_unrecomputable` (level error, `{"legalBodyId"}`), a note whose birth details do not give its
+address, never served: worth an alarm; `legal_body_chain_unavailable` with a `stage` of `pot_code`,
+`pot_agent_wallet` or `pot_read`, the 503 of a door or a tool.
+
 ## The seller policy
 
 `X402_TRUST_POLICY=legal-bodies-only` (third value, `config/env.ts`) applies to the deployment's configured wall at
@@ -209,8 +368,8 @@ the `www/backend` hop. Then run the acceptance legs.
 
 ## What to watch — `journalctl -u legalbody-api -f | grep opslog`
 
-- `legal_body_lookup` — one JSON line per memo MISS: `{"matchedBy":"pocket"|"treasury"|"statement"|"none","standing":…}`
-  (`statement` for a Minimal legal body). Never the address.
+- `legal_body_lookup` — one JSON line per memo MISS: `{"matchedBy":"pocket"|"treasury"|"statement"|"pot"|"none","standing":…}`
+  (`statement` for a Minimal legal body, `pot` for one found by a pot it declared). Never the address.
 - `legal_body_lookup_throttled` — `{"bucket":"client"|"shared"}`, at most once per 60 s whatever the volume.
 - `attestation_key_loaded`: once at boot, `{"attestor":"0x…"}`, the attestor's public address; compare it with the ENS
   record `com.novicorpus.attestor`. `legal_body_statements_off` `{"reason":"no_attestation_key"}` instead: the
