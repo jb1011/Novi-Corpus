@@ -7,11 +7,16 @@
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { ApiError, type IdentitySessionView } from "@/lib/api/types";
+import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
   READ_POLL_MS,
   READ_SYNC_EVERY_MS,
   READ_WINDOW_MS,
   SYNC_MIN_INTERVAL_MS,
+  clickLeftUnread,
+  identityCardText,
+  identityCardView,
+  type AutomaticCardView,
 } from "@/lib/legalBody/identityCheck";
 import {
   SYSTEM_TIMERS,
@@ -229,6 +234,45 @@ describe("a read at the provider over a fresh read of the session", () => {
     await vi.advanceTimersByTimeAsync(5_000);
     expect(send).toHaveBeenCalledTimes(2);
     loop.stop();
+  });
+
+  // U2 residual: a read again that fails is retried, so it can outlast a tick; a Check again in
+  // that time joins the tick's run, and the run settles with the tick's step.
+  test("a Check again that joins a tick's run whose read fails ends unreadable, with Try again", async () => {
+    const read = vi.fn(
+      (): Promise<FreshRead> =>
+        new Promise((_resolve, reject) => setTimeout(() => reject(new Error("network")), 7_000)),
+    );
+    const send = vi.fn(async () => ({}));
+    const gate = createSyncGate({ send, onCoolingChange() {}, timers: SYSTEM_TIMERS });
+    const fresh = createFreshSync({ read, gate });
+
+    const tick = fresh.run("wait");
+    await vi.advanceTimersByTimeAsync(1_000);
+    const click = fresh.run("click");
+    expect(click).toBe(tick);
+    await vi.advanceTimersByTimeAsync(6_000);
+    const out = await click;
+    expect(out).toEqual({ sent: false, step: "wait" });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(send).not.toHaveBeenCalled();
+
+    // The click reads it as unread: the read-back's failed state, which the card says with
+    // Try again, never "being read".
+    expect(clickLeftUnread(out)).toBe(true);
+    const A = LEGAL_BODY_COPY.human.guardianIdentity.automatic;
+    const view = identityCardView({
+      identity: { required: false, automatic: true, state: "pending" },
+      worldAccepted: true,
+      session: OPEN,
+      arrival: "failed",
+      startRefused: null,
+      nowMs: Date.now(),
+    });
+    expect(view.kind).toBe("unreadable");
+    expect(identityCardText(view as AutomaticCardView, { longWait: false, formatDate: String }).status).toBe(
+      A.unreadable,
+    );
   });
 
   test("a second run while one is under way shares it: no second read, no second POST", async () => {

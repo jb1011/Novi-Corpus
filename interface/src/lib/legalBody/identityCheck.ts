@@ -433,6 +433,13 @@ export function arrivalAfter(out: CheckedSync): Arrival {
   return out.step === "show" ? "done" : "failed";
 }
 
+/** Whether a Check again's outcome leaves the check unread: its read again failed. A click's own
+ *  run never gives `wait`, so a `wait` is the wait's own run the click joined (`createFreshSync`),
+ *  whose read failed: the same failure, and the card says it the same way, with Try again. */
+export function clickLeftUnread(out: CheckedSync): boolean {
+  return !out.sent && (out.step === "unreadable" || out.step === "wait");
+}
+
 /* ── What the card keeps from a click ──────────────────────────────────────────────────────── */
 
 /** A sentence about a click that went wrong, with the card's kind it was said under. */

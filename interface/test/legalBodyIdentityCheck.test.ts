@@ -20,6 +20,7 @@ import {
   arrivalOf,
   attemptSentence,
   cardUnderWay,
+  clickLeftUnread,
   identityCardText,
   identityCardView,
   providerPageUrl,
@@ -336,6 +337,19 @@ describe("the wait and the return", () => {
     expect(arrivalAfter({ sent: false, step: "unreadable" })).toBe("failed");
     // Another read at the provider under way or cooling: this one did not go out.
     expect(arrivalAfter({ sent: false, step: "busy" })).toBe("failed");
+  });
+
+  // U2 residual: a Check again that joined the wait's run settles with the tick's step.
+  test("a Check again leaves the check unread when its read failed, whoever started the run", () => {
+    expect(clickLeftUnread({ sent: false, step: "unreadable" })).toBe(true);
+    // A click's own run never gives a wait: this is the tick's run it joined, whose read failed.
+    expect(clickLeftUnread({ sent: false, step: "wait" })).toBe(true);
+    expect(clickLeftUnread({ sent: false, step: "show" })).toBe(false);
+    expect(clickLeftUnread({ sent: false, step: "busy" })).toBe(false);
+    expect(clickLeftUnread({ sent: true, result: { ok: true } })).toBe(false);
+    expect(
+      clickLeftUnread({ sent: true, result: { ok: false, error: new ApiError(503, { code: "identity_provider_unavailable", message: "m" }) } }),
+    ).toBe(false);
   });
 
   test("a sync the card asks for is never inside the server's throttle", () => {

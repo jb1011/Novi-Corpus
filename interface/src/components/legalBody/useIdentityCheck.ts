@@ -16,6 +16,7 @@ import {
   arrivalAfter,
   arrivalOf,
   cardUnderWay,
+  clickLeftUnread,
   identityCardView,
   providerPageUrl,
   providerReadStep,
@@ -306,9 +307,9 @@ export function useIdentityCheck(p: {
     const kind = view.kind;
     void fresh.run("click").then((out) => {
       if (out.sent) say(kind, out.result.ok ? null : syncRefusal(out.result.error).sentence);
-      // Its read again failed: the check is unread, with Try again, and the wait does not start
-      // again (follow-up U2).
-      if (!out.sent && out.step === "unreadable") {
+      // Its read again failed, its own or that of the wait's run it joined: the check is unread,
+      // with Try again, and the wait does not start again (follow-up U2).
+      if (clickLeftUnread(out)) {
         setLastRead("failed");
         return;
       }
