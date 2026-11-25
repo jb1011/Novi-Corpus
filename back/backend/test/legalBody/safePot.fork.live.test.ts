@@ -22,7 +22,7 @@
  * transactions are built by small encoders of this file, lifted from the proven script of
  * 20-24 Nov (`msTx`, `multiSendData`, `ownerSig`, `execTxData` and the Multicall3 wrapper of its
  * `buildPlan`), in exactly the shapes the website sends: step 0 pins them to the same bytes the
- * website's encoders are pinned to (V2, V4 to V6, V9 to V13).
+ * website's encoders are pinned to (V2, V4 to V6, V9 to V13 and V16).
  *
  * The module logic runs on the repository's 6-decimal `MockUSDC`, through a copy of the pot's table
  * whose `usdc` is the mock: an anvil fork cannot move Arc's USDC (its transfer calls a node-level
@@ -391,7 +391,7 @@ function clientsFor(rpcUrl: string) {
 /** Step 0 needs no chain: it runs whatever the flag, so every run of the suite pins this file's
  *  encoders to the website's vectors. */
 describe("the fork test's own encoders, pinned to the website's vectors (no chain, always run)", () => {
-  it("0. the test's own encoders give the bytes the website's encoders are pinned to (V2, V4 to V6, V9 to V13)", () => {
+  it("0. the test's own encoders give the bytes the website's encoders are pinned to (V2, V4 to V6, V9 to V13 and V16)", () => {
     const T = potAddresses(ARC_TESTNET);
     if (T === null) throw new Error("no pot table");
     const v3 = { guardian: RUN_G, agentWallet: RUN_A, token: T.usdc, ceilingUnits: 50n * U };
@@ -450,6 +450,12 @@ describe("the fork test's own encoders, pinned to the website's vectors (no chai
       restoreTx(T, RUN_G, { ...restore, key: RUN_P, delegates: [], modules: [] }),
       1092,
       "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12",
+    );
+    // V16: start again with the key itself still listed (removeDelegate first).
+    pinned(
+      restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [RUN_A], modules: [] }),
+      1252,
+      "0x5cc5e16da50f1eaa12fa7f4a415b509af88d67e05b494e1fb809035362871c1f",
     );
   });
 });
