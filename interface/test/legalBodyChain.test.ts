@@ -2375,6 +2375,9 @@ describe("the allowlist refuses a USDC transfer", () => {
       potCtx({ ...ADD_V14, amountUnits: POT_FUND_MAX_UNITS + BigInt(1) }),
       "fund_out_of_bounds",
     ],
+    ["add money to the zero address", { ...add, args: [ZERO, ADD_V14.amountUnits] }, potCtx({ ...ADD_V14, pot: ZERO }), "not_the_pot"],
+    ["add money to the guardian's own wallet", { ...add, args: [G, ADD_V14.amountUnits] }, potCtx({ ...ADD_V14, pot: lower(G) }), "not_the_pot"],
+    ["add money to the module", { ...add, args: [T.allowanceModule, ADD_V14.amountUnits] }, potCtx({ ...ADD_V14, pot: T.allowanceModule }), "not_the_pot"],
     ["fee money to the zero address", fee, potCtx({ ...FEE_V15, agentWallet: ZERO }), "wallet_is_zero"],
     ["fee money to the guardian's own wallet", fee, potCtx({ ...FEE_V15, agentWallet: lower(G) }), "wallet_is_guardian"],
     ["fee money to a wallet with code", fee, potCtx({ ...FEE_V15, agentHasCode: true }), "fee_money_contract_wallet"],
@@ -2409,6 +2412,7 @@ describe("the allowlist refuses a USDC transfer", () => {
         "not_the_pinned_abi",
         "sends_value",
         "fund_out_of_bounds",
+        "not_the_pot",
         "wallet_is_zero",
         "wallet_is_guardian",
         "fee_money_contract_wallet",
@@ -2416,6 +2420,20 @@ describe("the allowlist refuses a USDC transfer", () => {
         "transfer_args",
       ]),
     );
+  });
+
+  test("add money refuses a pot that is the zero address, the guardian's or any address of the pot's table, in any letter case (Ruling R32)", () => {
+    const strangers: Address[] = [ZERO, G, ...(Object.values(T) as Address[])];
+    for (const pot of strangers)
+      for (const spelling of [pot, lower(pot), upper(pot)]) {
+        const p: AddMoney = { ...ADD_V14, pot: spelling };
+        // The builder refuses it, and so does the allowlist for a request built another way.
+        expect(potTransferCall(config, p, TRANSFER_GAS), spelling).toEqual(refused("not_the_pot"));
+        const req: WriteRequest = { ...transferReq(ADD_V14), args: [spelling, ADD_V14.amountUnits] };
+        expect(allowedCall(req, potCtx(p)), spelling).toEqual(refused("not_the_pot"));
+      }
+    // The noted pot itself still passes.
+    expect(allowedCall(transferReq(ADD_V14), potCtx(ADD_V14)).ok).toBe(true);
   });
 
   test("add money: the common rules, then the transfer's, then its own, in the order they are written", () => {

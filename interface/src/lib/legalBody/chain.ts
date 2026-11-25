@@ -639,12 +639,23 @@ function rebuildExec(a: PotAddresses, p: ExecRead): { ok: true; args: SafeExecAr
 /** A USDC transfer's two arguments: the payee, checksummed, and the amount in units. */
 type TransferArgs = readonly [Address, bigint];
 
-/** A transfer's own rules, by kind, then its rebuild. Add money: 1 unit to POT_FUND_MAX_UNITS,
- *  to the noted pot. Fee money, in this order: never the zero address; never the guardian's own
- *  wallet; never a wallet with code, so only a plain key; 1 unit to POT_AGENT_GAS_MAX_UNITS; to
- *  the agent's wallet. */
-function rebuildTransfer(p: TransferContext): { ok: true; args: TransferArgs } | Refusal {
+/** A transfer's own rules, by kind, then its rebuild. Add money, in this order: never to the zero
+ *  address, the guardian's own wallet or any address of the pot's table (Ruling R32: the
+ *  allowlist does not rely on the caller having recomputed the noted pot); 1 unit to
+ *  POT_FUND_MAX_UNITS, to the noted pot. Fee money, in this order: never the zero address; never
+ *  the guardian's own wallet; never a wallet with code, so only a plain key; 1 unit to
+ *  POT_AGENT_GAS_MAX_UNITS; to the agent's wallet. */
+function rebuildTransfer(
+  a: PotAddresses,
+  p: TransferContext,
+): { ok: true; args: TransferArgs } | Refusal {
   if (p.kind === "add_money") {
+    if (
+      ZERO_ADDRESS.test(p.pot) ||
+      sameAddress(p.pot, p.guardian) ||
+      Object.values(a).some((known) => sameAddr(known, p.pot))
+    )
+      return refuse("not_the_pot");
     if (p.amountUnits === ZERO || p.amountUnits > POT_FUND_MAX_UNITS)
       return refuse("fund_out_of_bounds");
     return { ok: true, args: [checksummed(p.pot), p.amountUnits] };
@@ -719,7 +730,7 @@ export function potTransferCall(
   if (a === null) return refuse("pot_chain_unsupported");
   const read = readTransferContext(p);
   if (read === null) return refuse("no_pot_context");
-  const rebuilt = rebuildTransfer(read);
+  const rebuilt = rebuildTransfer(a, read);
   if (!rebuilt.ok) return rebuilt;
   return {
     chainId: config.chainId,
@@ -933,7 +944,7 @@ function checkTransfer(
   if (req.abi !== erc20Abi) return refuse("not_the_pinned_abi");
   const value: unknown = req.value;
   if (value !== undefined && value !== ZERO) return refuse("sends_value");
-  const rebuilt = rebuildTransfer(p);
+  const rebuilt = rebuildTransfer(a, p);
   if (!rebuilt.ok) return rebuilt;
   if (!sameTransferArgs(req.args, rebuilt.args)) return refuse("transfer_args");
   return {
