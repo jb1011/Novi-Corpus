@@ -525,6 +525,14 @@ describe("the done page's pot card", () => {
       calls.pot = { pot: NOTED };
       calls.raw = undefined;
       minimal(done(kit({ pot: false })), "not read yet");
+      // Its read failed: the card says so with Try again, and the take off stays beside it.
+      calls.rawError = true;
+      const failed = done(kit({ pot: false }));
+      expect(text(failed)).toContain(POT.recordUnavailable);
+      expect(button(failed, POT.retry)).not.toBeNull();
+      expect(button(failed, POT.offRecordSend)).not.toBeNull();
+      expect(button(failed, POT.stopSend)).toBeNull();
+      calls.rawError = false;
       nothingSent();
     });
 

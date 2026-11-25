@@ -163,7 +163,8 @@ function WalletCard({ card, onOpen }: { card: DoneWalletCard; onOpen: () => void
  * unlinked order, a notice, another deployment on this chain, a record naming no wallet of the
  * agent's own), the EXIT CARD reads the recomputed pot on the chain whatever the flag, and offers
  * what `potExitOffers` gives: Stop the allowance, Take the money back, and the take off. Until it
- * is read, or when it cannot be, or offers nothing, the take off stands alone as before.
+ * is read, or when it offers nothing, the take off stands alone as before; a read that failed says
+ * so with Try again beside it.
  *
  * `potCard` decides: nothing; the card while a read is out; the offer, whose click opens the setup
  * step here, in place, where it stays from then on; or the pot's own card (`PotManage`): what the
@@ -281,6 +282,19 @@ function DonePot({
           onChanged={reread}
           exit={offers}
         />
+      );
+    // Its read failed: the card says so with Try again, as the full card does; the take off stays.
+    if (rawQuery.isError)
+      return (
+        <>
+          <PotCardView
+            shown={{ kind: "unreadable" }}
+            onOpen={() => {}}
+            onRetry={reread}
+            retrying={potQuery.isFetching || rawQuery.isFetching}
+          />
+          {takeOff}
+        </>
       );
     return takeOff;
   }
