@@ -99,9 +99,13 @@ export type PotCard = "hidden" | "checking" | "offer" | "manage";
  *  - hidden: `/config` has no pot; the chain is not in the pot's table; there is no order, or it is
  *    not `linked`, is revoked or is of another chain; a notice is shown; or the record's agent
  *    wallet is unset, the guardian's, or not an address (the wallet card shows then);
- *  - checking: the record, the noted pot or, for a note, its reading is not there yet;
- *  - offer: no note, or a note whose address has no code (set up again only at THAT address);
- *  - manage: any other reading, on the record or off it.
+ *  - checking: the record, the noted pot, the grant or, for a note, its reading is not there yet;
+ *  - offer: no note, or a note whose address has no code (set up again only at THAT address), for
+ *    a grant that allows some spending, none, or could not be read (the step then says so and
+ *    offers no form until it reads);
+ *  - hidden, in place of offer, for a grant that allows none of buying, paying and engaging a
+ *    contractor: a pot would have nothing to release, and the server refuses it;
+ *  - manage: any other reading, on the record or off it, whatever the grant.
  * One pot for life: once the noted address holds code, `offer` never comes back.
  */
 export function potCard(p: {
@@ -114,6 +118,9 @@ export function potCard(p: {
   noted: OrderPotView | null | undefined;
   /** The noted address's reading: null while it is read. */
   reading: PotReading | null;
+  /** The order's grant as a cap (`potCeilingCapFromGrant`): null while it is read, "unreadable"
+   *  when the read failed. */
+  cap: PotCeilingCap | "unreadable" | null;
 }): PotCard {
   if (p.potOffered !== true) return "hidden";
   if (potAddresses(p.chainId) === null) return "hidden";
@@ -134,10 +141,12 @@ export function potCard(p: {
     agentWalletOwed(wallet as Address, order.guardian)
   )
     return "hidden";
-  if (p.noted === undefined) return "checking";
-  if (p.noted === null) return "offer";
+  if (p.noted === undefined || p.cap === null) return "checking";
+  const offer: PotCard =
+    p.cap !== "unreadable" && p.cap.kind === "no_spending" ? "hidden" : "offer";
+  if (p.noted === null) return offer;
   if (p.reading === null) return "checking";
-  return p.reading.state === "absent" ? "offer" : "manage";
+  return p.reading.state === "absent" ? offer : "manage";
 }
 
 /**
@@ -167,7 +176,7 @@ function capUnits(cap: Extract<PotCeilingCap, { kind: "capped" }>): bigint | nul
 /** The line beside the ceiling field: `ceilingMax` with the cap's amount, or `ceilingNoGrant`; a
  *  grant that allows no spending has no field, and says so. */
 export function potCeilingHint(cap: PotCeilingCap): string {
-  if (cap.kind === "capped") return fillCopy(POT.ceilingMax, { amount: String(cap.maxUsdc) });
+  if (cap.kind === "capped") return fillCopy(POT.ceilingMax, { cap: String(cap.maxUsdc) });
   if (cap.kind === "no_spending") return POT.grantNoSpending;
   return POT.ceilingNoGrant;
 }
@@ -260,13 +269,20 @@ export function potFormCheck(
 // The setup's plan
 // ---------------------------------------------------------------------------------------------
 
-/** What the setup will send, from one click's reads. `agentWalletKind` is the kind the click read
- *  (`walletKindOf` of the agent wallet's code); `value` is the transaction's own value, the sum of
- *  the two amounts, in native wei. */
+/**
+ * What the setup will send, from one click's reads. `agentWallet` is the key the pot is set up for:
+ * the registry's wallet (`registryWallet`, read in the click), or, for the noted pot that never got
+ * code when the registry has named another key since (`keyChanged`, Ruling R19), the key the note
+ * was made for. `agentWalletKind` is the kind the click read for `agentWallet` (`walletKindOf` of
+ * its code), and null when the click read another wallet's code: no fee money is sent then.
+ * `value` is the transaction's own value, the sum of the two amounts, in native wei.
+ */
 export type PotPlan = {
   guardian: Address;
   agentWallet: Address;
-  agentWalletKind: WalletKind;
+  registryWallet: Address;
+  keyChanged: boolean;
+  agentWalletKind: WalletKind | null;
   ceilingUnits: bigint;
   fundWei: bigint;
   agentGasWei: bigint;
@@ -306,36 +322,19 @@ function notedBirthOf(noted: OrderPotView): NotedBirth | null {
   return { saltNonce: BigInt(saltNonce), agentWallet: agentWallet as Address, ceilingUnits };
 }
 
-/** The noted pot a setup is made again for: the note's birth while the registry still names the
- *  key it was noted for; null for a new pot (no note, or a note for a key the registry no longer
- *  names, which is never created); "unreadable" for a note whose birth does not read. */
-function againOf(
-  noted: OrderPotView | null,
-  agentWallet: Address,
-): NotedBirth | null | "unreadable" {
-  if (noted === null) return null;
-  const birth = notedBirthOf(noted);
-  if (birth === null) return "unreadable";
-  return sameAddress(birth.agentWallet, agentWallet) ? birth : null;
-}
-
 /** A registry answer that names an address. */
 const isAddressRead = (read: AgentWalletRead): read is Address =>
   typeof read === "string" && ADDRESS.test(read);
 
 /**
- * The salt number the click predicts the pot's address with: the noted pot's own while the
- * registry still names the key it was noted for (one pot for life: a setup made again can only
- * land at THAT address), otherwise `fresh`, the click's own random number.
+ * The salt number the click predicts the pot's address with: the noted pot's own whenever there
+ * is a note (one pot for life: a setup made again can only land at THAT address, whatever key the
+ * registry names now), otherwise `fresh`, the click's own random number. A note whose birth does
+ * not read gives `fresh`, and `potPlan` refuses it.
  */
-export function potSaltNonce(p: {
-  noted: OrderPotView | null;
-  agentWallet: AgentWalletRead;
-  fresh: bigint;
-}): bigint {
-  if (!isAddressRead(p.agentWallet)) return p.fresh;
-  const again = againOf(p.noted, p.agentWallet);
-  return again === null || again === "unreadable" ? p.fresh : again.saltNonce;
+export function potSaltNonce(p: { noted: OrderPotView | null; fresh: bigint }): bigint {
+  const birth = p.noted === null ? null : notedBirthOf(p.noted);
+  return birth === null ? p.fresh : birth.saltNonce;
 }
 
 const refusePlan = (problem: PotProblem): { ok: false; problem: PotProblem } => ({
@@ -344,29 +343,51 @@ const refusePlan = (problem: PotProblem): { ok: false; problem: PotProblem } => 
 });
 
 /**
- * The setup's plan, from this click's reads, in this order: a chain in the pot's table
- * (`unsupported`); the registry's wallet read (`read_failed` when it could not be), the agent's own
- * (`agent_wallet` for none, the zero address or the guardian's); for the noted pot that never got
- * code, the note's own salt and ceiling and its own address (`refused`, `noted_pot`); the
- * predicted address holding no code (`pot_exists`); the guardian's balance covering the value
- * (`not_enough`; the fee is the wallet's own estimate). The wallet's kind is `walletKindOf` of
- * `agentCode`: for any kind but `key`, a delegated key included, `agentGasWei` is 0 whatever the
- * form held, so the review shows what will really be sent.
+ * The setup's plan, from this click's reads, in this order:
+ *  1. one pot for life: the noted address holding code in this click (`notedCode`) is
+ *     `pot_exists`, before anything else, so a card drawn from an older reading never plans a
+ *     setup on an address that already holds a pot;
+ *  2. a chain in the pot's table (`unsupported`);
+ *  3. the registry's wallet read (`read_failed` when it could not be), the agent's own
+ *     (`agent_wallet` for none, the zero address or the guardian's);
+ *  4. with a note (it never got code): its birth details read, its first key neither zero nor the
+ *     guardian's, the note's own salt (`refused`), and the note's own ceiling (`noted_pot`). The
+ *     plan is THE NOTED ADDRESS, never another. When the registry still names the note's key, it
+ *     carries the form's money and fee money. When the registry names another key now (Ruling
+ *     R19), it is set up for the note's first key with no money at all, the pot's and the fee
+ *     money both 0: once the Safe holds code, its reading shows a key that is not the registry's,
+ *     and the card moves the allowance to the new key on the same Safe;
+ *  5. the predicted address holding no code (`pot_exists`), and, for a note, being the noted one
+ *     (`refused`);
+ *  6. the guardian's balance covering the value (`not_enough`; the fee is the wallet's own
+ *     estimate).
+ * The wallet's kind is `walletKindOf` of `agentCode`, the registry wallet's code: for any kind but
+ * `key`, a delegated key included, `agentGasWei` is 0 whatever the form held, so the review shows
+ * what will really be sent.
  */
 export function potPlan(p: {
   chainId: number;
   guardian: Address;
   agentWallet: AgentWalletRead;
+  /** The code of the registry's wallet, read in the click. */
   agentCode: Hex | undefined;
   checked: Extract<PotFormCheck, { ok: true }>;
+  /** `potSaltNonce`'s answer for this click. */
   saltNonce: bigint;
+  /** The code at the address the click predicted with that salt. */
   potCode: Hex | undefined;
-  guardianBalanceWei: bigint;
   /** `GET /pot`'s answer: the note, or null for none. */
   noted: OrderPotView | null;
+  /** The code at the noted address, read in the click; undefined with no note. */
+  notedCode: Hex | undefined;
+  guardianBalanceWei: bigint;
 }): { ok: true; plan: PotPlan } | { ok: false; problem: PotProblem } {
+  // 1.
+  if (p.noted !== null && hasCode(p.notedCode)) return refusePlan("pot_exists");
+  // 2.
   const a = potAddresses(p.chainId);
   if (a === null) return refusePlan("unsupported");
+  // 3.
   const wallet = p.agentWallet;
   if (wallet === "unreadable") return refusePlan("read_failed");
   if (
@@ -375,40 +396,55 @@ export function potPlan(p: {
     agentWalletStanding(wallet, p.guardian) !== "own"
   )
     return refusePlan("agent_wallet");
-  const again = againOf(p.noted, wallet);
-  if (again === "unreadable") return refusePlan("refused");
-  if (again !== null) {
-    if (p.saltNonce !== again.saltNonce) return refusePlan("refused");
-    if (p.checked.ceilingUnits !== again.ceilingUnits) return refusePlan("noted_pot");
+  // 4.
+  let key: Address = wallet;
+  let keyChanged = false;
+  if (p.noted !== null) {
+    const birth = notedBirthOf(p.noted);
+    if (
+      birth === null ||
+      ZERO_ADDRESS.test(birth.agentWallet) ||
+      sameAddress(birth.agentWallet, p.guardian)
+    )
+      return refusePlan("refused");
+    if (p.saltNonce !== birth.saltNonce) return refusePlan("refused");
+    if (p.checked.ceilingUnits !== birth.ceilingUnits) return refusePlan("noted_pot");
+    keyChanged = !sameAddress(birth.agentWallet, wallet);
+    if (keyChanged) key = birth.agentWallet;
   }
-  const agentWalletKind = walletKindOf(p.agentCode);
+  const agentWalletKind = keyChanged ? null : walletKindOf(p.agentCode);
+  const fundWei = keyChanged ? ZERO : p.checked.fundWei;
   const agentGasWei = agentWalletKind === "key" ? p.checked.agentGasWei : ZERO;
   let built: { pot: Address; value: bigint };
   try {
     built = potSetupCalls(a, {
       guardian: p.guardian,
-      agentWallet: wallet,
+      agentWallet: key,
       token: a.usdc,
       ceilingUnits: p.checked.ceilingUnits,
       periodMinutes: POT_PERIOD_MINUTES,
       saltNonce: p.saltNonce,
-      fundWei: p.checked.fundWei,
+      fundWei,
       agentGasWei,
     });
   } catch {
     return refusePlan("refused");
   }
-  if (again !== null && !sameAddress(built.pot, p.noted?.address)) return refusePlan("refused");
+  // 5.
+  if (p.noted !== null && !sameAddress(built.pot, p.noted.address)) return refusePlan("refused");
   if (hasCode(p.potCode)) return refusePlan("pot_exists");
+  // 6.
   if (p.guardianBalanceWei < built.value) return refusePlan("not_enough");
   return {
     ok: true,
     plan: {
       guardian: p.guardian,
-      agentWallet: wallet,
+      agentWallet: key,
+      registryWallet: wallet,
+      keyChanged,
       agentWalletKind,
       ceilingUnits: p.checked.ceilingUnits,
-      fundWei: p.checked.fundWei,
+      fundWei,
       agentGasWei,
       saltNonce: p.saltNonce,
       pot: built.pot,
@@ -417,18 +453,22 @@ export function potPlan(p: {
   };
 }
 
-/** The allowlist's context of the plan's setup (`potSetupCall`, `CallContext.pot`). */
+/** The allowlist's context of the plan's setup (`potSetupCall`, `CallContext.pot`). For a plan
+ *  whose key's kind the click did not read (`keyChanged`), the kind is left out: the allowlist
+ *  reads a setup context without it only when it sends no fee money (`readSetupContext` in
+ *  `chain.ts`), and such a plan sends none. A kind that was not read is never stated. */
 export function potSetupContext(plan: PotPlan): Extract<PotCallContext, { kind: "setup" }> {
-  return {
-    kind: "setup",
+  const context = {
+    kind: "setup" as const,
     guardian: plan.guardian,
     agentWallet: plan.agentWallet,
-    agentWalletKind: plan.agentWalletKind,
     ceilingUnits: plan.ceilingUnits,
     saltNonce: plan.saltNonce,
     fundWei: plan.fundWei,
     agentGasWei: plan.agentGasWei,
   };
+  if (plan.agentWalletKind === null) return context as Extract<PotCallContext, { kind: "setup" }>;
+  return { ...context, agentWalletKind: plan.agentWalletKind };
 }
 
 /** The review's sentence about money: every amount formatted from the plan's own wei values, and
@@ -448,15 +488,20 @@ function moneyLine(plan: PotPlan): string {
 }
 
 /** The review: the only owner, the key, the ceiling, the pot's address, what the wallet will send;
- *  then `periods`, `keepLittle` and `noRecovery`. The declaration is not a line: it is the tick
- *  box. */
+ *  then `periods`, `keepLittle` and `noRecovery`. For a plan made for the note's first key
+ *  (`keyChanged`), the key's line names it and the registry's new key, and a line says why nothing
+ *  moves and what comes next. The declaration is not a line: it is the tick box. */
 export function potReviewLines(plan: PotPlan): string[] {
+  const key = plan.keyChanged
+    ? fillCopy(POT.reviewAgentNoted, { address: plan.agentWallet, registry: plan.registryWallet })
+    : fillCopy(POT.reviewAgent, { address: plan.agentWallet });
   return [
     fillCopy(POT.reviewOwner, { address: plan.guardian }),
-    fillCopy(POT.reviewAgent, { address: plan.agentWallet }),
+    key,
     fillCopy(POT.reviewCeiling, { amount: usdc(plan.ceilingUnits) }),
     fillCopy(POT.reviewAddress, { address: plan.pot }),
     moneyLine(plan),
+    ...(plan.keyChanged ? [POT.reviewKeyChanged] : []),
     POT.periods,
     POT.keepLittle,
     POT.noRecovery,
@@ -532,38 +577,47 @@ export function potGasLimit(estimate: bigint, cap: bigint): bigint | null {
 // The sentences of a click's problems
 // ---------------------------------------------------------------------------------------------
 
-/** A click's own problem, said: the guardian's address, the network, the balance and the total in
- *  USDC, and the noted ceiling, each filled when given. */
-export function potProblemSentence(
-  problem: PotProblem,
-  p: {
-    environment: Environment;
-    guardian?: Address;
-    balanceWei?: bigint;
-    totalWei?: bigint;
-    notedCeilingUnits?: bigint;
-  },
-): string {
-  const values: Record<string, string> = { network: networkName(p.environment) };
-  if (p.guardian !== undefined) values.address = p.guardian;
-  if (p.balanceWei !== undefined) values.balance = formatNative(p.balanceWei);
-  if (p.totalWei !== undefined) values.total = formatNative(p.totalWei);
-  if (p.notedCeilingUnits !== undefined) values.amount = usdc(p.notedCeilingUnits);
-  return fillCopy(POT.problems[problem], values);
+/** A click's problem with the values its sentence names, each required by its kind: the
+ *  guardian's balance and the total in native wei, the guardian's address, the network, the noted
+ *  ceiling in units. The other problems' sentences name nothing. */
+type ProblemWithValues = "not_enough" | "not_this_wallet" | "wrong_network" | "noted_pot";
+export type PotProblemSay =
+  | { problem: "not_enough"; balanceWei: bigint; totalWei: bigint }
+  | { problem: "not_this_wallet"; guardian: Address }
+  | { problem: "wrong_network"; environment: Environment }
+  | { problem: "noted_pot"; notedCeilingUnits: bigint }
+  | { problem: Exclude<PotProblem, ProblemWithValues> };
+
+/** A click's own problem, said, every value it names filled. */
+export function potProblemSentence(say: PotProblemSay): string {
+  switch (say.problem) {
+    case "not_enough":
+      return fillCopy(POT.problems.not_enough, {
+        balance: formatNative(say.balanceWei),
+        total: formatNative(say.totalWei),
+      });
+    case "not_this_wallet":
+      return fillCopy(POT.problems.not_this_wallet, { address: say.guardian });
+    case "wrong_network":
+      return fillCopy(POT.problems.wrong_network, { network: networkName(say.environment) });
+    case "noted_pot":
+      return fillCopy(POT.problems.noted_pot, { amount: usdc(say.notedCeilingUnits) });
+    default:
+      return POT.problems[say.problem];
+  }
 }
 
 /** A refusal of the allowlist or of the wallet's checks (`sendAllowedCall`) for a pot call, before
- *  the wallet opened: each code its own plain sentence, and one this page does not know the plain
- *  refusal. Never the code itself. */
+ *  the wallet opened: each code its own plain sentence, the network and the guardian's address
+ *  filled where it names them, and one this page does not know the plain refusal. Never the code
+ *  itself. */
 export function potRefusalSentence(
   code: string,
-  p: { environment: Environment; guardian?: Address },
+  p: { environment: Environment; guardian: Address },
 ): string {
   const refusals: Readonly<Record<string, string>> = POT.refusals;
   if (!owns(refusals, code)) return POT.problems.refused;
-  const values: Record<string, string> = { network: networkName(p.environment) };
-  if (p.guardian !== undefined) values.address = p.guardian;
-  return fillCopy(refusals[code], values);
+  return fillCopy(refusals[code], { network: networkName(p.environment), address: p.guardian });
 }
 
 /** The server's pot doors' codes the screens choose a next step for. The screen shows the
@@ -579,13 +633,21 @@ export const POT_SERVER_CODES = [
   "agent_wallet_required",
   "rate_limited",
   "other_deployment",
+  "legal_body_revoked",
+  "order_closed",
+  "pot_chain_unsupported",
+  "not_found",
+  "pot_declaration_required",
+  "pot_invalid",
 ] as const;
 export type PotServerCode = (typeof POT_SERVER_CODES)[number];
 
 /** What the screen does after a refusal of the server: read the noted pot again (a body that
  *  already has its pot, or a retry of a removal whose answer was lost), the grant again, or the
  *  record again (the agent's wallet changed); go back to the form (an address the server will not
- *  note); try again; or stop (the pot is not offered here). */
+ *  note); try again; or stop, where no retry can ever work (the pot is not offered here, the body
+ *  is revoked, closed, of another deployment or not this tenant's, or this page sent what the door
+ *  does not take). */
 export type PotServerNext =
   | "reread_pot"
   | "reread_grant"
@@ -605,6 +667,12 @@ const SERVER_NEXT: Readonly<Record<PotServerCode, PotServerNext>> = {
   agent_wallet_required: "reread_record",
   rate_limited: "try_again",
   other_deployment: "stop",
+  legal_body_revoked: "stop",
+  order_closed: "stop",
+  pot_chain_unsupported: "stop",
+  not_found: "stop",
+  pot_declaration_required: "stop",
+  pot_invalid: "stop",
 };
 
 /** The next step after a refusal of the server's pot doors, by its code; any other code, or none
@@ -643,10 +711,13 @@ function spentLine(r: CeilingRead): string {
   });
 }
 
-/** The agent key's fee money, and the low mark's warning for a plain key under it. */
+/** The agent key's fee money, and the low mark's warning under it: for a plain key only. A wallet
+ *  with code (a contract wallet or a delegated key) pays its fees its own way, and no fee money is
+ *  offered to it, so nothing is said of its balance. */
 function feeLines(raw: PotRaw): string[] {
+  if (raw.agentHasCode) return [];
   const lines = [fillCopy(POT.shownFeeMoney, { amount: formatNative(raw.agentBalanceWei) })];
-  if (!raw.agentHasCode && raw.agentBalanceWei < POT_FEE_LOW_WEI) lines.push(POT.feeMoneyLow);
+  if (raw.agentBalanceWei < POT_FEE_LOW_WEI) lines.push(POT.feeMoneyLow);
   return lines;
 }
 
@@ -679,9 +750,9 @@ function stoppable(a: PotAddresses | null, guardian: Address, raw: PotRaw): bool
  * The lines: the address and the only owner; for ceiling_read the key, the ceiling, what is left
  * until the period's end (while `nowSeconds` is before it: a reading of an ended period says no
  * amount left) and the balance; for stopped `stoppedLine` and the balance; for limits_not_read the
- * reason and the balance; for not_the_guardians `notYours` and the address; the agent key's fee
- * money where fee money is offered, with `feeMoneyLow` under POT_FEE_LOW_WEI for a plain key; and
- * `offRecord` when not `onRecord`.
+ * reason and the balance; for not_the_guardians `notYours` and the address; for ceiling_read and
+ * stopped, a plain key's fee money, with `feeMoneyLow` under POT_FEE_LOW_WEI (nothing for a wallet
+ * with code); and `offRecord` when not `onRecord`.
  */
 export function potReadingView(
   reading: PotReading,

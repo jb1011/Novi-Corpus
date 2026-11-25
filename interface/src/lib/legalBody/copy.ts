@@ -656,7 +656,7 @@ export const LEGAL_BODY_COPY = {
     /* The form. */
     ceilingLabel: "Ceiling for each thirty-day period, in USDC",
     ceilingMax:
-      "At most {amount} USDC: the total your agent's grant allows per thirty days for buying, paying and engaging contractors.",
+      "At most {cap} USDC, the grant's thirty-day total for buying, paying and engaging a contractor.",
     ceilingNoGrant: "Choose the most your agent's key may take in each thirty-day period.",
     grantNoSpending:
       "Your agent's grant allows no buying, no paying and no engaging of contractors, so a pot has nothing to release.",
@@ -692,6 +692,12 @@ export const LEGAL_BODY_COPY = {
     reviewTitle: "Check before you sign",
     reviewOwner: "Only owner of the pot: {address} (your wallet)",
     reviewAgent: "The key that may take from it: {address} (your agent's wallet in the registry)",
+    /** The noted pot that never got code, when the registry names another key now (Ruling R19):
+     *  it is created at its noted address, for the key it was noted for, with no money. */
+    reviewAgentNoted:
+      "The key that may take from it: {address}, the key this pot was noted for. Your agent's wallet in the registry is now {registry}.",
+    reviewKeyChanged:
+      "So this transaction puts no money in the pot and sends nothing to that earlier key. Once the pot exists, use My agent has a new key to let the new key take from it, then add money.",
     reviewCeiling:
       "Ceiling: {amount} USDC in each thirty-day period. The first period starts when the pot is created.",
     reviewAddress: "The pot's address will be {address}",

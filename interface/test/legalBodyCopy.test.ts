@@ -363,7 +363,7 @@ describe("the company's pot", () => {
     // The pot counts fixed periods: "in each thirty-day period". A grant's amounts are counted
     // back from each act, so they keep "per thirty days".
     const saying = ALL.filter((s) => /per thirty days/i.test(s));
-    expect(saying.sort()).toEqual([POT.ceilingMax, POT.ceilingProblems.above_grant].sort());
+    expect(saying).toEqual([POT.ceilingProblems.above_grant]);
     expect(section.filter((s) => /in each thirty-day period/.test(s)).length).toBeGreaterThan(4);
   });
 
@@ -422,7 +422,7 @@ describe("the company's pot", () => {
     [
       "ceilingMax",
       POT.ceilingMax,
-      "At most {amount} USDC: the total your agent's grant allows per thirty days for buying, paying and engaging contractors.",
+      "At most {cap} USDC, the grant's thirty-day total for buying, paying and engaging a contractor.",
     ],
     [
       "ceilingNoGrant",
@@ -499,6 +499,16 @@ describe("the company's pot", () => {
       "reviewCeiling",
       POT.reviewCeiling,
       "Ceiling: {amount} USDC in each thirty-day period. The first period starts when the pot is created.",
+    ],
+    [
+      "reviewAgentNoted",
+      POT.reviewAgentNoted,
+      "The key that may take from it: {address}, the key this pot was noted for. Your agent's wallet in the registry is now {registry}.",
+    ],
+    [
+      "reviewKeyChanged",
+      POT.reviewKeyChanged,
+      "So this transaction puts no money in the pot and sends nothing to that earlier key. Once the pot exists, use My agent has a new key to let the new key take from it, then add money.",
     ],
     ["reviewAddress", POT.reviewAddress, "The pot's address will be {address}"],
     [

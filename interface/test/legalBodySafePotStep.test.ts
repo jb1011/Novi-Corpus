@@ -69,6 +69,8 @@ import {
   potSimulationOk,
   type PotFormCheck,
   type PotPlan,
+  type PotProblem,
+  type PotProblemSay,
 } from "@/lib/legalBody/safePotStep";
 
 const P_ = LEGAL_BODY_COPY.pot;
@@ -181,6 +183,7 @@ const plan = (
     potCode: undefined,
     guardianBalanceWei: WEI(USDC(1000)),
     noted: null,
+    notedCode: undefined,
     ...over,
   });
 
@@ -268,7 +271,10 @@ describe("the form", () => {
 
   test("potCeilingHint names the grant's 350 USDC for a capped cap, and the no-grant sentence otherwise", () => {
     expect(potCeilingHint({ kind: "capped", maxUsdc: 350, endsOn: null })).toBe(
-      fillCopy(P_.ceilingMax, { amount: "350" }),
+      fillCopy(P_.ceilingMax, { cap: "350" }),
+    );
+    expect(potCeilingHint({ kind: "capped", maxUsdc: 350, endsOn: null })).toBe(
+      "At most 350 USDC, the grant's thirty-day total for buying, paying and engaging a contractor.",
     );
     expect(potCeilingHint({ kind: "capped", maxUsdc: 350, endsOn: null })).toContain("350 USDC");
     expect(potCeilingHint({ kind: "none" })).toBe(P_.ceilingNoGrant);
@@ -366,6 +372,8 @@ describe("potPlan, from this click's reads", () => {
     expect(p).toEqual({
       guardian: G,
       agentWallet: A,
+      registryWallet: A,
+      keyChanged: false,
       agentWalletKind: "key",
       ceilingUnits: USDC(50),
       fundWei: ZERO,
@@ -415,15 +423,19 @@ describe("potPlan, from this click's reads", () => {
   });
 
   test("one pot for life: the noted address that never got code is set up again only at THAT address", () => {
-    // The salt is the note's while the registry names the key the note was made for.
-    expect(potSaltNonce({ noted: NOTED, agentWallet: A, fresh: BigInt(999) })).toBe(BigInt(1));
-    expect(potSaltNonce({ noted: null, agentWallet: A, fresh: BigInt(999) })).toBe(BigInt(999));
+    // The salt is the note's whenever there is a note.
+    expect(potSaltNonce({ noted: NOTED, fresh: BigInt(999) })).toBe(BigInt(1));
+    expect(potSaltNonce({ noted: null, fresh: BigInt(999) })).toBe(BigInt(999));
+    expect(potSaltNonce({ noted: { ...NOTED, birth: { ...NOTED.birth, saltNonce: "x" } }, fresh: BigInt(999) })).toBe(
+      BigInt(999),
+    );
     const again = planOf(plan({ noted: NOTED, saltNonce: BigInt(1) }));
     expect(again.pot).toBe(V3_POT);
+    expect(again.keyChanged).toBe(false);
     // Another ceiling would be another address, a second pot: refused, with the note's ceiling.
     const other = { ok: true as const, ceilingUnits: USDC(60), fundWei: ZERO, agentGasWei: ZERO };
     expect(plan({ noted: NOTED, saltNonce: BigInt(1), checked: other })).toEqual({ ok: false, problem: "noted_pot" });
-    expect(potProblemSentence("noted_pot", { environment: "sandbox", notedCeilingUnits: USDC(50) })).toBe(
+    expect(potProblemSentence({ problem: "noted_pot", notedCeilingUnits: USDC(50) })).toBe(
       fillCopy(P_.problems.noted_pot, { amount: "50" }),
     );
     // Another salt than the note's is never sent.
@@ -437,13 +449,61 @@ describe("potPlan, from this click's reads", () => {
       ok: false,
       problem: "refused",
     });
+    // A note whose first key is the guardian's is never set up.
+    expect(plan({ noted: { ...NOTED, birth: { ...NOTED.birth, agentWallet: G } } })).toEqual({
+      ok: false,
+      problem: "refused",
+    });
   });
 
-  test("a noted pot for a key the registry no longer names is never created: a new pot is planned for the registry's key", () => {
-    expect(potSaltNonce({ noted: NOTED, agentWallet: P, fresh: BigInt(999) })).toBe(BigInt(999));
-    const fresh = planOf(plan({ noted: NOTED, agentWallet: P, saltNonce: BigInt(999) }));
-    expect(fresh.agentWallet).toBe(P);
-    expect(fresh.pot).not.toBe(V3_POT);
+  test("a noted address that holds code at click time is pot_exists, first, whatever the card was drawn with", () => {
+    expect(plan({ noted: NOTED, notedCode: SOME_CODE })).toEqual({ ok: false, problem: "pot_exists" });
+    // Before every other rule: a registry that cannot be read, a chain with no table.
+    expect(plan({ noted: NOTED, notedCode: SOME_CODE, agentWallet: "unreadable" })).toEqual({
+      ok: false,
+      problem: "pot_exists",
+    });
+    expect(plan({ noted: NOTED, notedCode: SOME_CODE, chainId: 1 })).toEqual({ ok: false, problem: "pot_exists" });
+    // No code there ("0x" or none): the plan goes on.
+    expect(planOf(plan({ noted: NOTED, notedCode: "0x" })).pot).toBe(V3_POT);
+  });
+
+  test("a changed key with a code-less note plans the NOTED address for the note's first key, with value 0 and fee 0 (Ruling R19)", () => {
+    // The registry names P now; the note was made for A. The form held money and fee money.
+    const checked = { ok: true as const, ceilingUnits: USDC(50), fundWei: WEI(USDC(60)), agentGasWei: WEI(BigInt(100_000)) };
+    const p = planOf(plan({ noted: NOTED, agentWallet: P, checked, guardianBalanceWei: ZERO }));
+    expect(p).toEqual({
+      guardian: G,
+      agentWallet: A,
+      registryWallet: P,
+      keyChanged: true,
+      agentWalletKind: null,
+      ceilingUnits: USDC(50),
+      fundWei: ZERO,
+      agentGasWei: ZERO,
+      saltNonce: BigInt(1),
+      pot: V3_POT,
+      value: ZERO,
+    });
+    // The review says nothing moves, names the note's key and the registry's new one, and what next.
+    const lines = potReviewLines(p);
+    expect(lines).toContain(P_.reviewNoMoney);
+    expect(lines).toContain(fillCopy(P_.reviewAgentNoted, { address: A, registry: P }));
+    expect(lines).toContain(P_.reviewKeyChanged);
+    expect(lines).not.toContain(fillCopy(P_.reviewAgent, { address: A }));
+    expect(lines.join(" ")).not.toContain("Multicall3");
+    for (const line of lines) expect(line).not.toMatch(/\{[a-zA-Z]+\}/);
+    // The one call creates the pot; the allowlist takes the context, which states no kind it did not read.
+    const context = potSetupContext(p);
+    expect("agentWalletKind" in context).toBe(false);
+    const config = { chainId: CHAIN, identityRegistry: "0x8004A818BFB912233c491871b3d84c89A494BD9e" as Address, factory: FACTORY };
+    const req = potSetupCall(config, context, POT_SETUP_GAS_CAP);
+    expect("ok" in req).toBe(false);
+    if ("ok" in req) return;
+    expect(req.value).toBe(ZERO);
+    expect(allowedCall(req, { config, order: order(), pot: context }).ok).toBe(true);
+    // With a new salt, never a second pot: refused.
+    expect(plan({ noted: NOTED, agentWallet: P, saltNonce: BigInt(999) })).toEqual({ ok: false, problem: "refused" });
   });
 });
 
@@ -513,23 +573,48 @@ describe("before the wallet", () => {
 });
 
 describe("the sentences of a click's problems", () => {
-  test("every problem has its sentence, filled", () => {
-    const p = { environment: "sandbox" as const, guardian: G, balanceWei: WEI(USDC(3)), totalWei: BigInt("5100000000000000000"), notedCeilingUnits: USDC(50) };
-    expect(potProblemSentence("not_enough", p)).toBe(fillCopy(P_.problems.not_enough, { balance: "3", total: "5.1" }));
-    expect(potProblemSentence("not_this_wallet", p)).toBe(fillCopy(P_.problems.not_this_wallet, { address: G }));
-    expect(potProblemSentence("wrong_network", p)).toBe(fillCopy(P_.problems.wrong_network, { network: "Arc testnet" }));
-    expect(potProblemSentence("wrong_network", { ...p, environment: "production" })).toBe(
+  test("every problem has its sentence, filled with the values its kind requires", () => {
+    expect(potProblemSentence({ problem: "not_enough", balanceWei: WEI(USDC(3)), totalWei: BigInt("5100000000000000000") })).toBe(
+      fillCopy(P_.problems.not_enough, { balance: "3", total: "5.1" }),
+    );
+    expect(potProblemSentence({ problem: "not_this_wallet", guardian: G })).toBe(
+      fillCopy(P_.problems.not_this_wallet, { address: G }),
+    );
+    expect(potProblemSentence({ problem: "wrong_network", environment: "sandbox" })).toBe(
+      fillCopy(P_.problems.wrong_network, { network: "Arc testnet" }),
+    );
+    expect(potProblemSentence({ problem: "wrong_network", environment: "production" })).toBe(
       fillCopy(P_.problems.wrong_network, { network: "Arc" }),
     );
-    const all = [
-      "unsupported", "agent_wallet", "pot_exists", "not_enough", "not_this_wallet", "wrong_network",
-      "record_failed", "would_revert", "declined", "reverted", "no_receipt", "read_failed", "refused", "noted_pot",
-    ] as const;
-    for (const problem of all) {
-      const s = potProblemSentence(problem, p);
-      expect(s.length).toBeGreaterThan(0);
-      expect(s).not.toMatch(/\{[a-zA-Z]+\}/);
+  });
+
+  test("no placeholder reaches the screen: every problem and every refusal, with realistic values, leaves no brace", () => {
+    // One entry per problem: a problem added without its values fails to compile here.
+    const every: Record<PotProblem, PotProblemSay> = {
+      unsupported: { problem: "unsupported" },
+      agent_wallet: { problem: "agent_wallet" },
+      pot_exists: { problem: "pot_exists" },
+      not_enough: { problem: "not_enough", balanceWei: WEI(USDC(3)), totalWei: WEI(USDC(5)) },
+      not_this_wallet: { problem: "not_this_wallet", guardian: G },
+      wrong_network: { problem: "wrong_network", environment: "production" },
+      record_failed: { problem: "record_failed" },
+      would_revert: { problem: "would_revert" },
+      declined: { problem: "declined" },
+      reverted: { problem: "reverted" },
+      no_receipt: { problem: "no_receipt" },
+      read_failed: { problem: "read_failed" },
+      refused: { problem: "refused" },
+      noted_pot: { problem: "noted_pot", notedCeilingUnits: USDC(50) },
+    };
+    expect(Object.keys(every).sort()).toEqual(Object.keys(P_.problems).sort());
+    for (const say of Object.values(every)) {
+      const sentence = potProblemSentence(say);
+      expect(sentence.length, say.problem).toBeGreaterThan(0);
+      expect(sentence, say.problem).not.toContain("{");
     }
+    for (const environment of ["sandbox", "production"] as const)
+      for (const code of [...Object.keys(P_.refusals), "something_new"])
+        expect(potRefusalSentence(code, { environment, guardian: G }), code).not.toContain("{");
   });
 
   test("every refusal the allowlist can give a pot click has a plain sentence of its own, never its code", () => {
@@ -551,14 +636,14 @@ describe("the sentences of a click's problems", () => {
       expect(s, code).not.toBe(P_.problems.refused);
     }
     // The setup's and Send fee money's codes for one rule: one sentence (Ruling R10).
-    expect(potRefusalSentence("fee_money_needs_plain_key", { environment: "sandbox" })).toBe(
-      potRefusalSentence("fee_money_contract_wallet", { environment: "sandbox" }),
+    expect(potRefusalSentence("fee_money_needs_plain_key", { environment: "sandbox", guardian: G })).toBe(
+      potRefusalSentence("fee_money_contract_wallet", { environment: "sandbox", guardian: G }),
     );
     expect(potRefusalSentence("wallet_is_not_the_guardian", { environment: "sandbox", guardian: G })).toContain(G);
-    expect(potRefusalSentence("wallet_on_another_chain", { environment: "production" })).toContain("Arc");
+    expect(potRefusalSentence("wallet_on_another_chain", { environment: "production", guardian: G })).toContain("Arc");
     // A code this page does not know: the plain refusal, never the code.
-    expect(potRefusalSentence("something_new", { environment: "sandbox" })).toBe(P_.problems.refused);
-    expect(potRefusalSentence("toString", { environment: "sandbox" })).toBe(P_.problems.refused);
+    expect(potRefusalSentence("something_new", { environment: "sandbox", guardian: G })).toBe(P_.problems.refused);
+    expect(potRefusalSentence("toString", { environment: "sandbox", guardian: G })).toBe(P_.problems.refused);
   });
 
   test("the server's pot codes choose the next step: a re-read of the pot after pot_exists and pot_not_on_record", () => {
@@ -566,7 +651,8 @@ describe("the sentences of a click's problems", () => {
       [
         "pot_not_offered", "pot_exists", "pot_taken", "pot_address_mismatch", "ceiling_above_grant",
         "grant_allows_no_spending", "pot_not_on_record", "agent_wallet_required", "rate_limited",
-        "other_deployment",
+        "other_deployment", "legal_body_revoked", "order_closed", "pot_chain_unsupported", "not_found",
+        "pot_declaration_required", "pot_invalid",
       ].sort(),
     );
     expect(potServerNext("pot_exists")).toBe("reread_pot");
@@ -579,6 +665,12 @@ describe("the sentences of a click's problems", () => {
     expect(potServerNext("grant_allows_no_spending")).toBe("reread_grant");
     expect(potServerNext("agent_wallet_required")).toBe("reread_record");
     expect(potServerNext("rate_limited")).toBe("try_again");
+    // Where a retry can never work: stop.
+    for (const code of [
+      "legal_body_revoked", "order_closed", "pot_chain_unsupported", "not_found",
+      "pot_declaration_required", "pot_invalid",
+    ])
+      expect(potServerNext(code), code).toBe("stop");
     expect(potServerNext("chain_unavailable")).toBe("try_again");
     expect(potServerNext(undefined)).toBe("try_again");
     expect(potServerNext("constructor")).toBe("try_again");
@@ -599,6 +691,7 @@ describe("which card the done page shows", () => {
       record: record(A),
       noted: null,
       reading: null,
+      cap: { kind: "none" },
       ...over,
     });
 
@@ -637,6 +730,19 @@ describe("which card the done page shows", () => {
     expect(card({ record: null, noted: NOTED, reading: read(HEALTHY) })).toBe("checking");
     expect(card({ noted: undefined })).toBe("checking");
     expect(card({ noted: NOTED, reading: null })).toBe("checking");
+  });
+
+  test("potCard: checking while the grant is read; a grant allowing none of the three kinds gets no pot offer, and an existing pot is still managed", () => {
+    expect(card({ cap: null })).toBe("checking");
+    expect(card({ cap: null, noted: NOTED, reading: read(HEALTHY) })).toBe("checking");
+    const noSpending = { kind: "no_spending" } as const;
+    expect(card({ cap: noSpending })).toBe("hidden");
+    expect(card({ cap: noSpending, noted: NOTED, reading: { state: "absent" } })).toBe("hidden");
+    expect(card({ cap: noSpending, noted: NOTED, reading: read(HEALTHY) })).toBe("manage");
+    expect(card({ cap: noSpending, noted: NOTED, reading: read(STOPPED) })).toBe("manage");
+    // A capped grant offers; a grant that could not be read offers the step, which says so.
+    expect(card({ cap: { kind: "capped", maxUsdc: 350, endsOn: null } })).toBe("offer");
+    expect(card({ cap: "unreadable" })).toBe("offer");
   });
 });
 
@@ -743,6 +849,16 @@ describe("what the card says of a reading, and what it offers", () => {
     expect(view({ ...HEALTHY, agentBalanceWei: POT_FEE_LOW_WEI }).lines).not.toContain(P_.feeMoneyLow);
     expect(view({ ...HEALTHY, agentBalanceWei: ZERO, agentHasCode: true }).lines).not.toContain(P_.feeMoneyLow);
     expect(view({ ...STOPPED, agentBalanceWei: ZERO }).lines).toContain(P_.feeMoneyLow);
+  });
+
+  test("no fee money line at all for an agent wallet with code, on a running pot or a stopped one", () => {
+    for (const raw of [HEALTHY, STOPPED]) {
+      const lines = view({ ...raw, agentHasCode: true }).lines;
+      expect(lines.some((l) => l.startsWith("Your agent's key holds"))).toBe(false);
+      expect(lines).not.toContain(P_.feeMoneyLow);
+      // A plain key's line is there for the same pot.
+      expect(view(raw).lines).toContain(fillCopy(P_.shownFeeMoney, { amount: "0.1" }));
+    }
   });
 
   test("every line is filled", () => {
