@@ -482,7 +482,7 @@ describe("one action at a time on the card (Ruling R25)", () => {
       renderToString(
         createElement(PotActionResultPanel, {
           title: POT.addMoneyTitle,
-          stage: { at: "problem", action: "add_money", lines: [POT.problems.no_receipt], hash, again: { agentWallet: A, ceilingUnits: null, hash, confirmed: false } },
+          stage: { at: "problem", action: "add_money", lines: [POT.problems.no_receipt], hash, again: { pot: V3_POT, agentWallet: A, ceilingUnits: null, hash, confirmed: false } },
           after: [],
           busy: false,
           disabled,
@@ -576,7 +576,9 @@ describe("the sources", () => {
     const click = code.slice(code.indexOf("async function onTransfer"), code.indexOf("async function afterSend"));
     for (const read of [
       "readRegistry(client, agentId)",
-      "readPotRaw(client, a, { pot: noted.address, agentWallet: wallet })",
+      // The pot read is the runner's checked address, handed to the closure (by construction).
+      "read: async (pot) => {",
+      "readPotRaw(client, a, { pot, agentWallet: wallet })",
       "potReading(fresh, { addresses: a, guardian, agentWallet: wallet })",
       "client.getBalance({ address: guardian })",
       "readNoted: () => readPotNow()",
@@ -587,6 +589,8 @@ describe("the sources", () => {
       "allowedCall(req, { config, order, pot: ctx })",
     ])
       expect(click, read).toContain(read);
+    const readClosure = click.slice(click.indexOf("read: async (pot) => {"), click.indexOf("readNoted: () =>"));
+    expect(readClosure).not.toContain("noted.address");
     const registry = code.slice(code.indexOf("function readRegistry"), code.indexOf("async function onTransfer"));
     expect(registry).toContain("readAgentWallet(");
     expect(registry).toContain('functionName: "getAgentWallet"');
@@ -613,10 +617,13 @@ describe("the sources", () => {
   });
 
   test("after the receipt the pot and the key are read again against the click's own key, then the done page reads again", () => {
-    const back = code.slice(code.indexOf("async function readBack"));
+    const back = code.slice(code.indexOf("async function readBack"), code.indexOf("async function onCheckAgain"));
     expect(back).toContain("const wallet = again.agentWallet;");
-    expect(back).toContain("readPotRaw(client, a, { pot: noted.address, agentWallet: wallet })");
+    // Read back at the address the runner checked, never the component's noted one.
+    expect(back).toContain("readPotRaw(client, a, { pot: again.pot, agentWallet: wallet })");
+    expect(back).not.toContain("noted.address");
     expect(back).toContain("potTransferDoneView(");
+    expect(code).toContain("pot: result.pot,");
     expect(back).toContain("latestOnChanged.current()");
     expect(code).toContain("result.agentWallet");
   });

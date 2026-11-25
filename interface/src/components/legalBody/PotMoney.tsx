@@ -186,14 +186,14 @@ export function PotMoney({
       };
       const result = await runPotTransfer(kind, shown, {
         alive: () => life.alive(),
-        read: async () => {
+        read: async (pot) => {
           const [wallet, guardianBalanceWei] = await Promise.all([
             readRegistry(client, agentId),
             client.getBalance({ address: guardian }),
           ]);
           if (wallet === "none" || wallet === "unreadable")
             return { agentWallet: wallet, raw: null, reading: null, guardianBalanceWei };
-          const fresh = await readPotRaw(client, a, { pot: noted.address, agentWallet: wallet });
+          const fresh = await readPotRaw(client, a, { pot, agentWallet: wallet });
           return {
             agentWallet: wallet,
             raw: fresh,
@@ -245,6 +245,7 @@ export function PotMoney({
       // The transfer is on its way: its field starts again, so nothing is sent twice by mistake.
       setAmounts((m) => ({ ...m, [kind]: START[kind] }));
       await afterSend(client, a, kind, {
+        pot: result.pot,
         agentWallet: result.agentWallet,
         ceilingUnits: null,
         hash: result.hash,
@@ -299,7 +300,7 @@ export function PotMoney({
     const wallet = again.agentWallet;
     let fresh: PotRaw | null;
     try {
-      fresh = await readPotRaw(client, a, { pot: noted.address, agentWallet: wallet });
+      fresh = await readPotRaw(client, a, { pot: again.pot, agentWallet: wallet });
     } catch {
       fresh = null;
     }

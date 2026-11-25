@@ -242,9 +242,11 @@ export type PotActionDeps = {
    *  before the send, so a person who left gets no wallet prompt. */
   alive(): boolean;
   /** Fresh reads made in this click: the registry's `getAgentWallet` through `readAgentWallet`,
-   *  then `readPotRaw` and `potReading` for `potReadKey(registry, guardian, fallback)` when it is
-   *  an address (null `raw` and `reading` when it is none). Throws when the chain cannot be read. */
-  read(fallback: Address | null): Promise<PotActionRead>;
+   *  then `readPotRaw` and `potReading` of `pot` for `potReadKey(registry, guardian, fallback)`
+   *  when it is an address (null `raw` and `reading` when it is none). `pot` is the address the
+   *  runner checked (step 0): the closure reads that one, never one of its own. Throws when the
+   *  chain cannot be read. */
+  read(pot: Address, fallback: Address | null): Promise<PotActionRead>;
   preflight(): { ok: true } | { ok: false; problem: PotPreflightProblem };
   /** The allowlist's answer on the exact request (`potExecCall` at POT_EXEC_GAS_CAP, then
    *  `allowedCall`): the call it accepted, or its refusal's code. Nothing reaches the chain before. */
@@ -333,7 +335,8 @@ async function actionChainFailure(cause: unknown, d: PotActionDeps): Promise<Pot
  *     `wallet_is_not_the_guardian`, and nothing is sent;
  * 10. the one transaction through the allowlist, its outcomes read as `runPotCreate` reads them.
  * The answer names the key the pot was read against in the click (the registry's, or for an exit
- * the birth's first key): the pot is read back against it.
+ * the birth's first key), and the pot's checked address: the pot is read back at that address,
+ * against that key.
  */
 export async function runPotAction(
   action: PotSafeAction,
@@ -350,7 +353,7 @@ export async function runPotAction(
     noted: OrderPotView;
   },
   d: PotActionDeps,
-): Promise<{ ok: true; hash: Hex; agentWallet: Address } | PotActionFailure> {
+): Promise<{ ok: true; hash: Hex; agentWallet: Address; pot: Address } | PotActionFailure> {
   // 0.
   const checked0 = notedPotChecked(p.addresses, p.guardian, p.noted);
   if (checked0 === null || !sameAddress(checked0, p.pot))
@@ -360,7 +363,7 @@ export async function runPotAction(
   // 1.
   let fresh: PotActionRead;
   try {
-    fresh = await d.read(fallback);
+    fresh = await d.read(checked0, fallback);
   } catch (cause) {
     return d.alive() ? { ok: false, problem: "read_failed", cause } : LEFT_ACTION;
   }
@@ -427,7 +430,7 @@ export async function runPotAction(
     return { ok: false, problem: chainRefused(cause) ? "would_revert" : "refused", cause };
   }
   if (!sent.ok) return { ok: false, problem: "refused", cause: sent.problem };
-  return { ok: true, hash: sent.hash, agentWallet: key };
+  return { ok: true, hash: sent.hash, agentWallet: key, pot: checked0 };
 }
 
 /** A failed action's sentences (Task 10's), and whether the card reads the pot again: a click that
@@ -463,6 +466,8 @@ export function potActionFailureView(
 /** Read the pot again for this key: after a receipt that went through (`confirmed`), or one not
  *  seen in time, whose receipt is asked again first. */
 export type PotReadAgain = {
+  /** The pot's address the runner checked: the one read back. */
+  pot: Address;
   agentWallet: Address;
   ceilingUnits: bigint | null;
   hash: Hex;
@@ -592,9 +597,10 @@ export type PotTransferDeps = {
    *  before the send. */
   alive(): boolean;
   /** Fresh reads made in this click: the registry's `getAgentWallet` through `readAgentWallet`,
-   *  `readPotRaw` and `potReading` for it at a fresh block, and the guardian's `getBalance`.
-   *  Throws when the chain cannot be read. */
-  read(): Promise<PotTransferRead>;
+   *  `readPotRaw` and `potReading` of `pot` for it at a fresh block, and the guardian's
+   *  `getBalance`. `pot` is the address the runner checked (Ruling R32): the closure reads that
+   *  one, never one of its own. Throws when the chain cannot be read. */
+  read(pot: Address): Promise<PotTransferRead>;
   /** `GET /pot`, a request made now, for Add money only: the money goes only to the pot noted,
    *  and on the record, as the server holds it now. Throws when it fails. */
   readNoted(): Promise<OrderPotView | null>;
@@ -681,7 +687,8 @@ async function transferChainFailure(
  *  9. the account connected now is the guardian's, else `refused` with
  *     `wallet_is_not_the_guardian`, and nothing is sent;
  * 10. the one transfer through the allowlist, its outcomes read as `runPotCreate` reads them.
- * The answer names the registry's key of the click: the pot and the key are read back against it.
+ * The answer names the registry's key of the click and the pot's checked address: the pot is read
+ * back at that address, and the key against it.
  */
 export async function runPotTransfer(
   kind: PotTransfer,
@@ -697,7 +704,7 @@ export async function runPotTransfer(
     noted: OrderPotView;
   },
   d: PotTransferDeps,
-): Promise<{ ok: true; hash: Hex; agentWallet: Address } | PotTransferFailure> {
+): Promise<{ ok: true; hash: Hex; agentWallet: Address; pot: Address } | PotTransferFailure> {
   // 0.
   const amountUnits: unknown = p.amountUnits;
   if (typeof amountUnits !== "bigint" || amountUnits <= ZERO) return { ok: false, problem: "refused" };
@@ -718,7 +725,7 @@ export async function runPotTransfer(
   // 1.
   let fresh: PotTransferRead;
   try {
-    fresh = await d.read();
+    fresh = await d.read(predicted);
   } catch (cause) {
     return d.alive() ? { ok: false, problem: "read_failed", cause } : LEFT_TRANSFER;
   }
@@ -784,7 +791,7 @@ export async function runPotTransfer(
     return { ok: false, problem: chainRefused(cause) ? "would_revert" : "refused", cause };
   }
   if (!sent.ok) return { ok: false, problem: "refused", cause: sent.problem };
-  return { ok: true, hash: sent.hash, agentWallet: wallet };
+  return { ok: true, hash: sent.hash, agentWallet: wallet, pot: predicted };
 }
 
 /** A failed transfer's sentences: money short names what the wallet holds and what is needed; a

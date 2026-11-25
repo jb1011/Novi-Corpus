@@ -268,11 +268,11 @@ export function PotManage({
         alive: () => life.alive(),
         // The pot is read against the registry's key, or for an exit against the birth's first
         // key when the registry names none of the agent's own (Ruling R33).
-        read: async (fallback) => {
+        read: async (pot, fallback) => {
           const wallet = await readRegistry(client, agentId);
           const key = potReadKey(wallet, guardian, fallback);
           if (key === null) return { agentWallet: wallet, raw: null, reading: null };
-          const fresh = await readPotRaw(client, a, { pot: noted.address, agentWallet: key });
+          const fresh = await readPotRaw(client, a, { pot, agentWallet: key });
           return {
             agentWallet: wallet,
             raw: fresh,
@@ -319,6 +319,7 @@ export function PotManage({
         return;
       }
       await afterSend(client, a, action, {
+        pot: result.pot,
         agentWallet: result.agentWallet,
         ceilingUnits: newCeilingUnits ?? null,
         hash: result.hash,
@@ -373,7 +374,7 @@ export function PotManage({
     const wallet = again.agentWallet;
     let reading: PotReading | null;
     try {
-      const fresh = await readPotRaw(client, a, { pot: noted.address, agentWallet: wallet });
+      const fresh = await readPotRaw(client, a, { pot: again.pot, agentWallet: wallet });
       reading = potReading(fresh, { addresses: a, guardian, agentWallet: wallet });
     } catch {
       reading = null;

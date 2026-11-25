@@ -2252,6 +2252,8 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     const sent: PotExecContext[] = [];
     /** The fallback key each read was asked with (Ruling R33). */
     const fallbacks: (Address | null)[] = [];
+    /** The pot each read was asked for: the runner's checked address. */
+    const pots: Address[] = [];
     const yes: PotActionDeps = {
       alive: () => true,
       read: async () => f,
@@ -2271,10 +2273,11 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     const use = { ...yes, ...impl };
     const d: PotActionDeps = {
       alive: () => use.alive(),
-      read: (fallback) => {
+      read: (pot, fallback) => {
         calls.push("read");
+        pots.push(pot);
         fallbacks.push(fallback);
-        return use.read(fallback);
+        return use.read(pot, fallback);
       },
       preflight: () => {
         calls.push("preflight");
@@ -2307,7 +2310,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
         return use.send(ctx, gas);
       },
     };
-    return { d, calls, checked, sent, fallbacks };
+    return { d, calls, checked, sent, fallbacks, pots };
   }
   const ALL = ["read", "preflight", "check", "simulate", "estimate", "account", "send 154680"];
   /** The step is gone after `n` asks of its lifetime. */
@@ -2333,6 +2336,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
         ok: true,
         hash: HASH,
         agentWallet: f.agentWallet,
+        pot: V3_POT,
       });
       expect(h.calls, action).toEqual(ALL);
       // What is sent is the context of the click's read, the one the allowlist accepted.
@@ -2381,8 +2385,12 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     for (const [action, raw, wallet, ceiling] of GOES) {
       const h = harness(fresh(raw, wallet));
       const lower = { ...NOTED, address: V3_POT.toLowerCase() as Address };
-      expect(await runPotAction(action, { ...args(ceiling, wallet, lower), pot: V3_POT.toLowerCase() as Address }, h.d), action).toMatchObject({ ok: true });
-      // What is sent names the recomputed address.
+      expect(await runPotAction(action, { ...args(ceiling, wallet, lower), pot: V3_POT.toLowerCase() as Address }, h.d), action).toMatchObject({
+        ok: true,
+        pot: V3_POT,
+      });
+      // What is read, sent and read back names the recomputed address, by construction.
+      expect(h.pots, action).toEqual([V3_POT]);
       expect(h.sent.map((c) => c.pot), action).toEqual([V3_POT]);
     }
   });
@@ -2396,6 +2404,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
         ok: true,
         hash: HASH,
         agentWallet: A,
+        pot: V3_POT,
       });
       expect(stop.calls).toEqual(ALL);
       expect(stop.fallbacks).toEqual([A]);
@@ -2503,6 +2512,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
       ok: true,
       hash: HASH,
       agentWallet: P,
+      pot: V3_POT,
     });
     expect(h.sent).toEqual([
       {
@@ -2825,6 +2835,8 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     const checked: PotTransferContext[] = [];
     const sent: PotTransferContext[] = [];
     const data: Hex[] = [];
+    /** The pot each read was asked for: the runner's checked address. */
+    const pots: Address[] = [];
     const yes: PotTransferDeps = {
       alive: () => true,
       read: async () => f,
@@ -2845,9 +2857,10 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     const use = { ...yes, ...impl };
     const d: PotTransferDeps = {
       alive: () => use.alive(),
-      read: () => {
+      read: (pot) => {
         calls.push("read");
-        return use.read();
+        pots.push(pot);
+        return use.read(pot);
       },
       readNoted: () => {
         calls.push("noted");
@@ -2886,7 +2899,7 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
         return use.send(ctx, gas);
       },
     };
-    return { d, calls, checked, sent, data };
+    return { d, calls, checked, sent, data, pots };
   }
   // Ruling R32: add money reads GET /pot first, and checks its address, before any read of the pot.
   const ADD_ALL = ["noted", "read", "preflight", "check", "simulate", "estimate", "account", "send 64140"];
@@ -2904,12 +2917,12 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
   test("all pass: the click's reads (and for Add money the noted pot, fresh), the page's checks, the allowlist, the simulation, the estimate, the account, then the one send; an estimate of 49338 sends gas 64140", async () => {
     for (const raw of [HEALTHY, STOPPED]) {
       const add = harness(fresh(raw));
-      expect(await runPotTransfer("add_money", args(ADD), add.d)).toEqual({ ok: true, hash: HASH, agentWallet: A });
+      expect(await runPotTransfer("add_money", args(ADD), add.d)).toEqual({ ok: true, hash: HASH, agentWallet: A, pot: V3_POT });
       expect(add.calls).toEqual(ADD_ALL);
       expect(add.sent).toEqual([ADD_CTX]);
       expect(add.checked).toEqual([ADD_CTX]);
       const fee = harness(fresh(raw));
-      expect(await runPotTransfer("fee_money", args(FEE), fee.d)).toEqual({ ok: true, hash: HASH, agentWallet: A });
+      expect(await runPotTransfer("fee_money", args(FEE), fee.d)).toEqual({ ok: true, hash: HASH, agentWallet: A, pot: V3_POT });
       expect(fee.calls).toEqual(FEE_ALL);
       expect(fee.sent).toEqual([FEE_CTX]);
     }
@@ -2957,10 +2970,19 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     // Letter case is ignored; what is sent names the recomputed address.
     const lower = { ...NOTED, address: V3_POT.toLowerCase() as Address };
     const add = harness(fresh(HEALTHY), { readNoted: async () => lower });
-    expect(await runPotTransfer("add_money", { ...args(ADD), pot: V3_POT.toLowerCase() as Address }, add.d)).toMatchObject({ ok: true });
+    expect(await runPotTransfer("add_money", { ...args(ADD), pot: V3_POT.toLowerCase() as Address }, add.d)).toMatchObject({
+      ok: true,
+      pot: V3_POT,
+    });
     expect(add.sent).toEqual([ADD_CTX]);
+    // The pot is read, and read back, at the checked address, by construction.
+    expect(add.pots).toEqual([V3_POT]);
     const fee = harness(fresh(HEALTHY));
-    expect(await runPotTransfer("fee_money", args(FEE, A, lower), fee.d)).toMatchObject({ ok: true });
+    expect(await runPotTransfer("fee_money", { ...args(FEE, A, lower), pot: V3_POT.toLowerCase() as Address }, fee.d)).toMatchObject({
+      ok: true,
+      pot: V3_POT,
+    });
+    expect(fee.pots).toEqual([V3_POT]);
   });
 
   test("a read that throws is read_failed and nothing else is called; a registry that cannot be read too; a registry naming the guardian, none or zero is agent_wallet", async () => {
@@ -3053,7 +3075,7 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     expect(moved.calls).toEqual(["read"]);
     expect(moved.sent).toEqual([]);
     const same = harness(fresh(HEALTHY, A));
-    expect(await runPotTransfer("fee_money", args(FEE, A.toLowerCase() as Address), same.d)).toEqual({ ok: true, hash: HASH, agentWallet: A });
+    expect(await runPotTransfer("fee_money", args(FEE, A.toLowerCase() as Address), same.d)).toEqual({ ok: true, hash: HASH, agentWallet: A, pot: V3_POT });
     // The transfer goes to the key read in the click, which is the one shown.
     expect(same.sent).toEqual([FEE_CTX]);
   });
