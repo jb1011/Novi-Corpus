@@ -752,9 +752,11 @@ export const LEGAL_BODY_COPY = {
       /** The wallet could not pay the transaction's network fee. */
       no_gas:
         "Your wallet does not hold enough USDC to pay the network fee of this transaction. Nothing was sent.",
-      /** One pot for life: the noted address that never got code is set up again only as noted. */
+      /** One pot for life: the noted address that never got code is set up again only as noted.
+       *  The way out of a ceiling the guardian no longer wants (Ruling R34): create it with no
+       *  money, then change the allowance before adding any. */
       noted_pot:
-        "A pot with a ceiling of {amount} USDC was noted for this legal body and is not on the chain yet. Keep that ceiling to create it: another ceiling would make a second pot. Nothing was sent.",
+        "A pot with a ceiling of {amount} USDC was noted for this legal body and is not on the chain yet. Keep that ceiling to create it: another ceiling would make a second pot. To use another ceiling, create it with no money, then use Change the allowance before you add any. Nothing was sent.",
     },
     /** The allowlist's refusals of a pot call, before the wallet opened: one plain sentence for
      *  each code it can give, never the code itself. */

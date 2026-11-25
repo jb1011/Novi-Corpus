@@ -602,6 +602,13 @@ describe("the company's pot", () => {
       POT.problems.refused,
       "This transaction is not one this page may send, so nothing was sent.",
     ],
+    [
+      // Ruling R34: a setup declined or dropped keeps the noted ceiling; the sentence says the way
+      // out.
+      "problems.noted_pot",
+      POT.problems.noted_pot,
+      "A pot with a ceiling of {amount} USDC was noted for this legal body and is not on the chain yet. Keep that ceiling to create it: another ceiling would make a second pot. To use another ceiling, create it with no money, then use Change the allowance before you add any. Nothing was sent.",
+    ],
     ["checkAgain", POT.checkAgain, "Check again"],
     ["shownAddress", POT.shownAddress, "The pot's address: {address}"],
     ["shownOwner", POT.shownOwner, "Only owner: {address}"],
