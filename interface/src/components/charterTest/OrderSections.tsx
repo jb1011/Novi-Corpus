@@ -63,8 +63,8 @@ export function OrderSections({
   return (
     <>
       <Section title="6. Agreement (GET /legal-body-orders/:id/agreement)">
-        <Refusal error={orderQuery.error} />
-        <Refusal error={agreementQuery.error} />
+        <Refusal error={orderQuery.error ?? orderQuery.failureReason} />
+        <Refusal error={agreementQuery.error ?? agreementQuery.failureReason} />
         {(orderQuery.isPending || agreementQuery.isPending) && <Line>Reading the order and its agreement.</Line>}
         {problem !== null && (
           <Line>
@@ -98,13 +98,28 @@ export function OrderSections({
 
 /* ── 6. The agreement ─────────────────────────────────────────────────────────────────────── */
 
+/** A key of the agreement's answer, as served: its text or its null under `name`, or `not served`
+ *  where the answer has no such key (a backend from before the key). */
+function ServedKey({
+  agreement,
+  field,
+  name,
+}: {
+  agreement: LegalBodyAgreement;
+  field: "notice" | "adoptionStatement";
+  name: string;
+}) {
+  if (!Object.hasOwn(agreement, field)) return <Facts rows={[[field, "not served"]]} />;
+  return <Served name={name} text={agreement[field] ?? null} />;
+}
+
 /** The notice first, then the text's facts, the terms, and the order's grant read back. */
 function Agreement({ orderId, agreement }: { orderId: string; agreement: LegalBodyAgreement }) {
   const grantQuery = useOrderGrantQuery(orderId);
   const grant = grantQuery.data === undefined ? undefined : readServedGrant(grantQuery.data);
   return (
     <>
-      <Served name="notice (served with the agreement)" text={agreement.notice ?? null} />
+      <ServedKey agreement={agreement} field="notice" name="notice (served with the agreement)" />
       <Facts
         rows={[
           ["textId", agreement.textId],
@@ -220,10 +235,11 @@ function Adoption({
 
   return (
     <>
-      <Served name="notice (served with the agreement)" text={agreement.notice ?? null} />
-      <Served
+      <ServedKey agreement={agreement} field="notice" name="notice (served with the agreement)" />
+      <ServedKey
+        agreement={agreement}
+        field="adoptionStatement"
         name="adoptionStatement (the words the wallet will sign, as served)"
-        text={agreement.adoptionStatement ?? null}
       />
       {(agreement.adoptionStatement ?? null) === null && (
         <Line>This agreement is adopted by its fields alone: there are no words to sign.</Line>
@@ -354,7 +370,8 @@ function Link({
     <>
       <Line>
         The ERC-8004 id of an agent identity this wallet owns on the deployment&apos;s chain, in
-        decimal. The link door reads its owner.
+        decimal. The link door reads its owner, and the wallet the identity names. This page has
+        no step that sets that wallet: a refusal for it is shown below, as served.
       </Line>
       <Field label="agentId" htmlFor="charter-test-agent-id" className="max-w-xs">
         <TextInput
@@ -464,7 +481,7 @@ function BindingRead({ orderId }: { orderId: string }) {
   const bindingQuery = useLegalBodyBindingQuery(orderId);
   return (
     <>
-      <Refusal error={bindingQuery.error} />
+      <Refusal error={bindingQuery.error ?? bindingQuery.failureReason} />
       {bindingQuery.data && <Json value={bindingQuery.data} />}
     </>
   );

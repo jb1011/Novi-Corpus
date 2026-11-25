@@ -11,14 +11,18 @@ type Entry = { id: number; at: string; call: string; view: RefusalView };
 const KEPT = 50;
 
 /**
- * Every failed call of the page, newest first, as served.
+ * Every call of the page that ended in an error, newest first, as served.
  *
  * Every API call and every wallet request of the page, its own and the ones of the hooks it
  * shares with the product, runs through the one query client. This listens to that client and
  * lists each query and each mutation that ended in an error, so a refusal is on screen even where
- * a shared hook keeps only its sentence. A failure that is not a call (the World ID widget's own
- * error, a sign-in stopped before its first request) is shown beside its card only. A call is
- * named by the first parts of its key (`callLabel`), which never hold a token.
+ * a shared hook keeps only its sentence. Three things are not listed. The link door's 422 is an
+ * answer, not an error: step 8 shows it with its code, its sentence and its detail, until the
+ * next click there. A read that is tried again after a failure is listed once, when its last try
+ * failed. A failure that is not a call (the World ID widget's own error, a sign-in stopped before
+ * its first request) is shown beside its card only. A call is named by the first parts of its key
+ * (`callLabel`), which never hold a token; a mutation of a shared hook has no key, so it is listed
+ * as `mutation (no key)`, and its own step shows which door answered.
  *
  * The one effect subscribes and unsubscribes; the list changes only when the client reports.
  */
@@ -54,6 +58,10 @@ export function RefusalLog() {
 
   return (
     <Section title="Refusals and failures, newest first">
+      <Line>
+        Calls that ended in an error. The link door&apos;s 422 is an answer, not an error: step 8
+        shows it, and this list does not.
+      </Line>
       {entries.length === 0 ? (
         <Line>None yet.</Line>
       ) : (

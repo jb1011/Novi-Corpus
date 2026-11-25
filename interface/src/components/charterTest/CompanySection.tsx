@@ -49,7 +49,7 @@ export function CompanySection({
   return (
     <Section title="3. Company">
       <h3 className="text-[13px] font-medium text-ink">Your declared companies (GET /companies)</h3>
-      <Refusal error={companiesQuery.error} />
+      <Refusal error={companiesQuery.error ?? companiesQuery.failureReason} />
       {companiesQuery.data !== undefined && declared.length === 0 && <Line>None.</Line>}
       {declared.map((company) => (
         <div key={company.companyId} className="flex flex-col gap-2 rounded-xl border hairline px-4 py-3">

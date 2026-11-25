@@ -127,7 +127,7 @@ const sameHex = (a: unknown, b: unknown): boolean =>
  *  - `order_id`: the order on screen;
  *  - `manifest_hash`: the hash the order froze, which is the hash of the agreement read;
  *  - `text`: the id and version of the agreement read;
- *  - `guardian`: the wallet in session, which is the order's guardian;
+ *  - `guardian`: the wallet in session, which is the order's Guardian;
  *  - `issued_at`: a whole number of seconds, the one the answer names beside the typed data;
  *  - `statement`: in the form with words, exactly the words the agreement's answer served.
  */

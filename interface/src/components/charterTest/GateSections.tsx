@@ -11,8 +11,9 @@ import { Facts, Line, Section } from "./parts";
  * The two gates before the flow, each the product's own piece, used as it is: the wallet sign-in
  * card, and the real-human check with its World ID widget.
  *
- * Neither gate blocks the steps below it on this page: every door makes its own checks and
- * answers for them, and the page shows that answer.
+ * The real-human check does not block the steps below it on this page: every door makes that
+ * check itself and answers for it, and the page shows that answer. The steps do wait for the
+ * sign-in: every call below carries the session's token.
  */
 
 export function SignInSection() {
