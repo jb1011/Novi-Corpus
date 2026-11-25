@@ -78,14 +78,7 @@ import {
   type PotProblemSay,
 } from "@/lib/legalBody/safePotStep";
 import {
-  POT_ACTION_MOVED,
-  potActionAfter,
-  potActionContext,
-  potActionDoneView,
-  potActionFailureView,
-  potCeilingCheck,
   potCreateFailureView,
-  potExecSimulationOk,
   potFormBegin,
   potFormMoney,
   potFreshSalt,
@@ -94,15 +87,24 @@ import {
   potReadsAllowed,
   potRecordWallet,
   potReviewNote,
-  runPotAction,
   runPotCreate,
   runPotReview,
-  type PotActionDeps,
   type PotCreateDeps,
-  type PotExecContext,
   type PotReviewDeps,
-  type PotSafeAction,
 } from "@/lib/legalBody/safePotRun";
+import {
+  POT_ACTION_MOVED,
+  potActionAfter,
+  potActionContext,
+  potActionDoneView,
+  potActionFailureView,
+  potCeilingCheck,
+  potExecSimulationOk,
+  runPotAction,
+  type PotActionDeps,
+  type PotExecContext,
+  type PotSafeAction,
+} from "@/lib/legalBody/safePotActions";
 import { ApiError } from "@/lib/api/types";
 
 const P_ = LEGAL_BODY_COPY.pot;
@@ -1737,7 +1739,7 @@ describe("what the done page reads of the pot", () => {
 
 // ---------------------------------------------------------------------------------------------
 // The guardian's Safe actions on the same pot: change, stop, take back, start again, a new key
-// (`safePotRun.ts`). Every context is built from the click's own reads, never the card's.
+// (`safePotActions.ts`). Every context is built from the click's own reads, never the card's.
 // ---------------------------------------------------------------------------------------------
 
 /** The deployment the allowlist reads: Arc testnet, the registry and the factory as served. */

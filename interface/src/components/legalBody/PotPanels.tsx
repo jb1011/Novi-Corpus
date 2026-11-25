@@ -13,12 +13,8 @@ import {
 import type { Hex } from "@/lib/api/types";
 import { txUrl } from "@/lib/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
-import type {
-  PotActionStage,
-  PotCardShown,
-  PotFormMoney,
-  PotProblemThen,
-} from "@/lib/legalBody/safePotRun";
+import type { PotActionStage } from "@/lib/legalBody/safePotActions";
+import type { PotCardShown, PotFormMoney, PotProblemThen } from "@/lib/legalBody/safePotRun";
 import type { PotForm, PotFormCheck } from "@/lib/legalBody/safePotStep";
 
 /**

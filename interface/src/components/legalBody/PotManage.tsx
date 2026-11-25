@@ -36,7 +36,7 @@ import {
   type PotActionStage,
   type PotReadAgain,
   type PotSafeAction,
-} from "@/lib/legalBody/safePotRun";
+} from "@/lib/legalBody/safePotActions";
 import {
   potAgentCommands,
   potCeilingHint,
