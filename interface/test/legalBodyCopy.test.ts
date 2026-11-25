@@ -375,9 +375,9 @@ describe("the company's pot", () => {
     expect(POT_DECLARATION_VERSION).toBe("pot-declaration-1");
   });
 
-  test("the stopped pot says only what was read: the agent's key cannot take from it (Ruling R5)", () => {
+  test("the stopped pot says only what was read: the agent's key cannot take from it (Rulings R5 and R36)", () => {
     expect(POT.stoppedLine).toBe(
-      "The allowance of this pot is switched off: the agent's key cannot take from it.",
+      "The agent's key cannot take from this pot: its allowance is switched off.",
     );
     expect(POT.recordStopped).toBe(
       "The guardian declared this pot for the company: {address}. The agent's key cannot take from it: its allowance is switched off. It holds {balance} USDC. Read from the chain on {date}.",
@@ -399,7 +399,7 @@ describe("the company's pot", () => {
     [
       "what",
       POT.what,
-      "The pot is a Safe wallet on {network}. Your wallet is its only owner. Your agent's key can take USDC from it up to the ceiling, and nothing more. Novi Corpus holds no key and no money.",
+      "The pot is a Safe wallet on {network}. Your wallet is its only owner. Your agent's key can take USDC from it up to the ceiling. Novi Corpus holds no key and no money.",
     ],
     [
       "periods",
@@ -675,7 +675,7 @@ describe("the company's pot", () => {
     [
       "stopLine",
       POT.stopLine,
-      "Removes your agent's key from the pot and switches the allowance off, in one transaction. Your agent can take nothing after it. The money stays in the pot until you take it back.",
+      "Removes your agent's key from the pot and switches the allowance off, in one transaction. Your agent's key can take nothing through the allowance after it. The money stays in the pot until you take it back.",
     ],
     ["stopSend", POT.stopSend, "Stop the allowance"],
     ["withdrawTitle", POT.withdrawTitle, "Take the money back"],

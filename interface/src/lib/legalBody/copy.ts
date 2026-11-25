@@ -646,7 +646,7 @@ export const LEGAL_BODY_COPY = {
     cardLine:
       "Keep the company's money in a pot that only your wallet owns. Your agent's key takes from it up to a ceiling in each thirty-day period.",
     title: "The company's pot",
-    what: "The pot is a Safe wallet on {network}. Your wallet is its only owner. Your agent's key can take USDC from it up to the ceiling, and nothing more. Novi Corpus holds no key and no money.",
+    what: "The pot is a Safe wallet on {network}. Your wallet is its only owner. Your agent's key can take USDC from it up to the ceiling. Novi Corpus holds no key and no money.",
     periods:
       "The pot counts in fixed periods of thirty days, one after the other, from the minute it is created. What is not taken in a period is not carried over. Around the end of a period your agent's key can take the ceiling just before it ends and the ceiling again just after, so up to twice the ceiling within a few minutes.",
     limits:
@@ -837,7 +837,7 @@ export const LEGAL_BODY_COPY = {
     shownFeeMoney: "Your agent's key holds {amount} USDC for network fees.",
     feeMoneyLow:
       "This is low. Each take costs the key a small fee in USDC, and the network refuses a take the key cannot pay for. Send it a little with Send fee money.",
-    stoppedLine: "The allowance of this pot is switched off: the agent's key cannot take from it.",
+    stoppedLine: "The agent's key cannot take from this pot: its allowance is switched off.",
     limitsNotRead:
       "This pot is set up in a way this page does not read: {reason}. Its ceiling is not shown.",
     limitReasons: {
@@ -860,7 +860,7 @@ export const LEGAL_BODY_COPY = {
     changeSend: "Set the new ceiling",
     stopTitle: "Stop the allowance",
     stopLine:
-      "Removes your agent's key from the pot and switches the allowance off, in one transaction. Your agent can take nothing after it. The money stays in the pot until you take it back.",
+      "Removes your agent's key from the pot and switches the allowance off, in one transaction. Your agent's key can take nothing through the allowance after it. The money stays in the pot until you take it back.",
     stopSend: "Stop the allowance",
     withdrawTitle: "Take the money back",
     withdrawLine: "Sends everything in the pot, {balance} USDC, to your wallet.",
