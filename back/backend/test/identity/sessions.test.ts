@@ -2217,6 +2217,56 @@ describe("sweepSessions", () => {
     ]);
   });
 
+  // Ruling R35: a read of the session just before a pass (the guardian's card, the webhook) leaves
+  // it out of that pass's read batch, never out of its alarm lines.
+  test("a session waiting for an operator still raises its line at a pass when the guardian read it a minute before", async () => {
+    const s = await parkedSession(deps());
+    now = T0 + 2 * 3_600_000 - MINUTE;
+    // The card's check: the session is looked at, not read at the provider, and its last read moves.
+    expect(await syncSession(deps(), s.sessionId)).toBe("unchanged");
+    expect(s.session().lastReadAt).toBe(now);
+
+    now = T0 + 2 * 3_600_000;
+    // The read batch is unchanged: the session read a minute ago is not in it.
+    expect(await sweepSessions(deps(), now)).toEqual(zero);
+    expect(opsLines("identity_session_waiting_operator")).toEqual([
+      expect.objectContaining({ sessionId: s.sessionId, ageHours: 2, level: "warn" }),
+    ]);
+  });
+
+  test("a screen pending for more than 24 hours still raises its CRITICAL line at a pass when the guardian read it a minute before", async () => {
+    const s = await started();
+    provider.verify(s.ref);
+    screener.answer = "error";
+    expect(await syncSession(deps(), s.sessionId)).toBe("screen_pending");
+    now = T0 + 25 * 3_600_000 - MINUTE;
+    expect(await syncSession(deps(), s.sessionId)).toBe("screen_pending");
+    expect(s.session().screenPendingSince).toBe(T0);
+
+    now = T0 + 25 * 3_600_000;
+    expect(await sweepSessions(deps(), now)).toEqual(zero);
+    expect(opsLines("identity_screen_pending_stale")).toEqual([
+      expect.objectContaining({ sessionId: s.sessionId, hours: 25, severity: "CRITICAL" }),
+    ]);
+  });
+
+  test("an open session read a minute before a pass, in neither state, raises no line", async () => {
+    // One waiting for the person, one whose screen gave no verdict less than 24 hours ago.
+    const waiting = await started(deps(), tenant(1));
+    const pending = await started(deps(), tenant(2));
+    provider.verify(pending.ref);
+    screener.answer = "error";
+    expect(await syncSession(deps(), pending.sessionId)).toBe("screen_pending");
+    now = T0 + 3_600_000 - MINUTE;
+    await syncSession(deps(), waiting.sessionId);
+    await syncSession(deps(), pending.sessionId);
+
+    now = T0 + 3_600_000;
+    expect(await sweepSessions(deps(), now)).toEqual(zero);
+    expect(opsLines("identity_session_waiting_operator")).toEqual([]);
+    expect(opsLines("identity_screen_pending_stale")).toEqual([]);
+  });
+
   test("a session verified at the provider and not completed within its days closes with reason code other and its cause, not as abandoned; one left waiting for the person is abandoned", async () => {
     const refused = await parkedSession(deps(), tenant(1));
     // Its typed names lost: refused with no_typed_names.

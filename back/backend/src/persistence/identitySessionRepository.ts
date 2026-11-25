@@ -134,6 +134,9 @@ export interface IdentitySessionRepository {
   eraseTypedNames(sessionId: string, at: number): void;
   /** Open sessions not read since `readBeforeMs`, least recently read (or created) first. */
   openOlderThan(readBeforeMs: number, limit: number): IdentitySession[];
+  /** Every open session, read lately or not: at most one per tenant (the table's unique index).
+   *  The sweep's alarm lines, at each pass. */
+  allOpen(): IdentitySession[];
   /**
    * Sessions due for redaction and not redacted: never requested, or requested more than 7 days
    * before `nowMs` (a request the provider did not complete is sent again). Earliest due first.
@@ -484,6 +487,10 @@ export class SqliteIdentitySessionRepository implements IdentitySessionRepositor
           ORDER BY COALESCE(last_read_at, created_at), rowid
           LIMIT @limit`,
       ),
+      // `idx_identity_sessions_one_open` serves it, its filter and its order: no sort.
+      allOpen: db.prepare(
+        "SELECT * FROM identity_sessions WHERE closed_at IS NULL ORDER BY tenant_id",
+      ),
       // The conditions of `idx_identity_sessions_redact`, so the index serves the query.
       redactionDue: db.prepare(
         `SELECT * FROM identity_sessions
@@ -644,6 +651,10 @@ export class SqliteIdentitySessionRepository implements IdentitySessionRepositor
         limit: limitShape(limit),
       }) as Row[]
     ).map(toSession);
+  }
+
+  allOpen(): IdentitySession[] {
+    return (this.stmts.allOpen.all() as Row[]).map(toSession);
   }
 
   redactionDue(nowMs: number, limit: number): IdentitySession[] {
