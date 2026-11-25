@@ -6,7 +6,8 @@
  * The guardian may take the pot off the public record at any time, with a note of its own: the pot
  * itself is untouched, and the address stays the body's. Beside a signed statement, the record
  * serves the pot on the record as read from the chain at the statement's own block, and a lookup by
- * any pot address a body declared leads to the body.
+ * a pot's own address leads to the body that declared it, unless the body's agent now states a
+ * newer body or the pot, still on the record, no longer reads as the guardian's alone.
  *
  * The domain over a real in-memory database, a fake registry and a fake chain port, on a fixed
  * clock. Each body is placed through the order door's own domain function, so its agreement and
@@ -2340,6 +2341,17 @@ describe("the words of the record", () => {
     for (const name of ["pot", "byAgent", "byAddress"] as const) {
       expect(files[name], name).toMatch(/read from the chain/);
       expect(files[name], name).toMatch(/periods are fixed/);
+    }
+    // Ruling R31: the lookup by a pot's address is described as it is, never as "every pot leads
+    // to it": a replaced body's pot, and a pot on the record no longer the guardian's alone, lead
+    // nowhere by their address.
+    for (const [name, text] of Object.entries(files))
+      expect(text, name).not.toMatch(/every pot (?:address )?a body declared leads/i);
+    for (const name of ["pot", "byAddress"] as const) {
+      expect(files[name], name).toContain("a replaced body's pot leads nowhere by its address");
+      expect(files[name], name).toContain(
+        "the pot, still on the record, no longer reads as the guardian's alone",
+      );
     }
     // The off-record door's comment, and its domain function's, say why it takes no flag.
     for (const name of ["orders", "pot"] as const)

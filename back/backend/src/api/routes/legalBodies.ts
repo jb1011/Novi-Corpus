@@ -60,13 +60,16 @@ import { TokenBucket } from "./agentBook";
  * the record, no pot's code at its address, a Safe not the guardian's alone); null whenever there
  * is no statement. While the pot is not offered it is still named, its limits not read.
  *
- * EVERY POT A BODY DECLARED LEADS TO IT. When neither the full product nor an agent's wallet
- * answers the address, and the pot is wired, the address is looked up among the pots the bodies
- * declared (`statementForPotAddress`): the answer is the body's own signed statement, about its
- * agent, with `address` the address asked and `pot` that same address's block: the pot on the
- * record, `former` for a pot the body declared that is no longer the one on the record, or null
- * beside a statement not in force. The server reads only addresses it recomputed itself from its
- * notes, never one a request named; an address nobody noted costs no chain read.
+ * A POT'S ADDRESS LEADS TO THE COMPANY THAT DECLARED IT. When neither the full product nor an
+ * agent's wallet answers the address, and the pot is wired, the address is looked up among the
+ * pots the bodies declared (`statementForPotAddress`): the answer is the body's own signed
+ * statement, about its agent, with `address` the address asked and `pot` that same address's
+ * block: the pot on the record, `former` for a pot the body declared that is no longer the one on
+ * the record, or null beside a statement not in force. It leads there while the address holds a
+ * pot's code, unless the body's agent now states a newer legal body (a replaced body's pot leads
+ * nowhere by its address) or the pot, still on the record, no longer reads as the guardian's
+ * alone. The server reads only addresses it recomputed itself from its notes, never one a request
+ * named; an address nobody noted costs no chain read.
  *
  * An answer whose `pot` is `{ state: "unavailable" }` (the chain could not be read for it) is sent
  * `no-store` and never memoised, like `unknown`.

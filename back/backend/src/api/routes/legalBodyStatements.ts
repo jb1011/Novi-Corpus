@@ -91,8 +91,10 @@ import {
  * not in force, for no pot on the record (none noted, or taken off), for a noted address with no
  * pot's code, and for a Safe that is not the guardian's alone; null on the unsigned `unknown`. While
  * the pot is not offered it is still named, its limits not read. A former pot is never served here:
- * the lookup by that pot's own address leads to the body. A pot the chain could not be read for is
- * `{ state: "unavailable" }`: that answer is sent `no-store` and never memoised, like `unknown`.
+ * the lookup by that pot's own address leads to the body, by the rules of `statementForPotAddress`
+ * (not for a replaced body's pot, nor for one that holds no pot's code). A pot the chain could not
+ * be read for is `{ state: "unavailable" }`: that answer is sent `no-store` and never memoised,
+ * like `unknown`.
  * One read of the pot per statement, none for a body without one on the record.
  */
 

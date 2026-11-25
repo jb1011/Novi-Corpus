@@ -93,8 +93,11 @@ export type {
  * one ended. Only an address the server recomputed from its notes' birth details is ever read:
  * never one a request named. While the flag is off, the pot is still named, with "Its limits were
  * not read." (Ruling R15 b): nothing is claimed from contracts that failed their check, and the
- * link to the company is never hidden. Every pot address a body declared leads back to the body
- * (`statementForPotAddress`): the one on the record, or a former one.
+ * link to the company is never hidden. A lookup by a pot's own address (`statementForPotAddress`)
+ * leads to the company that declared it, the pot on the record or a former one, while it holds a
+ * pot's code, unless that company's agent now states a newer legal body (a replaced body's pot
+ * leads nowhere by its address) or the pot, still on the record, no longer reads as the guardian's
+ * alone.
  *
  * FOR THE AGENT'S OWN KEY (`potForAgent`, `prepareTake`, the MCP tools `get_pot` and
  * `prepare_pot_take`). The agent reads what is left of the ceiling in the current period, and gets
