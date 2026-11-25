@@ -748,8 +748,9 @@ function stoppable(a: PotAddresses | null, guardian: Address, raw: PotRaw): bool
 /**
  * What the card says of a reading, and what it offers. Every state but `absent` offers the record
  * action: `take_off_record` when `onRecord`, else `put_back`, never for an order of another
- * deployment (the server refuses it). `add_money` only while the pot is on the record: money put
- * in a pot taken off it would not show beside the company.
+ * deployment (the server refuses it), nor for a pot that is not the guardian's alone (Ruling
+ * R26: it can be taken off, never put back). `add_money` only while the pot is on the record:
+ * money put in a pot taken off it would not show beside the company.
  *  - ceiling_read: change, stop, add_money, and fee_money unless the agent's wallet holds code;
  *  - stopped: start_again; stop while the add-on is still on (no key, module on); withdraw once no
  *    add-on is on and the pot holds money; add_money; fee_money unless the agent's wallet holds
@@ -757,7 +758,7 @@ function stoppable(a: PotAddresses | null, guardian: Address, raw: PotRaw): bool
  *  - limits_not_read: with `other_delegate` and the registry's `agentWallet` (never the guardian's)
  *    not among a complete list of the pot's keys, new_key and stop; otherwise stop when there is
  *    something to stop. No money: after a changed-key setup, the new key is set first;
- *  - not_the_guardians: the record action only;
+ *  - not_the_guardians: take_off_record only, while it is on the record;
  *  - absent: nothing (the card offers the setup).
  * The lines: the address and the only owner; for ceiling_read the key, the ceiling, what is left
  * until the period's end (while `nowSeconds` is before it: a reading of an ended period says no
@@ -839,7 +840,7 @@ export function potReadingView(
   }
 
   if (p.onRecord) actions.push("take_off_record");
-  else if (p.onThisDeployment) actions.push("put_back");
+  else if (p.onThisDeployment && reading.state !== "not_the_guardians") actions.push("put_back");
   if (!p.onRecord) lines.push(POT.offRecord);
   return { lines, actions };
 }

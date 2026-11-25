@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useConnection, usePublicClient } from "wagmi";
 import { Callout } from "@/components/onboarding/primitives";
 import {
@@ -39,6 +39,7 @@ import {
   potActionDoneView,
   potActionFailureView,
   potActionTakesCeiling,
+  potCardLockCore,
   potCeilingCheck,
   potRecordFailureView,
   runPotAction,
@@ -65,6 +66,7 @@ import {
   PotCeilingField,
   PotDeclarationTick,
   PotManageFrame,
+  type PotCardLock,
 } from "./PotPanels";
 
 const POT = LEGAL_BODY_COPY.pot;
@@ -106,6 +108,9 @@ const TITLES: Readonly<Record<PotSafeAction, string>> = {
  * connected now, and only then the wallet. After the receipt the pot is read again against the
  * click's key, and `onChanged` reads the done page's pot again.
  *
+ * One action of the card at a time (Ruling R25): every click takes the done page's one lock for
+ * the card (`lock`), and while any action holds it every other button and field is disabled.
+ *
  * Nothing is read or sent on mount but the grant (the done page's, from the cache), which caps the
  * ceiling fields. The ceilings typed live in this card's state only, never in a browser store. A
  * click's continuation stops after its next await once the card is gone.
@@ -118,6 +123,7 @@ export function PotManage({
   raw: shownRaw,
   reading: shownReading,
   nowSeconds,
+  lock,
   onChanged,
 }: {
   kit: LegalBodyStepKit;
@@ -130,6 +136,8 @@ export function PotManage({
   reading: PotReading;
   /** When the pot was read, in unix seconds: what is left is said of that period. */
   nowSeconds: number;
+  /** The card's one lock, the done page's: one action of the card at a time (Ruling R25). */
+  lock: PotCardLock;
   /** Reads the noted pot, its reading and the record again. */
   onChanged: () => void;
 }) {
@@ -164,9 +172,9 @@ export function PotManage({
   });
   const [ceilingProblems, setCeilingProblems] = useState<Partial<Record<CeilingAction, string>>>({});
   const [stage, setStage] = useState<PotActionStage>({ at: "idle" });
+  // This component's own click in flight (its spinner). The card's lock (`lock.busy`) disables
+  // every action of the card while any one of them is in flight (Ruling R25).
   const [busy, setBusy] = useState(false);
-  // Set and cleared inside a click: a second click before the first settles reads and sends nothing.
-  const inFlight = useRef(false);
 
   const a = potAddresses(config.chainId);
   const cap =
@@ -199,7 +207,7 @@ export function PotManage({
 
   /** One action's click: its ceiling checked, then `runPotAction` over this click's own reads. */
   async function onAction(action: PotSafeAction) {
-    if (inFlight.current) return;
+    if (lock.held()) return;
     let newCeilingUnits: bigint | undefined;
     if (potActionTakesCeiling(action)) {
       const field = action as CeilingAction;
@@ -222,7 +230,7 @@ export function PotManage({
       refusedHere(action, potProblemSentence({ problem: "refused" }));
       return;
     }
-    inFlight.current = true;
+    if (!lock.take()) return;
     setBusy(true);
     // Until the wallet opens: the click's reads, the checks, the simulation and the estimate.
     setStage({ at: "checking", action });
@@ -288,7 +296,7 @@ export function PotManage({
         confirmed: false,
       });
     } finally {
-      inFlight.current = false;
+      lock.release();
       setBusy(false);
     }
   }
@@ -354,11 +362,11 @@ export function PotManage({
   /** "Check again": a receipt not seen in time is asked for first; then the pot read again. A
    *  receipt still not there leaves the card as it is. */
   async function onCheckAgain() {
-    if (inFlight.current || stage.at !== "problem" || stage.again === null) return;
+    if (lock.held() || stage.at !== "problem" || stage.again === null) return;
     const { action, again } = stage;
     const client = publicClient;
     if (!client || a === null) return;
-    inFlight.current = true;
+    if (!lock.take()) return;
     setBusy(true);
     try {
       if (again.confirmed) {
@@ -374,7 +382,7 @@ export function PotManage({
       if (!life.alive()) return;
       await afterReceipt(client, a, action, again, receipt);
     } finally {
-      inFlight.current = false;
+      lock.release();
       setBusy(false);
     }
   }
@@ -413,7 +421,7 @@ export function PotManage({
         value={ceilings[action]}
         hint={hint}
         error={ceilingProblems[action]}
-        disabled={busy}
+        disabled={lock.busy}
         onChange={(value) => editCeiling(action, value)}
         unreadable={cap === "unreadable"}
         onRetry={() => void grantQuery.refetch()}
@@ -427,7 +435,7 @@ export function PotManage({
     const running = busy && stage.at !== "idle" && stage.action === action;
     const send = { onSend: () => void onAction(action), loading: running };
     // A ceiling's panel cannot send until the grant that caps it is read.
-    const capped = { ...send, disabled: busy || hint === null };
+    const capped = { ...send, disabled: lock.busy || hint === null };
     switch (action) {
       case "change":
         return (
@@ -449,7 +457,7 @@ export function PotManage({
             lines={[POT.stopLine]}
             sendLabel={POT.stopSend}
             danger
-            disabled={busy}
+            disabled={lock.busy}
             {...send}
           />
         );
@@ -462,7 +470,7 @@ export function PotManage({
             title={POT.withdrawTitle}
             lines={[fillCopy(POT.withdrawLine, { balance })]}
             sendLabel={fillCopy(POT.withdrawSend, { balance })}
-            disabled={busy}
+            disabled={lock.busy}
             {...send}
           />
         );
@@ -502,6 +510,7 @@ export function PotManage({
           stage={stage}
           after={potActionAfter(stage)}
           busy={busy}
+          disabled={lock.busy}
           onCheckAgain={() => void onCheckAgain()}
         />
       )}
@@ -513,9 +522,19 @@ export function PotManage({
         agentWallet={shownWallet}
         raw={shownRaw}
         offered={transfers}
+        lock={lock}
         onChanged={onChanged}
       />
-      <PotRecordAction kit={kit} order={order} noted={noted} action={recordAction} onChanged={onChanged} />
+      {/* A new record action starts afresh: the declaration unticked, no refusal left over. */}
+      <PotRecordAction
+        key={recordAction ?? "none"}
+        kit={kit}
+        order={order}
+        noted={noted}
+        action={recordAction}
+        lock={lock}
+        onChanged={onChanged}
+      />
       {commands && <PotAgentPanel take={commands.take} read={commands.read} />}
     </PotManageFrame>
   );
@@ -539,6 +558,7 @@ export function PotRecordAction({
   order,
   noted,
   action,
+  lock,
   onChanged,
 }: {
   kit: LegalBodyStepKit;
@@ -546,6 +566,8 @@ export function PotRecordAction({
   noted: OrderPotView;
   /** The record action the card's reading offers, or none. */
   action: RecordAction | null;
+  /** The card's one lock (Ruling R25). */
+  lock: PotCardLock;
   /** Reads the noted pot, its reading and the record again. */
   onChanged: () => void;
 }) {
@@ -562,14 +584,14 @@ export function PotRecordAction({
   });
   // The declaration, ticked again for each put back: never kept in a browser store.
   const [declared, setDeclared] = useState(false);
+  // This action's own click in flight (its spinner); `lock.busy` disables it for any other.
   const [busy, setBusy] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
-  const inFlight = useRef(false);
 
   async function onRecord(act: RecordAction) {
-    if (inFlight.current) return;
+    if (lock.held()) return;
     if (act === "put_back" && !declared) return;
-    inFlight.current = true;
+    if (!lock.take()) return;
     setBusy(true);
     setLines([]);
     try {
@@ -593,7 +615,7 @@ export function PotRecordAction({
       setLines(failed.lines);
       if (failed.reread) latestOnChanged.current();
     } finally {
-      inFlight.current = false;
+      lock.release();
       setBusy(false);
     }
   }
@@ -610,7 +632,7 @@ export function PotRecordAction({
         lines={[POT.offRecordLine]}
         sendLabel={POT.offRecordSend}
         onSend={() => void onRecord("take_off_record")}
-        disabled={busy}
+        disabled={lock.busy}
         loading={busy}
       >
         {said}
@@ -623,13 +645,57 @@ export function PotRecordAction({
         lines={[]}
         sendLabel={POT.backOnSend}
         onSend={() => void onRecord("put_back")}
-        disabled={busy || !declared}
+        disabled={lock.busy || !declared}
         loading={busy}
       >
         {said}
-        <PotDeclarationTick declared={declared} disabled={busy} onDeclared={setDeclared} />
+        <PotDeclarationTick declared={declared} disabled={lock.busy} onDeclared={setDeclared} />
         {!declared && <p className="mt-2 text-[12.5px] text-muted-2">{POT.declarationNeeded}</p>}
       </PotActionPanel>
     );
   return said ? <div className="border-t hairline pt-5">{said}</div> : null;
+}
+
+/** The card's one lock (Ruling R25), held by the done page for the card it draws and handed to
+ *  every action of it: a click takes it before its first read and gives it back when it ends. */
+export function usePotCardLock(): PotCardLock {
+  const [busy, setBusy] = useState(false);
+  const [core] = useState(() => potCardLockCore(setBusy));
+  return useMemo(() => ({ busy, ...core }), [busy, core]);
+}
+
+/**
+ * Ruling R24: a pot the server says is on the public record can always be taken off it, whatever
+ * the pot's flag, the order's state (revoked, not linked) or its deployment, and whatever the
+ * chain could be read for: the done page then shows at least this card, the pot's address and
+ * "Take the pot off the public record" (the server's off-record door takes all of them). Nothing
+ * else of the pot is offered here: no wallet, no chain, no put back.
+ */
+export function PotTakeOffCard({
+  kit,
+  order,
+  noted,
+  lock,
+  onChanged,
+}: {
+  kit: LegalBodyStepKit;
+  order: LegalBodyOrderView;
+  /** The noted pot, on the record. */
+  noted: OrderPotView;
+  lock: PotCardLock;
+  /** Reads the noted pot and the record again. */
+  onChanged: () => void;
+}) {
+  return (
+    <PotManageFrame lines={[fillCopy(POT.shownAddress, { address: noted.address })]}>
+      <PotRecordAction
+        kit={kit}
+        order={order}
+        noted={noted}
+        action="take_off_record"
+        lock={lock}
+        onChanged={onChanged}
+      />
+    </PotManageFrame>
+  );
 }

@@ -112,7 +112,8 @@ vi.mock("wagmi", async (importOriginal) => {
 });
 
 import type { LegalBodyStepKit } from "@/components/legalBody/LegalBodyFlow";
-import { PotManage } from "@/components/legalBody/PotManage";
+import { PotManage, PotTakeOffCard } from "@/components/legalBody/PotManage";
+import { PotActionResultPanel, type PotCardLock } from "@/components/legalBody/PotPanels";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
 import {
   POT_AGENT_GAS_DEFAULT,
@@ -244,10 +245,14 @@ const STOPPED: PotRaw = {
   allowance: [ZERO, ZERO, ZERO, ZERO, BigInt(3)],
 };
 
+/** The card's lock (Ruling R25): open, or held by an action in flight. */
+const OPEN: PotCardLock = { busy: false, held: () => false, take: () => true, release: () => {} };
+const TAKEN: PotCardLock = { busy: true, held: () => true, take: () => false, release: () => {} };
+
 /** The card for a raw read made for `agentWallet` (the record's key). */
 function card(
   raw: PotRaw,
-  over: { agentWallet?: Address; noted?: OrderPotView; order?: LegalBodyOrderView } = {},
+  over: { agentWallet?: Address; noted?: OrderPotView; order?: LegalBodyOrderView; lock?: PotCardLock } = {},
 ): string {
   const order = over.order ?? linkedOrder();
   const agentWallet = over.agentWallet ?? A;
@@ -260,6 +265,7 @@ function card(
       raw,
       reading: potReading(raw, { addresses: T, guardian: G, agentWallet }),
       nowSeconds: NOW_S,
+      lock: over.lock ?? OPEN,
       onChanged: () => {},
     }),
   );
@@ -428,6 +434,85 @@ describe("the public record", () => {
   });
 });
 
+describe("one action at a time on the card (Ruling R25)", () => {
+  const source = (name: string) =>
+    readFileSync(fileURLToPath(new URL(`../src/components/legalBody/${name}`, import.meta.url)), "utf8");
+  /** Every button that starts one of the card's actions (a wallet's or the record's). */
+  const ACTIONS = [
+    POT.changeSend,
+    POT.stopSend,
+    fillCopy(POT.withdrawSend, { balance: "190" }),
+    POT.startAgainSend,
+    POT.newKeySend,
+    POT.addMoneyTitle,
+    fillCopy(POT.feeMoneySend, { amount: "0.1" }),
+    POT.offRecordSend,
+    POT.backOnSend,
+  ];
+  const cases: [string, PotRaw, { agentWallet?: Address; noted?: OrderPotView }][] = [
+    ["ceiling_read", HEALTHY, {}],
+    ["stopped with money", STOPPED, {}],
+    ["off the record", HEALTHY, { noted: { ...NOTED, onRecord: false } }],
+    ["a new key in the registry", HEALTHY, { agentWallet: P }],
+  ];
+
+  test("while any action of the card is in flight, every action's button is disabled, and every field and the tick box with them; Copy stays", () => {
+    for (const [what, raw, over] of cases) {
+      const m = card(raw, { ...over, lock: TAKEN });
+      const shown = buttons(m).filter((b) => ACTIONS.includes(b.words));
+      expect(shown.length, what).toBeGreaterThan(1);
+      for (const b of shown) expect(isDisabled(b), `${what}: ${b.words}`).toBe(true);
+      for (const field of m.match(/<input[^>]*>/g) ?? []) expect(field, what).toMatch(/\sdisabled=""/);
+      for (const b of buttons(m).filter((x) => x.words === POT.copy)) expect(isDisabled(b), what).toBe(false);
+    }
+    nothingSent();
+  });
+
+  test("with the card open, the same buttons are enabled, but for the put back until its box is ticked", () => {
+    for (const [what, raw, over] of cases) {
+      const m = card(raw, { ...over, lock: OPEN });
+      for (const b of buttons(m).filter((x) => ACTIONS.includes(x.words)))
+        expect(isDisabled(b), `${what}: ${b.words}`).toBe(b.words === POT.backOnSend);
+    }
+  });
+
+  test("Check again, after a transaction not seen in time, follows the card's lock too", () => {
+    const hash = `0x${"7a".repeat(32)}` as const;
+    const panel = (disabled: boolean) =>
+      renderToString(
+        createElement(PotActionResultPanel, {
+          title: POT.addMoneyTitle,
+          stage: { at: "problem", action: "add_money", lines: [POT.problems.no_receipt], hash, again: { agentWallet: A, ceilingUnits: null, hash, confirmed: false } },
+          after: [],
+          busy: false,
+          disabled,
+          onCheckAgain: () => {},
+        }),
+      );
+    expect(isDisabled(button(panel(false), POT.checkAgain))).toBe(false);
+    expect(isDisabled(button(panel(true), POT.checkAgain))).toBe(true);
+    // Both result areas hand it the card's lock.
+    for (const file of [source("PotManage.tsx"), source("PotMoney.tsx")])
+      expect(file).toMatch(/<PotActionResultPanel[^>]*disabled=\{lock\.busy\}/);
+  });
+
+  test("the minimal take-off card follows the card's lock too", () => {
+    const render = (lock: PotCardLock) =>
+      renderToString(
+        createElement(PotTakeOffCard, { kit: kit(linkedOrder()), order: linkedOrder(), noted: NOTED, lock, onChanged: () => {} }),
+      );
+    expect(isDisabled(button(render(OPEN), POT.offRecordSend))).toBe(false);
+    expect(isDisabled(button(render(TAKEN), POT.offRecordSend))).toBe(true);
+    const t = text(render(OPEN));
+    expect(t).toContain(POT.title);
+    expect(t).toContain(fillCopy(POT.shownAddress, { address: V3_POT }));
+    expect(t).toContain(POT.offRecordLine);
+    // Nothing else of the pot.
+    expect(buttons(render(OPEN)).map((b) => b.words)).toEqual([POT.offRecordSend]);
+    nothingSent();
+  });
+});
+
 describe("the sources", () => {
   const source = (name: string) =>
     readFileSync(fileURLToPath(new URL(`../src/components/legalBody/${name}`, import.meta.url)), "utf8");
@@ -581,6 +666,33 @@ describe("the sources", () => {
       expect(file, name).not.toContain("aggregate3Value");
     }
     expect(panels).not.toContain("setTimeout");
+  });
+
+  test("Ruling R25: every click of the card takes the card's one lock and gives it back, and every action's button and field reads it", () => {
+    for (const [name, file] of [
+      ["PotMoney.tsx", code],
+      ["PotManage.tsx", manage],
+    ] as const) {
+      expect(file, name).not.toContain("inFlight");
+      expect(file, name).not.toMatch(/disabled=\{busy/);
+      expect(file, name).not.toMatch(/disabled: busy/);
+    }
+    // PotManage: the action and Check again; PotMoney: the transfer and Check again; the record.
+    expect(manage.slice(0, manage.indexOf("export function PotRecordAction")).match(/if \(!lock\.take\(\)\) return;/g)).toHaveLength(2);
+    expect(code.match(/if \(!lock\.take\(\)\) return;/g)).toHaveLength(2);
+    expect(record.match(/if \(!lock\.take\(\)\) return;/g)).toHaveLength(1);
+    // The put back waits for its tick AND for the card (a server render never shows it ticked).
+    expect(record).toContain("disabled={lock.busy || !declared}");
+    for (const file of [code, manage]) expect(file.match(/lock\.release\(\);/g)?.length).toBe(file.match(/lock\.take\(\)/g)?.length);
+    // One lock per card, the done page's, handed down.
+    expect(manage).toContain("lock={lock}");
+    const done = source("DoneStep.tsx");
+    expect(done).toContain("const lock = usePotCardLock();");
+  });
+
+  test("the record action starts again whenever the action changes: the declaration never shows ticked, no refusal is left over", () => {
+    expect(manage).toMatch(/<PotRecordAction\s+key=\{recordAction \?\? "none"\}/);
+    expect(record).toContain("const [declared, setDeclared] = useState(false);");
   });
 
   test("the panels draw only: no wallet, no chain, no server", () => {

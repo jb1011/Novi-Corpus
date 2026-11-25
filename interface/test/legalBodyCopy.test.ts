@@ -722,9 +722,9 @@ describe("the company's pot", () => {
     ["backOnTitle", POT.backOnTitle, "Put the pot back on the public record"],
     ["backOnSend", POT.backOnSend, "Put it back on the record"],
     [
-      "recordChangeFailed",
-      POT.recordChangeFailed,
-      "Novi Corpus could not change the public record just now, so nothing was changed. Try again.",
+      "recordAnswerLost",
+      POT.recordAnswerLost,
+      "The answer did not come back, so this page reads the pot again to show where it stands.",
     ],
     ["agentTitle", POT.agentTitle, "For your agent"],
     [

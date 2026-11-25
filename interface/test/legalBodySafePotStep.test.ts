@@ -108,6 +108,7 @@ import {
   potCeilingCheck,
   potExecSimulationOk,
   isPotTransfer,
+  potCardLockCore,
   potRecordFailureView,
   potTransferAmount,
   potTransferDoneView,
@@ -898,7 +899,11 @@ describe("what the card says of a reading, and what it offers", () => {
     expect(view(HEALTHY, { onRecord: false, onThisDeployment: false }).actions).toEqual([
       "change", "stop", "fee_money",
     ]);
-    expect(view({ ...HEALTHY, owners: [P] }, { onRecord: false }).actions).toEqual(["put_back"]);
+    // Ruling R26: never put back a pot that is not the guardian's alone; it can still be taken off.
+    expect(view({ ...HEALTHY, owners: [P] }, { onRecord: false }).actions).toEqual([]);
+    expect(view({ ...HEALTHY, owners: [P] }).actions).toEqual(["take_off_record"]);
+    for (const raw of [STOPPED, { ...HEALTHY, guard: P }])
+      expect(view(raw, { onRecord: false }).actions, "the guardian's alone").toContain("put_back");
   });
 
   test("add money only while the pot is on the record and reads ceiling_read or stopped: never off the record, never for other_delegate (a changed key is moved first), never for a pot this page does not read", () => {
@@ -2876,7 +2881,8 @@ describe("after a transfer, and the public record's two actions", () => {
     // Another refusal: its sentence, as served, and nothing read again.
     for (const code of ["rate_limited", "other_deployment", "legal_body_revoked", "pot_not_offered"])
       expect(potRecordFailureView(served(code)), code).toEqual({ lines: [`The server's sentence for ${code}.`], reread: false });
-    // No answer the server wrote: this page's own sentence, never "nothing was sent" of a wallet.
+    // A lost answer (no answer the server wrote): the request may have landed, so the sentence
+    // claims nothing about the record, and the pot and the record are read again to show it.
     for (const e of [
       new ApiError(0, { code: TIMEOUT_CODE, message: "The request took too long." }),
       new ApiError(502, { code: "http_error", message: "Bad gateway" }),
@@ -2884,7 +2890,26 @@ describe("after a transfer, and the public record's two actions", () => {
       new Error("Failed to fetch"),
       undefined,
     ])
-      expect(potRecordFailureView(e)).toEqual({ lines: [P_.recordChangeFailed], reread: false });
-    expect(P_.recordChangeFailed).not.toMatch(/\{[a-zA-Z]+\}|sent/);
+      expect(potRecordFailureView(e)).toEqual({ lines: [P_.recordAnswerLost], reread: true });
+    expect(P_.recordAnswerLost).not.toMatch(/\{[a-zA-Z]+\}|nothing|changed|sent|taken off|put back/i);
+  });
+});
+
+describe("Ruling R25: one action at a time on the card", () => {
+  test("potCardLockCore: a click takes the card, a second is refused until the first gives it back, and the card hears each change once", () => {
+    const heard: boolean[] = [];
+    const lock = potCardLockCore((busy) => heard.push(busy));
+    expect(lock.held()).toBe(false);
+    expect(lock.take()).toBe(true);
+    expect(lock.held()).toBe(true);
+    expect(lock.take()).toBe(false);
+    expect(lock.take()).toBe(false);
+    expect(heard).toEqual([true]);
+    lock.release();
+    expect(lock.held()).toBe(false);
+    lock.release();
+    expect(heard).toEqual([true, false]);
+    expect(lock.take()).toBe(true);
+    expect(heard).toEqual([true, false, true]);
   });
 });

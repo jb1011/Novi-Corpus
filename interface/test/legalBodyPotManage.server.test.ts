@@ -295,6 +295,8 @@ function manage(raw: PotRaw, agentWallet: Address = A, noted: OrderPotView = NOT
       raw,
       reading: potReading(raw, { addresses: T, guardian: G, agentWallet }),
       nowSeconds: NOW_S,
+      // The card's lock, open (Ruling R25; its held state is tested with the money panels).
+      lock: { busy: false, held: () => false, take: () => true, release: () => {} },
       onChanged: () => {},
     }),
   );

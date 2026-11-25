@@ -151,6 +151,7 @@ import {
 } from "@/components/legalBody/PotPanels";
 import { PotStep } from "@/components/legalBody/PotStep";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
+import type { LegalBodyNotice } from "@/lib/legalBody/flow";
 import { potAddresses, SAFE_PROXY_RUNTIME_CODE_HASH, SAFE_SENTINEL, type PotAddresses } from "@/lib/legalBody/safePot";
 import type { PotRaw } from "@/lib/legalBody/safePotRules";
 import { potFormMoney } from "@/lib/legalBody/safePotRun";
@@ -223,12 +224,16 @@ const linkedOrder = (over: Partial<LegalBodyOrderView> = {}): LegalBodyOrderView
   ...over,
 });
 
-function kit(over: Partial<Extract<LegalBodyConfig, { available: true }>> = {}): LegalBodyStepKit {
-  const order = linkedOrder();
+function kit(
+  over: Partial<Extract<LegalBodyConfig, { available: true }>> = {},
+  orderOver: Partial<LegalBodyOrderView> = {},
+  notice?: LegalBodyNotice,
+): LegalBodyStepKit {
+  const order = linkedOrder(orderOver);
   return {
     config: config(over),
     tenant: G,
-    derivation: { phase: "done" },
+    derivation: notice === undefined ? { phase: "done" } : { phase: "done", notice },
     companyId: order.companyId,
     orderId: order.id,
     company: null,
@@ -445,19 +450,114 @@ describe("the done page's pot card", () => {
     nothingSent();
   });
 
-  test("the website offers nothing of the pot unless /config.legalBodies.pot is true: no card, and no pot read asked", () => {
-    for (const pot of [false, undefined]) {
-      calls.potQueries = [];
-      calls.grantQueries = [];
-      calls.rawQueries = [];
-      const m = done(kit({ pot }));
-      expect(text(m)).not.toContain(POT.cardTitle);
-      expect(text(m)).not.toContain(POT.title);
-      expect(calls.potQueries.some(Boolean)).toBe(false);
-      expect(calls.grantQueries.some(Boolean)).toBe(false);
-      expect(calls.rawQueries.some((q) => q.pot !== null)).toBe(false);
-    }
+  test("unless /config.legalBodies.pot is true, nothing of the pot is offered: with no note, or a note off the record, no card; only GET /pot is asked (Ruling R24), never the grant or the chain", () => {
+    for (const pot of [false, undefined])
+      for (const noted of [null, { ...NOTED, onRecord: false }]) {
+        calls.potQueries = [];
+        calls.grantQueries = [];
+        calls.rawQueries = [];
+        calls.pot = { pot: noted };
+        const m = done(kit({ pot }));
+        expect(text(m)).not.toContain(POT.cardTitle);
+        expect(text(m)).not.toContain(POT.title);
+        expect(text(m)).not.toContain(POT.offRecordTitle);
+        expect(calls.potQueries).toContain(true);
+        expect(calls.grantQueries.some(Boolean)).toBe(false);
+        expect(calls.rawQueries.some((q) => q.pot !== null)).toBe(false);
+      }
     nothingSent();
+  });
+
+  describe("Ruling R24: a pot on the record can always be taken off it", () => {
+    /** The pot's words, every one but the minimal card's. */
+    const OTHERS = [POT.cardTitle, POT.changeTitle, POT.stopTitle, POT.addMoneyTitle, POT.feeMoneyTitle, POT.backOnTitle, POT.startAgainTitle, POT.checking];
+    function minimal(m: string, what: string) {
+      const t = text(m);
+      expect(t, what).toContain(POT.title);
+      expect(t, what).toContain(fillCopy(POT.shownAddress, { address: V3_POT }));
+      expect(t, what).toContain(POT.offRecordTitle);
+      const take = button(m, POT.offRecordSend);
+      expect(take, what).not.toBeNull();
+      expect(isDisabled(take), what).toBe(false);
+      for (const s of OTHERS) expect(t, `${what}: ${s}`).not.toContain(s);
+    }
+
+    test("the pot flag off: the pot's address and Take the pot off the public record, nothing else, and no grant or chain read", () => {
+      for (const pot of [false, undefined]) {
+        calls.pot = { pot: NOTED };
+        calls.raw = HEALTHY;
+        calls.grantQueries = [];
+        calls.rawQueries = [];
+        minimal(done(kit({ pot })), `pot ${String(pot)}`);
+        expect(calls.grantQueries.some(Boolean)).toBe(false);
+        expect(calls.rawQueries.some((q) => q.pot !== null)).toBe(false);
+      }
+      nothingSent();
+    });
+
+    test("a revoked body, or one that is not linked: the same minimal card", () => {
+      calls.pot = { pot: NOTED };
+      calls.raw = HEALTHY;
+      minimal(done(kit({}, { revoked: true })), "revoked");
+      for (const state of ["deployed", "broken", "lapsed", "superseded"] as const) minimal(done(kit({}, { state })), state);
+      nothingSent();
+    });
+
+    test("another deployment, another factory or another chain: the same minimal card, and never a put back", () => {
+      calls.pot = { pot: NOTED };
+      calls.raw = HEALTHY;
+      // The flow marks an order of another deployment with its notice; the chain alone hides the card too.
+      const OTHER = { kind: "other_deployment" } as const;
+      minimal(done(kit({}, { factory: "0x00000000000000000000000000000000000fac70" }, OTHER)), "another factory");
+      minimal(done(kit({}, { chainId: 1 }, OTHER)), "another chain, with its notice");
+      minimal(done(kit({}, { chainId: 1 })), "another chain");
+      calls.pot = { pot: { ...NOTED, onRecord: false } };
+      const off = text(done(kit({}, { chainId: 1 })));
+      expect(off).not.toContain(POT.offRecordTitle);
+      expect(off).not.toContain(POT.backOnTitle);
+      nothingSent();
+    });
+
+    test("the pot offered, but its chain read failed or the record names no wallet of the agent's own: the take off is there beside it", () => {
+      calls.pot = { pot: NOTED };
+      calls.rawError = true;
+      const failed = done(kit());
+      expect(text(failed)).toContain(POT.recordUnavailable);
+      expect(button(failed, POT.retry)).not.toBeNull();
+      expect(button(failed, POT.offRecordSend)).not.toBeNull();
+      calls.rawError = false;
+      calls.raw = HEALTHY;
+      calls.byAgent = naming(G);
+      minimal(done(kit()), "the record names the guardian's wallet");
+      // Off the record: nothing to take off.
+      calls.pot = { pot: { ...NOTED, onRecord: false } };
+      expect(text(done(kit()))).not.toContain(POT.offRecordTitle);
+    });
+
+    test("the full card keeps its own take off, once; a noted pot that never got code offers the setup, not a take off", () => {
+      calls.pot = { pot: NOTED };
+      calls.raw = HEALTHY;
+      const full = text(done(kit()));
+      expect(full).toContain(POT.changeTitle);
+      expect(full.split(POT.offRecordTitle).length - 1).toBe(1);
+      calls.raw = ABSENT;
+      const offer = done(kit());
+      expect(button(offer, POT.cardTitle)).not.toBeNull();
+      expect(text(offer)).not.toContain(POT.offRecordTitle);
+      // A grant that allows no spending hides the offer: a pot the chain shows was never created
+      // still gets no take off (the record never shows it).
+      calls.grant = {
+        grant: {
+          choices: {
+            acts: { buy: { allowed: false }, pay: { allowed: false }, engageContractor: { allowed: false } },
+            endsOn: null,
+          },
+        },
+      } satisfies OrderGrantView;
+      const hidden = text(done(kit()));
+      expect(hidden).not.toContain(POT.cardTitle);
+      expect(hidden).not.toContain(POT.offRecordTitle);
+    });
   });
 
   test("checking: the card's title with pot.checking while the noted pot or the grant is read", () => {

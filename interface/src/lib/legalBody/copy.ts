@@ -895,9 +895,11 @@ export const LEGAL_BODY_COPY = {
       "This pot is off the public record. A search by its address still leads to the company, marked as a former pot.",
     backOnTitle: "Put the pot back on the public record",
     backOnSend: "Put it back on the record",
-    /** Taking the pot off the record, or putting it back, with no answer the server wrote. */
-    recordChangeFailed:
-      "Novi Corpus could not change the public record just now, so nothing was changed. Try again.",
+    /** Taking the pot off the record, or putting it back, with no answer the server wrote: the
+     *  request may have landed, so this claims nothing about the record, and the page reads it
+     *  again. */
+    recordAnswerLost:
+      "The answer did not come back, so this page reads the pot again to show where it stands.",
 
     /* The agent's side. The commands are data the page fills in, shown in copy boxes. */
     agentTitle: "For your agent",

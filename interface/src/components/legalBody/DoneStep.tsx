@@ -22,7 +22,7 @@ import { potCard } from "@/lib/legalBody/safePotStep";
 import { publicReadAllowed, publicRecordOf } from "@/lib/legalBody/standing";
 import { AgentWalletStep } from "./AgentWalletStep";
 import { LegalBodyRecord } from "./LegalBodyRecord";
-import { PotManage } from "./PotManage";
+import { PotManage, PotTakeOffCard, usePotCardLock } from "./PotManage";
 import { PotCardView } from "./PotPanels";
 import { PotStep } from "./PotStep";
 import type { CompanyView, LegalBodyByAgent, LegalBodyOrderView } from "@/lib/api/types";
@@ -51,8 +51,8 @@ const CARD_LINES: Record<DoneWalletCard, string> = {
  * says it; a click on the card opens the agent's wallet step here, in place, in its "linked" mode,
  * and the step stays open from then on. The record and its standing are left as they are.
  *
- * Under it, the company's pot, only where `/config.legalBodies.pot` is true (`DonePot`): nothing
- * of the pot is read or shown otherwise.
+ * Under it, the company's pot (`DonePot`): its card where `/config.legalBodies.pot` is true, and
+ * wherever the server says a pot is on the record, at least the way to take it off (Ruling R24).
  */
 export function DoneStep({ kit }: { kit: LegalBodyStepKit }) {
   const order = kit.order;
@@ -87,7 +87,7 @@ export function DoneStep({ kit }: { kit: LegalBodyStepKit }) {
         ) : (
           walletCard && <WalletCard card={walletCard} onOpen={() => setWalletOpen(true)} />
         ))}
-      {kit.config.pot === true && order !== null && (
+      {order !== null && (
         <DonePot
           kit={kit}
           order={order}
@@ -133,17 +133,23 @@ function WalletCard({ card, onOpen }: { card: DoneWalletCard; onOpen: () => void
 }
 
 /**
- * "Give your agent an allowance", and once it exists, the company's pot as read. Rendered only
- * where `/config.legalBodies.pot` is true, and it reads only for a linked order of this chain with
- * no notice beside it (`potReadsAllowed`): the noted pot and the grant from the server, and, for a
- * noted pot, its raw facts from the chain for the record's agent wallet. Each is read once as the
- * page shows it, and again after a transaction (`reread`).
+ * "Give your agent an allowance", and once it exists, the company's pot as read. The card reads
+ * only where `/config.legalBodies.pot` is true, for a linked order of this chain with no notice
+ * beside it (`potReadsAllowed`): the grant from the server, and, for a noted pot, its raw facts
+ * from the chain for the record's agent wallet. The noted pot itself (`GET /pot`) is read for
+ * every order (Ruling R24): a pot the server says is on the record can always be taken off it, so
+ * wherever the full card is not shown (the flag off, a revoked or unlinked order, another
+ * deployment, a chain that could not be read, a record that names no wallet of the agent's own)
+ * the page shows `PotTakeOffCard`, the pot's address and the take off, and nothing else of the
+ * pot. Each is read once as the page shows it, and again after a transaction (`reread`). One lock
+ * for the card (`usePotCardLock`): one action at a time (Ruling R25).
  *
  * `potCard` decides: nothing; the card while a read is out; the offer, whose click opens the setup
  * step here, in place, where it stays from then on; or the pot's own card (`PotManage`): what the
  * chain shows, and the guardian's actions on the same pot, each read again in its click. A read
  * that failed says so with Try again, never a spinner for ever. A record read that names no agent
- * wallet of its own shows nothing: the wallet card speaks then.
+ * wallet of its own shows nothing of the card (the wallet card speaks then), only the take off of a
+ * pot on the record.
  */
 function DonePot({
   kit,
@@ -162,13 +168,15 @@ function DonePot({
   const allowed = potReadsAllowed({ potOffered, chainId: config.chainId, order, notice });
   const record = publicRecordOf(read);
   const wallet = potRecordWallet(record, order.guardian);
-  const potQuery = useOrderPotQuery(order.id, allowed);
+  // Ruling R24: for every order, so a pot on the record can always be taken off it.
+  const potQuery = useOrderPotQuery(order.id, true);
   const grantQuery = useOrderGrantQuery(order.id, allowed);
   // undefined while it is read, null for no note.
   const noted = potQuery.data === undefined ? undefined : potQuery.data.pot;
   const rawPot = allowed && noted ? noted.address : null;
   const rawQuery = usePotRawQuery(config.chainId, rawPot, allowed ? wallet : null);
   const [open, setOpen] = useState(false);
+  const lock = usePotCardLock();
 
   const a = potAddresses(config.chainId);
   const raw = rawPot !== null ? rawQuery.data : undefined;
@@ -192,16 +200,24 @@ function DonePot({
     reading,
     cap,
   });
-  // The record has been read and names no wallet of the agent's own, or the order is not one for
-  // the pot: nothing of it here.
-  if (card === "hidden" || (read !== undefined && wallet === null)) return null;
-
-  const failed = (noted === undefined && potQuery.isError) || (rawPot !== null && rawQuery.isError);
   const reread = () => {
     void potQuery.refetch();
     if (rawPot !== null) void rawQuery.refetch();
     refetchRecord();
   };
+  // Ruling R24: a pot the server says is on the record, never one the chain shows was never
+  // created (the offer then sets it up at that address), keeps its take off wherever the full
+  // card is not shown.
+  const takeOff =
+    noted && noted.onRecord === true && reading?.state !== "absent" ? (
+      <PotTakeOffCard kit={kit} order={order} noted={noted} lock={lock} onChanged={reread} />
+    ) : null;
+  if (!allowed) return takeOff;
+  // The record has been read and names no wallet of the agent's own, or the order is not one for
+  // the pot: nothing of it here but the take off.
+  if (card === "hidden" || (read !== undefined && wallet === null)) return takeOff;
+
+  const failed = (noted === undefined && potQuery.isError) || (rawPot !== null && rawQuery.isError);
 
   const step = open && wallet !== null && (
     <Card className="mb-6 p-6">
@@ -221,6 +237,7 @@ function DonePot({
           reading={reading}
           // The time the pot was read: what is left is said of the period it was read in.
           nowSeconds={Math.floor(rawQuery.dataUpdatedAt / 1000)}
+          lock={lock}
           onChanged={reread}
         />
       </>
@@ -243,6 +260,8 @@ function DonePot({
           retrying={potQuery.isFetching || rawQuery.isFetching}
         />
       )}
+      {/* The chain could not be read: the pot on the record can still be taken off it. */}
+      {failed && takeOff}
     </>
   );
 }

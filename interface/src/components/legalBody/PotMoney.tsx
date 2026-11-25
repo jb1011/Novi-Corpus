@@ -35,7 +35,7 @@ import {
   potSendPreflight,
 } from "@/lib/legalBody/safePotStep";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
-import { PotActionPanel, PotActionResultPanel, PotAmountField } from "./PotPanels";
+import { PotActionPanel, PotActionResultPanel, PotAmountField, type PotCardLock } from "./PotPanels";
 
 const POT = LEGAL_BODY_COPY.pot;
 
@@ -78,6 +78,7 @@ export function PotMoney({
   agentWallet: shownWallet,
   raw: shownRaw,
   offered,
+  lock,
   onChanged,
 }: {
   kit: LegalBodyStepKit;
@@ -89,6 +90,8 @@ export function PotMoney({
   raw: PotRaw;
   /** The transfers the card's reading offers (`potReadingView`). */
   offered: readonly PotTransfer[];
+  /** The card's one lock, the done page's: one action of the card at a time (Ruling R25). */
+  lock: PotCardLock;
   /** Reads the noted pot, its reading and the record again. */
   onChanged: () => void;
 }) {
@@ -118,9 +121,9 @@ export function PotMoney({
   const [amounts, setAmounts] = useState<Record<PotTransfer, string>>({ ...START });
   const [amountProblems, setAmountProblems] = useState<Partial<Record<PotTransfer, string>>>({});
   const [stage, setStage] = useState<PotTransferStage>({ at: "idle" });
+  // This component's own click in flight (its spinner). The card's lock (`lock.busy`) disables
+  // every action of the card while any one of them is in flight (Ruling R25).
   const [busy, setBusy] = useState(false);
-  // Set and cleared inside a click: a second click before the first settles reads and sends nothing.
-  const inFlight = useRef(false);
 
   const a = potAddresses(config.chainId);
 
@@ -147,7 +150,7 @@ export function PotMoney({
 
   /** One transfer's click: its amount checked, then `runPotTransfer` over this click's own reads. */
   async function onTransfer(kind: PotTransfer) {
-    if (inFlight.current) return;
+    if (lock.held()) return;
     const amount = potTransferAmount(kind, amounts[kind]);
     if (!amount.ok) {
       setAmountProblems((p) => ({ ...p, [kind]: amount.sentence }));
@@ -164,7 +167,7 @@ export function PotMoney({
       refusedHere(kind, potProblemSentence({ problem: "refused" }));
       return;
     }
-    inFlight.current = true;
+    if (!lock.take()) return;
     setBusy(true);
     // Until the wallet opens: the click's reads, the checks, the simulation and the estimate.
     setStage({ at: "checking", action: kind });
@@ -239,7 +242,7 @@ export function PotMoney({
         confirmed: false,
       });
     } finally {
-      inFlight.current = false;
+      lock.release();
       setBusy(false);
     }
   }
@@ -304,11 +307,11 @@ export function PotMoney({
   /** "Check again": a receipt not seen in time is asked for first; then the pot read again. A
    *  receipt still not there leaves the panel as it is. */
   async function onCheckAgain() {
-    if (inFlight.current || stage.at !== "problem" || stage.again === null) return;
+    if (lock.held() || stage.at !== "problem" || stage.again === null) return;
     const { action, again } = stage;
     const client = publicClient;
     if (!client || a === null) return;
-    inFlight.current = true;
+    if (!lock.take()) return;
     setBusy(true);
     try {
       if (again.confirmed) {
@@ -324,7 +327,7 @@ export function PotMoney({
       if (!life.alive()) return;
       await afterReceipt(client, a, action, again, receipt);
     } finally {
-      inFlight.current = false;
+      lock.release();
       setBusy(false);
     }
   }
@@ -343,14 +346,14 @@ export function PotMoney({
         label={kind === "add_money" ? POT.addMoneyLabel : POT.gasLabel}
         value={amounts[kind]}
         error={amountProblems[kind]}
-        disabled={busy}
+        disabled={lock.busy}
         onChange={(typed) => editAmount(kind, typed)}
       />
     );
     const send = {
       sendLabel: potTransferSendLabel(kind, amounts[kind]),
       onSend: () => void onTransfer(kind),
-      disabled: busy,
+      disabled: lock.busy,
       loading: running,
     };
     if (kind === "add_money")
@@ -389,6 +392,7 @@ export function PotMoney({
           stage={stage}
           after={[]}
           busy={busy}
+          disabled={lock.busy}
           onCheckAgain={() => void onCheckAgain()}
         />
       )}

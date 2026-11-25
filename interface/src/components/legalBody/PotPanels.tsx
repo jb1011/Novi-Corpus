@@ -26,6 +26,22 @@ import type { PotForm, PotFormCheck } from "@/lib/legalBody/safePotStep";
 
 const POT = LEGAL_BODY_COPY.pot;
 
+/**
+ * One action at a time on a pot's card (Ruling R25): the done page holds one lock per card and
+ * hands it to every action of it (the Safe's, the transfers, the record's). While an action holds
+ * it, every other action's button and field is disabled, so a quick guardian never opens two
+ * wallet prompts at once.
+ */
+export type PotCardLock = {
+  /** An action of the card is in flight: what the render disables. */
+  busy: boolean;
+  /** Whether an action holds the card now: read in a click, never in a render. */
+  held: () => boolean;
+  /** Takes the card for one click: false while another action holds it. */
+  take: () => boolean;
+  release: () => void;
+};
+
 /** Lines, each a paragraph of its own. */
 function Lines({ lines, className }: { lines: readonly string[]; className?: string }) {
   return (
@@ -571,12 +587,16 @@ export function PotActionResultPanel({
   stage,
   after,
   busy,
+  disabled = false,
   onCheckAgain,
 }: {
   title: string;
   stage: Exclude<PotCardStage<string>, { at: "idle" }>;
   after: readonly string[];
+  /** This panel's own Check again is in flight. */
   busy: boolean;
+  /** Another action of the card is in flight. */
+  disabled?: boolean;
   onCheckAgain: () => void;
 }) {
   let body: ReactNode;
@@ -618,7 +638,7 @@ export function PotActionResultPanel({
           </Callout>
           {stage.again && (
             <div className="mt-4 flex justify-end">
-              <Button onClick={onCheckAgain} loading={busy}>
+              <Button onClick={onCheckAgain} loading={busy} disabled={disabled}>
                 {POT.checkAgain}
               </Button>
             </div>

@@ -766,14 +766,48 @@ const RECORD_REREAD: readonly string[] = ["pot_exists", "pot_pending", "pot_take
  * (`pot_not_on_record`, a retry after a lost answer) says nothing and reads again: the card then
  * shows the pot as off the record. `pot_exists`, `pot_pending` and `pot_taken`, and any code the
  * server's next step reads again for, say the server's own sentence and read again. Any other
- * refusal says the server's sentence; with no answer the server wrote, this page's own.
+ * refusal says the server's sentence. With no answer the server wrote (a timeout, a gateway's
+ * error, a request that never came back) the request may have landed: the sentence claims nothing
+ * about the record, and the pot and the record are read again to show where it stands.
  */
 export function potRecordFailureView(e: unknown): { lines: string[]; reread: boolean } {
   const served = potServedRefusal(e);
-  if (served === null) return { lines: [POT.recordChangeFailed], reread: false };
+  if (served === null) return { lines: [POT.recordAnswerLost], reread: true };
   if (served.code === "pot_not_on_record") return { lines: [], reread: true };
   const next = potServerNext(served.code);
   const reread =
     RECORD_REREAD.includes(served.code) || next === "reread_pot" || next === "reread_record";
   return { lines: [served.line], reread };
+}
+
+// ---------------------------------------------------------------------------------------------
+// One action at a time on the card (Ruling R25)
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * The card's one lock, without React: `take` holds it for one click and answers false while
+ * another click holds it; `release` gives it back. `onBusy` hears each change, so the card can
+ * disable every other action while one is in flight (a quick guardian never opens two wallet
+ * prompts at once).
+ */
+export function potCardLockCore(onBusy: (busy: boolean) => void): {
+  held: () => boolean;
+  take: () => boolean;
+  release: () => void;
+} {
+  let holding = false;
+  return {
+    held: () => holding,
+    take: () => {
+      if (holding) return false;
+      holding = true;
+      onBusy(true);
+      return true;
+    },
+    release: () => {
+      if (!holding) return;
+      holding = false;
+      onBusy(false);
+    },
+  };
 }
