@@ -379,7 +379,9 @@ describe("the pot's card, as the chain shows the pot", () => {
     expect(t).toContain(fillCopy(POT.withdrawLine, { balance: "190" }));
     expect(button(m, fillCopy(POT.withdrawSend, { balance: "190" }))).not.toBeNull();
     expect(t).toContain(POT.startAgainTitle);
-    expect(t).toContain(POT.startAgainLine);
+    // Ruling R23: the panel names the key the allowance goes to.
+    expect(t).toContain(fillCopy(POT.startAgainLine, { address: A }));
+    expect(POT.startAgainLine).toContain("{address}");
     expect(button(m, POT.startAgainSend)).not.toBeNull();
     expect(t).toContain(POT.onePot);
     expect(t.indexOf(POT.onePot)).toBeGreaterThan(t.indexOf(POT.startAgainTitle));
@@ -577,19 +579,25 @@ describe("the card's source", () => {
     const registry = code.slice(code.indexOf("function readRegistry"), code.indexOf("async function onAction"));
     expect(registry).toContain("readAgentWallet(");
     expect(registry).toContain('functionName: "getAgentWallet"');
-    // The context comes from the click's read alone: the card's key, raw facts and reading (its
-    // props, held as `shown...`) never reach the click.
-    const run = click.indexOf("await runPotAction(");
-    const p = click.slice(run, click.indexOf("}, {", run));
+    // The context comes from the click's read alone: the card's raw facts and reading (its props,
+    // held as `shown...`) never reach the click, and its key only as the key the panel named, which
+    // the click's own read must equal (Ruling R23).
+    expect(click).toContain("await runPotAction(action, shown, {");
+    const built = /const shown = \{([^}]*)\};/.exec(click);
+    expect(built).not.toBeNull();
+    const p = built?.[1] ?? "";
     expect(p).toContain("pot: noted.address");
-    expect(p).not.toContain("agentWallet");
+    expect(p).toContain("shownAgentWallet: shownWallet");
+    expect(p.replace("shownAgentWallet: shownWallet", "")).not.toMatch(/agentWallet|shownWallet/i);
+    // That is the one place the card's key reaches the click.
+    expect(click.match(/shownWallet/g)).toHaveLength(1);
     // Nor the receipt's continuation, the read back or Check again: every async function of the card.
     const clicks = code.slice(code.indexOf("async function onAction"), code.indexOf("const view = potReadingView("));
     expect(clicks).toContain("async function readBack");
     expect(clicks).toContain("async function onCheckAgain");
     for (const shown of ["shownWallet", "shownRaw", "shownReading"]) {
       expect(code, shown).toContain(shown);
-      expect(clicks, shown).not.toContain(shown);
+      expect(clicks.replace("shownAgentWallet: shownWallet", ""), shown).not.toContain(shown);
     }
     // The click's own continuation asks the lifetime as soon as the runner answers.
     expect(click).toMatch(/\}\);\s*if \(!life\.alive\(\)\) return;\s*if \(!result\.ok\) \{/);

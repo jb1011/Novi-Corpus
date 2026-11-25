@@ -862,8 +862,9 @@ export const LEGAL_BODY_COPY = {
     withdrawLine: "Sends everything in the pot, {balance} USDC, to your wallet.",
     withdrawSend: "Take {balance} USDC back",
     startAgainTitle: "Start again",
+    /** Names the key the allowance goes to (Ruling R23): the click refuses any other. */
     startAgainLine:
-      "Puts your agent's key back on this pot with the ceiling you choose, in one transaction. A new thirty-day period starts now, with nothing taken yet.",
+      "Lets this key take from the pot again: {address}, your agent's wallet in the registry. One transaction, with the ceiling you choose. A new thirty-day period starts now, with nothing taken yet.",
     startAgainSend: "Start again",
     newKeyTitle: "My agent has a new key",
     newKeyLine:

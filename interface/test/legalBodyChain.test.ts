@@ -1363,6 +1363,20 @@ describe("the allowlist takes the guardian's Safe actions", () => {
     }
   });
 
+  test("start again of a pot stopped elsewhere with the key still listed: the allowlist takes the restore that removes it first, and refuses the one that keeps its old period", () => {
+    // Switched off elsewhere by disableModule alone: the module still lists A.
+    const listed: Restore = { ...RESTORE_V11, delegates: [A] };
+    const req = execReq(listed);
+    expect(accepted(req, potCtx(listed))).toMatch(/^0x/);
+    // V11's bytes keep A's old period (no removeDelegate): for this pot they are refused.
+    expect(allowedCall(execReq(RESTORE_V11), potCtx(listed))).toEqual(refused("exec_args"));
+    // And the new shape is not taken for a pot that lists no key.
+    expect(allowedCall(req, potCtx(RESTORE_V11))).toEqual(refused("exec_args"));
+    expect(allowedCall(req, potCtx({ ...listed, agentWallet: P }))).toEqual(refused("exec_args"));
+    expect(allowedCall(req, potCtx({ ...listed, modules: [OTHER_MODULE] }))).toEqual(refused("restore_other_module"));
+    // V11, V12 and V13 list no such key: their bytes are unchanged (pinned above).
+  });
+
   test("a value of 0 is no value", () => {
     expect(accepted({ ...execReq(CHANGE_V6), value: NO_WEI }, potCtx(CHANGE_V6))).toBe(
       accepted(execReq(CHANGE_V6), potCtx(CHANGE_V6)),

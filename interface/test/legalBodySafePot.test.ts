@@ -684,27 +684,46 @@ describe("the guardian's transactions on a running or stopped pot", () => {
     });
   });
 
-  test("restore keeps a delegate that is the agent's wallet (no removeDelegate for it), and is null when modules hold another module, alone or beside ours", () => {
-    const kept = potRestoreParts(T, {
+  test("restore removes a listed delegate that is the agent's wallet first, so its allowance starts a fresh period; and is null when modules hold another module, alone or beside ours", () => {
+    // A pot stopped elsewhere by switching the add-on off alone keeps its key listed, with its old
+    // period and what was taken in it. Removed with its allowances, then added and set again, the
+    // key starts a new period at the minute the restore is mined, with nothing taken.
+    const listed = potRestoreParts(T, {
       ...V3,
       delegates: [A.toLowerCase() as Address],
-      modules: [T.allowanceModule],
+      modules: [],
     }) as Hex[];
-    const parts = kept.map((p) => splitParts(p)[0]);
-    expect(parts.map((p) => decodeModuleCall(p.data).functionName)).toEqual([
+    const parts = listed.map((p) => splitParts(p)[0]);
+    expect(parts.map((p) => p.to)).toEqual([T.allowanceModule, zeroAddress, T.allowanceModule, T.allowanceModule]);
+    expect(decodeModuleCall(parts[0].data)).toMatchObject({ functionName: "removeDelegate", args: [A, true] });
+    expect(decodeSafeCall(parts[1].data)).toMatchObject({ functionName: "enableModule" });
+    expect(decodeModuleCall(parts[2].data)).toMatchObject({ functionName: "addDelegate", args: [A] });
+    expect(decodeModuleCall(parts[3].data)).toMatchObject({
+      functionName: "setAllowance",
+      args: [A, T.usdc, BigInt(50_000_000), 43200, 0],
+    });
+    // The add-on still on: the same, without enabling it again.
+    const on = potRestoreParts(T, { ...V3, delegates: [A], modules: [T.allowanceModule] }) as Hex[];
+    expect(on.map((p) => decodeModuleCall(splitParts(p)[0].data).functionName)).toEqual([
+      "removeDelegate",
       "addDelegate",
       "setAllowance",
     ]);
+    // Every listed key goes, the agent's wallet among them, in the order listed.
     const mixed = potRestoreParts(T, {
       ...V3,
       delegates: [P, A],
       modules: [T.allowanceModule],
     }) as Hex[];
-    expect(mixed.map((p) => decodeModuleCall(splitParts(p)[0].data).functionName)).toEqual([
+    const mixedParts = mixed.map((p) => decodeModuleCall(splitParts(p)[0].data));
+    expect(mixedParts.map((c) => c.functionName)).toEqual([
+      "removeDelegate",
       "removeDelegate",
       "addDelegate",
       "setAllowance",
     ]);
+    expect(mixedParts[0]).toMatchObject({ args: [P, true] });
+    expect(mixedParts[1]).toMatchObject({ args: [A, true] });
 
     const others: Address[][] = [
       [OTHER_MODULE],

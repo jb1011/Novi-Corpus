@@ -751,10 +751,20 @@ export function potWithdrawArgs(p: { guardian: Address; balanceWei: bigint }): S
 
 /**
  * The restore (start again, or a new key, on the same Safe), in this order: removeDelegate(d,
- * true) for every listed delegate that is not `agentWallet`; enableModule(module) sent to the zero
- * address when `modules` is empty; addDelegate(agentWallet); setAllowance(agentWallet, token,
- * ceiling, period, 0). No amount. Null when `modules` is neither empty nor exactly [module]: a
- * Safe with another module is not a pot this site restores.
+ * true) for EVERY listed delegate, `agentWallet` included when it is listed; enableModule(module)
+ * sent to the zero address when `modules` is empty; addDelegate(agentWallet);
+ * setAllowance(agentWallet, token, ceiling, period, 0). No amount. Null when `modules` is neither
+ * empty nor exactly [module]: a Safe with another module is not a pot this site restores.
+ *
+ * Why `agentWallet` is removed too when it is listed: a pot switched off elsewhere by
+ * `disableModule` alone still lists its key, with that key's allowance as it was (its period's
+ * start and what was taken in it). Without the removal, `addDelegate` does nothing for a key
+ * already listed, and `setAllowance` with a reset base of 0 keeps the allowance's last reset, so
+ * the old period and what was taken would carry on. `removeDelegate(key, true)` sets the key's
+ * amount, spent, period and last reset to 0 (its nonce is kept); the module's `setAllowance` then
+ * starts the period at the minute the restore is mined, because the allowance's last reset is 0.
+ * So every restore starts a new thirty-day period, with nothing taken yet. The inputs of V11, V12
+ * and V13 list no such key: their bytes are unchanged.
  */
 export function potRestoreParts(
   a: PotAddresses,
@@ -763,9 +773,7 @@ export function potRestoreParts(
   const off = p.modules.length === 0;
   const ours = p.modules.length === 1 && sameAddress(p.modules[0], a.allowanceModule);
   if (!off && !ours) return null;
-  const parts = p.delegates
-    .filter((d) => !sameAddress(d, p.agentWallet))
-    .map((d) => removeDelegatePart(a, d));
+  const parts = p.delegates.map((d) => removeDelegatePart(a, d));
   if (off) parts.push(enableModulePart(a));
   parts.push(addDelegatePart(a, p.agentWallet), setAllowancePart(a, p));
   return parts;

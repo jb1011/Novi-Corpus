@@ -681,7 +681,7 @@ describe("the company's pot", () => {
     [
       "startAgainLine",
       POT.startAgainLine,
-      "Puts your agent's key back on this pot with the ceiling you choose, in one transaction. A new thirty-day period starts now, with nothing taken yet.",
+      "Lets this key take from the pot again: {address}, your agent's wallet in the registry. One transaction, with the ceiling you choose. A new thirty-day period starts now, with nothing taken yet.",
     ],
     ["startAgainSend", POT.startAgainSend, "Start again"],
     ["newKeyTitle", POT.newKeyTitle, "My agent has a new key"],

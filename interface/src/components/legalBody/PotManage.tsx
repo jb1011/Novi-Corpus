@@ -78,9 +78,11 @@ const TITLES: Readonly<Record<PotSafeAction, string>> = {
  * the agent does with its own key: the MCP tools by name and the two commands.
  *
  * The card is drawn from the done page's reads (`agentWallet`, `raw`, `reading`: the record's key
- * and the pot read for it). An action's click never uses them: it reads the registry's key and the
- * pot again (`runPotAction`), and builds its transaction from THAT read, so a restore is for the
- * key the registry names in the same click. Then the page's checks, the allowlist on the exact
+ * and the pot read for it). An action's click never builds from them: it reads the registry's key
+ * and the pot again (`runPotAction`), and builds its transaction from THAT read, so a restore is
+ * for the key the registry names in the same click; and since the guardian signs only what was
+ * shown, a start again or a new key is refused when that key is not the one its panel names
+ * (Ruling R23), and the card reads again. Then the page's checks, the allowlist on the exact
  * request, the simulation and the estimate from the guardian with no fee field, the account
  * connected now, and only then the wallet. After the receipt the pot is read again against the
  * click's key, and `onChanged` reads the done page's pot again.
@@ -206,7 +208,10 @@ export function PotManage({
     // Until the wallet opens: the click's reads, the checks, the simulation and the estimate.
     setStage({ at: "checking", action });
     try {
-      const result = await runPotAction(action, { pot: noted.address, guardian, newCeilingUnits }, {
+      // The key the panel names goes in only to be compared: the restore is built from the
+      // click's own read of the registry, and refused unless the two are the same (Ruling R23).
+      const shown = { pot: noted.address, guardian, shownAgentWallet: shownWallet, newCeilingUnits };
+      const result = await runPotAction(action, shown, {
         alive: () => life.alive(),
         read: async () => {
           const wallet = await readRegistry(client, agentId);
@@ -442,7 +447,7 @@ export function PotManage({
           <PotActionPanel
             key={action}
             title={POT.startAgainTitle}
-            lines={[POT.startAgainLine, POT.onePot]}
+            lines={[fillCopy(POT.startAgainLine, { address: shownWallet }), POT.onePot]}
             sendLabel={POT.startAgainSend}
             {...capped}
           >

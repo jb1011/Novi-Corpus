@@ -1944,7 +1944,14 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
   /** The click's read: the registry names `agentWallet`, and the pot is read for it. */
   const fresh = (raw: PotRaw, agentWallet: Address = A): Fresh => ({ agentWallet, raw, reading: read(raw, agentWallet) });
   const none = (agentWallet: AgentWalletRead): Fresh => ({ agentWallet, raw: null, reading: null });
-  const args = (newCeilingUnits?: bigint) => ({ pot: SAFE_CREATED, guardian: G, newCeilingUnits });
+  /** What the card hands the runner: the pot, the guardian, the key its panel names (Ruling R23),
+   *  and the ceiling typed. */
+  const args = (newCeilingUnits?: bigint, shownAgentWallet: Address = A) => ({
+    pot: SAFE_CREATED,
+    guardian: G,
+    shownAgentWallet,
+    newCeilingUnits,
+  });
   /** Hand-made dependencies that say yes, each recording its call; the allowlist is the real one,
    *  as the card's closure asks it. `impl` replaces any. */
   function harness(f: Fresh, impl: Partial<PotActionDeps> = {}) {
@@ -2027,7 +2034,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     ];
     for (const [action, f, ceiling] of cases) {
       const h = harness(f);
-      expect(await runPotAction(action, args(ceiling), h.d), action).toEqual({
+      expect(await runPotAction(action, args(ceiling, f.agentWallet as Address), h.d), action).toEqual({
         ok: true,
         hash: HASH,
         agentWallet: f.agentWallet,
@@ -2035,7 +2042,9 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
       expect(h.calls, action).toEqual(ALL);
       // What is sent is the context of the click's read, the one the allowlist accepted.
       const want = potActionContext(action, {
-        ...args(ceiling),
+        pot: SAFE_CREATED,
+        guardian: G,
+        newCeilingUnits: ceiling,
         agentWallet: f.agentWallet as Address,
         raw: f.raw as PotRaw,
         reading: f.reading as PotReading,
@@ -2094,26 +2103,61 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     }
   });
 
-  test("a new key pressed on a card drawn with key P while the click's registry read names key Q builds the restore for Q", async () => {
-    const h = harness(fresh(HEALTHY, Q));
-    expect(await runPotAction("new_key", args(USDC(50)), h.d)).toEqual({ ok: true, hash: HASH, agentWallet: Q });
+  test("Ruling R23: a new key or a start again pressed on a card that named key P, while the click's registry read names key Q, is refused before anything else, and the card reads again", async () => {
+    for (const [action, raw] of [
+      ["new_key", HEALTHY],
+      ["start_again", STOPPED],
+    ] as [PotSafeAction, PotRaw][]) {
+      const h = harness(fresh(raw, Q));
+      expect(await runPotAction(action, args(USDC(50), P), h.d), action).toEqual({
+        ok: false,
+        problem: "refused",
+        cause: POT_ACTION_MOVED,
+      });
+      // Nothing preflighted, checked, simulated or sent.
+      expect(h.calls, action).toEqual(["read"]);
+      expect(h.sent, action).toEqual([]);
+    }
+    expect(potActionFailureView({ ok: false, problem: "refused", cause: POT_ACTION_MOVED }, { environment: "sandbox", guardian: G })).toEqual({
+      lines: [P_.actionMoved],
+      reread: true,
+    });
+  });
+
+  test("Ruling R23: the key shown and the key read in the click are the same (any letter case): the restore is for that key, built from the click's read", async () => {
+    const h = harness(fresh(HEALTHY, P));
+    expect(await runPotAction("new_key", args(USDC(50), P.toLowerCase() as Address), h.d)).toEqual({
+      ok: true,
+      hash: HASH,
+      agentWallet: P,
+    });
     expect(h.sent).toEqual([
       {
         kind: "restore",
         pot: SAFE_CREATED,
         guardian: G,
-        agentWallet: Q,
+        agentWallet: P,
         ceilingUnits: USDC(50),
         delegates: [A],
         modules: [T.allowanceModule],
       },
     ]);
-    // A start again of a stopped pot is for the click's key too.
-    const again = harness(fresh(STOPPED, Q));
-    expect(await runPotAction("start_again", args(USDC(50)), again.d)).toMatchObject({ ok: true, agentWallet: Q });
+    const again = harness(fresh(STOPPED, P));
+    expect(await runPotAction("start_again", args(USDC(50), P), again.d)).toMatchObject({ ok: true, agentWallet: P });
     expect(again.sent).toEqual([
-      { kind: "restore", pot: SAFE_CREATED, guardian: G, agentWallet: Q, ceilingUnits: USDC(50), delegates: [], modules: [] },
+      { kind: "restore", pot: SAFE_CREATED, guardian: G, agentWallet: P, ceilingUnits: USDC(50), delegates: [], modules: [] },
     ]);
+  });
+
+  test("the stop, the change and the take back give no key: a key that moved in the registry never blocks the stop", async () => {
+    // The card named A; the registry names Q now. The stop removes every key the pot lists.
+    const stop = harness(fresh(HEALTHY, Q));
+    expect(await runPotAction("stop", args(undefined, A), stop.d)).toMatchObject({ ok: true });
+    expect(stop.sent).toEqual([
+      { kind: "stop", pot: SAFE_CREATED, guardian: G, delegates: [A], modules: [T.allowanceModule] },
+    ]);
+    const back = harness(fresh(STOPPED_3, Q));
+    expect(await runPotAction("withdraw", args(undefined, A), back.d)).toMatchObject({ ok: true });
   });
 
   test("a simulation that answers false, or nothing, is would_revert and nothing is sent; one the chain refuses too; one the node could not answer is read_failed", async () => {

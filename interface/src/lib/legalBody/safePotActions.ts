@@ -102,7 +102,8 @@ const listOf = (list: unknown): Address[] | null =>
  *    and not the guardian's, a restore for it with a new ceiling (V12). A stopped pot reads
  *    `stopped` whatever key the registry names: its start again is then for the new key.
  * A restore is always for the registry's key of the click (Ruling R19: after a changed-key setup
- * the pot's key is the note's first one, never the registry's).
+ * the pot's key is the note's first one, never the registry's), and `runPotAction` sends it only
+ * when that key is also the one the card named (Ruling R23).
  */
 export function potActionContext(
   action: PotSafeAction,
@@ -253,21 +254,32 @@ async function actionChainFailure(cause: unknown, d: PotActionDeps): Promise<Pot
  *     read too);
  *  2. a registry key of the agent's own (`agent_wallet` for none, the zero address or the
  *     guardian's);
- *  3. `potActionContext` from THAT read (`refused`, cause POT_ACTION_MOVED): never the card's;
- *  4. the page's own checks (their problem);
- *  5. the allowlist on the exact request (`refused`, with its code as `cause`);
- *  6. the simulation from the guardian, and `potExecSimulationOk` (`would_revert`);
- *  7. the estimate, and `potGasLimit` under POT_EXEC_GAS_CAP (`would_revert`). For 6 and 7, a
+ *  3. for a start again or a new key, the registry's key of the click is the one the card's panel
+ *     named (`shownAgentWallet`, in any letter case), else `refused` with cause POT_ACTION_MOVED
+ *     (Ruling R23): the guardian never signs the allowance over to a key they were not shown. The
+ *     restore is still built from the click's read, so it is for a key both shown and read;
+ *  4. `potActionContext` from THAT read (`refused`, cause POT_ACTION_MOVED): never the card's;
+ *  5. the page's own checks (their problem);
+ *  6. the allowlist on the exact request (`refused`, with its code as `cause`);
+ *  7. the simulation from the guardian, and `potExecSimulationOk` (`would_revert`);
+ *  8. the estimate, and `potGasLimit` under POT_EXEC_GAS_CAP (`would_revert`). For 7 and 8, a
  *     throw is `no_gas` when the node says the money is short (the balance read again), else
  *     `would_revert` only when the chain refused it, else `read_failed`;
- *  8. the account connected now is the guardian's, else `refused` with
+ *  9. the account connected now is the guardian's, else `refused` with
  *     `wallet_is_not_the_guardian`, and nothing is sent;
- *  9. the one transaction through the allowlist, its outcomes read as `runPotCreate` reads them.
+ * 10. the one transaction through the allowlist, its outcomes read as `runPotCreate` reads them.
  * The answer names the registry's key of the click: the pot is read back against it.
  */
 export async function runPotAction(
   action: PotSafeAction,
-  p: { pot: Address; guardian: Address; newCeilingUnits?: bigint },
+  p: {
+    pot: Address;
+    guardian: Address;
+    /** The key the card's panel names: for a start again or a new key, the key the allowance
+     *  goes to, which the click's own read must name too. */
+    shownAgentWallet: Address;
+    newCeilingUnits?: bigint;
+  },
   d: PotActionDeps,
 ): Promise<{ ok: true; hash: Hex; agentWallet: Address } | PotActionFailure> {
   // 1.
@@ -284,6 +296,12 @@ export async function runPotAction(
   if (!agentsOwn(wallet, p.guardian)) return { ok: false, problem: "agent_wallet" };
   if (fresh.raw === null || fresh.reading === null) return { ok: false, problem: "read_failed" };
   // 3.
+  if (
+    (action === "start_again" || action === "new_key") &&
+    !sameAddress(wallet, p.shownAgentWallet)
+  )
+    return { ok: false, problem: "refused", cause: POT_ACTION_MOVED };
+  // 4.
   const ctx = potActionContext(action, {
     pot: p.pot,
     guardian: p.guardian,
@@ -293,13 +311,13 @@ export async function runPotAction(
     newCeilingUnits: p.newCeilingUnits,
   });
   if ("problem" in ctx) return { ok: false, problem: "refused", cause: POT_ACTION_MOVED };
-  // 4.
+  // 5.
   const pre = d.preflight();
   if (!pre.ok) return { ok: false, problem: pre.problem };
-  // 5.
+  // 6.
   const checked = d.check(ctx);
   if (!checked.ok) return { ok: false, problem: "refused", cause: checked.problem };
-  // 6.
+  // 7.
   let returned: Hex;
   try {
     returned = await d.simulate(checked.call);
@@ -308,7 +326,7 @@ export async function runPotAction(
   }
   if (!d.alive()) return LEFT_ACTION;
   if (!potExecSimulationOk(returned)) return { ok: false, problem: "would_revert" };
-  // 7.
+  // 8.
   let estimate: bigint;
   try {
     estimate = await d.estimate(checked.call);
@@ -318,11 +336,11 @@ export async function runPotAction(
   if (!d.alive()) return LEFT_ACTION;
   const gas = potGasLimit(estimate, POT_EXEC_GAS_CAP);
   if (gas === null) return { ok: false, problem: "would_revert" };
-  // 8.
+  // 9.
   if (!sameAddress(d.account(), p.guardian))
     return { ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" };
   if (!d.alive()) return LEFT_ACTION;
-  // 9.
+  // 10.
   let sent: { ok: true; hash: Hex } | { ok: false; problem: string };
   try {
     sent = await d.send(ctx, gas);
@@ -395,9 +413,9 @@ export type PotActionStage =
  * After an action's receipt, the pot read again (against `agentWallet`, the registry's key of the
  * click) in its own sentences: a change, a start again or a new key is done (`ok`) only when it
  * reads `ceiling_read` with the ceiling asked (`potCreatedView`); a stop or a take back once it
- * reads `stopped`. A start again or a new key that is done names the key that may take now: the
- * click's, which the card's line may not have named if the registry moved meanwhile. Anything
- * else is the warning's own lines, and the card claims nothing more.
+ * reads `stopped`. A start again or a new key that is done names the key that may take now (the
+ * click's, which Ruling R23 makes the one the card named). Anything else is the warning's own
+ * lines, and the card claims nothing more.
  */
 export function potActionDoneView(
   action: PotSafeAction,
