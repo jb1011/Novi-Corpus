@@ -251,19 +251,24 @@ off it; and the record still names a pot that holds a pot's code, with "Its limi
   the agent's key itself, to the AllowanceModule, with an empty signature and a gas limit of 200,000.
 
 **The exit card: Stop the allowance and Take the money back are always reachable.** They only remove rights or
-pay the guardian's own wallet, so the done page keeps them whatever happens to the legal body (revoked, broken,
-winding down, dissolved, replaced), whatever the registry now names as the agent's wallet (none, the zero address,
-the guardian's, a new key) and whatever the pot's switch says. Wherever the full card is not shown (the switch off,
-an order not linked or revoked, a notice, another deployment on the same chain, a record naming no wallet of the
-agent's own), the page shows the exit card instead: "Stop the allowance" while a key or the pot's module is listed,
-"Take the money back" while no module is on and the pot holds money, and "Take the pot off the public record" while
-it is on the record. What it needs: a noted pot (on the record or taken off it) whose address the browser recomputes
-itself from the note's birth details and the guardian, on the configured chain, holding a pot's code and reading as
-the guardian's alone. Its chain reads are the browser's own, whatever the switch; of the server it asks only the
-noted pot (`GET /legal-body-orders/:id/pot`). The website's allowlist takes the two exits for any such order of this
-chain with the same guardian, and refuses every other pot call for it. A noted address the browser does not
-recompute shows "The address noted for this legal body is not a pot that only your wallet owns." and offers no wallet
-action at all, only the take off while it is on the record.
+pay the guardian's own wallet, so the legal body's page keeps them whatever happens to the legal body (revoked,
+broken, winding down, dissolved, replaced, superseded), whatever the registry now names as the agent's wallet (none,
+the zero address, the guardian's, a new key) and whatever the pot's switch says. A body still on the done page with
+its full card (the switch on, linked, not revoked, no notice, a record naming a wallet of the agent's own) has "Stop
+the allowance" there, and "Take the money back" once it is stopped. Everywhere else the page shows the exit card:
+on the done page in place of the full card, and under the closed notice (another deployment on the same chain,
+replaced, superseded) or under the pointer step (its pointer cleared) that a fallen body lands on, where no public
+record is read and the pot is read against the note's first key. The exit card offers "Stop the allowance" while a
+key or the pot's module is listed, "Take the money back" while no module is on and the pot holds money, and "Take the
+pot off the public record" while it is on the record. What it needs: a noted pot (on the record or taken off it)
+whose address the browser recomputes itself from the note's birth details and the guardian, an order on the
+configured chain, the pot holding a pot's code and reading as the guardian's alone. Its chain reads are the
+browser's own, whatever the switch; of the server it asks only the noted pot (`GET /legal-body-orders/:id/pot`). The
+website's allowlist takes the two exits for any order of this chain with the same guardian, whatever its state or
+factory; every other pot call still needs a linked, not revoked order of this deployment. A noted address the browser
+does not recompute shows "The address noted for this legal body is not a pot that only your wallet owns." and offers
+no wallet action at all, only the take off while it is on the record, whose line says only that the record stops
+showing the address and that nothing on the chain changes.
 
 **A guardian who declined the setup in the wallet.** The note is written before the wallet opens, so a guardian who
 declined (or whose setup was dropped) keeps the noted pot, its address and its first ceiling: the page then asks for
