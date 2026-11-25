@@ -1571,6 +1571,24 @@ describe("runPotReview: the review's reads, every one fresh in the click", () =>
     expect(await review(fresh.d)).toMatchObject({ ok: false, say: { problem: "pot_exists" } });
   });
 
+  test("Ruling R32: a note whose address its own birth details do not predict, or whose birth does not read, is refused before any code is read; letter case is ignored", async () => {
+    for (const [what, noted] of [
+      ["another address", { ...NOTED, address: SAFE_CREATED }],
+      ["another salt", { ...NOTED, birth: { ...NOTED.birth, saltNonce: "2" } }],
+      ["another first key", { ...NOTED, birth: { ...NOTED.birth, agentWallet: P } }],
+      ["a birth that does not read", { ...NOTED, birth: { ...NOTED.birth, ceilingUnits: "lots" } }],
+    ] as [string, OrderPotView][]) {
+      const { d, asked } = reads({ readNoted: async () => noted });
+      expect(await review(d), what).toEqual({ ok: false, say: { problem: "refused" }, kind: null });
+      expect(asked.filter((x) => x.startsWith("code ")), what).toEqual([]);
+    }
+    // The noted address in lower case is the pot: its code is read, and the plan is THAT address.
+    const { d, asked } = reads({ readNoted: async () => ({ ...NOTED, address: V3_POT.toLowerCase() as Address }) });
+    const result = await review(d);
+    expect(result).toMatchObject({ ok: true, plan: { pot: V3_POT } });
+    expect(asked).toContain(`code ${lower(V3_POT)}`);
+  });
+
   test("a failed GET /pot stops the click with pot_unreadable, said as the pot that could not be read, never as the chain", async () => {
     const server = new ApiError(503, { code: "chain_unavailable", message: "x" });
     const { d, asked } = reads({ readNoted: async () => Promise.reject(server) });

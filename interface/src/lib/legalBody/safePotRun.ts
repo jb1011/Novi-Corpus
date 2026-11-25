@@ -162,7 +162,9 @@ function sayOf(
 /**
  * "Review", after the form's own check: every read the plan decides on, made now, in this order,
  * stopping at the first that fails (`read_failed`, with the error as `cause`):
- *  1. `GET /pot`, the registry's agent wallet and the guardian's balance, together;
+ *  1. `GET /pot`, the registry's agent wallet and the guardian's balance, together; a note whose
+ *     address is not the one its own birth details and the guardian predict (`notedPotChecked`,
+ *     Ruling R32), or whose birth details do not read, is `refused` with nothing more read;
  *  2. the code at the noted address, when there is a note: one pot for life is decided first;
  *  3. `potPlan`'s own rules on these reads, so a wallet it refuses has no code read for it;
  *  4. the agent wallet's code (its kind: fee money goes to a plain key only) and the code at the
@@ -189,6 +191,11 @@ export async function runPotReview(
   const wallet = walletRead.value;
   const balanceWei = balanceRead.value;
   if (noted !== null && !isAddress(noted.address))
+    return { ok: false, say: { problem: "refused" }, kind: null };
+  // Ruling R32: a noted pot is read only at the address its own birth details and the guardian
+  // predict; a note that is not at it is refused, and nothing more is read.
+  const table = potAddresses(p.chainId);
+  if (noted !== null && table !== null && notedPotChecked(table, p.guardian, noted) === null)
     return { ok: false, say: { problem: "refused" }, kind: null };
   // 2.
   let notedCode: Hex | undefined;
