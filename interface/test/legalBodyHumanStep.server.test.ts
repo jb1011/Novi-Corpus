@@ -39,7 +39,14 @@ vi.mock("@/lib/api/hooks", async (importOriginal) => ({
 
 vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/api/legalBodyHooks")>()),
-  useIdentityCheckSessionQuery: () => ({ data: session.current, error: null, refetch: async () => undefined }),
+  // A read from the cache the card mounted on: nothing read after the mount yet.
+  useIdentityCheckSessionQuery: () => ({
+    data: session.current,
+    error: null,
+    dataUpdatedAt: 0,
+    isFetchedAfterMount: false,
+    refetch: async () => undefined,
+  }),
   useStartIdentityCheckMutation: () => ({ mutate() {}, mutateAsync: async () => ({}), isPending: false }),
   useSyncIdentityCheckMutation: () => ({ mutate() {}, mutateAsync: async () => ({}), isPending: false }),
 }));

@@ -275,7 +275,9 @@ export function useGasSeedMutation(id: string) {
 /* ── The identity check ──────────────────────────────────────────────────────────────────── */
 
 /** The tenant's open identity check session, ids and counts only. A refusal (the 404 of a
- *  deployment that does not run the check automatically, a 401) is said at once (`retryRead`). */
+ *  deployment that does not run the check automatically, a 401) is said at once (`retryRead`).
+ *  Read again at every mount, whatever the cache holds: the card reads a session back only over a
+ *  read made after it mounted (`providerReadStep`). */
 export function useIdentityCheckSessionQuery(options: { enabled: boolean }) {
   const token = useAuthToken();
   return useQuery({
@@ -283,6 +285,7 @@ export function useIdentityCheckSessionQuery(options: { enabled: boolean }) {
     queryFn: () => getIdentityCheckSession(token!),
     enabled: options.enabled && !!token,
     retry: retryRead,
+    refetchOnMount: "always",
   });
 }
 

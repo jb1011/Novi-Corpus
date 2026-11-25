@@ -16,12 +16,14 @@ import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
   READ_SYNC_EVERY_MS,
   SYNC_MIN_INTERVAL_MS,
+  arrivalAfter,
   arrivalOf,
   attemptSentence,
   cardUnderWay,
   identityCardText,
   identityCardView,
   providerPageUrl,
+  providerReadStep,
   readingStep,
   refusalStands,
   returnedFromCheck,
@@ -283,6 +285,36 @@ describe("the wait and the return", () => {
     expect(refused("identity_sync_too_soon", 429)).toBe("done");
     expect(refused("identity_provider_unavailable", 503)).toBe("failed");
     expect(arrivalOf({ ok: false, error: new Error("network") })).toBe("failed");
+  });
+
+  // Ruling R35: no read at the provider over a read of the session older than the moment it is
+  // for (the card's mount, a click), nor over one that says the session is held, closed or gone.
+  test("a read at the provider goes out only over a fresh read of the session that says it is open and not held", () => {
+    const fresh = (session: Parameters<typeof providerReadStep>[0]["session"]) =>
+      providerReadStep({ session, readAt: NOW + 1, after: NOW });
+    expect(fresh(open())).toBe("sync");
+    expect(fresh(open({ reading: true }))).toBe("sync");
+    expect(fresh(open({ lastErrorCode: "document_expired", attemptsLeft: 2 }))).toBe("sync");
+    // Held, or closed and gone: the card shows the fresh read, with no read at the provider.
+    expect(fresh(open({ held: "system" }))).toBe("show");
+    expect(fresh(open({ held: "operator" }))).toBe("show");
+    expect(fresh({ status: "none" })).toBe("show");
+    // Only a read from before (the cache when the card mounted, or a read again that failed): wait.
+    expect(providerReadStep({ session: open(), readAt: NOW, after: NOW })).toBe("wait");
+    expect(providerReadStep({ session: open(), readAt: NOW - 1, after: NOW })).toBe("wait");
+    expect(providerReadStep({ session: { status: "none" }, readAt: NOW, after: NOW })).toBe("wait");
+    // No read yet.
+    expect(providerReadStep({ session: "loading", readAt: 0, after: 0 })).toBe("wait");
+    expect(providerReadStep({ session: "unreadable", readAt: 0, after: 0 })).toBe("wait");
+  });
+
+  test("the read-back tried again settles as the read did, as done when the fresh read showed the session held or gone, and unread with no fresh read", () => {
+    expect(arrivalAfter({ sent: true, result: { ok: true } })).toBe("done");
+    expect(
+      arrivalAfter({ sent: true, result: { ok: false, error: new ApiError(503, { code: "identity_provider_unavailable", message: "m" }) } }),
+    ).toBe("failed");
+    expect(arrivalAfter({ sent: false, step: "show" })).toBe("done");
+    expect(arrivalAfter({ sent: false, step: "wait" })).toBe("failed");
   });
 
   test("a sync the card asks for is never inside the server's throttle", () => {

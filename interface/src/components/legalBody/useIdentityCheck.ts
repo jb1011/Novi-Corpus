@@ -10,13 +10,15 @@ import {
   useStartIdentityCheckMutation,
   useSyncIdentityCheckMutation,
 } from "@/lib/api/legalBodyHooks";
-import type { GuardianIdentityView } from "@/lib/api/types";
+import type { GuardianIdentityView, IdentitySessionView } from "@/lib/api/types";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
+  arrivalAfter,
   arrivalOf,
   cardUnderWay,
   identityCardView,
   providerPageUrl,
+  providerReadStep,
   refusalStands,
   sessionMark,
   shouldReadBack,
@@ -34,6 +36,8 @@ import {
   SYSTEM_TIMERS,
   createReadingWait,
   createSyncGate,
+  syncOverFreshRead,
+  type FreshRead,
   type ReadingWait,
   type SyncGate,
 } from "@/lib/legalBody/identityCheckTimers";
@@ -47,11 +51,18 @@ const A = LEGAL_BODY_COPY.human.guardianIdentity.automatic;
  * kept for the mount: the gate in front of the reads at the provider, and the bounded wait while
  * the provider is processing. This hook only tells them when to run.
  *
- * One write is not a click: the read-back. When the session first reads open and not held, the
- * hook reads it back from the provider once per mount (`POST /identity-check/sync`). It continues
- * the Start click that sent the person away, whichever way they came back, and the server keeps
- * one row at most. Until it settles the card says it is reading the check, never the continue
- * form. A session with nothing to read back is `"done"` from the first render.
+ * One write is not a click: the read-back. When the session's first read made after this mount
+ * says it is open and not held, the hook reads it back from the provider once per mount
+ * (`POST /identity-check/sync`). It continues the Start click that sent the person away, whichever
+ * way they came back, and the server keeps one row at most. Until it settles the card says it is
+ * reading the check, never the continue form. A session with nothing to read back is `"done"`
+ * from the first render.
+ *
+ * No read at the provider goes out over a read of the session older than the moment it is for
+ * (ruling R35, `providerReadStep`): the read-back waits for a read made after the mount, not the
+ * cache the card mounted on; Check again, Try again and the wait's own reads at the provider read
+ * both reads again first (`syncOverFreshRead`). A session held, closed or gone on that read is
+ * shown, never read at the provider.
  *
  * Check again and Try again wait on the gate's cooling: a click within the server's interval
  * would be refused as too soon, and a refusal that reads as "read a moment ago" must not stand
@@ -102,14 +113,30 @@ export function useIdentityCheck(p: {
   // with nothing read yet, a failure is unreadable.
   const session: SessionRead =
     sessionQuery.data ?? (sessionQuery.error ? "unreadable" : "loading");
+  // The time of the session's data when the card mounted: TanStack's cache from an earlier visit
+  // to the step, or 0. A read newer than it was made after this mount.
+  const [mountReadAt] = useState(() => sessionQuery.dataUpdatedAt);
+
+  // Both reads again, for a read at the provider: the session's, with its time and the time of the
+  // read before it (`FreshRead`), and `/world-id/me`'s, so the card shows what the reads say.
+  const readAgain = useCallback(async (): Promise<FreshRead> => {
+    const sessionKey = apiKeys.identityCheckSession(token ?? "");
+    const after = queryClient.getQueryState(sessionKey)?.dataUpdatedAt ?? 0;
+    await Promise.all([
+      queryClient.refetchQueries({ queryKey: sessionKey, exact: true }),
+      queryClient.invalidateQueries({ queryKey: apiKeys.worldIdMe(token ?? "") }),
+    ]);
+    const read = queryClient.getQueryState<IdentitySessionView>(sessionKey);
+    return { session: read?.data ?? "unreadable", readAt: read?.dataUpdatedAt ?? 0, after };
+  }, [queryClient, token]);
 
   /* ── The gate and the wait, once per mount ───────────────────────────────────────────────── */
 
-  // The latest send and poll, for the two objects below, which outlive a render.
-  const calls = useRef({ send: syncCheck, poll: invalidate });
+  // The latest send, poll and read again, for the two objects below, which outlive a render.
+  const calls = useRef({ send: syncCheck, poll: invalidate, readAgain });
   useEffect(() => {
-    calls.current = { send: syncCheck, poll: invalidate };
-  }, [syncCheck, invalidate]);
+    calls.current = { send: syncCheck, poll: invalidate, readAgain };
+  }, [syncCheck, invalidate, readAgain]);
 
   const [cooling, setCooling] = useState(false);
   const [longWait, setLongWait] = useState(false);
@@ -123,7 +150,8 @@ export function useIdentityCheck(p: {
         timers: SYSTEM_TIMERS,
       });
       const wait = createReadingWait({
-        sync: () => void gate.run(),
+        // Over a fresh read of the session, like a click's.
+        sync: () => void syncOverFreshRead({ read: () => calls.current.readAgain(), gate }),
         lastSyncAt: gate.lastSyncAt,
         poll: () => void calls.current.poll(),
         onLongWait: () => setLongWait(true),
@@ -136,14 +164,22 @@ export function useIdentityCheck(p: {
 
   /* ── The read-back on arrival ────────────────────────────────────────────────────────────── */
 
-  // Decided once, on the session's first read (React's pattern for state that follows a value,
-  // set during render, so no render shows a decision not yet taken).
+  // Decided once, on the session's first read made after this mount (React's pattern for state
+  // that follows a value, set during render, so no render shows a decision not yet taken). Until
+  // then the cache decides what shows: an open session not held reads as being read, never as the
+  // continue form; a fresh read that failed leaves it unread, with Try again.
   const [firstRead, setFirstRead] = useState<"read_back" | "nothing" | null>(null);
-  if (firstRead === null && typeof session === "object")
-    setFirstRead(shouldReadBack(session) ? "read_back" : "nothing");
+  const arrivalStep = providerReadStep({
+    session,
+    readAt: sessionQuery.dataUpdatedAt,
+    after: mountReadAt,
+  });
+  if (firstRead === null && arrivalStep !== "wait")
+    setFirstRead(arrivalStep === "sync" ? "read_back" : "nothing");
   const wantsReadBack = firstRead === null ? shouldReadBack(session) : firstRead === "read_back";
   const [readBack, setReadBack] = useState<Arrival>("pending");
-  const arrival: Arrival = wantsReadBack ? readBack : "done";
+  const undecided: Arrival = sessionQuery.isFetchedAfterMount ? "failed" : "pending";
+  const arrival: Arrival = !wantsReadBack ? "done" : firstRead === null ? undecided : readBack;
 
   const readBackSent = useRef(false);
   useEffect(() => {
@@ -254,20 +290,24 @@ export function useIdentityCheck(p: {
     const { gate } = timedRules();
     if (gate.cooling()) return;
     const kind = view.kind;
-    void gate.run().then((result) => {
-      say(kind, result.ok ? null : syncRefusal(result.error).sentence);
+    void syncOverFreshRead({ read: readAgain, gate }).then((out) => {
+      if (out.sent) say(kind, out.result.ok ? null : syncRefusal(out.result.error).sentence);
       // The wait starts again while the provider is still processing.
       setLongWait(false);
     });
   }
 
-  // Both reads: an unreadable card may come from either, the session or `/world-id/me`.
+  // Both reads: an unreadable card may come from either, the session or `/world-id/me`. Before
+  // the read-back is decided, the fresh read decides it; a read-back that failed goes out again
+  // only over this click's read.
   function retryRead() {
-    void invalidate();
+    const reading = readAgain();
     const { gate } = timedRules();
-    if (arrival !== "failed" || gate.cooling()) return;
+    if (firstRead !== "read_back" || readBack !== "failed" || gate.cooling()) return;
     setReadBack("pending");
-    void gate.run().then((result) => setReadBack(arrivalOf(result)));
+    void syncOverFreshRead({ read: () => reading, gate }).then((out) =>
+      setReadBack(arrivalAfter(out)),
+    );
   }
 
   const underWay = cardUnderWay({

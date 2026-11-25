@@ -73,6 +73,8 @@ vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
   useIdentityCheckSessionQuery: () => ({
     data: state.identitySession,
     error: null,
+    dataUpdatedAt: 0,
+    isFetchedAfterMount: false,
     refetch: async () => undefined,
   }),
   useStartIdentityCheckMutation: () => ({

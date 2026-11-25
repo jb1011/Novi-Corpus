@@ -6,7 +6,7 @@
  * minutes in all, measured from the wait's own start).
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { ApiError } from "@/lib/api/types";
+import { ApiError, type IdentitySessionView } from "@/lib/api/types";
 import {
   READ_POLL_MS,
   READ_SYNC_EVERY_MS,
@@ -17,6 +17,8 @@ import {
   SYSTEM_TIMERS,
   createReadingWait,
   createSyncGate,
+  syncOverFreshRead,
+  type FreshRead,
 } from "@/lib/legalBody/identityCheckTimers";
 
 beforeEach(() => {
@@ -95,6 +97,59 @@ describe("the gate in front of the reads at the provider", () => {
     await gate.run();
     await gate.run();
     expect(send).toHaveBeenCalledTimes(2);
+  });
+});
+
+// Ruling R35: Check again, Try again and the wait's own reads at the provider read the session
+// again first, and send only over that read.
+describe("a read at the provider over a fresh read of the session", () => {
+  const OPEN: IdentitySessionView = {
+    status: "open",
+    sessionId: "s1",
+    startedAt: 0,
+    attemptsLeft: 3,
+    lastErrorCode: null,
+    reading: true,
+    held: null,
+  };
+  const BEFORE = Date.UTC(2026, 10, 24) - 10_000;
+
+  function over(read: () => Promise<FreshRead>) {
+    const send = vi.fn(async () => ({}));
+    const gate = createSyncGate({ send, onCoolingChange() {}, timers: SYSTEM_TIMERS });
+    return { send, run: () => syncOverFreshRead({ read, gate }) };
+  }
+  const freshly = (session: FreshRead["session"]) => async (): Promise<FreshRead> => ({
+    session,
+    readAt: BEFORE + 1,
+    after: BEFORE,
+  });
+
+  test("still processing on the fresh read: the read at the provider goes out, once", async () => {
+    const { send, run } = over(freshly(OPEN));
+    await expect(run()).resolves.toEqual({ sent: true, result: { ok: true } });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  test("held, closed or gone on the fresh read: nothing goes out, and the card shows the read", async () => {
+    for (const session of [
+      { ...OPEN, reading: false, held: "system" },
+      { ...OPEN, reading: false, held: "operator" },
+      { status: "none" },
+    ] as const) {
+      const { send, run } = over(freshly(session));
+      await expect(run()).resolves.toEqual({ sent: false, step: "show" });
+      expect(send).not.toHaveBeenCalled();
+    }
+  });
+
+  test("no fresh read (the read again failed, or answered nothing newer): nothing goes out", async () => {
+    const stale = over(async () => ({ session: OPEN, readAt: BEFORE, after: BEFORE }));
+    await expect(stale.run()).resolves.toEqual({ sent: false, step: "wait" });
+    expect(stale.send).not.toHaveBeenCalled();
+    const thrown = over(() => Promise.reject(new Error("network")));
+    await expect(thrown.run()).resolves.toEqual({ sent: false, step: "wait" });
+    expect(thrown.send).not.toHaveBeenCalled();
   });
 });
 

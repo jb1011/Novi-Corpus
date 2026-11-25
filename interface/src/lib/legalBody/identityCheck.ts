@@ -392,6 +392,40 @@ export function arrivalOf(result: SyncResult): Arrival {
   return result.ok || syncRefusal(result.error).counted ? "done" : "failed";
 }
 
+/** What a read at the provider may do over a read of the session. */
+export type ProviderReadStep = "sync" | "show" | "wait";
+
+/**
+ * Whether the card may ask for a read at the provider (ruling R35): only over a read of the
+ * session newer than `after` (the card's mount for the read-back on arrival; the read before it
+ * for Check again, Try again and the wait's own reads at the provider), and only when that read
+ * says the session is open and not held. Over a fresh read that says it is held, closed or gone,
+ * none goes out, and the card shows what the read says. Over an older read (the cache the card
+ * mounted on, or a read again that failed), or none yet, the card waits for a fresh one.
+ */
+export function providerReadStep(p: {
+  session: SessionRead;
+  readAt: number;
+  after: number;
+}): ProviderReadStep {
+  if (typeof p.session !== "object" || !(p.readAt > p.after)) return "wait";
+  return shouldReadBack(p.session) ? "sync" : "show";
+}
+
+/** A read at the provider asked for over a fresh read of the session: sent, and how it settled;
+ *  or not sent, and why (`providerReadStep`). */
+export type CheckedSync =
+  | { sent: true; result: SyncResult }
+  | { sent: false; step: Exclude<ProviderReadStep, "sync"> };
+
+/** The read-back tried again, once it settled: as `arrivalOf` when it went out; done when the
+ *  fresh read showed the session held, closed or gone, which the card then shows; still unread
+ *  with no fresh read. */
+export function arrivalAfter(out: CheckedSync): Arrival {
+  if (out.sent) return arrivalOf(out.result);
+  return out.step === "show" ? "done" : "failed";
+}
+
 /* ── What the card keeps from a click ──────────────────────────────────────────────────────── */
 
 /** A sentence about a click that went wrong, with the card's kind it was said under. */

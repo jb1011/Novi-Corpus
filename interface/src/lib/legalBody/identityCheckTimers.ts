@@ -1,7 +1,10 @@
 import {
   READ_POLL_MS,
   SYNC_MIN_INTERVAL_MS,
+  providerReadStep,
   readingStep,
+  type CheckedSync,
+  type SessionRead,
   type SyncResult,
 } from "@/lib/legalBody/identityCheck";
 
@@ -15,6 +18,8 @@ import {
  *   after the read finished, when the server takes the next one.
  * - The wait while the provider is processing: every `READ_POLL_MS`, what `readingStep` says,
  *   measured from the wait's own start, which a running wait keeps.
+ * - A read at the provider over a fresh read of the session (`syncOverFreshRead`): the session read
+ *   again first, and the gate asked only when that read allows it (`providerReadStep`).
  */
 
 export type Timers = {
@@ -93,6 +98,30 @@ export function createSyncGate(p: {
     cooling: () => cooling,
     lastSyncAt: () => lastSyncAt,
   };
+}
+
+/* ── A read at the provider over a fresh read ──────────────────────────────────────────────── */
+
+/** The session read again, when that read was made (its data's time) and the time of the read
+ *  before it, so a read that failed, or answered nothing newer, is told from a fresh one. */
+export type FreshRead = { session: SessionRead; readAt: number; after: number };
+
+/**
+ * Check again, Try again and the wait's own reads at the provider (ruling R35): the session is
+ * read again first (`read`), and the gate is asked only when that read is fresh and says the
+ * session is open and not held. A session held since the card last read it is never read at the
+ * provider by the card: the server's job, or an operator, finishes it. Never rejects: a read again
+ * that throws is no fresh read.
+ */
+export async function syncOverFreshRead(p: {
+  read(): Promise<FreshRead>;
+  gate: SyncGate;
+}): Promise<CheckedSync> {
+  const read = await p.read().catch(() => null);
+  if (read === null) return { sent: false, step: "wait" };
+  const step = providerReadStep(read);
+  if (step !== "sync") return { sent: false, step };
+  return { sent: true, result: await p.gate.run() };
 }
 
 /* ── The wait ──────────────────────────────────────────────────────────────────────────────── */
