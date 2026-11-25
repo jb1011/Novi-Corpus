@@ -22,11 +22,14 @@ CONTRACTS_DIR="$(cd "$BACKEND_DIR/.." && pwd)"
 STATE_DIR="$BACKEND_DIR/.local-chain"
 
 PORT="${LOCAL_CHAIN_PORT:-8555}"
-FORK_URL="${LOCAL_CHAIN_FORK_URL:-https://rpc.testnet.arc.network}"
+FORK_URL="${LOCAL_CHAIN_FORK_URL:-https://rpc.testnet.arc.io}"
 RPC_URL="http://127.0.0.1:$PORT"
 CHAIN_ID=5042002
 IDENTITY_REGISTRY=0x8004A818BFB912233c491871b3d84c89A494BD9e
-AGREEMENT_VERSION="${LOCAL_CHAIN_AGREEMENT_VERSION:-2026-11-draft-5}"
+# The October texts by default: the Charter draft the backend holds today is written for legal
+# bodies whose code is never replaced, and today's contracts create upgradeable ones, so the API
+# refuses it here (see the runbook).
+AGREEMENT_VERSION="${LOCAL_CHAIN_AGREEMENT_VERSION:-2026-10-draft-1}"
 # Your own settings, added to the API's after the chain's (the World ID block goes here). Kept
 # outside .local-chain/ so that `up` does not delete it; git ignores it (.env.*).
 EXTRA_ENV="${LOCAL_CHAIN_EXTRA_ENV:-$BACKEND_DIR/.env.local-chain}"
