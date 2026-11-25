@@ -2,9 +2,11 @@
  * The company's pot, the whole flow, on a fork of Arc testnet with Safe's real contracts.
  *
  * Opt-in, off by default (the pattern of `test/jobs.arc.live.test.ts`): it needs the network.
+ * Step 0 is pure (no chain) and runs ALWAYS, so every run of the suite pins this file's encoders
+ * to the website's vectors; the steps after it need the flag:
  *
  *   cd back/backend && SAFE_POT_FORK=1 ./node_modules/.bin/vitest run --minWorkers=1 \
- *     --maxWorkers=4 test/legalBody/safePot.fork.live.test.ts
+ *     --maxWorkers=2 test/legalBody/safePot.fork.live.test.ts
  *
  * What it does. It starts its OWN anvil forking `https://rpc.testnet.arc.io` on 127.0.0.1:8572
  * (refused when the port is taken; never 8555, never 8546) and stops it at the end. Anvil's first
@@ -386,6 +388,72 @@ function clientsFor(rpcUrl: string) {
   };
 }
 
+/** Step 0 needs no chain: it runs whatever the flag, so every run of the suite pins this file's
+ *  encoders to the website's vectors. */
+describe("the fork test's own encoders, pinned to the website's vectors (no chain, always run)", () => {
+  it("0. the test's own encoders give the bytes the website's encoders are pinned to (V2, V4 to V6, V9 to V13)", () => {
+    const T = potAddresses(ARC_TESTNET);
+    if (T === null) throw new Error("no pot table");
+    const v3 = { guardian: RUN_G, agentWallet: RUN_A, token: T.usdc, ceilingUnits: 50n * U };
+    const v2 = setupTx(T, {
+      ...v3,
+      ceilingUnits: 2n * U,
+      periodMinutes: 5,
+      saltNonce: 72231338869903870587851170785833461215n,
+      fundWei: 5n * WEI,
+      agentGasWei: WEI / 10n,
+    });
+    pinned(v2.data, 1796, "0x4b7b3d40ad68c749c0fd423f03c816f5a96bc6d48bdcdb48adcb292327340ad4");
+    expect(v2.value).toBe(5_100_000_000_000_000_000n);
+    expect(v2.pot).toBe("0x0bbBa174c1D6b6Edd2F1A86ff5af435B645b77EF");
+    const v4 = setupTx(T, { ...v3, saltNonce: 1n, fundWei: 0n, agentGasWei: 0n });
+    pinned(v4.data, 1412, "0x50c45965c858bc26d42cfe3d36b6a90e33a0dca0a984b03af5e41112a9d23e73");
+    expect([v4.calls, v4.value, v4.pot]).toEqual([
+      1,
+      0n,
+      "0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D",
+    ]);
+    const v5 = setupTx(T, { ...v3, saltNonce: 1n, fundWei: 60n * WEI, agentGasWei: WEI / 10n });
+    pinned(v5.data, 1796, "0xb5141445053d556060d1ea2ca1cb75be1d85193cc326b949272fff21238a772d");
+    pinned(
+      changeTx(T, RUN_G, RUN_A, T.usdc, 20n * U),
+      676,
+      "0xc615b5f6bca36df97bbcb1f78c3a6a5f5a4cfb3c0f932d529192511423f01944",
+    );
+    pinned(
+      stopTx(T, RUN_G, [RUN_A], [T.allowanceModule]),
+      900,
+      "0xd709c6dfd342e50a6df9859f5063de95552f967b76c3281224a69a8c93507324",
+    );
+    pinned(
+      takeBackTx(RUN_G, 3n * WEI),
+      484,
+      "0xce7031830a444423e2440b3aa34c5e9bfd41e6606641d3deb24abb35961dd164",
+    );
+    const restore = { token: T.usdc, ceilingUnits: 50n * U };
+    pinned(
+      restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [], modules: [] }),
+      1092,
+      "0x86747b4dd8d72f104246417a357650d86a7dd380fef6a438545ae98b453fdb76",
+    );
+    pinned(
+      restoreTx(T, RUN_G, {
+        ...restore,
+        key: RUN_P,
+        delegates: [RUN_A],
+        modules: [T.allowanceModule],
+      }),
+      1124,
+      "0xf8652af05b7d90febd332989e7aa09032325dac7467a629f72dc61fb28bed50c",
+    );
+    pinned(
+      restoreTx(T, RUN_G, { ...restore, key: RUN_P, delegates: [], modules: [] }),
+      1092,
+      "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12",
+    );
+  });
+});
+
 run("the company's pot on a fork of Arc testnet, with Safe's real contracts", () => {
   let anvil: AnvilHandle | undefined;
   let c: ReturnType<typeof clientsFor>;
@@ -566,68 +634,6 @@ run("the company's pot on a fork of Arc testnet, with Safe's real contracts", ()
     (await c.pub.getBlock({ blockNumber })).timestamp / 60n;
 
   // -------------------------------------------------------------------------------------------
-
-  it("0. the test's own encoders give the bytes the website's encoders are pinned to (V2, V4 to V6, V9 to V13)", () => {
-    const T = potAddresses(ARC_TESTNET);
-    if (T === null) throw new Error("no pot table");
-    const v3 = { guardian: RUN_G, agentWallet: RUN_A, token: T.usdc, ceilingUnits: 50n * U };
-    const v2 = setupTx(T, {
-      ...v3,
-      ceilingUnits: 2n * U,
-      periodMinutes: 5,
-      saltNonce: 72231338869903870587851170785833461215n,
-      fundWei: 5n * WEI,
-      agentGasWei: WEI / 10n,
-    });
-    pinned(v2.data, 1796, "0x4b7b3d40ad68c749c0fd423f03c816f5a96bc6d48bdcdb48adcb292327340ad4");
-    expect(v2.value).toBe(5_100_000_000_000_000_000n);
-    expect(v2.pot).toBe("0x0bbBa174c1D6b6Edd2F1A86ff5af435B645b77EF");
-    const v4 = setupTx(T, { ...v3, saltNonce: 1n, fundWei: 0n, agentGasWei: 0n });
-    pinned(v4.data, 1412, "0x50c45965c858bc26d42cfe3d36b6a90e33a0dca0a984b03af5e41112a9d23e73");
-    expect([v4.calls, v4.value, v4.pot]).toEqual([
-      1,
-      0n,
-      "0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D",
-    ]);
-    const v5 = setupTx(T, { ...v3, saltNonce: 1n, fundWei: 60n * WEI, agentGasWei: WEI / 10n });
-    pinned(v5.data, 1796, "0xb5141445053d556060d1ea2ca1cb75be1d85193cc326b949272fff21238a772d");
-    pinned(
-      changeTx(T, RUN_G, RUN_A, T.usdc, 20n * U),
-      676,
-      "0xc615b5f6bca36df97bbcb1f78c3a6a5f5a4cfb3c0f932d529192511423f01944",
-    );
-    pinned(
-      stopTx(T, RUN_G, [RUN_A], [T.allowanceModule]),
-      900,
-      "0xd709c6dfd342e50a6df9859f5063de95552f967b76c3281224a69a8c93507324",
-    );
-    pinned(
-      takeBackTx(RUN_G, 3n * WEI),
-      484,
-      "0xce7031830a444423e2440b3aa34c5e9bfd41e6606641d3deb24abb35961dd164",
-    );
-    const restore = { token: T.usdc, ceilingUnits: 50n * U };
-    pinned(
-      restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [], modules: [] }),
-      1092,
-      "0x86747b4dd8d72f104246417a357650d86a7dd380fef6a438545ae98b453fdb76",
-    );
-    pinned(
-      restoreTx(T, RUN_G, {
-        ...restore,
-        key: RUN_P,
-        delegates: [RUN_A],
-        modules: [T.allowanceModule],
-      }),
-      1124,
-      "0xf8652af05b7d90febd332989e7aa09032325dac7467a629f72dc61fb28bed50c",
-    );
-    pinned(
-      restoreTx(T, RUN_G, { ...restore, key: RUN_P, delegates: [], modules: [] }),
-      1092,
-      "0x80154523980e27f1c18cdd015aedbfb47a427bc92292b88995879b2373401c12",
-    );
-  });
 
   it("1. the start-up check passes against the fork with the real table, and fails on a table naming another token", async () => {
     const client = c.pub as unknown as PublicClient;
