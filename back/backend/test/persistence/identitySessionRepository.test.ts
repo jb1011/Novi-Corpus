@@ -507,6 +507,27 @@ describe("SqliteIdentitySessionRepository", () => {
     expect(repo.openOlderThan(bound, 2).map((s) => s.sessionId)).toEqual([sid(5), sid(1)]);
   });
 
+  test("allOpen reads every open session, read lately or not, and no closed one", () => {
+    repo.insert(session(1, { createdAt: T0 })); // never read
+    repo.insert(session(2, { createdAt: T0 }));
+    repo.recordRead(sid(2), {
+      at: T0 + DAY, // read a moment ago: still open
+      status: "verified",
+      lastErrorCode: null,
+      failedAttempts: 0,
+      reportId: null,
+    });
+    repo.insert(session(3, { createdAt: T0 - DAY })); // closed
+    repo.close(sid(3), CLOSE);
+
+    expect(
+      repo
+        .allOpen()
+        .map((s) => s.sessionId)
+        .sort(),
+    ).toEqual([sid(1), sid(2)]);
+  });
+
   test("redactionDue reads the due sessions not requested, and those requested over 7 days ago", () => {
     const now = T0 + 30 * DAY;
     const closeWith = (n: number, redactDueAt: number | null) => {

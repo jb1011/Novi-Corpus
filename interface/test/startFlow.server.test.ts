@@ -7,6 +7,8 @@
  * the two legal-body gates, then the choice of paths; and where the full product is offered, the
  * gate that stops a legal body shows one link past it to the full product.
  */
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -305,6 +307,67 @@ describe("the gates", () => {
     const html = render(StartDestination);
     expect(html).toContain(S.expiredTitle);
     expect(html).not.toContain(START_COPY.title);
+  });
+});
+
+describe("the return from the identity check", () => {
+  const read = (file: string) =>
+    readFileSync(fileURLToPath(new URL(`../src/components/${file}`, import.meta.url)), "utf8");
+  const PAGES = [
+    ["start/StartFlow.tsx", "/start"],
+    ["legalBody/LegalBodyFlow.tsx", "/legal-body"],
+  ] as const;
+
+  test("back from the check on the testnet: the human step with its Continue, not the choice of paths", () => {
+    given({ search: "identityCheck=returned" });
+    const html = render(StartDestination);
+    expect(html).toContain(H.titleAccepted);
+    expect(html).not.toContain(START_COPY.title);
+    given({});
+    expect(render(StartDestination)).toContain(START_COPY.title);
+  });
+
+  test("back from the check to a session that ended while the person was away: sign-in first", () => {
+    given({
+      search: "identityCheck=returned",
+      companies: undefined,
+      companiesError: new ApiError(401, { code: "unauthorized", message: "session expired" }),
+    });
+    const html = render(StartDestination);
+    expect(html).toContain(S.expiredTitle);
+    expect(html).not.toContain(H.titleAccepted);
+    expect(html).not.toContain(START_COPY.title);
+  });
+
+  test("back from the check to a tab with no session: the sign-in step, never the choice", () => {
+    given({ session: null, search: "identityCheck=returned" });
+    const html = render(StartDestination);
+    expect(html).toContain(S.title);
+    expect(html).not.toContain(START_COPY.title);
+  });
+
+  // The render tests (here, and `legalBodyFlowReturn.server.test.ts` for `/legal-body`) show
+  // each page reading the return. No render reaches a click, so the two handlers that carry the
+  // return on are pinned by their source: the sign-in step's Continue, and the human step's, where
+  // the return is spent (`addressAfterContinue`).
+  test("both pages spend the return on the human step's Continue, the flag leaving the address there and nowhere else, and name their own return path", () => {
+    for (const [file, path] of PAGES) {
+      const code = read(file);
+      expect(code, file).toContain(`returnPath="${path}"`);
+      expect(code, file).toContain("onContinue={() => setView(gateViewAfterSignIn(returned))}");
+      expect(code, file).toMatch(
+        new RegExp(
+          String.raw`onContinue=\{\(\) => \{\s*(?://[^\n]*\n\s*)*` +
+            String.raw`const address = addressAfterContinue\(\{\s*returned,\s*path: "${path}",\s*search: window\.location\.search,\s*\}\);\s*` +
+            String.raw`if \(address !== null\) window\.history\.replaceState\(null, "", address\);\s*` +
+            String.raw`setReturned\(false\);\s*setView\(null\);\s*\}\}`,
+        ),
+      );
+      // The flag leaves the address in that one place, in place, and never by a navigation.
+      expect(code.match(/replaceState\(/g), file).toHaveLength(1);
+      expect(code, file).not.toContain("returnTaken(");
+      expect(code, file).not.toMatch(/router\.(replace|push)\([^)]*identityCheck/);
+    }
   });
 });
 

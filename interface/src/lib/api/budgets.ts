@@ -57,6 +57,10 @@ const BUDGETS: { method: string; pattern: RegExp; ms: number }[] = [
     ms: BROADCAST_BUDGET_MS,
   },
   { method: "POST", pattern: /^legal-body-orders\/[^/]+\/gas-seed$/, ms: BROADCAST_BUDGET_MS },
+  // The identity check's start and sync can each chain three provider calls of up to 10 seconds:
+  // at 25 seconds the proxy would answer 504 on a check that completes.
+  { method: "POST", pattern: /^identity-check\/sessions$/, ms: BROADCAST_BUDGET_MS },
+  { method: "POST", pattern: /^identity-check\/sync$/, ms: BROADCAST_BUDGET_MS },
   // An evidence upload is up to 4 MiB on what may be a slow uplink. Long, but finite: the backend
   // answers only once the whole body is in, and `Infinity` would install no timer at all.
   { method: "POST", pattern: /^companies\/[^/]+\/evidence$/, ms: RECEIPT_BUDGET_MS },

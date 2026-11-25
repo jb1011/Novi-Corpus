@@ -109,6 +109,13 @@ export interface IdentitySessionDeps {
   now?: () => number;
 }
 
+/**
+ * Who a verified session waits on: `system` while our screen has given no verdict (the sweep
+ * reads it again by itself), `operator` once its result waits for a person (`waitsForOperator`).
+ * The words say who acts, never why.
+ */
+export type SessionHold = "system" | "operator";
+
 export type SessionView =
   | { status: "none" }
   | {
@@ -117,8 +124,10 @@ export type SessionView =
       startedAt: number;
       attemptsLeft: number;
       lastErrorCode: string | null;
-      /** The provider has the person's attempt and its result is being read. */
+      /** The provider is processing the person's attempt. Never true while the session is held. */
       reading: boolean;
+      /** Who a verified session waits on; null unless the provider verified it. */
+      held: SessionHold | null;
     };
 
 export type SyncOutcome =
@@ -156,8 +165,9 @@ const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
 /** How long the provider's page stays open for the person, as the answer states it. */
 const URL_LIFETIME_MS = 48 * HOUR_MS;
-/** A verified guardian may renew within this window before the expiry. */
-const RENEWAL_WINDOW_MS = 90 * DAY_MS;
+/** A verified guardian may renew within this window before the expiry. The site's card copies it
+ *  (the drift guard, `legalBodyInterfaceTypes.test.ts`, holds the two equal). */
+export const RENEWAL_WINDOW_MS = 90 * DAY_MS;
 /** The window of the daily cap on sessions started. */
 const DAILY_WINDOW_MS = DAY_MS;
 /** The sweep reads again an open session nobody read for this long. */
@@ -169,10 +179,15 @@ const SCREEN_PENDING_ALARM_MS = 24 * HOUR_MS;
 const DECISION_BATCH = 500;
 /** A review undecided longer than this raises a warning at each sweep (ruling F7). */
 const REVIEW_WAITING_ALARM_MS = 7 * DAY_MS;
-const NAME_MAX_CODE_POINTS = 100;
+/** The longest typed name, in code points. The site's card copies it (the drift guard). */
+export const NAME_MAX_CODE_POINTS = 100;
 /** Control, format, surrogate, private-use and unassigned characters. */
 const OTHER_CHARACTER = /\p{C}/u;
 const DEFAULT_RETURN_PATH = "/legal-body";
+/** The query the provider sends the person back with, `?identityCheck=returned`, read by the
+ *  site's card (the drift guard holds its copy equal). */
+export const IDENTITY_RETURN_PARAM = "identityCheck";
+export const IDENTITY_RETURN_VALUE = "returned";
 /** The decisions that settle a review: the operator's acceptance, refusal or name correction. */
 const DECISIONS: ReadonlySet<NewIdentityEvent["kind"]> = new Set([
   "accepted",
@@ -480,7 +495,7 @@ async function start(
     deps,
     tenantId,
     sessionId,
-    `${origin}${returnPath}?identityCheck=returned`,
+    `${origin}${returnPath}?${IDENTITY_RETURN_PARAM}=${IDENTITY_RETURN_VALUE}`,
   );
 
   const opened = repo.transaction(() => {
@@ -663,7 +678,13 @@ export function sessionView(deps: IdentitySessionDeps, tenantId: string): Sessio
     startedAt: open.createdAt,
     attemptsLeft: Math.max(0, deps.limits.attemptsPerSession - open.failedAttempts),
     lastErrorCode: open.lastErrorCode,
-    reading: open.lastStatus === "processing" || open.lastStatus === "verified",
+    reading: open.lastStatus === "processing",
+    held:
+      open.lastStatus !== "verified"
+        ? null
+        : open.screenPendingSince !== null
+          ? "system"
+          : "operator",
   };
 }
 
@@ -1402,9 +1423,9 @@ async function requestRedaction(
  *    provider (redacted, or canceled when redaction does not take them: `endAtProvider`) and
  *    closed as abandoned, or without a row when an operator's row was written over them
  *    (`writtenOver`); else read (`syncSession`; a refused result waiting for an operator is only
- *    looked at). Then, whatever the read did, one still waiting for an operator raises a line at
- *    each pass, and one still waiting for its screen more than 24 hours on a CRITICAL line
- *    (`openSessionAlarm`).
+ *    looked at). Then every open session, in that batch or not (one read in the last two minutes
+ *    is not), raises its line at each pass: one waiting for an operator a line, one waiting for
+ *    its screen more than 24 hours a CRITICAL line (`openSessionAlarm`).
  * 2. Closed sessions whose row went to review: once the operator has decided the review (an
  *    acceptance, a refusal, or a name correction that settles it), or once it is no longer the
  *    tenant's standing row (anything written over it), their redaction falls due; a review left
@@ -1438,7 +1459,10 @@ export async function sweepSessions(
     });
   };
 
+  // The sessions this pass met in its read batch: they raise their line after their read.
+  const met = new Set<string>();
   for (const session of deps.sessions.openOlderThan(nowMs - REREAD_AFTER_MS, SWEEP_BATCH)) {
+    met.add(session.sessionId);
     try {
       if (nowMs - session.createdAt >= days(deps.limits.sessionDays)) {
         const redactionRequested = await endAtProvider(deps, session);
@@ -1455,9 +1479,13 @@ export async function sweepSessions(
       failed("sync", session.sessionId, e);
     } finally {
       // Whatever the read did, a read that threw included (decided 24 November).
-      openSessionAlarm(deps, session.sessionId, nowMs);
+      openSessionAlarm(deps, deps.sessions.byId(session.sessionId), nowMs);
     }
   }
+  // Every other open session raises its line too: a read just before the pass (the guardian's
+  // card, the webhook) leaves a session out of the batch, never out of its line (ruling R35).
+  for (const session of deps.sessions.allOpen())
+    if (!met.has(session.sessionId)) openSessionAlarm(deps, session, nowMs);
 
   for (const session of deps.sessions.awaitingDecision(DECISION_BATCH)) {
     try {
@@ -1486,9 +1514,10 @@ export async function sweepSessions(
 }
 
 /**
- * The alarm of an open session the sweep met, as the session stands after the sweep's read (or
- * its failure), at each sweep that meets it: a session read in the two minutes before a sweep (the
- * guardian's return, the card's check) is not in that sweep's batch, and gets no line from it.
+ * The alarm of an open session, written at each pass for every open session in one of the two
+ * states below, whatever read it lately: as it stands after the pass's read (or its failure) for
+ * a session in the pass's batch, as stored for one the pass did not read (read in the two minutes
+ * before it, by the guardian's card or the webhook). No read keeps a line quiet.
  *
  * - waiting for an operator (`waitsForOperator`): `identity_session_waiting_operator { sessionId,
  *   ageHours }`, CRITICAL on production and a warning on a sandbox (`parkedLevel`), until an
@@ -1497,13 +1526,16 @@ export async function sweepSessions(
  *   `identity_screen_pending_stale { sessionId, hours }`, CRITICAL. The screener is down, or its
  *   key refused (`person_screen_error`), and on production no check completes until a person acts.
  */
-function openSessionAlarm(deps: IdentitySessionDeps, sessionId: string, nowMs: number): void {
-  const after = deps.sessions.byId(sessionId);
+function openSessionAlarm(
+  deps: IdentitySessionDeps,
+  after: IdentitySession | undefined,
+  nowMs: number,
+): void {
   if (after === undefined || after.closedAt !== null) return;
   if (waitsForOperator(after)) {
     opsLog("identity_session_waiting_operator", {
       ...parkedLevel(deps),
-      sessionId,
+      sessionId: after.sessionId,
       ageHours: Math.floor((nowMs - after.createdAt) / HOUR_MS),
     });
     return;
@@ -1514,7 +1546,7 @@ function openSessionAlarm(deps: IdentitySessionDeps, sessionId: string, nowMs: n
   opsLog("identity_screen_pending_stale", {
     level: "error",
     severity: "CRITICAL",
-    sessionId,
+    sessionId: after.sessionId,
     hours: Math.floor(waited / HOUR_MS),
   });
 }

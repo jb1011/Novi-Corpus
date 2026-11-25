@@ -17,10 +17,14 @@ import { apiKeys } from "@/lib/api/keys";
 import { ApiError, type LegalBodyConfig, type PublicConfig } from "@/lib/api/types";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
+  addressAfterContinue,
   anySignInRequired,
+  arrivalGateView,
   bannerLines,
+  gateViewAfterSignIn,
   humanErrorSentence,
   humanStepView,
+  identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
   legalBodyGate,
@@ -200,6 +204,52 @@ describe("legalBodyGate", () => {
   });
 });
 
+describe("the return from the identity check", () => {
+  // Review Focus 2: a person comes back to a tab with no session, or to a session that ended.
+  test("back from the check: the human step is held on screen, after the sign-in step when there was one", () => {
+    expect(arrivalGateView({ engaged: false, returned: true })).toBe("human");
+    expect(arrivalGateView({ engaged: true, returned: true })).toBe("signin");
+    expect(arrivalGateView({ engaged: false, returned: false })).toBeNull();
+    expect(gateViewAfterSignIn(true)).toBe("human");
+    expect(gateViewAfterSignIn(false)).toBeNull();
+    const human: WorldIdGateState = { kind: "accepted", credential: "orb" };
+    expect(
+      legalBodyGate({
+        signIn: "ready",
+        human,
+        view: arrivalGateView({ engaged: false, returned: true }),
+        identityBlocks: false,
+      }),
+    ).toBe("human");
+    expect(legalBodyGate({ signIn: "expired", human, view: "human", identityBlocks: false })).toBe(
+      "signin",
+    );
+  });
+
+  test("a person who signed in on this page and did not come back from the check: the sign-in step, as before", () => {
+    expect(arrivalGateView({ engaged: true, returned: false })).toBe("signin");
+  });
+
+  test("the flag leaves the address on the human step's Continue, where the return is spent, and every other part stays", () => {
+    expect(addressAfterContinue({ returned: true, path: "/start", search: "?identityCheck=returned" })).toBe(
+      "/start",
+    );
+    expect(
+      addressAfterContinue({
+        returned: true,
+        path: "/legal-body",
+        search: "?order=o_1&identityCheck=returned",
+      }),
+    ).toBe("/legal-body?order=o_1");
+    expect(
+      addressAfterContinue({ returned: true, path: "/start", search: "?path=declare&identityCheck=returned" }),
+    ).toBe("/start?path=declare");
+    // No return, or one already spent: the address is left alone.
+    expect(addressAfterContinue({ returned: false, path: "/start", search: "?path=declare" })).toBeNull();
+    expect(addressAfterContinue({ returned: false, path: "/legal-body", search: "" })).toBeNull();
+  });
+});
+
 describe("humanStepView", () => {
   test("loading: the reading line, no button", () => {
     expect(humanStepView({ kind: "loading" })).toEqual({
@@ -209,7 +259,6 @@ describe("humanStepView", () => {
       verify: false,
       continue: false,
       retry: false,
-      guardianIdentity: null,
     });
   });
 
@@ -222,8 +271,7 @@ describe("humanStepView", () => {
         verify: false,
         continue: false,
         retry: false,
-        guardianIdentity: null,
-      });
+        });
     }
   });
 
@@ -239,7 +287,6 @@ describe("humanStepView", () => {
       verify: true,
       continue: false,
       retry: false,
-      guardianIdentity: null,
     });
   });
 
@@ -251,7 +298,6 @@ describe("humanStepView", () => {
       verify: true,
       continue: false,
       retry: false,
-      guardianIdentity: null,
     });
   });
 
@@ -263,8 +309,17 @@ describe("humanStepView", () => {
       verify: false,
       continue: true,
       retry: false,
-      guardianIdentity: null,
     });
+  });
+
+  test("the identity check: optional on the testnet, and on mainnet no Continue until it counts", () => {
+    const accepted: WorldIdGateState = { kind: "accepted", credential: "orb" };
+    expect(humanStepView(accepted, { required: false, automatic: true, state: "none" }).continue).toBe(true);
+    expect(humanStepView(accepted, { required: true, automatic: true, state: "pending" }).continue).toBe(false);
+    expect(humanStepView(accepted, { required: true, automatic: true, state: "verified" }).continue).toBe(true);
+    expect(identityBlocksGate({ required: false, automatic: true, state: "none" })).toBe(false);
+    expect(identityBlocksGate({ required: true, automatic: true, state: "needs_review" })).toBe(true);
+    expect(identityBlocksGate({ required: true, automatic: true, state: "verified" })).toBe(false);
   });
 });
 

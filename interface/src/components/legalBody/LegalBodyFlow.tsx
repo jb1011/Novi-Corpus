@@ -53,8 +53,11 @@ import {
   type LegalBodyThreadRef,
 } from "@/lib/legalBody/flow";
 import {
+  addressAfterContinue,
   anySignInRequired,
+  arrivalGateView,
   bannerLines,
+  gateViewAfterSignIn,
   identityBlocksGate,
   isSignInRequired,
   legalBodyDoor,
@@ -64,6 +67,7 @@ import {
   type GateView,
   type LegalBodyDoor,
 } from "@/lib/legalBody/gates";
+import { returnedFromCheck } from "@/lib/legalBody/identityCheck";
 import { afterOrderRefused, linkScreen, type LinkSendBack } from "@/lib/legalBody/link";
 import { closedSentence, noticeSentence } from "@/lib/legalBody/notice";
 import { pointerScreen } from "@/lib/legalBody/paste";
@@ -142,6 +146,13 @@ import { ThreadChooser } from "./ThreadChooser";
  * (`arrivalMemory`) written to the store, and the address cleaned; the memory's write once a
  * thread is on screen; and the scroll to the top when the screen changes.
  *
+ * The identity check's provider sends the person back here (`?identityCheck=returned`) when the
+ * check was started from this page: the session reads the flag as it mounts and holds the human
+ * step, with the card's result, until its Continue (`arrivalGateView`), after the sign-in step
+ * when the person had to sign in first (`gateViewAfterSignIn`); never the chooser or the thread
+ * before it. The return is spent on that Continue, and only the flag leaves the address then, in
+ * place (`addressAfterContinue`): an order or a company the address names is the arrival's.
+ *
  * Three facts live in this visit's memory only, never in the store: that a draft's agreement was
  * read (so the draft moves on to the identity step, and a reload shows the agreement again); a
  * door's sentence carried back to the step it sends the person to; and the identity already
@@ -210,7 +221,9 @@ function LegalBodyHydrated() {
   return <LegalBodyFrame />;
 }
 
-function LegalBodyFrame() {
+/** The page under the hydration guard: the deployment's door, then the flow. Exported for its
+ *  test. */
+export function LegalBodyFrame() {
   const door = legalBodyDoor(useLegalBodyConfig());
   const { refetch } = usePublicConfigQuery();
   return (
@@ -280,7 +293,12 @@ function LegalBodySession({
   // facts from it.
   const { data: publicConfig } = usePublicConfigQuery();
 
-  const [view, setView] = useState<GateView>(engaged ? "signin" : null);
+  // Whether the provider sent the person back here from the identity check: read once, as this
+  // session mounts, which is after sign-in, so a tab that had no session still has it. Spent on
+  // the human step's Continue, with the flag in the address, so a later sign-in (a step's refusal
+  // that means sign in) goes back to the thread, not to the human step.
+  const [returned, setReturned] = useState(() => returnedFromCheck(searchParams));
+  const [view, setView] = useState<GateView>(() => arrivalGateView({ engaged, returned }));
   // The token a step's request was refused under: that session is over, whatever it still says.
   const [refusedToken, setRefusedToken] = useState<string | null>(null);
   // An order or a company named in the address, read as this session mounts: the memory it hands
@@ -571,7 +589,7 @@ function LegalBodySession({
           code={codeRead}
           expired={expired}
           onEngage={() => setView("signin")}
-          onContinue={() => setView(null)}
+          onContinue={() => setView(gateViewAfterSignIn(returned))}
           onRetryCheck={() => void code.refetch()}
         />
       );
@@ -579,8 +597,21 @@ function LegalBodySession({
       return (
         <HumanStep
           onEngage={() => setView("human")}
-          onContinue={() => setView(null)}
+          onContinue={() => {
+            // The return is spent here: the flag leaves the address in place, with no navigation
+            // and no new history entry. An order or a company the address names stays, for the
+            // arrival once the gates are passed.
+            const address = addressAfterContinue({
+              returned,
+              path: "/legal-body",
+              search: window.location.search,
+            });
+            if (address !== null) window.history.replaceState(null, "", address);
+            setReturned(false);
+            setView(null);
+          }}
           onBack={() => setView("signin")}
+          returnPath="/legal-body"
         />
       );
 

@@ -73,6 +73,16 @@ of its own, and the job never writes over it (0.4).
 
 ### 0.1 Setting it up, per box
 
+Set the block only on a box whose backend answers `held` in `GET /identity-check/session`: the
+site's card needs it (0.7). On an older backend the card says "being read" for a session that waits
+for the search or for an operator, and it sends no read at the provider at all: no read-back when
+the guardian comes back, none while it waits, none on Check again or Try again. The card reads a
+session at the provider only when `held` is null, and an older backend sends no `held`. The result
+then shows only once the server reads the session by itself: the webhook's wake-up, or the job's
+pass. That is why, where the block is already set, the box is updated to a backend that answers
+`held` before the site's card goes live (the site goes live when it is merged, the box only when it
+is updated).
+
 In the Stripe dashboard, in the mode of the box (the founder who holds the account does it):
 
 |                         | testnet box                                           | mainnet box                                              |
@@ -240,11 +250,11 @@ journalctl -u legalbody-api --since '7 days ago' | grep <sessionId>
 | `identity_session_closed { tenant, sessionId, reasonCode }` | The session closed with a `failed` row: the last attempt failed, a code no retry changes, a cancellation or redaction at Stripe, or its days ran out (`abandoned`). `reasonCode` is the row's (section 1, step 5). A session Stripe had verified whose days ran out while it waited for its search or for you closes with `other`, never `abandoned`: the row's reason reads `verified at the provider; not completed within 14 days (screen_pending)`, or `(plan_refused)`, or `(no_typed_names)` (the days are `IDENTITY_SESSION_DAYS`). |
 | `identity_session_superseded { sessionId }` | An operator's row was written for the guardian while the session was open: the session closed without a row of its own, its redaction due as after a row. Your row stands. |
 | `identity_screen_pending { sessionId }` | The search gave no verdict: no row yet, the job tries again each pass. See below. |
-| `identity_screen_pending_stale { sessionId, hours }` (CRITICAL) | The session has waited for its search more than 24 hours; written at each pass of the job that meets the session until the search answers, even a pass whose read of the session failed. A read in the two minutes before a pass (the guardian's return to the site, or the card's check) makes that pass skip the session, and its line. Read `person_screen_error`, then see below. |
+| `identity_screen_pending_stale { sessionId, hours }` (CRITICAL) | The session has waited for its search more than 24 hours; written at each pass of the job for every open session in that state, until the search answers, whatever read the session lately (the guardian's card, the webhook), and even at a pass whose read of the session failed. Read `person_screen_error`, then see below. |
 | `person_screen_error { status }` (CRITICAL on 401, 402, 403; warn otherwise) | Why the search gave none: OpenSanctions' HTTP status, or `timeout`, `unreachable`, `unreadable`, `invalid_query`, `query_<status>`. A 401 or 403 is the OpenSanctions key, a 402 its credits spent: no check completes on production until it is fixed. |
 | `identity_dob_not_read { sessionId }` | Stripe served no birth date for this session (a key without "Recent detailed verification results", or more than 48 hours after the document was processed): the search runs on the name alone. Said once per session. Repeated across sessions, check the key. |
 | `identity_session_refused { sessionId, reason }` (CRITICAL on production, warn on a sandbox) | The session waits for an operator; written once, when the result is refused. See "A result the rules refuse" below. |
-| `identity_session_waiting_operator { sessionId, ageHours }` (CRITICAL on production, warn on a sandbox) | The session still waits for an operator; written at each pass of the job that meets the session, until your row closes it or its days run out. A read in the two minutes before a pass (the guardian's return to the site, or the card's check) makes that pass skip the session, and its line. `ageHours` is the session's age since it started. See "A result the rules refuse" below. |
+| `identity_session_waiting_operator { sessionId, ageHours }` (CRITICAL on production, warn on a sandbox) | The session still waits for an operator; written at each pass of the job for every open session in that state, whatever read it lately (the guardian's card, the webhook), until your row closes it or its days run out. `ageHours` is the session's age since it started. See "A result the rules refuse" below. |
 | `identity_session_dropped { sessionId, reason }` | A read came back in the other mode (`mode`) or naming another session (`reference`): nothing written. `mode`: the key and the box disagree. |
 | `identity_session_unreadable { sessionId, field }` (error) | Stripe's answer lacked the shape we read, at the field named: nothing written, the caller got 503. Report it. |
 | `identity_session_names_unreadable { sessionId, keyId }` (CRITICAL) | The typed names are sealed under a PII key this box no longer holds: configure the key `keyId` names again (section 6). |
@@ -289,11 +299,9 @@ row, even should the search answer later. Check with `identity:session` and `ide
 sandbox). With `plan_refused`, the record's rules refused a verified result. On production that is
 a session without the face match: the flow lacks the selfie (0.1), so fix the flow. The session
 stays open, waiting for an operator: it is not read or searched again until an operator writes a
-row for that guardian, and each pass of the job that meets it says so again
-(`identity_session_waiting_operator { sessionId, ageHours }`, at the same level; a read of the
-session by the guardian's return or the card's check in the two minutes before a pass makes that
-pass skip it). Until it closes,
-the guardian's start answers 409 `identity_under_review`. An operator's row closes it: record what
+row for that guardian, and each pass of the job says so again
+(`identity_session_waiting_operator { sessionId, ageHours }`, at the same level, whatever read the
+session lately). Until it closes, the guardian's start answers 409 `identity_under_review`. An operator's row closes it: record what
 you read (`identity:record`), or refuse the attempt (`identity:refuse`, `--expect-latest` the
 session's `started` row; during a renewal a refusal ends the earlier pass, "A renewal" below), and
 the job's next pass closes the session without a row of its own (`identity_session_superseded`),
@@ -392,6 +400,45 @@ A live company is its own decision (`company:revoke`, section 3).
 - **The typed names**: sealed under the PII key in the session row, and only until the session
   closes.
 - **Stripe's error sentence** (`last_error.reason`): never read; its code only.
+
+### 0.7 What the guardian sees
+
+Where the block is set, the site's human step shows the check on one card: on `/start`, and on
+`/legal-body` at "Accountable human". Under its title the card says "World ID proves one real
+person. The identity check says who." It never names Stripe or the search: the guardian's privacy
+notice does. On the testnet it says the check is optional and a test check; on production, that it
+is required before a legal body is created.
+
+The card decides from two reads only: the record (`identity.state` in `GET /world-id/me`, the
+state `identity:show` reads) and the open session (`GET /identity-check/session`). In
+`identity:session`, the session view's `reading` is `lastStatus` `processing`, and its `held` is
+`lastStatus` `verified`: `system` while `screenPendingSince` is set, `operator` once it is not.
+A record in review shows the review sentence whatever the session. Otherwise an open session
+decides, and with none the record does.
+
+Stripe sends the person back to `WEB_ORIGIN`, on the page they started from, with
+`?identityCheck=returned`. When the card opens on an open session that is not held, it reads it back
+once (`POST /identity-check/sync`), whichever way the person came back. It never reads back a held
+session: the job reads one held for the search, and one held for an operator waits for your row.
+
+`{date}` and `{n}` are filled in on the page.
+
+| The card says | The record and the session | What you do |
+| ------------- | -------------------------- | ----------- |
+| The name form and "Start the check". On production it opens with "You leave this site for our identity check provider's page." On the testnet: "Test check. You leave this site for our identity check provider's test page, pick an outcome there, and come back here." | `none` or `pending`, no open session. | Nothing. The guardian types the name and starts (0, step 1). |
+| "Your check is open and not finished. Continue it below." The name form again ("Type your name again: this site does not keep it.") and "Continue the check". | An open session the person has not finished: `lastStatus` null or `requires_input`, no `lastErrorCode`. | Nothing. Each start answers a fresh link to the same session (`identity_session_reused`). Left alone, it closes as `abandoned` after `IDENTITY_SESSION_DAYS` (14). |
+| "That attempt did not go through.", then the reason, then "{n} attempts left on this check." (or "1 attempt left on this check.") and "Try again". | An open session with a `lastErrorCode` and `failedAttempts` below `attemptsPerSession`. The reason is the card's own sentence for Stripe's code; a code it does not list reads "Try again, or use another document." | Nothing. The attempt that reaches the limit closes the session with a `failed` row (`identity_session_closed`). |
+| "Your result is being read. This page checks again by itself." After three minutes: "Still being read. This can take a few minutes. You can leave this page: the result is kept, and it shows here when you come back." and "Check again". | An open session, `lastStatus` `processing`. For three minutes the page reads the record and the session every five seconds, and asks for a read at Stripe every 20 seconds. | Nothing, while it lasts minutes. Hours: look for `identity_provider_unavailable` and the `identity_webhook_` lines (0.4). The job reads the session at each pass. |
+| "Your part is done. We are finishing the check on our side, and this page shows the result when it is ready. Nothing more to do now. If it still says this tomorrow, write to us." No button. | An open session, `lastStatus` `verified`, `screenPendingSince` set (`held` `system`): the search gave no verdict (`identity_screen_pending`). | Read `person_screen_error` (0.4, "A search that gives no verdict"): a 401, 402 or 403 is the key or its credits. Fix it, or finish by hand. |
+| "Your part is done. A person at Novi Corpus is looking at the result, usually within one working day. Nothing more to do now: this page shows the result once it is decided." No button. | The record `needs_review` (section 2, 0.5), whatever the session. Or an open session, `lastStatus` `verified`, `screenPendingSince` null (`held` `operator`): `identity_session_refused`, then `identity_session_waiting_operator` (0.4, "A result the rules refuse"). Or a renewal whose start answered `identity_under_review`. | Decide the review (section 3), or write the row the session waits for (0.4). Until then the guardian's start answers 409 `identity_under_review`. |
+| "The last check did not go through. You can start a new one, or write to us." and "Start a new check". | The record `failed`, no open session, whatever the row's reason: the last attempt failed, a code no retry changes, a cancellation or redaction at Stripe, a session closed after `IDENTITY_SESSION_DAYS` (`abandoned`, or `other` when Stripe had verified the person), or an operator's failed row (`identity:refuse`, `identity:record --result failed`). The card never says why. | When the guardian writes, read the row's reason in `identity:show`. A reason that ends `(screen_pending)` or `(plan_refused)`: Stripe verified the person, so fix the cause (0.4) before they start again, or the new check stops at the same place. |
+| "Your identity check has expired. Start a new one to go on." The name form and "Start a new check". | The record `expired`, no open session: a pass past its `expiresAt` (`IDENTITY_REVERIFY_YEARS`, three years), or a pass whose names were erased (section 5, a guardian with no live company). | Nothing. The guardian starts a new check (0, step 1); its pass counts from its own completion. |
+| "Your identity check no longer counts. You can run it again. A person at Novi Corpus then reviews the result before it counts." The name form and "Run the check again". | The record `revoked` (`identity:revoke`), no open session. | Nothing until the guardian runs it again. The check then runs, and its result waits for you: a review with `provider_flag`, never `passed` (0.4, "After a revocation"; 0.5). Decide it (section 3). |
+| "Verified on {date}". On the testnet: "Verified on {date} (test check)" and "A test check counts on the testnet only." No form, no button. | The record `verified`, more than 90 days before its `expiresAt`, no open session. | Nothing. A testnet row is `synthetic`: no production door counts it (0.2). |
+| The verified line, then "Due again on {date}. You can renew now. Your current check counts until then." and "Renew now". | The record `verified`, its `expiresAt` within 90 days, no open session. The browser's clock decides when the line shows; the server decides whether a renewal may start (`identity_already_verified` earlier). | Nothing. No email says it: only the human step does. |
+
+During a renewal the verified line stays above the card's sentence for as long as the earlier pass
+counts (0.4, "A renewal").
 
 ## 1. The operator path, when the automatic check is not there
 
@@ -805,7 +852,9 @@ cli scheduler:list      # identity_sessions_sync, with its note
 
 **4. Sign in, and give the account a World ID row.** Sign in with the test wallet: the local
 interface does it (`npm run dev` in `interface/`, which talks to `localhost:8789`), or by hand as
-`back/backend/README.md` says ("Auth"). Copy the `token` of the `auth/verify` answer. The check
+`back/backend/README.md` says ("Auth"). The site's local run needs `WEB_ORIGIN=http://localhost:3000`
+(step 2), and a Vercel preview cannot be used for the return: the person comes back to
+`WEB_ORIGIN`, not to the preview. Copy the `token` of the `auth/verify` answer. The check
 needs a World ID verification of the guardian action: verify with the sandbox World App
 (`world-sandbox-testing.md`), or redeem a waiver code, which a sandbox takes:
 

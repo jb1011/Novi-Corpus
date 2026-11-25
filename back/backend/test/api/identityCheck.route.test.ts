@@ -379,6 +379,7 @@ describe("the identity check routes", () => {
       attemptsLeft: 3,
       lastErrorCode: null,
       reading: false,
+      held: null,
     });
 
     provider.verify(refOf(started.body.sessionId));

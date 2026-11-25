@@ -25,7 +25,8 @@ import { ApiError, readJson } from "../errors";
  *    expiresAt }`, our session id (never the provider's), the provider's page the person is sent
  *    to, and when that page stops taking them;
  *  - `GET /identity-check/session` shows the tenant's open session, ids and counts only, or
- *    `{ status: "none" }`;
+ *    `{ status: "none" }`; its `reading` is true only while the provider processes an attempt,
+ *    and `held` names who a verified session waits on (`system` or `operator`), else null;
  *  - `POST /identity-check/sync` reads the tenant's open session back from the provider (the
  *    person is back on the page, or the card checks again) and answers `{ outcome, state }`: what
  *    the read did, and the identity state as `/world-id/me` shows it. Without an open session it

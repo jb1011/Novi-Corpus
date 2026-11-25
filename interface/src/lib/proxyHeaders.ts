@@ -188,9 +188,11 @@ export function foundingForwardedFor(header: string | null): string | null {
  * The connection package and the bootstrap response carry freshly minted credentials. Document
  * downloads carry legal documents belonging to one tenant. The legal-body order doors carry one
  * tenant's orders and the typed data its person is about to sign, and the customer company doors
- * carry a declaration and the statement message to be signed. The backend already sets
- * `Cache-Control: private, no-store` on documents; this is the second lock, because the proxy is
- * where an intermediary would otherwise be free to decide for itself.
+ * carry a declaration and the statement message to be signed. The identity check's start carries
+ * the two names a person typed, and the World ID record carries the name of record once the check
+ * has passed. The backend already sets `Cache-Control: private, no-store` on documents and on the
+ * identity check; this is the second lock, because the proxy is where an intermediary would
+ * otherwise be free to decide for itself.
  */
 export function isNoStorePath(joinedPath: string): boolean {
   return (
@@ -202,6 +204,10 @@ export function isNoStorePath(joinedPath: string): boolean {
     /^legal-body-orders(\/|$)/.test(joinedPath) ||
     // companies/customer and companies/customer/statement-message
     /^companies\/customer(\/|$)/.test(joinedPath) ||
+    // identity-check/sessions, identity-check/session and identity-check/sync
+    /^identity-check(\/|$)/.test(joinedPath) ||
+    // The World ID record, with the guardian's identity block and its name of record.
+    joinedPath === "world-id/me" ||
     // Founding applications: emails and answers. The public config route is not in this list.
     joinedPath === "founding/applications" ||
     joinedPath === "founding/applications.csv" ||

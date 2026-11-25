@@ -6,6 +6,7 @@ import {
 } from "@/lib/api/types";
 import { walletKindOf } from "@/lib/legalBody/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
+import { stripReturnedFlag, type IdentityReturnPath } from "@/lib/legalBody/identityCheck";
 import type { WorldIdGateState } from "@/lib/legalBody/worldIdGate";
 import { walletSignedIn, type WalletAttempt } from "@/lib/walletSignIn";
 
@@ -119,6 +120,37 @@ export function legalBodyGate(p: {
   return "flow";
 }
 
+/**
+ * The view a session starts on: the sign-in step when the person signed in on this page, else the
+ * human step when they come back from the identity check. The provider sends the person back to
+ * the page the check was started from (`?identityCheck=returned`); the human step holds the card
+ * with the result, so it stays on screen until its Continue even where nothing else holds it.
+ */
+export function arrivalGateView(p: { engaged: boolean; returned: boolean }): GateView {
+  if (p.engaged) return "signin";
+  return p.returned ? "human" : null;
+}
+
+/** The view after the sign-in step's Continue: the human step when the person came back from the
+ *  check, so a person who had to sign in first still reads the result. */
+export function gateViewAfterSignIn(returned: boolean): GateView {
+  return returned ? "human" : null;
+}
+
+/**
+ * The address after the human step's Continue, where the return from the identity check is spent:
+ * the page's own path with the flag gone and every other part of the query kept, or null when
+ * there is no return to spend. Until that Continue the flag stays, so a reload, a new sign-in or
+ * another wallet on the page holds the human step again, which only shows the result once more.
+ */
+export function addressAfterContinue(p: {
+  returned: boolean;
+  path: IdentityReturnPath;
+  search: string;
+}): string | null {
+  return p.returned ? stripReturnedFlag(p.path, p.search) : null;
+}
+
 /* ── 3. The person ─────────────────────────────────────────────────────────────────────────── */
 
 export type HumanStepView = {
@@ -132,28 +164,25 @@ export type HumanStepView = {
   verify: boolean;
   continue: boolean;
   retry: boolean;
-  /** The identity card's state, or null when this deployment does not require the record. */
-  guardianIdentity: GuardianIdentityView["state"] | null;
 };
 
 /**
  * The human gate's screen under this product's rule (`requireRealHuman`, `forceRequired`): a
  * record the real-human check refuses offers Verify and never Continue; a deployment without World
- * ID says so and offers no button at all.
+ * ID says so and offers no button at all. An accepted person's Continue waits, like the gate, on
+ * an identity record that production requires and that is not verified (`identityBlocksGate`).
+ * The identity card itself is `identityCardView`'s.
  */
 export function humanStepView(
   state: WorldIdGateState,
   identity?: GuardianIdentityView | null,
 ): HumanStepView {
-  const guardianIdentity = identity?.required === true ? identity.state : null;
-  const identityOpen = guardianIdentity === null || guardianIdentity === "verified";
   const none = {
     title: "ask" as const,
     points: false,
     verify: false,
     continue: false,
     retry: false,
-    guardianIdentity,
   };
   switch (state.kind) {
     case "loading":
@@ -169,7 +198,12 @@ export function humanStepView(
     case "not_accepted":
       return { ...none, line: "record", points: true, verify: true };
     case "accepted":
-      return { ...none, title: "accepted", line: "record", continue: identityOpen };
+      return {
+        ...none,
+        title: "accepted",
+        line: "record",
+        continue: !identityBlocksGate(identity),
+      };
   }
 }
 

@@ -3,16 +3,21 @@
  *
  * The interface never imports backend code, so it carries its own copy of every union and view the
  * legal-body flow reads: the order, its binding, the link message, the statement message, the
- * agreement, `/config.legalBodies` and the transparency rows. Beside each copy it keeps a runtime
- * list, its members or its keys, written `as const` so this guard has something unambiguous to
- * read. Nothing in either compiler ties the two packages together: a state added here would still
- * build and render there, with no branch for it.
+ * agreement, `/config.legalBodies`, the transparency rows, the guardian's identity record as
+ * `/world-id/me` serves it and the identity check's session view. Beside each copy it keeps a
+ * runtime list, its members or its keys, written `as const` so this guard has something
+ * unambiguous to read. Nothing in either compiler ties the two packages together: a state added
+ * here would still build and render there, with no branch for it.
  *
  * Each union and each view is written out ONCE below as an exhaustive record. A
  * `Record<Union, true>` or a `Record<keyof View, true>` cannot be short a key, nor carry one too
  * many: changing the backend's type fails to compile here until the record follows, and the record
  * is then compared with the interface's list, so the change fails CI until the interface's copy
  * follows too.
+ *
+ * The identity check card also copies four of this backend's values: the return flag the provider
+ * sends the person back with, the renewal window, the sync's interval and the typed name's limit.
+ * Each is compared with the backend's own, so a change on either side fails CI.
  *
  * Text-parsed rather than imported, like `formationStatusUnion.test.ts`: the interface package has
  * its own tsconfig and module resolution.
@@ -22,7 +27,18 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import type { LegalBodyConfig } from "../../src/api/app";
 import type { StatementMessageAnswer } from "../../src/api/routes/customerCompanies";
+import { IDENTITY_SYNC_MIN_INTERVAL_MS } from "../../src/api/routes/identityCheck";
 import type { LegalBodyAgreementAnswer } from "../../src/api/routes/legalBodyOrders";
+import {
+  IDENTITY_RETURN_PARAM,
+  IDENTITY_RETURN_VALUE,
+  NAME_MAX_CODE_POINTS,
+  RENEWAL_WINDOW_MS,
+  type SessionHold,
+  type SessionView,
+} from "../../src/identity/sessions";
+import type { IdentityView } from "../../src/identity/state";
+import type { IdentityState } from "../../src/identity/types";
 import { ADOPTION_FIELDS } from "../../src/legalBody/adoption";
 import type { VerificationState } from "../../src/legalBody/attestation";
 import type { BindingView } from "../../src/legalBody/binding";
@@ -50,6 +66,20 @@ const INTERFACE_TYPES = join(
   "lib",
   "api",
   "types.ts",
+);
+
+/** The identity check card's rules, where the interface keeps its copies of the four values. */
+const INTERFACE_IDENTITY_CHECK = join(
+  import.meta.dirname,
+  "..",
+  "..",
+  "..",
+  "..",
+  "interface",
+  "src",
+  "lib",
+  "legalBody",
+  "identityCheck.ts",
 );
 
 // ---------------------------------------------------------------------------------------------
@@ -108,6 +138,21 @@ const FILING_STATUSES: Record<FilingStatus, true> = {
   filed: true,
   past_due_unverified: true,
   unverified: true,
+};
+
+const GUARDIAN_IDENTITY_STATES: Record<IdentityState, true> = {
+  none: true,
+  pending: true,
+  needs_review: true,
+  failed: true,
+  verified: true,
+  expired: true,
+  revoked: true,
+};
+
+const IDENTITY_SESSION_HOLDS: Record<SessionHold, true> = {
+  system: true,
+  operator: true,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -214,6 +259,29 @@ const TRANSPARENCY_LEGAL_BODY_KEYS: Record<keyof TransparencyLegalBody, true> = 
   links: true,
 };
 
+const GUARDIAN_IDENTITY_VIEW_KEYS: Record<keyof IdentityView, true> = {
+  required: true,
+  automatic: true,
+  state: true,
+  firstName: true,
+  lastName: true,
+  verifiedAt: true,
+  expiresAt: true,
+};
+
+/** The open session: the other arm is `{ status: "none" }`. */
+type OpenSessionView = Extract<SessionView, { status: "open" }>;
+
+const IDENTITY_SESSION_VIEW_KEYS: Record<keyof OpenSessionView, true> = {
+  status: true,
+  sessionId: true,
+  startedAt: true,
+  attemptsLeft: true,
+  lastErrorCode: true,
+  reading: true,
+  held: true,
+};
+
 // ---------------------------------------------------------------------------------------------
 // The interface's lists, read as text.
 // ---------------------------------------------------------------------------------------------
@@ -244,12 +312,34 @@ function interfaceFields(name: string): { name: string; type: string }[] {
   ].map((m) => ({ name: m[1] ?? "", type: m[2] ?? "" }));
 }
 
+/**
+ * The value of `export const NAME = <literal>;` in the interface's identity check module: a quoted
+ * string, or a number written as integer literals multiplied together (`90 * 86_400_000`).
+ * Anything else fails, so a value the guard cannot read is never passed over.
+ */
+function interfaceConstant(name: string): string | number {
+  const source = readFileSync(INTERFACE_IDENTITY_CHECK, "utf8");
+  const opening = `export const ${name} = `;
+  const start = source.indexOf(opening);
+  expect(start, `${name} must exist in ${INTERFACE_IDENTITY_CHECK}`).toBeGreaterThan(-1);
+  expect(source.indexOf(opening, start + 1), `${name} must be declared once`).toBe(-1);
+  const end = source.indexOf(";", start);
+  const literal = source.slice(start + opening.length, end).trim();
+  const quoted = /^"([^"\\]*)"$/.exec(literal);
+  if (quoted) return quoted[1] ?? "";
+  const factors = literal.split("*").map((part) => part.trim());
+  for (const factor of factors)
+    expect(factor, `${name} = ${literal}: a string or integers multiplied`).toMatch(/^\d[\d_]*$/);
+  return factors.reduce((product, factor) => product * Number(factor.replace(/_/g, "")), 1);
+}
+
 /** Compared sorted, so a duplicate on either side fails too. */
 const sorted = (words: Iterable<string>): string[] => [...words].sort();
 
 test("the interface's types module is where this guard expects it", () => {
   // If this fails the module moved, and the assertions below would fail for the wrong reason.
   expect(existsSync(INTERFACE_TYPES), INTERFACE_TYPES).toBe(true);
+  expect(existsSync(INTERFACE_IDENTITY_CHECK), INTERFACE_IDENTITY_CHECK).toBe(true);
 });
 
 describe("each union the interface copies has exactly this backend's members", () => {
@@ -261,6 +351,8 @@ describe("each union the interface copies has exactly this backend's members", (
     ["BROKEN_REASONS", BROKEN_REASONS],
     ["STANDINGS", STANDINGS],
     ["FILING_STATUSES", FILING_STATUSES],
+    ["GUARDIAN_IDENTITY_STATES", GUARDIAN_IDENTITY_STATES],
+    ["IDENTITY_SESSION_HOLDS", IDENTITY_SESSION_HOLDS],
   ];
   test.each(unions)("%s", (list, backend) => {
     expect(sorted(interfaceList(list))).toEqual(sorted(Object.keys(backend)));
@@ -276,6 +368,8 @@ describe("each view the interface copies has exactly this backend's keys", () =>
     ["LEGAL_BODY_AGREEMENT_KEYS", LEGAL_BODY_AGREEMENT_KEYS],
     ["LINK_MESSAGE_RESULT_KEYS", LINK_MESSAGE_RESULT_KEYS],
     ["TRANSPARENCY_LEGAL_BODY_KEYS", TRANSPARENCY_LEGAL_BODY_KEYS],
+    ["GUARDIAN_IDENTITY_VIEW_KEYS", GUARDIAN_IDENTITY_VIEW_KEYS],
+    ["IDENTITY_SESSION_VIEW_KEYS", IDENTITY_SESSION_VIEW_KEYS],
   ];
   test.each(views)("%s", (list, backend) => {
     expect(sorted(interfaceList(list))).toEqual(sorted(Object.keys(backend)));
@@ -294,4 +388,22 @@ test("the interface's adoption fields are this backend's, by name and type, in o
   expect(interfaceFields("ADOPTION_FIELDS")).toEqual(
     ADOPTION_FIELDS.map(({ name, type }) => ({ name, type })),
   );
+});
+
+describe("each value the identity check card copies is this backend's", () => {
+  const values: [name: string, backend: string | number][] = [
+    // The provider sends the person back to `{origin}{returnPath}?identityCheck=returned`.
+    ["IDENTITY_RETURN_PARAM", IDENTITY_RETURN_PARAM],
+    ["IDENTITY_RETURN_VALUE", IDENTITY_RETURN_VALUE],
+    // When the card offers "Renew now"; the server decides whether a renewal may start.
+    ["RENEWAL_WINDOW_MS", RENEWAL_WINDOW_MS],
+    // Check again and Try again wait this long after a read, or the server refuses as too soon.
+    ["SYNC_MIN_INTERVAL_MS", IDENTITY_SYNC_MIN_INTERVAL_MS],
+    // The browser refuses a name the server would refuse.
+    ["NAME_MAX_CODE_POINTS", NAME_MAX_CODE_POINTS],
+  ];
+  test.each(values)("%s", (name, backend) => {
+    expect(backend, `the backend's ${name} must be exported`).toBeDefined();
+    expect(interfaceConstant(name)).toBe(backend);
+  });
 });
