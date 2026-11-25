@@ -977,9 +977,10 @@ test("a node that answers 429: unknown, unsigned and not stored, with no memo en
     links: { transparency: TRANSPARENCY },
     checkedAt: expect.any(String),
     statement: null,
-    // The unsigned treasury block sits beside the statement on every answer that has one; with
-    // no statement it is null.
+    // The unsigned treasury and pot blocks sit beside the statement on every answer that has one;
+    // with no statement both are null.
     treasury: null,
+    pot: null,
   });
   expect(logRows()).toBe(0);
   expect(opsLines("legal_body_statement_unavailable")).toEqual([
