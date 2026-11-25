@@ -271,7 +271,8 @@ export type WriteRequest = {
  * for the order; `delegates`, `modules` and `balanceWei` are a `readPotRaw` of that pot, and
  * `agentHasCode` is its field for the agent's wallet. The setup's `agentWalletKind` is
  * `walletKindOf` of the agent wallet's `getCode` in the same click: fee money goes to a plain key
- * only, and a context that leaves the kind out is read only when it sends no fee money. Money sent
+ * only, and a context that leaves the kind out (a screen that did not read that wallet's code, Ruling
+ * R21) is read only when it sends no fee money. Money sent
  * as value is in native wei (18 decimals); the ceiling, and the amount of a USDC transfer, are in
  * USDC units (6): a transfer never carries wei.
  */
@@ -280,7 +281,7 @@ export type PotCallContext =
       kind: "setup";
       guardian: Address;
       agentWallet: Address;
-      agentWalletKind: WalletKind;
+      agentWalletKind?: WalletKind;
       ceilingUnits: bigint;
       saltNonce: bigint;
       fundWei: bigint;

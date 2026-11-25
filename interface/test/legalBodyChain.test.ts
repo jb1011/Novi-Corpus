@@ -2569,6 +2569,30 @@ describe("the setup's fee money goes to a plain key only", () => {
     expect(potSetupCall(config, withoutKind(SETUP_V4) as Setup, SETUP_GAS)).toEqual(setupReq(SETUP_V4));
   });
 
+  test("a context TYPED with no kind (Ruling R21): the allowlist still refuses fee money, and takes the setup that sends none", () => {
+    // No cast and no `odd`: the type itself now leaves the kind out, as a screen that never read
+    // the agent wallet's code builds it (the noted pot set up again for its first key).
+    const feeMoney: Setup = {
+      kind: "setup",
+      guardian: G,
+      agentWallet: A,
+      ceilingUnits: SETUP_V5.ceilingUnits,
+      saltNonce: SETUP_V5.saltNonce,
+      fundWei: SETUP_V5.fundWei,
+      agentGasWei: SETUP_V5.agentGasWei,
+    };
+    expect("agentWalletKind" in feeMoney).toBe(false);
+    expect(allowedCall(setupReq(SETUP_V5), potCtx(feeMoney))).toEqual(refused("no_pot_context"));
+    expect(potSetupCall(config, feeMoney, SETUP_GAS)).toEqual(refused("no_pot_context"));
+    // One unit of fee money is fee money.
+    const oneUnit: Setup = { ...feeMoney, fundWei: NO_WEI, agentGasWei: WEI_PER_UNIT };
+    expect(potSetupCall(config, oneUnit, SETUP_GAS)).toEqual(refused("no_pot_context"));
+    // No fee money: the kind decides nothing, and V4 keeps its bytes.
+    const none: Setup = { ...feeMoney, fundWei: NO_WEI, agentGasWei: NO_WEI };
+    pinned(accepted(setupReq(SETUP_V4), potCtx(none)), 1412, V4_HASH);
+    expect(potSetupCall(config, none, SETUP_GAS)).toEqual(setupReq(SETUP_V4));
+  });
+
   test("a kind that is none of the three: no_pot_context, with fee money or without", () => {
     for (const agentWalletKind of ["eoa", "Key", "", null, 1, true, {}])
       for (const p of [SETUP_V5, SETUP_V4]) {

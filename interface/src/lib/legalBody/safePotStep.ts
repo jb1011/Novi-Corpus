@@ -458,8 +458,8 @@ export function potPlan(p: {
  *  reads a setup context without it only when it sends no fee money (`readSetupContext` in
  *  `chain.ts`), and such a plan sends none. A kind that was not read is never stated. */
 export function potSetupContext(plan: PotPlan): Extract<PotCallContext, { kind: "setup" }> {
-  const context = {
-    kind: "setup" as const,
+  const context: Extract<PotCallContext, { kind: "setup" }> = {
+    kind: "setup",
     guardian: plan.guardian,
     agentWallet: plan.agentWallet,
     ceilingUnits: plan.ceilingUnits,
@@ -467,8 +467,8 @@ export function potSetupContext(plan: PotPlan): Extract<PotCallContext, { kind: 
     fundWei: plan.fundWei,
     agentGasWei: plan.agentGasWei,
   };
-  if (plan.agentWalletKind === null) return context as Extract<PotCallContext, { kind: "setup" }>;
-  return { ...context, agentWalletKind: plan.agentWalletKind };
+  if (plan.agentWalletKind !== null) context.agentWalletKind = plan.agentWalletKind;
+  return context;
 }
 
 /** The review's sentence about money: every amount formatted from the plan's own wei values, and

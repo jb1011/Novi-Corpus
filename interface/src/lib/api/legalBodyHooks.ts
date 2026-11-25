@@ -15,10 +15,12 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { useConnection, useWriteContract } from "wagmi";
+import { useConnection, usePublicClient, useWriteContract } from "wagmi";
 import { arcTestnet } from "@/lib/chain";
 import { sendAllowedCall, type CallContext, type WriteRequest } from "@/lib/legalBody/chain";
 import { orderPollInterval, retryRead } from "@/lib/legalBody/polling";
+import { potAddresses } from "@/lib/legalBody/safePot";
+import { readPotRaw } from "@/lib/legalBody/safePotRules";
 import { getTransparency } from "./client";
 import { useAuthToken, usePublicConfigQuery } from "./hooks";
 import { apiKeys } from "./keys";
@@ -46,11 +48,13 @@ import {
 } from "./legalBodyClient";
 import { ApiError } from "./types";
 import type {
+  Address,
   CustomerCompanyInput,
   CustomerStatementInput,
   Hex,
   LegalBodyConfig,
   LinkTypedDataWire,
+  OrderPotView,
 } from "./types";
 
 /** The token a mutation sends, or a refusal before any request: the flow signs in first. */
@@ -298,6 +302,46 @@ export function useOrderGrantQuery(id: string | null | undefined, enabled: boole
     enabled: enabled && !!token && !!id,
     retry: false,
     refetchOnWindowFocus: false,
+  });
+}
+
+/** `GET /pot` read now, a click's own read: a request made in the click, never the cached answer
+ *  (a stale "no note" is the one way left to plan a pot at another address). Its answer becomes the
+ *  pot query's data, so the card reads what the click read. A failure throws, a missing session
+ *  as a 401 before any request. */
+export function useReadOrderPotNow(id: string) {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useCallback(async (): Promise<OrderPotView | null> => {
+    const t = requireToken(token);
+    const answer = await getOrderPot(t, id);
+    queryClient.setQueryData(apiKeys.legalBodyOrderPot(t, id), answer);
+    return answer.pot;
+  }, [queryClient, token, id]);
+}
+
+/**
+ * A pot's raw facts, as one block answered them (`readPotRaw`), through the public client of
+ * `chainId`: the noted pot read for the record's agent wallet. One query keyed by the chain and
+ * the two addresses; nothing is read until both are given and the chain has the pot's table. Read
+ * once as the done page shows it, and again only when a screen asks after a transaction: never
+ * retried, never polled, never read again on focus or on reconnect. A failed read is the query's
+ * error, never an answer.
+ */
+export function usePotRawQuery(chainId: number, pot: Address | null, agentWallet: Address | null) {
+  const client = usePublicClient({ chainId });
+  const addresses = potAddresses(chainId);
+  return useQuery({
+    queryKey: apiKeys.potRaw(chainId, pot ?? "", agentWallet ?? ""),
+    queryFn: () => {
+      if (!client || addresses === null || pot === null || agentWallet === null)
+        throw new Error("no pot to read");
+      return readPotRaw(client, addresses, { pot, agentWallet });
+    },
+    enabled: !!client && addresses !== null && pot !== null && agentWallet !== null,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 }
 

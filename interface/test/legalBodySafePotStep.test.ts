@@ -15,6 +15,8 @@ import {
   encodeAbiParameters,
   encodeFunctionData,
   encodeFunctionResult,
+  ExecutionRevertedError,
+  HttpRequestError,
   keccak256,
   size,
   zeroAddress,
@@ -72,6 +74,21 @@ import {
   type PotProblem,
   type PotProblemSay,
 } from "@/lib/legalBody/safePotStep";
+import {
+  potCreateFailureView,
+  potFormBegin,
+  potFormMoney,
+  potFreshSalt,
+  potNoteFailure,
+  potReadsAllowed,
+  potRecordWallet,
+  potReviewNote,
+  runPotCreate,
+  runPotReview,
+  type PotCreateDeps,
+  type PotReviewDeps,
+} from "@/lib/legalBody/safePotRun";
+import { ApiError } from "@/lib/api/types";
 
 const P_ = LEGAL_BODY_COPY.pot;
 
@@ -1012,3 +1029,468 @@ describe("the agent's two commands", () => {
 function readSource(path: string): string {
   return readFileSync(fileURLToPath(new URL(`../${path}`, import.meta.url)), "utf8");
 }
+
+// ---------------------------------------------------------------------------------------------
+// The setup's two clicks: the review's fresh reads, and "Create the pot" (`safePotRun.ts`)
+// ---------------------------------------------------------------------------------------------
+
+const HASH: Hex = `0x${"7a".repeat(32)}`;
+/** A revert, as viem names one through a contract call (`isRevert` reads it). */
+const revertError = () =>
+  Object.assign(new Error("execution reverted"), { name: "ContractFunctionRevertedError" });
+/** A revert of a plain call or estimate, as viem builds it: `CallExecutionError` (or
+ *  `EstimateGasExecutionError`) around the node's `ExecutionRevertedError`, never named
+ *  `ContractFunctionRevertedError`. */
+const callRevertError = (wrapper = "CallExecutionError") =>
+  Object.assign(new Error("Execution reverted for an unknown reason."), {
+    name: wrapper,
+    cause: new ExecutionRevertedError({ message: "execution reverted" }),
+  });
+/** The node could not be reached: not a revert. */
+const offlineError = () =>
+  Object.assign(new Error("HTTP request failed."), {
+    name: "CallExecutionError",
+    cause: new HttpRequestError({ url: "https://rpc.example.test", status: 502 }),
+  });
+/** The wallet's no (EIP-1193 4001). */
+const rejectedError = () => Object.assign(new Error("User rejected the request."), { code: 4001 });
+
+/** `aggregate3Value`'s answer for a plan: one result per call, the first naming `pot`. */
+function simulated(p: PotPlan, over: { pot?: Address; failed?: boolean } = {}): Hex {
+  const calls = 1 + (p.fundWei > ZERO ? 1 : 0) + (p.agentGasWei > ZERO ? 1 : 0);
+  const first = { success: over.failed !== true, returnData: encodeAbiParameters([{ type: "address" }], [over.pot ?? p.pot]) };
+  const rest = Array.from({ length: calls - 1 }, () => ({ success: true, returnData: "0x" as Hex }));
+  return encodeFunctionResult({ abi: multicall3Abi, functionName: "aggregate3Value", result: [first, ...rest] });
+}
+
+describe("runPotCreate: what Create the pot does before and at the wallet", () => {
+  /** Hand-made dependencies that say yes, each recording its call; `impl` replaces any of them. */
+  function harness(p: PotPlan, impl: Partial<PotCreateDeps> = {}) {
+    const calls: string[] = [];
+    const yes: PotCreateDeps = {
+      preflight: () => ({ ok: true }),
+      simulate: async () => simulated(p),
+      estimate: async () => BigInt(499_083),
+      declare: async () => {},
+      send: async () => ({ ok: true, hash: HASH }),
+    };
+    const use = { ...yes, ...impl };
+    const d: PotCreateDeps = {
+      preflight: () => {
+        calls.push("preflight");
+        return use.preflight();
+      },
+      simulate: () => {
+        calls.push("simulate");
+        return use.simulate();
+      },
+      estimate: () => {
+        calls.push("estimate");
+        return use.estimate();
+      },
+      declare: () => {
+        calls.push("declare");
+        return use.declare();
+      },
+      send: (gas) => {
+        calls.push(`send ${gas}`);
+        return use.send(gas);
+      },
+    };
+    return { d, calls };
+  }
+  const funded = () =>
+    planOf(plan({ checked: { ok: true, ceilingUnits: USDC(50), fundWei: WEI(USDC(60)), agentGasWei: WEI(BigInt(100_000)) } }));
+
+  test("all pass: the calls are preflight, simulate, estimate, declare, send, in that order, and send gets potGasLimit of the estimate", async () => {
+    for (const p of [planOf(plan()), funded()]) {
+      const { d, calls } = harness(p);
+      expect(await runPotCreate(p, d)).toEqual({ ok: true, hash: HASH });
+      // The server holds the declaration and the address before anything reaches the wallet.
+      expect(calls).toEqual(["preflight", "simulate", "estimate", "declare", "send 648808"]);
+      expect(potGasLimit(BigInt(499_083), POT_SETUP_GAS_CAP)).toBe(BigInt(648_808));
+    }
+  });
+
+  test("a preflight refusal: its problem, and nothing else is called", async () => {
+    for (const problem of ["not_this_wallet", "wrong_network", "refused"] as const) {
+      const { d, calls } = harness(planOf(plan()), { preflight: () => ({ ok: false, problem }) });
+      expect(await runPotCreate(planOf(plan()), d)).toEqual({ ok: false, problem });
+      expect(calls).toEqual(["preflight"]);
+    }
+  });
+
+  test("a simulation that throws, or that answers another address than the plan's pot: would_revert, and neither declare nor send is called", async () => {
+    const p = funded();
+    const cases: Partial<PotCreateDeps>[] = [
+      // As viem throws it from `call`, and as a contract read would name it.
+      { simulate: async () => Promise.reject(callRevertError()) },
+      { simulate: async () => Promise.reject(revertError()) },
+      { simulate: async () => simulated(p, { pot: SAFE_CREATED }) },
+      { simulate: async () => simulated(p, { failed: true }) },
+      { simulate: async () => simulated(planOf(plan())) },
+      { simulate: async () => "0x" },
+    ];
+    for (const impl of cases) {
+      const { d, calls } = harness(p, impl);
+      expect(await runPotCreate(p, d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(calls).toEqual(["preflight", "simulate"]);
+    }
+  });
+
+  test("a simulation or an estimate the node could not answer: read_failed, never said as a refusal of the chain, and neither declare nor send is called", async () => {
+    const p = planOf(plan());
+    const sim = harness(p, { simulate: async () => Promise.reject(offlineError()) });
+    expect(await runPotCreate(p, sim.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    expect(sim.calls).toEqual(["preflight", "simulate"]);
+    const est = harness(p, { estimate: async () => Promise.reject(offlineError()) });
+    expect(await runPotCreate(p, est.d)).toMatchObject({ ok: false, problem: "read_failed" });
+    expect(est.calls).toEqual(["preflight", "simulate", "estimate"]);
+  });
+
+  test("an estimate above the cap: would_revert, and neither declare nor send is called", async () => {
+    const p = planOf(plan());
+    for (const impl of [
+      { estimate: async () => POT_SETUP_GAS_CAP + BigInt(1) },
+      { estimate: async () => ZERO },
+      { estimate: async () => Promise.reject(callRevertError("EstimateGasExecutionError")) },
+      { estimate: async () => Promise.reject(revertError()) },
+    ] as Partial<PotCreateDeps>[]) {
+      const { d, calls } = harness(p, impl);
+      expect(await runPotCreate(p, d)).toMatchObject({ ok: false, problem: "would_revert" });
+      expect(calls).toEqual(["preflight", "simulate", "estimate"]);
+    }
+    // At the cap itself, the limit is the cap.
+    const atCap = harness(p, { estimate: async () => POT_SETUP_GAS_CAP });
+    expect((await runPotCreate(p, atCap.d)).ok).toBe(true);
+    expect(atCap.calls.at(-1)).toBe(`send ${POT_SETUP_GAS_CAP}`);
+  });
+
+  test("a note the server refuses: record_failed with the error as cause, and send is not called", async () => {
+    const p = planOf(plan());
+    for (const error of [
+      new ApiError(409, { code: "pot_taken", message: "This pot's address is noted for another legal body." }),
+      offlineError(),
+    ]) {
+      const { d, calls } = harness(p, { declare: async () => Promise.reject(error) });
+      const result = await runPotCreate(p, d);
+      expect(result).toEqual({ ok: false, problem: "record_failed", cause: error });
+      if (!result.ok) expect(result.cause).toBe(error);
+      expect(calls).toEqual(["preflight", "simulate", "estimate", "declare"]);
+    }
+  });
+
+  test("a refusal of the allowlist: refused; a rejection in the wallet: declined", async () => {
+    const p = planOf(plan());
+    const refusal = harness(p, { send: async () => ({ ok: false, problem: "wallet_on_another_chain" }) });
+    expect(await runPotCreate(p, refusal.d)).toEqual({ ok: false, problem: "refused", cause: "wallet_on_another_chain" });
+    const no = harness(p, { send: async () => Promise.reject(rejectedError()) });
+    expect(await runPotCreate(p, no.d)).toMatchObject({ ok: false, problem: "declined" });
+    // Wrapped as viem wraps it, the wallet's no is still the wallet's no.
+    const wrapped = harness(p, {
+      send: async () => Promise.reject(Object.assign(new Error("request failed"), { cause: rejectedError() })),
+    });
+    expect(await runPotCreate(p, wrapped.d)).toMatchObject({ ok: false, problem: "declined" });
+    // Any other throw: would_revert only for a revert, else refused.
+    const revert = harness(p, { send: async () => Promise.reject(revertError()) });
+    expect(await runPotCreate(p, revert.d)).toMatchObject({ ok: false, problem: "would_revert" });
+    const nodeRevert = harness(p, { send: async () => Promise.reject(callRevertError("TransactionExecutionError")) });
+    expect(await runPotCreate(p, nodeRevert.d)).toMatchObject({ ok: false, problem: "would_revert" });
+    const other = harness(p, { send: async () => Promise.reject(offlineError()) });
+    expect(await runPotCreate(p, other.d)).toMatchObject({ ok: false, problem: "refused" });
+    for (const h of [refusal, no, wrapped, revert, nodeRevert, other])
+      expect(h.calls).toEqual(["preflight", "simulate", "estimate", "declare", "send 648808"]);
+  });
+});
+
+describe("runPotReview: the review's reads, every one fresh in the click", () => {
+  const CHECKED_50 = { ok: true as const, ceilingUnits: USDC(50), fundWei: ZERO, agentGasWei: ZERO };
+  /** Hand-made reads that record what was asked: no note, the registry names A, no code anywhere
+   *  but where `code` says, a guardian holding 1,000 USDC, and a fresh salt of 1. */
+  function reads(impl: Partial<PotReviewDeps> = {}, code: Record<string, Hex> = {}) {
+    const asked: string[] = [];
+    const use: PotReviewDeps = {
+      readNoted: async () => null,
+      readRegistryWallet: async () => A,
+      readCode: async (address) => code[address.toLowerCase()],
+      readBalance: async () => WEI(USDC(1000)),
+      freshSalt: () => BigInt(1),
+      ...impl,
+    };
+    const d: PotReviewDeps = {
+      readNoted: () => {
+        asked.push("pot");
+        return use.readNoted();
+      },
+      readRegistryWallet: () => {
+        asked.push("registry");
+        return use.readRegistryWallet();
+      },
+      readCode: (address) => {
+        asked.push(`code ${address.toLowerCase()}`);
+        return use.readCode(address);
+      },
+      readBalance: () => {
+        asked.push("balance");
+        return use.readBalance();
+      },
+      freshSalt: () => {
+        asked.push("salt");
+        return use.freshSalt();
+      },
+    };
+    return { d, asked };
+  }
+  const review = (d: PotReviewDeps, checked: Extract<PotFormCheck, { ok: true }> = CHECKED_50) =>
+    runPotReview({ chainId: CHAIN, guardian: G, checked }, d);
+  const lower = (a: Address) => a.toLowerCase();
+
+  test("with no note: GET /pot, the registry and the balance, then the agent wallet's code, then the predicted address's code; the plan is V3", async () => {
+    const { d, asked } = reads();
+    const result = await review(d);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan).toEqual(planOf(plan()));
+    expect(result.plan.pot).toBe(V3_POT);
+    expect(result.noted).toBeNull();
+    expect(result.kind).toBe("key");
+    for (const read of ["pot", "registry", "balance", `code ${lower(A)}`, `code ${lower(V3_POT)}`])
+      expect(asked.filter((x) => x === read), read).toHaveLength(1);
+    expect(asked.indexOf(`code ${lower(A)}`)).toBeGreaterThan(asked.indexOf("registry"));
+    expect(asked.indexOf(`code ${lower(V3_POT)}`)).toBeGreaterThan(asked.indexOf(`code ${lower(A)}`));
+  });
+
+  test("a note found in the click, where the card had none: the NOTED address with the note's own salt, never the fresh one", async () => {
+    const { d, asked } = reads({ readNoted: async () => NOTED, freshSalt: () => BigInt(999) });
+    const result = await review(d);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.plan.pot).toBe(V3_POT);
+    expect(result.plan.saltNonce).toBe(BigInt(1));
+    expect(result.noted).toEqual(NOTED);
+    // The noted address's code first (one pot for life is decided before anything else), then the
+    // agent wallet's; the noted address is the predicted one, so no other pot's code is read.
+    expect(asked.filter((x) => x.startsWith("code "))).toEqual([`code ${lower(V3_POT)}`, `code ${lower(A)}`]);
+  });
+
+  test("the noted address holding code in the click: pot_exists, whatever the card was drawn with", async () => {
+    const { d } = reads({ readNoted: async () => NOTED }, { [lower(V3_POT)]: SOME_CODE });
+    expect(await review(d)).toMatchObject({ ok: false, say: { problem: "pot_exists" } });
+    // And with no note, a predicted address that holds code is pot_exists too.
+    const fresh = reads({}, { [lower(V3_POT)]: SOME_CODE });
+    expect(await review(fresh.d)).toMatchObject({ ok: false, say: { problem: "pot_exists" } });
+  });
+
+  test("a failed read stops the click with read_failed, and nothing after it is read or planned", async () => {
+    const failures: [Partial<PotReviewDeps>, string][] = [
+      [{ readNoted: async () => Promise.reject(new ApiError(503, { code: "chain_unavailable", message: "x" })) }, "pot"],
+      [{ readBalance: async () => Promise.reject(offlineError()) }, "balance"],
+      [{ readCode: async () => Promise.reject(offlineError()) }, "code"],
+    ];
+    for (const [impl, what] of failures) {
+      const { d, asked } = reads(impl);
+      const result = await review(d);
+      expect(result, what).toMatchObject({ ok: false, say: { problem: "read_failed" } });
+      if (!result.ok) expect(result.cause, what).toBeDefined();
+      if (what !== "code") expect(asked.some((x) => x.startsWith("code ")), what).toBe(false);
+    }
+    // A registry that could not be read is read_failed too, never "no wallet".
+    const registry = reads({ readRegistryWallet: async () => "unreadable" });
+    expect(await review(registry.d)).toMatchObject({ ok: false, say: { problem: "read_failed" } });
+  });
+
+  test("the registry names none or the guardian's wallet: agent_wallet, and no code is read for it", async () => {
+    for (const wallet of ["none", G] as const) {
+      const { d, asked } = reads({ readRegistryWallet: async () => wallet });
+      expect(await review(d)).toMatchObject({ ok: false, say: { problem: "agent_wallet" } });
+      expect(asked).not.toContain(`code ${lower(G)}`);
+    }
+  });
+
+  test("not_enough names the guardian's balance and the plan's own total", async () => {
+    const checked = { ok: true as const, ceilingUnits: USDC(50), fundWei: WEI(USDC(60)), agentGasWei: WEI(BigInt(100_000)) };
+    const value = BigInt("60100000000000000000");
+    const { d } = reads({ readBalance: async () => value - BigInt(1) });
+    const result = await review(d, checked);
+    expect(result).toEqual({
+      ok: false,
+      say: { problem: "not_enough", balanceWei: value - BigInt(1), totalWei: value },
+      kind: "key",
+    });
+    if (!result.ok)
+      expect(potProblemSentence(result.say)).toBe(
+        fillCopy(P_.problems.not_enough, { balance: "60.099999999999999999", total: "60.1" }),
+      );
+  });
+
+  test("another ceiling than the noted pot's: noted_pot, naming the note's own ceiling", async () => {
+    const { d } = reads({ readNoted: async () => NOTED });
+    const result = await review(d, { ok: true, ceilingUnits: USDC(60), fundWei: ZERO, agentGasWei: ZERO });
+    expect(result).toMatchObject({ ok: false, say: { problem: "noted_pot", notedCeilingUnits: USDC(50) } });
+  });
+
+  test("the agent wallet's kind is read in the click: a contract wallet gets no fee money, and the kind comes back for the form", async () => {
+    const checked = { ok: true as const, ceilingUnits: USDC(50), fundWei: ZERO, agentGasWei: WEI(BigInt(100_000)) };
+    for (const [code, kind] of [
+      [SOME_CODE, "contract"],
+      [DELEGATED_CODE, "delegated"],
+    ] as const) {
+      const { d } = reads({}, { [lower(A)]: code });
+      const result = await review(d, checked);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.kind).toBe(kind);
+      expect(result.plan.agentGasWei).toBe(ZERO);
+      expect(result.plan.value).toBe(ZERO);
+    }
+  });
+
+  test("potFreshSalt: the salt number of 16 random bytes", () => {
+    expect(potFreshSalt(new Uint8Array(16).fill(0xff))).toBe(BigInt(`0x${"ff".repeat(16)}`));
+    const one = new Uint8Array(16);
+    one[15] = 1;
+    expect(potFreshSalt(one)).toBe(BigInt(1));
+    expect(() => potFreshSalt(new Uint8Array(15))).toThrow();
+    expect(() => potFreshSalt(new Uint8Array(32))).toThrow();
+  });
+});
+
+describe("after a refusal of Create the pot: where the screen goes, and what it says", () => {
+  const ENV = { environment: "sandbox" as const, guardian: G };
+
+  test("the server's refusal of the note: its own sentence as served, and its code chooses the next step", () => {
+    const served = "This pot's address is noted for another legal body.";
+    expect(potNoteFailure(new ApiError(409, { code: "pot_taken", message: served }))).toEqual({
+      next: "back_to_form",
+      line: served,
+    });
+    expect(potNoteFailure(new ApiError(409, { code: "pot_exists", message: served })).next).toBe("reread_pot");
+    // No answer, or no answer the server wrote: this page's own sentence, and a try again.
+    for (const e of [
+      new ApiError(0, { code: "timeout", message: "The request timed out" }),
+      new ApiError(502, { code: "http_error", message: "Bad Gateway" }),
+      new ApiError(409, { code: "pot_taken", message: "  " }),
+      offlineError(),
+      "nothing",
+    ])
+      expect(potNoteFailure(e)).toEqual({ next: "try_again", line: P_.problems.record_failed });
+  });
+
+  test("the wallet's own problems go back to the review, with their sentence; nothing is lost but the click", () => {
+    expect(potCreateFailureView({ ok: false, problem: "not_this_wallet" }, ENV)).toEqual({
+      to: "review",
+      lines: [fillCopy(P_.problems.not_this_wallet, { address: G })],
+    });
+    expect(potCreateFailureView({ ok: false, problem: "wrong_network" }, ENV)).toEqual({
+      to: "review",
+      lines: [fillCopy(P_.problems.wrong_network, { network: "Arc testnet" })],
+    });
+    expect(potCreateFailureView({ ok: false, problem: "declined", cause: rejectedError() }, ENV)).toEqual({
+      to: "review",
+      lines: [P_.problems.declined],
+    });
+    expect(potCreateFailureView({ ok: false, problem: "read_failed", cause: offlineError() }, ENV)).toEqual({
+      to: "review",
+      lines: [P_.problems.read_failed],
+    });
+    // The allowlist's refusal: its own sentence, never its code.
+    expect(potCreateFailureView({ ok: false, problem: "refused", cause: "wallet_is_not_the_guardian" }, ENV)).toEqual({
+      to: "review",
+      lines: [potRefusalSentence("wallet_is_not_the_guardian", ENV)],
+    });
+    expect(potCreateFailureView({ ok: false, problem: "refused", cause: offlineError() }, ENV)).toEqual({
+      to: "review",
+      lines: [P_.problems.refused],
+    });
+  });
+
+  test("a refusal of the chain offers Change something; the page's own refusal before the wallet stops; the server's refusal follows its code", () => {
+    expect(potCreateFailureView({ ok: false, problem: "would_revert" }, ENV)).toEqual({
+      to: "problem",
+      then: "form",
+      lines: [P_.problems.would_revert],
+    });
+    expect(potCreateFailureView({ ok: false, problem: "refused" }, ENV)).toEqual({
+      to: "problem",
+      then: "none",
+      lines: [P_.problems.refused],
+    });
+    const refusal = (code: string) =>
+      potCreateFailureView(
+        { ok: false, problem: "record_failed", cause: new ApiError(409, { code, message: `served ${code}` }) },
+        ENV,
+      );
+    expect(refusal("rate_limited")).toEqual({ to: "review", lines: ["served rate_limited"] });
+    expect(refusal("pot_taken")).toEqual({ to: "form", lines: ["served pot_taken"] });
+    expect(refusal("pot_exists")).toEqual({ to: "problem", then: "form", lines: ["served pot_exists"], reread: "pot" });
+    expect(refusal("ceiling_above_grant")).toEqual({ to: "form", lines: ["served ceiling_above_grant"], reread: "grant" });
+    expect(refusal("agent_wallet_required")).toEqual({ to: "form", lines: ["served agent_wallet_required"], reread: "record" });
+    expect(refusal("legal_body_revoked")).toEqual({ to: "problem", then: "none", lines: ["served legal_body_revoked"] });
+    expect(
+      potCreateFailureView({ ok: false, problem: "record_failed", cause: offlineError() }, ENV),
+    ).toEqual({ to: "review", lines: [P_.problems.record_failed] });
+  });
+});
+
+describe("the form's money fields", () => {
+  test("a plain key, or a kind no click has read yet: the fee field with gasLine, and 0.1 proposed", () => {
+    for (const kind of ["key", null] as const) {
+      expect(potFormMoney({ kind, noted: null, registryWallet: A })).toEqual({ fields: "key", lines: [P_.gasLine] });
+      expect(potFormBegin({ kind, noted: null, registryWallet: A })).toEqual({ ceiling: "", fund: "", agentGas: "0.1" });
+    }
+  });
+
+  test("a delegated key or a contract wallet: gasContract in place of the fee field, and no fee money", () => {
+    for (const kind of ["delegated", "contract"] as const) {
+      expect(potFormMoney({ kind, noted: null, registryWallet: A })).toEqual({ fields: "no_fee", lines: [P_.gasContract] });
+      expect(potFormBegin({ kind, noted: null, registryWallet: A })).toEqual({ ceiling: "", fund: "", agentGas: "" });
+    }
+  });
+
+  test("the noted pot that never got code starts with its own ceiling; made for another key than the record's, it has no money fields and says why", () => {
+    expect(potFormBegin({ kind: null, noted: NOTED, registryWallet: A })).toEqual({ ceiling: "50", fund: "", agentGas: "0.1" });
+    expect(potFormMoney({ kind: null, noted: NOTED, registryWallet: A.toLowerCase() as Address }).fields).toBe("key");
+    // The record names P now; the note was made for A.
+    expect(potFormMoney({ kind: "key", noted: NOTED, registryWallet: P })).toEqual({
+      fields: "none",
+      lines: [fillCopy(P_.reviewAgentNoted, { address: A, registry: P }), P_.reviewKeyChanged],
+    });
+    expect(potFormBegin({ kind: "key", noted: NOTED, registryWallet: P })).toEqual({ ceiling: "50", fund: "", agentGas: "" });
+  });
+});
+
+describe("the review's note, and the record's wallet", () => {
+  test("potReviewNote: gasContract for a delegated key or a contract wallet, read in the click; nothing for a plain key or a kind not read", () => {
+    expect(potReviewNote(planOf(plan()))).toBeNull();
+    expect(potReviewNote(planOf(plan({ agentCode: SOME_CODE })))).toBe(P_.gasContract);
+    expect(potReviewNote(planOf(plan({ agentCode: DELEGATED_CODE })))).toBe(P_.gasContract);
+    // A changed key's plan read no kind: nothing said of it.
+    expect(potReviewNote(planOf(plan({ noted: NOTED, agentWallet: P })))).toBeNull();
+  });
+
+  test("potRecordWallet: the record's agent wallet of its own; null for none, the guardian's, or no address", () => {
+    expect(potRecordWallet(record(A), G)).toBe(A);
+    expect(potRecordWallet(record(G), G)).toBeNull();
+    expect(potRecordWallet(record(G.toLowerCase()), G)).toBeNull();
+    expect(potRecordWallet(record(zeroAddress), G)).toBeNull();
+    expect(potRecordWallet(record("0x1234"), G)).toBeNull();
+    expect(potRecordWallet(null, G)).toBeNull();
+  });
+});
+
+describe("what the done page reads of the pot", () => {
+  const allowed = (over: Partial<Parameters<typeof potReadsAllowed>[0]> = {}) =>
+    potReadsAllowed({ potOffered: true, chainId: CHAIN, order: order(), notice: undefined, ...over });
+
+  test("nothing of the pot is read unless /config's pot is true, for a linked order of this chain with no notice", () => {
+    expect(allowed()).toBe(true);
+    expect(allowed({ potOffered: false })).toBe(false);
+    expect(allowed({ potOffered: undefined as unknown as boolean })).toBe(false);
+    expect(allowed({ chainId: 1, order: order({ chainId: 1 }) })).toBe(false);
+    expect(allowed({ order: null })).toBe(false);
+    expect(allowed({ order: order({ revoked: true }) })).toBe(false);
+    expect(allowed({ order: order({ state: "deployed" }) })).toBe(false);
+    expect(allowed({ order: order({ chainId: 5042 }) })).toBe(false);
+    expect(allowed({ notice: { kind: "order_revoked" } })).toBe(false);
+  });
+});

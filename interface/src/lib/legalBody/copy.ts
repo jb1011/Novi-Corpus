@@ -802,6 +802,11 @@ export const LEGAL_BODY_COPY = {
       wallet_is_not_the_guardian: POT_NOT_THIS_WALLET,
     },
     checkAgain: "Check again",
+    retry: "Try again",
+    viewTransaction: "See the transaction",
+    /** The setup's receipt said it went through, and the read of the pot after it failed. */
+    readBackFailed:
+      "The transaction went through, but the chain could not be read just now to show the pot. Check again.",
 
     /* What the card shows of the pot, as read from the chain. */
     shownAddress: "The pot's address: {address}",
