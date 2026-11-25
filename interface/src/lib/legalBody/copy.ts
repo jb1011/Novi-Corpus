@@ -155,7 +155,7 @@ export const LEGAL_BODY_COPY = {
         optional:
           "Optional on the testnet. On Arc mainnet this check is required before a legal body is created.",
         testNote:
-          "Test check. You leave this site for our identity check provider's test page, pick an outcome there, and come back here. No document is read. The name is not compared with anything, so a made-up name is fine.",
+          "Test check. You leave this site for our identity check provider's test page, pick an outcome there, and come back here. No document is read, and the name is not compared with one, so a made-up name is fine.",
         testCounts: "A test check counts on the testnet only.",
         locked: "First verify with World ID above. Then you confirm who you are here.",
         loading: "Reading your check…",
@@ -186,7 +186,7 @@ export const LEGAL_BODY_COPY = {
             "You leave this site for our identity check provider's page. There you show a government document (a passport, an identity card or a driving licence) and take a live photo of your face. You need the document and a camera. It takes a few minutes, then you come back here.",
           nameWhy:
             "Type your first and last name exactly as the document prints them. This is the name that goes on your record, and it is compared with the document. If the two differ, a person reviews the result before it counts.",
-          nameAgain: "Type your name again: it is not kept in this browser.",
+          nameAgain: "Type your name again: this site does not keep it.",
           nameHelp: "Several given names on the document? Type them all in the first field.",
           firstName: "First name, as printed on the document",
           lastName: "Last name, as printed on the document",

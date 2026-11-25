@@ -15,6 +15,10 @@
  * is then compared with the interface's list, so the change fails CI until the interface's copy
  * follows too.
  *
+ * The identity check card also copies four of this backend's values: the return flag the provider
+ * sends the person back with, the renewal window, the sync's interval and the typed name's limit.
+ * Each is compared with the backend's own, so a change on either side fails CI.
+ *
  * Text-parsed rather than imported, like `formationStatusUnion.test.ts`: the interface package has
  * its own tsconfig and module resolution.
  */
@@ -23,8 +27,16 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import type { LegalBodyConfig } from "../../src/api/app";
 import type { StatementMessageAnswer } from "../../src/api/routes/customerCompanies";
+import { IDENTITY_SYNC_MIN_INTERVAL_MS } from "../../src/api/routes/identityCheck";
 import type { LegalBodyAgreementAnswer } from "../../src/api/routes/legalBodyOrders";
-import type { SessionHold, SessionView } from "../../src/identity/sessions";
+import {
+  IDENTITY_RETURN_PARAM,
+  IDENTITY_RETURN_VALUE,
+  NAME_MAX_CODE_POINTS,
+  RENEWAL_WINDOW_MS,
+  type SessionHold,
+  type SessionView,
+} from "../../src/identity/sessions";
 import type { IdentityView } from "../../src/identity/state";
 import type { IdentityState } from "../../src/identity/types";
 import { ADOPTION_FIELDS } from "../../src/legalBody/adoption";
@@ -54,6 +66,20 @@ const INTERFACE_TYPES = join(
   "lib",
   "api",
   "types.ts",
+);
+
+/** The identity check card's rules, where the interface keeps its copies of the four values. */
+const INTERFACE_IDENTITY_CHECK = join(
+  import.meta.dirname,
+  "..",
+  "..",
+  "..",
+  "..",
+  "interface",
+  "src",
+  "lib",
+  "legalBody",
+  "identityCheck.ts",
 );
 
 // ---------------------------------------------------------------------------------------------
@@ -286,12 +312,34 @@ function interfaceFields(name: string): { name: string; type: string }[] {
   ].map((m) => ({ name: m[1] ?? "", type: m[2] ?? "" }));
 }
 
+/**
+ * The value of `export const NAME = <literal>;` in the interface's identity check module: a quoted
+ * string, or a number written as integer literals multiplied together (`90 * 86_400_000`).
+ * Anything else fails, so a value the guard cannot read is never passed over.
+ */
+function interfaceConstant(name: string): string | number {
+  const source = readFileSync(INTERFACE_IDENTITY_CHECK, "utf8");
+  const opening = `export const ${name} = `;
+  const start = source.indexOf(opening);
+  expect(start, `${name} must exist in ${INTERFACE_IDENTITY_CHECK}`).toBeGreaterThan(-1);
+  expect(source.indexOf(opening, start + 1), `${name} must be declared once`).toBe(-1);
+  const end = source.indexOf(";", start);
+  const literal = source.slice(start + opening.length, end).trim();
+  const quoted = /^"([^"\\]*)"$/.exec(literal);
+  if (quoted) return quoted[1] ?? "";
+  const factors = literal.split("*").map((part) => part.trim());
+  for (const factor of factors)
+    expect(factor, `${name} = ${literal}: a string or integers multiplied`).toMatch(/^\d[\d_]*$/);
+  return factors.reduce((product, factor) => product * Number(factor.replace(/_/g, "")), 1);
+}
+
 /** Compared sorted, so a duplicate on either side fails too. */
 const sorted = (words: Iterable<string>): string[] => [...words].sort();
 
 test("the interface's types module is where this guard expects it", () => {
   // If this fails the module moved, and the assertions below would fail for the wrong reason.
   expect(existsSync(INTERFACE_TYPES), INTERFACE_TYPES).toBe(true);
+  expect(existsSync(INTERFACE_IDENTITY_CHECK), INTERFACE_IDENTITY_CHECK).toBe(true);
 });
 
 describe("each union the interface copies has exactly this backend's members", () => {
@@ -340,4 +388,22 @@ test("the interface's adoption fields are this backend's, by name and type, in o
   expect(interfaceFields("ADOPTION_FIELDS")).toEqual(
     ADOPTION_FIELDS.map(({ name, type }) => ({ name, type })),
   );
+});
+
+describe("each value the identity check card copies is this backend's", () => {
+  const values: [name: string, backend: string | number][] = [
+    // The provider sends the person back to `{origin}{returnPath}?identityCheck=returned`.
+    ["IDENTITY_RETURN_PARAM", IDENTITY_RETURN_PARAM],
+    ["IDENTITY_RETURN_VALUE", IDENTITY_RETURN_VALUE],
+    // When the card offers "Renew now"; the server decides whether a renewal may start.
+    ["RENEWAL_WINDOW_MS", RENEWAL_WINDOW_MS],
+    // Check again and Try again wait this long after a read, or the server refuses as too soon.
+    ["SYNC_MIN_INTERVAL_MS", IDENTITY_SYNC_MIN_INTERVAL_MS],
+    // The browser refuses a name the server would refuse.
+    ["NAME_MAX_CODE_POINTS", NAME_MAX_CODE_POINTS],
+  ];
+  test.each(values)("%s", (name, backend) => {
+    expect(backend, `the backend's ${name} must be exported`).toBeDefined();
+    expect(interfaceConstant(name)).toBe(backend);
+  });
 });

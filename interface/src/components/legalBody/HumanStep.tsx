@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import { GetWorldIdHelp } from "@/components/guardian/GetWorldIdHelp";
 import { PersonhoodSeal } from "@/components/guardian/PersonhoodSeal";
 import { useWorldIdGate, WorldIdStatusRow } from "@/components/guardian/WorldIdGate";
@@ -26,7 +26,9 @@ const H = LEGAL_BODY_COPY.human;
  *
  * Under the World ID card, the identity check card (`useIdentityCheck`), where the deployment
  * requires the record or runs the check automatically. `returnPath` is the page hosting the step:
- * the provider sends the person back there.
+ * the provider sends the person back there. While the check is under way (`cardUnderWay`), the
+ * step calls `onEngage` once, so the page holds it and the result shows here until Continue,
+ * even where nothing else would hold it once the check passes.
  */
 export function HumanStep({
   onEngage,
@@ -53,6 +55,15 @@ export function HumanStep({
     returnPath,
   });
   const identityCard = identityCheck.view;
+
+  // Once per mount. Each page's `onEngage` sets its view to this step, a constant: called again it
+  // changes nothing, and a click that leaves the step unmounts it first.
+  const engagedForCheck = useRef(false);
+  useEffect(() => {
+    if (!identityCheck.underWay || engagedForCheck.current) return;
+    engagedForCheck.current = true;
+    onEngage();
+  }, [identityCheck.underWay, onEngage]);
 
   return (
     <div>

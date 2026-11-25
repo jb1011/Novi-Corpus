@@ -346,31 +346,27 @@ describe("the return from the identity check", () => {
     expect(html).not.toContain(START_COPY.title);
   });
 
-  test("both pages read the return and name their own path", () => {
+  // The render tests (here, and `legalBodyFlowReturn.server.test.ts` for `/legal-body`) show
+  // each page reading the return. No render reaches a click, so the two handlers that carry the
+  // return on are pinned by their source: the sign-in step's Continue, and the human step's, where
+  // the return is spent (`addressAfterContinue`).
+  test("both pages spend the return on the human step's Continue, the flag leaving the address there and nowhere else, and name their own return path", () => {
     for (const [file, path] of PAGES) {
       const code = read(file);
-      expect(code).toContain("returnedFromCheck(");
-      expect(code).toContain("arrivalGateView(");
-      expect(code).toContain("gateViewAfterSignIn(");
-      expect(code).toContain(`returnPath="${path}"`);
-    }
-  });
-
-  test("both pages take the flag out of the address in place, with no navigation, once the return is taken, and spend it on the human step's Continue", () => {
-    for (const [file, path] of PAGES) {
-      const code = read(file);
-      expect(code, file).toContain(
-        "const takeReturn = returnTaken({ returned, gate, recordRead: me !== null });",
-      );
+      expect(code, file).toContain(`returnPath="${path}"`);
+      expect(code, file).toContain("onContinue={() => setView(gateViewAfterSignIn(returned))}");
       expect(code, file).toMatch(
         new RegExp(
-          String.raw`useEffect\(\(\) => \{\s*if \(!takeReturn\) return;\s*` +
-            String.raw`window\.history\.replaceState\(null, "", stripReturnedFlag\("${path}", window\.location\.search\)\);\s*` +
-            String.raw`\}, \[takeReturn\]\);`,
+          String.raw`onContinue=\{\(\) => \{\s*(?://[^\n]*\n\s*)*` +
+            String.raw`const address = addressAfterContinue\(\{\s*returned,\s*path: "${path}",\s*search: window\.location\.search,\s*\}\);\s*` +
+            String.raw`if \(address !== null\) window\.history\.replaceState\(null, "", address\);\s*` +
+            String.raw`setReturned\(false\);\s*setView\(null\);\s*\}\}`,
         ),
       );
+      // The flag leaves the address in that one place, in place, and never by a navigation.
+      expect(code.match(/replaceState\(/g), file).toHaveLength(1);
+      expect(code, file).not.toContain("returnTaken(");
       expect(code, file).not.toMatch(/router\.(replace|push)\([^)]*identityCheck/);
-      expect(code, file).toContain("setReturned(false);");
     }
   });
 });

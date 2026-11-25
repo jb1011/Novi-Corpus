@@ -304,6 +304,10 @@ export function useInvalidateIdentity() {
  * again: the browser leaves for the provider's page. A refusal may mean the record moved (a review
  * stands, a session is held), so both reads are asked again. The names are the mutation's
  * variables, in memory only: never a query key, never stored.
+ *
+ * TanStack keeps a mutation's variables in its cache until the mutation is reset and collected.
+ * The caller resets it once it settles (`useIdentityCheck`), and `gcTime: 0` collects it then, so
+ * the names leave memory with the request.
  */
 export function useStartIdentityCheckMutation() {
   const token = useAuthToken();
@@ -312,6 +316,7 @@ export function useStartIdentityCheckMutation() {
     mutationFn: (input: { firstName: string; lastName: string; returnPath: string }) =>
       startIdentityCheck(requireToken(token), input),
     onError: invalidate,
+    gcTime: 0,
   });
 }
 

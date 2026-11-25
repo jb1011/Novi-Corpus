@@ -113,6 +113,10 @@ describe("the claims ceiling", () => {
     for (const s of ALL) expect(s).not.toMatch(/\bfree\b/i);
   });
 
+  test("no sentence says PEP, as a word: the screen's subject is the privacy notice's to name", () => {
+    for (const s of ALL) expect(s).not.toMatch(/\bpep\b/i);
+  });
+
   test("no sentence carries an em dash", () => {
     for (const s of ALL) expect(s).not.toContain("\u2014");
   });
@@ -182,6 +186,18 @@ describe("the sentences carried verbatim", () => {
 
   test("every reason a check can fail has its sentence", () => {
     expect(Object.keys(CHECK_REASON_SENTENCES).sort()).toEqual([...CHECK_REASON_CODES].sort());
+  });
+
+  test("the identity check's form says only what is true wherever it runs", () => {
+    const A = LEGAL_BODY_COPY.human.guardianIdentity.automatic;
+    // A testnet box may run the name search: the test check compares the name with no document,
+    // which is not the same as comparing it with nothing.
+    expect(A.testNote).toBe(
+      "Test check. You leave this site for our identity check provider's test page, pick an outcome there, and come back here. No document is read, and the name is not compared with one, so a made-up name is fine.",
+    );
+    // The browser may fill the two inputs in by itself: what the site can say is that it keeps no
+    // name.
+    expect(A.form.nameAgain).toBe("Type your name again: this site does not keep it.");
   });
 });
 

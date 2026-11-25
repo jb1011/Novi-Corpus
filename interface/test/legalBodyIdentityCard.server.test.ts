@@ -146,6 +146,24 @@ describe("GuardianIdentityCard, automatic", () => {
     expect(card(unreadable)).not.toMatch(disabledButton(A.retryRead));
   });
 
+  test("a screen reader hears a problem at once, and the card's state from its first change", () => {
+    const sentence = A.refusals.identity_session_limit;
+    const out = card(automatic("start", true), { problem: sentence });
+    // The problem is an alert: the sentence sits inside the element that carries the role.
+    expect(out).toMatch(new RegExp(`<div role="alert">(?:(?!<ul|<form).)*${sentence}`, "s"));
+    expect(card(automatic("start", true))).not.toContain('role="alert"');
+    // The state's live region is in the page while it says nothing, so its first sentence is heard:
+    // empty, and never hidden.
+    for (const kind of ["start", "verified"] as const) {
+      const html = card(automatic(kind, true));
+      expect(html).toMatch(/<div aria-live="polite"[^>]*><\/div>/);
+      expect(html).not.toMatch(/<div aria-live="polite"[^>]*\bhidden\b/);
+    }
+    expect(card(automatic("reading", true))).toMatch(
+      new RegExp(`<div aria-live="polite"[^>]*>(?:(?!</div>).)*${A.reading}`, "s"),
+    );
+  });
+
   test("a long wait offers Check again; a refusal is shown as the card's own sentence", () => {
     expect(card(automatic("reading", true), { longWait: true })).toMatch(button(A.checkAgain));
     expect(card(automatic("reading", true))).not.toMatch(button(A.checkAgain));

@@ -18,12 +18,16 @@ import {
   SYNC_MIN_INTERVAL_MS,
   arrivalOf,
   attemptSentence,
+  cardUnderWay,
   identityCardText,
   identityCardView,
   providerPageUrl,
   readingStep,
+  refusalStands,
   returnedFromCheck,
+  sessionMark,
   shouldReadBack,
+  shownProblem,
   stripReturnedFlag,
   startRefusal,
   syncRefusal,
@@ -183,7 +187,7 @@ describe("what the start may send, and how a refusal reads", () => {
     expect(typedNames({ firstName: "  Jean-Pierre ", lastName: "O'Neil" })).toEqual({ firstName: "Jean-Pierre", lastName: "O'Neil" });
     expect(typedNames({ firstName: "Łukasz", lastName: "山田" })).toEqual({ firstName: "Łukasz", lastName: "山田" });
     expect(typedNames({ firstName: "a".repeat(100), lastName: "b" })).not.toBeNull();
-    for (const bad of ["", "   ", "a".repeat(101), "Ana​", "Ana\u0000", "Ana‍"])
+    for (const bad of ["", "   ", "a".repeat(101), "Ana\u200B", "Ana\u0000", "Ana\u200D"])
       expect(typedNames({ firstName: bad, lastName: "Person" })).toBeNull();
   });
 
@@ -217,6 +221,50 @@ describe("what the start may send, and how a refusal reads", () => {
     expect(syncRefusal(new ApiError(401, { code: "unauthorized", message: "m" }))).toEqual({ sentence: null, signIn: true, counted: false });
     expect(syncRefusal(new ApiError(500, { code: "internal_error", message: "m" }))).toEqual({ sentence: null, signIn: false, counted: false });
     expect(syncRefusal(new Error("network"))).toEqual({ sentence: null, signIn: false, counted: false });
+  });
+});
+
+describe("what the card keeps from a click", () => {
+  test("a problem shows while the card is in the kind it was said under, and not once the card moved on", () => {
+    const unavailable = { sentence: A.refusals.identity_provider_unavailable, kind: "reading" } as const;
+    expect(shownProblem(unavailable, "reading")).toBe(A.refusals.identity_provider_unavailable);
+    // Check again met the provider down, then the check passed: the card says the pass, alone.
+    expect(shownProblem(unavailable, "verified")).toBeNull();
+    // A renewal refused as under review, then decided: the review sentence does not outlive it.
+    const underReview = { sentence: A.refusals.identity_under_review, kind: "renewal_due" } as const;
+    expect(shownProblem(underReview, "renewal_due")).toBe(A.refusals.identity_under_review);
+    expect(shownProblem(underReview, "review")).toBeNull();
+    expect(shownProblem(null, "start")).toBeNull();
+  });
+
+  test("the start's refusal stands while the session reads the same, and ends with a new session or a closed one", () => {
+    expect(sessionMark({ status: "none" })).toBe("none");
+    expect(sessionMark(open({ sessionId: "s1" }))).toBe("open:s1");
+    expect(sessionMark("loading")).toBeNull();
+    expect(sessionMark("unreadable")).toBeNull();
+
+    const none = sessionMark({ status: "none" });
+    expect(refusalStands(none, { status: "none" })).toBe(true);
+    expect(refusalStands(none, open())).toBe(false);
+    const first = sessionMark(open({ sessionId: "s1" }));
+    // The same session read again, its counts moved: the same session.
+    expect(refusalStands(first, open({ sessionId: "s1", attemptsLeft: 2, lastErrorCode: "document_expired" }))).toBe(true);
+    expect(refusalStands(first, open({ sessionId: "s2" }))).toBe(false);
+    expect(refusalStands(first, { status: "none" })).toBe(false);
+    // A read not made yet changes nothing.
+    expect(refusalStands(first, "loading")).toBe(true);
+    expect(refusalStands(none, "unreadable")).toBe(true);
+  });
+
+  test("the card is under way while its read-back runs, its wait runs, or the provider is processing", () => {
+    const idle = { session: open(), readBackRunning: false, waiting: false };
+    expect(cardUnderWay(idle)).toBe(false);
+    expect(cardUnderWay({ ...idle, readBackRunning: true })).toBe(true);
+    expect(cardUnderWay({ ...idle, waiting: true })).toBe(true);
+    expect(cardUnderWay({ ...idle, session: open({ reading: true }) })).toBe(true);
+    // A held session, no session, or one not read: nothing under way on the card's side.
+    for (const session of [open({ held: "system" }), open({ held: "operator" }), { status: "none" } as const, "loading" as const, "unreadable" as const])
+      expect(cardUnderWay({ ...idle, session })).toBe(false);
   });
 });
 

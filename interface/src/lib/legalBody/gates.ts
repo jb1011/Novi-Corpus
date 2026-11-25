@@ -6,6 +6,7 @@ import {
 } from "@/lib/api/types";
 import { walletKindOf } from "@/lib/legalBody/chain";
 import { LEGAL_BODY_COPY, fillCopy } from "@/lib/legalBody/copy";
+import { stripReturnedFlag, type IdentityReturnPath } from "@/lib/legalBody/identityCheck";
 import type { WorldIdGateState } from "@/lib/legalBody/worldIdGate";
 import { walletSignedIn, type WalletAttempt } from "@/lib/walletSignIn";
 
@@ -137,17 +138,17 @@ export function gateViewAfterSignIn(returned: boolean): GateView {
 }
 
 /**
- * Whether the return flag may leave the address now: once the human step is on screen for a
- * session the server answered (its record read). Until then the flag stays, so a session that is
- * refused or cleared a moment later never spends it, and a reload of the sign-in step in front of
- * it still lands on the result.
+ * The address after the human step's Continue, where the return from the identity check is spent:
+ * the page's own path with the flag gone and every other part of the query kept, or null when
+ * there is no return to spend. Until that Continue the flag stays, so a reload, a new sign-in or
+ * another wallet on the page holds the human step again, which only shows the result once more.
  */
-export function returnTaken(p: {
+export function addressAfterContinue(p: {
   returned: boolean;
-  gate: LegalBodyGate;
-  recordRead: boolean;
-}): boolean {
-  return p.returned && p.gate === "human" && p.recordRead;
+  path: IdentityReturnPath;
+  search: string;
+}): string | null {
+  return p.returned ? stripReturnedFlag(p.path, p.search) : null;
 }
 
 /* ── 3. The person ─────────────────────────────────────────────────────────────────────────── */

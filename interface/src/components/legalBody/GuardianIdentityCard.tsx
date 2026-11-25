@@ -143,7 +143,9 @@ function AutomaticCard({
           </p>
         )}
 
-        <div aria-live="polite" className="empty:hidden">
+        {/* The state's live region stays in the page while it says nothing, so its first sentence
+            is heard: empty, it takes no room (`sr-only`), and it is never hidden. */}
+        <div aria-live="polite" className="empty:sr-only">
           {text.status &&
             (WARN_KINDS.includes(view.kind) ? (
               <Callout tone="warn">{text.status}</Callout>
@@ -193,7 +195,12 @@ function AutomaticCard({
           />
         )}
 
-        {problem && <Callout tone="warn">{problem}</Callout>}
+        {/* A problem is said at once: it follows a click. */}
+        {problem && (
+          <div role="alert">
+            <Callout tone="warn">{problem}</Callout>
+          </div>
+        )}
 
         <ul className="flex flex-col gap-2 text-[12.5px] leading-[1.6] text-muted">
           <li>{A.checked}</li>

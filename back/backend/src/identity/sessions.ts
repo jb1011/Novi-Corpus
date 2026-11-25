@@ -165,8 +165,9 @@ const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
 /** How long the provider's page stays open for the person, as the answer states it. */
 const URL_LIFETIME_MS = 48 * HOUR_MS;
-/** A verified guardian may renew within this window before the expiry. */
-const RENEWAL_WINDOW_MS = 90 * DAY_MS;
+/** A verified guardian may renew within this window before the expiry. The site's card copies it
+ *  (the drift guard, `legalBodyInterfaceTypes.test.ts`, holds the two equal). */
+export const RENEWAL_WINDOW_MS = 90 * DAY_MS;
 /** The window of the daily cap on sessions started. */
 const DAILY_WINDOW_MS = DAY_MS;
 /** The sweep reads again an open session nobody read for this long. */
@@ -178,10 +179,15 @@ const SCREEN_PENDING_ALARM_MS = 24 * HOUR_MS;
 const DECISION_BATCH = 500;
 /** A review undecided longer than this raises a warning at each sweep (ruling F7). */
 const REVIEW_WAITING_ALARM_MS = 7 * DAY_MS;
-const NAME_MAX_CODE_POINTS = 100;
+/** The longest typed name, in code points. The site's card copies it (the drift guard). */
+export const NAME_MAX_CODE_POINTS = 100;
 /** Control, format, surrogate, private-use and unassigned characters. */
 const OTHER_CHARACTER = /\p{C}/u;
 const DEFAULT_RETURN_PATH = "/legal-body";
+/** The query the provider sends the person back with, `?identityCheck=returned`, read by the
+ *  site's card (the drift guard holds its copy equal). */
+export const IDENTITY_RETURN_PARAM = "identityCheck";
+export const IDENTITY_RETURN_VALUE = "returned";
 /** The decisions that settle a review: the operator's acceptance, refusal or name correction. */
 const DECISIONS: ReadonlySet<NewIdentityEvent["kind"]> = new Set([
   "accepted",
@@ -489,7 +495,7 @@ async function start(
     deps,
     tenantId,
     sessionId,
-    `${origin}${returnPath}?identityCheck=returned`,
+    `${origin}${returnPath}?${IDENTITY_RETURN_PARAM}=${IDENTITY_RETURN_VALUE}`,
   );
 
   const opened = repo.transaction(() => {

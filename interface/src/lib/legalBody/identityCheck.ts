@@ -23,6 +23,10 @@ const G = LEGAL_BODY_COPY.human.guardianIdentity;
 
 /* ── The constants ─────────────────────────────────────────────────────────────────────────── */
 
+// Four of them copy the server's values: the return flag, the renewal window, the sync's interval
+// and the name's limit (below). The backend's drift guard (`legalBodyInterfaceTypes.test.ts`)
+// holds each equal to the server's, so a change on either side fails CI.
+
 /** The query the server puts on the address it sends the person back to:
  *  `{origin}{returnPath}?identityCheck=returned`. */
 export const IDENTITY_RETURN_PARAM = "identityCheck";
@@ -292,7 +296,7 @@ export function attemptSentence(code: string | null): string {
 /** The server's rule for one typed name (`typedName` in `back/backend/src/identity/sessions.ts`):
  *  trimmed, 1 to 100 code points, no control, format (a zero-width character, a direction
  *  override), surrogate, private-use or unassigned character. */
-const NAME_MAX_CODE_POINTS = 100;
+export const NAME_MAX_CODE_POINTS = 100;
 const OTHER_CHARACTER = /\p{C}/u;
 
 function typedName(value: string): string | null {
@@ -386,6 +390,48 @@ export type SyncResult = { ok: true } | { ok: false; error: unknown };
  *  one (a read made a moment ago); any other refusal leaves the check unread. */
 export function arrivalOf(result: SyncResult): Arrival {
   return result.ok || syncRefusal(result.error).counted ? "done" : "failed";
+}
+
+/* ── What the card keeps from a click ──────────────────────────────────────────────────────── */
+
+/** A sentence about a click that went wrong, with the card's kind it was said under. */
+export type CardProblem = { sentence: string; kind: IdentityCardView["kind"] };
+
+/** The problem's sentence while the card is still in the kind it was said under. Once the card
+ *  moved on (a pass, a review, a new session), the sentence no longer describes it, and it goes. */
+export function shownProblem(
+  problem: CardProblem | null,
+  kind: IdentityCardView["kind"],
+): string | null {
+  return problem !== null && problem.kind === kind ? problem.sentence : null;
+}
+
+/** The session as the start's refusal is kept against it: its status, and its id when open.
+ *  Null while the session is not read. */
+export function sessionMark(session: SessionRead): string | null {
+  if (typeof session !== "object") return null;
+  return session.status === "open" ? `open:${session.sessionId}` : "none";
+}
+
+/** Whether the start's refusal, kept against `mark`, still stands over this read of the session:
+ *  while the session reads the same, status and id. A new session, or one that closed, ends it; a
+ *  read not made yet changes nothing. */
+export function refusalStands(mark: string | null, session: SessionRead): boolean {
+  const now = sessionMark(session);
+  return now === null || now === mark;
+}
+
+/** Whether the card is under way: its read-back on arrival running, its wait running, or the
+ *  provider processing the session. While it is, the page holds the human step, so the result
+ *  shows there until Continue. */
+export function cardUnderWay(p: {
+  session: SessionRead;
+  readBackRunning: boolean;
+  waiting: boolean;
+}): boolean {
+  const processing =
+    typeof p.session === "object" && p.session.status === "open" && p.session.reading;
+  return p.readBackRunning || p.waiting || processing;
 }
 
 /* ── The return ────────────────────────────────────────────────────────────────────────────── */

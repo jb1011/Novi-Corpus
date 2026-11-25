@@ -17,6 +17,7 @@ import { apiKeys } from "@/lib/api/keys";
 import { ApiError, type LegalBodyConfig, type PublicConfig } from "@/lib/api/types";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
 import {
+  addressAfterContinue,
   anySignInRequired,
   arrivalGateView,
   bannerLines,
@@ -27,7 +28,6 @@ import {
   isSignInRequired,
   legalBodyDoor,
   legalBodyGate,
-  returnTaken,
   signInStepState,
   type CodeRead,
   type SignInStepState,
@@ -230,16 +230,23 @@ describe("the return from the identity check", () => {
     expect(arrivalGateView({ engaged: true, returned: false })).toBe("signin");
   });
 
-  test("the flag leaves the address only once the human step is on screen for a session the server answered", () => {
-    expect(returnTaken({ returned: true, gate: "human", recordRead: true })).toBe(true);
-    // A session still being checked, or refused: the sign-in step, and the flag stays for a reload.
-    expect(returnTaken({ returned: true, gate: "signin", recordRead: true })).toBe(false);
-    expect(returnTaken({ returned: true, gate: "signin", recordRead: false })).toBe(false);
-    // The human step before the server answered for the session: not yet.
-    expect(returnTaken({ returned: true, gate: "human", recordRead: false })).toBe(false);
-    // No return, or one already spent on the human step's Continue: nothing to take.
-    expect(returnTaken({ returned: false, gate: "human", recordRead: true })).toBe(false);
-    expect(returnTaken({ returned: false, gate: "flow", recordRead: true })).toBe(false);
+  test("the flag leaves the address on the human step's Continue, where the return is spent, and every other part stays", () => {
+    expect(addressAfterContinue({ returned: true, path: "/start", search: "?identityCheck=returned" })).toBe(
+      "/start",
+    );
+    expect(
+      addressAfterContinue({
+        returned: true,
+        path: "/legal-body",
+        search: "?order=o_1&identityCheck=returned",
+      }),
+    ).toBe("/legal-body?order=o_1");
+    expect(
+      addressAfterContinue({ returned: true, path: "/start", search: "?path=declare&identityCheck=returned" }),
+    ).toBe("/start?path=declare");
+    // No return, or one already spent: the address is left alone.
+    expect(addressAfterContinue({ returned: false, path: "/start", search: "?path=declare" })).toBeNull();
+    expect(addressAfterContinue({ returned: false, path: "/legal-body", search: "" })).toBeNull();
   });
 });
 
