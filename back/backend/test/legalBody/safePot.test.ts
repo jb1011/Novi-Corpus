@@ -696,7 +696,9 @@ describe("potReading: what a pot's raw facts let the record say", () => {
     ] as const)
       expect(read(asRaw({ ...HEALTHY, allowance })), label).toEqual(limitsNotRead("other_period"));
     // The list of five still reads its ceiling.
-    expect(read(asRaw({ ...HEALTHY, allowance: healthy }))).toMatchObject({ state: "ceiling_read" });
+    expect(read(asRaw({ ...HEALTHY, allowance: healthy }))).toMatchObject({
+      state: "ceiling_read",
+    });
   });
 });
 

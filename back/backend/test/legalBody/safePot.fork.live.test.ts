@@ -491,10 +491,22 @@ describe("the fork test's own encoders, pinned to the website's vectors (no chai
     );
     // A false flag leaves V11 to V13 byte for byte; a listed key takes no leftover part.
     expect(
-      restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [], modules: [], clearAllowance: false }),
+      restoreTx(T, RUN_G, {
+        ...restore,
+        key: RUN_A,
+        delegates: [],
+        modules: [],
+        clearAllowance: false,
+      }),
     ).toBe(restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [], modules: [] }));
     expect(
-      restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [RUN_A], modules: [], clearAllowance: true }),
+      restoreTx(T, RUN_G, {
+        ...restore,
+        key: RUN_A,
+        delegates: [RUN_A],
+        modules: [],
+        clearAllowance: true,
+      }),
     ).toBe(restoreTx(T, RUN_G, { ...restore, key: RUN_A, delegates: [RUN_A], modules: [] }));
   });
 });
@@ -1190,7 +1202,9 @@ run("the company's pot on a fork of Arc testnet, with Safe's real contracts", ()
 
   it("19. a key removed elsewhere with removeDelegate(key, false) after a take keeps its old period; the website's restore with the leftover part (V17's shape, deleteAllowance first) starts a new period with nothing taken, the nonce kept (Ruling R35)", async () => {
     // The module's deployed code answers deleteAllowance(address,address).
-    const selector = toFunctionSelector("function deleteAllowance(address delegate, address token)");
+    const selector = toFunctionSelector(
+      "function deleteAllowance(address delegate, address token)",
+    );
     expect(selector).toBe("0x885133e3");
     const moduleCode = await c.pub.getCode({ address: REAL.allowanceModule });
     expect(moduleCode?.toLowerCase()).toContain(selector.slice(2));

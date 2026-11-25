@@ -16,8 +16,8 @@ import { verifyPublicStatement } from "../../src/legalBody/publicStatement";
 import { SAFE_PROXY_RUNTIME_CODE_HASH } from "../../src/legalBody/safePot";
 import type { LegalBodyResolution, LegalBodyStanding } from "../../src/payments/legalBody";
 import { SqliteLegalBodyPotRepository } from "../../src/persistence/legalBodyPotRepository";
-import { SqliteLegalBodyTreasuryRepository } from "../../src/persistence/legalBodyTreasuryRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
+import { SqliteLegalBodyTreasuryRepository } from "../../src/persistence/legalBodyTreasuryRepository";
 import type { EntityRecord } from "../../src/types";
 import { CHAIN_ID } from "../helpers/customerCompanyFixtures";
 import {
