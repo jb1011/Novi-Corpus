@@ -452,7 +452,7 @@ describe("the done page's pot card", () => {
     nothingSent();
   });
 
-  test("unless /config.legalBodies.pot is true, nothing of the pot is offered: with no note, or a note off the record, no card; only GET /pot is asked (Ruling R24), never the grant or the chain", () => {
+  test("unless /config.legalBodies.pot is true, the full card is never offered: no note, no card and no chain read; a note off the record is read on the chain for its exit card only (Ruling R33), never the grant", () => {
     for (const pot of [false, undefined])
       for (const noted of [null, { ...NOTED, onRecord: false }]) {
         calls.potQueries = [];
@@ -465,14 +465,18 @@ describe("the done page's pot card", () => {
         expect(text(m)).not.toContain(POT.offRecordTitle);
         expect(calls.potQueries).toContain(true);
         expect(calls.grantQueries.some(Boolean)).toBe(false);
-        expect(calls.rawQueries.some((q) => q.pot !== null)).toBe(false);
+        // The exit card reads the recomputed pot against the record's own wallet, A.
+        expect(calls.rawQueries.filter((q) => q.pot !== null)).toEqual(noted === null ? [] : [{ pot: V3_POT, agentWallet: A }]);
       }
     nothingSent();
   });
 
-  describe("Ruling R24: a pot on the record can always be taken off it", () => {
-    /** The pot's words, every one but the minimal card's. */
-    const OTHERS = [POT.cardTitle, POT.changeTitle, POT.stopTitle, POT.addMoneyTitle, POT.feeMoneyTitle, POT.backOnTitle, POT.startAgainTitle, POT.checking];
+  describe("Rulings R24 and R33: a pot on the record can always be taken off it, and stopped and emptied wherever the full card is not", () => {
+    /** The words no exit card ever shows: the setup, the change, money, the restore, the put back. */
+    const NEVER = [POT.cardTitle, POT.changeTitle, POT.addMoneyTitle, POT.feeMoneyTitle, POT.backOnTitle, POT.startAgainTitle, POT.newKeyTitle, POT.checking];
+    /** The pot's words, every one but the take off's (R24, before the pot is read). */
+    const OTHERS = [...NEVER, POT.stopTitle, POT.withdrawTitle];
+    /** The take off alone: the pot's address and Take the pot off the public record. */
     function minimal(m: string, what: string) {
       const t = text(m);
       expect(t, what).toContain(POT.title);
@@ -483,36 +487,67 @@ describe("the done page's pot card", () => {
       expect(isDisabled(take), what).toBe(false);
       for (const s of OTHERS) expect(t, `${what}: ${s}`).not.toContain(s);
     }
+    /** The exit card: the pot's address, Stop the allowance and the take off (with `withdraw`,
+     *  Take the money back too), every button enabled, and nothing else of the pot. */
+    function exitCard(m: string, what: string, o: { stop?: boolean; withdraw?: boolean; onRecord?: boolean } = {}) {
+      const { stop = true, withdraw = false, onRecord = true } = o;
+      const t = text(m);
+      expect(t, what).toContain(POT.title);
+      expect(t, what).toContain(fillCopy(POT.shownAddress, { address: V3_POT }));
+      expect(t, what).toContain(fillCopy(POT.shownOwner, { address: G }));
+      expect(button(m, POT.stopSend) !== null, `${what}: stop`).toBe(stop);
+      expect(t.includes(POT.withdrawTitle), `${what}: take back`).toBe(withdraw);
+      expect(button(m, POT.offRecordSend) !== null, `${what}: take off`).toBe(onRecord);
+      expect(t.includes(POT.offRecord), `${what}: off the record`).toBe(!onRecord);
+      for (const b of buttons(m).filter((b) => [POT.stopSend, POT.offRecordSend].some((w) => b.words.includes(w))))
+        expect(isDisabled(b), `${what}: ${b.words}`).toBe(false);
+      for (const s of NEVER) expect(t, `${what}: ${s}`).not.toContain(s);
+    }
 
-    test("the pot flag off: the pot's address and Take the pot off the public record, nothing else, and no grant or chain read", () => {
+    test("the pot flag off: the exit card, its pot read on the chain at the recomputed address whatever the flag, and no grant read", () => {
       for (const pot of [false, undefined]) {
         calls.pot = { pot: NOTED };
         calls.raw = HEALTHY;
         calls.grantQueries = [];
         calls.rawQueries = [];
-        minimal(done(kit({ pot })), `pot ${String(pot)}`);
+        exitCard(done(kit({ pot })), `pot ${String(pot)}`);
         expect(calls.grantQueries.some(Boolean)).toBe(false);
-        expect(calls.rawQueries.some((q) => q.pot !== null)).toBe(false);
+        expect(calls.rawQueries.filter((q) => q.pot !== null)).toEqual([{ pot: V3_POT, agentWallet: A }]);
       }
+      // A stopped pot holding money: Take the money back as well.
+      calls.raw = { ...HEALTHY, modules: { list: [], next: SAFE_SENTINEL }, delegates: { list: [], next: 0 } };
+      exitCard(done(kit({ pot: false })), "stopped with money", { stop: false, withdraw: true });
+      // Taken off the record: the exits, no take off, and no put back.
+      calls.pot = { pot: { ...NOTED, onRecord: false } };
+      calls.raw = HEALTHY;
+      exitCard(done(kit({ pot: false })), "off the record", { onRecord: false });
+      // Before the pot is read: the take off alone, as before.
+      calls.pot = { pot: NOTED };
+      calls.raw = undefined;
+      minimal(done(kit({ pot: false })), "not read yet");
       nothingSent();
     });
 
-    test("a revoked body, or one that is not linked: the same minimal card", () => {
+    test("a revoked body, or one that is not linked: the same exit card", () => {
       calls.pot = { pot: NOTED };
       calls.raw = HEALTHY;
-      minimal(done(kit({}, { revoked: true })), "revoked");
-      for (const state of ["deployed", "broken", "lapsed", "superseded"] as const) minimal(done(kit({}, { state })), state);
+      exitCard(done(kit({}, { revoked: true })), "revoked");
+      for (const state of ["deployed", "broken", "lapsed", "superseded"] as const) exitCard(done(kit({}, { state })), state);
+      exitCard(done(kit({}, { state: "broken", brokenReason: "dissolved", revoked: true })), "broken and revoked");
       nothingSent();
     });
 
-    test("another deployment, another factory or another chain: the same minimal card, and never a put back", () => {
+    test("another deployment on this chain: the exit card; another chain: the take off alone; never a put back", () => {
       calls.pot = { pot: NOTED };
       calls.raw = HEALTHY;
-      // The flow marks an order of another deployment with its notice; the chain alone hides the card too.
+      // The flow marks an order of another deployment with its notice.
       const OTHER = { kind: "other_deployment" } as const;
-      minimal(done(kit({}, { factory: "0x00000000000000000000000000000000000fac70" }, OTHER)), "another factory");
+      exitCard(done(kit({}, { factory: "0x00000000000000000000000000000000000fac70" }, OTHER)), "another factory");
+      // An order of another chain than the configured one: nothing is read on the chain.
+      calls.rawQueries = [];
       minimal(done(kit({}, { chainId: 1 }, OTHER)), "another chain, with its notice");
       minimal(done(kit({}, { chainId: 1 })), "another chain");
+      expect(calls.rawQueries.filter((q) => q.pot !== null)).toEqual([]);
       calls.pot = { pot: { ...NOTED, onRecord: false } };
       const off = text(done(kit({}, { chainId: 1 })));
       expect(off).not.toContain(POT.offRecordTitle);
@@ -520,7 +555,7 @@ describe("the done page's pot card", () => {
       nothingSent();
     });
 
-    test("the pot offered, but its chain read failed or the record names no wallet of the agent's own: the take off is there beside it", () => {
+    test("the pot offered, but its chain read failed: the take off beside the failure; the record naming no wallet of the agent's own: the exit card, read against the birth's first key", () => {
       calls.pot = { pot: NOTED };
       calls.rawError = true;
       const failed = done(kit());
@@ -529,9 +564,17 @@ describe("the done page's pot card", () => {
       expect(button(failed, POT.offRecordSend)).not.toBeNull();
       calls.rawError = false;
       calls.raw = HEALTHY;
-      calls.byAgent = naming(G);
-      minimal(done(kit()), "the record names the guardian's wallet");
-      // Off the record: nothing to take off.
+      for (const named of [G, "0x0000000000000000000000000000000000000000"]) {
+        calls.byAgent = naming(named);
+        calls.rawQueries = [];
+        exitCard(done(kit()), `the record names ${named}`);
+        expect(calls.rawQueries.filter((q) => q.pot !== null)).toEqual([{ pot: V3_POT, agentWallet: A }]);
+      }
+      // A pot that is not the guardian's alone: no exit card, the take off alone.
+      calls.raw = { ...HEALTHY, owners: [G, P] };
+      minimal(done(kit()), "not the guardian's alone");
+      // Off the record and nothing to offer: nothing.
+      calls.raw = { ...HEALTHY, owners: [G, P] };
       calls.pot = { pot: { ...NOTED, onRecord: false } };
       expect(text(done(kit()))).not.toContain(POT.offRecordTitle);
     });
@@ -551,7 +594,7 @@ describe("the done page's pot card", () => {
           expect(t, what).toContain(POT.notYours);
           expect(t, what).toContain(fillCopy(POT.shownAddress, { address: noted.address }));
           expect(button(m, POT.offRecordSend), what).not.toBeNull();
-          for (const s of [...OTHERS, POT.withdrawTitle]) expect(t, `${what}: ${s}`).not.toContain(s);
+          for (const s of [...NEVER, POT.stopTitle, POT.withdrawTitle]) expect(t, `${what}: ${s}`).not.toContain(s);
           expect(calls.rawQueries.filter((q) => q.pot !== null), what).toEqual([]);
           // Off the record: the sentence, and nothing to press.
           calls.pot = { pot: { ...noted, onRecord: false } };

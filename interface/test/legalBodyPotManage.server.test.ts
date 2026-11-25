@@ -573,12 +573,14 @@ describe("the card's source", () => {
     expect(code.slice(0, run)).not.toContain('at: "sending"');
   });
 
-  test("every read the click decides on is made in the click: the registry's key, then the pot read for it; the lifetime and the account asked at the moment", () => {
+  test("every read the click decides on is made in the click: the registry's key, then the pot read for it (for an exit, the birth's first key when the registry names none of the agent's own); the lifetime and the account asked at the moment", () => {
     const click = code.slice(code.indexOf("async function onAction"), code.indexOf("async function afterSend"));
     for (const read of [
       "readRegistry(client, agentId)",
-      "readPotRaw(client, a, { pot: noted.address, agentWallet: wallet })",
-      "potReading(fresh, { addresses: a, guardian, agentWallet: wallet })",
+      "const key = potReadKey(wallet, guardian, fallback)",
+      "readPotRaw(client, a, { pot: noted.address, agentWallet: key })",
+      "potReading(fresh, { addresses: a, guardian, agentWallet: key })",
+      "exit: isPotExit(action)",
       "alive: () => life.alive()",
       "account: () => walletNow().address",
       "readBalance: () => client.getBalance({ address: guardian })",

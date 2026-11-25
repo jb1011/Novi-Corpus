@@ -43,6 +43,7 @@ import {
   type PotPreflightProblem,
 } from "./safePotRun";
 import {
+  notedBirthKey,
   notedPotChecked,
   potCreatedView,
   potFeeLines,
@@ -102,6 +103,24 @@ const ceilingAllowed = (units: unknown): units is bigint =>
 /** A wallet of the agent's own: an address, never the zero address or the guardian's. */
 const agentsOwn = (wallet: unknown, guardian: Address): wallet is Address =>
   isAddress(wallet) && !ZERO_ADDRESS.test(wallet) && !sameAddress(wallet, guardian);
+
+/** The two exits (Ruling R33): they only remove rights or pay the guardian's own wallet, so the
+ *  guardian may send them whatever the registry names now. */
+export const isPotExit = (action: PotSafeAction): boolean => action === "stop" || action === "withdraw";
+
+/**
+ * The key an action's click reads the pot against: the registry's, when it names a wallet of the
+ * agent's own; otherwise `fallback`, given only for the exits (the noted pot's first key, from its
+ * birth details: Ruling R33), else none. For the exits the reading is used only for whether the pot
+ * is the guardian's alone, its lists and its balance, none of which depends on the key.
+ */
+export function potReadKey(
+  wallet: AgentWalletRead,
+  guardian: Address,
+  fallback: Address | null,
+): Address | null {
+  return agentsOwn(wallet, guardian) ? wallet : fallback;
+}
 
 /** A reading of a pot of the guardian's alone: any but `absent` and `not_the_guardians`. */
 const guardiansAlone = (r: PotReading): boolean =>
@@ -223,9 +242,9 @@ export type PotActionDeps = {
    *  before the send, so a person who left gets no wallet prompt. */
   alive(): boolean;
   /** Fresh reads made in this click: the registry's `getAgentWallet` through `readAgentWallet`,
-   *  then `readPotRaw` and `potReading` for it when it is an address. Throws when the chain
-   *  cannot be read. */
-  read(): Promise<PotActionRead>;
+   *  then `readPotRaw` and `potReading` for `potReadKey(registry, guardian, fallback)` when it is
+   *  an address (null `raw` and `reading` when it is none). Throws when the chain cannot be read. */
+  read(fallback: Address | null): Promise<PotActionRead>;
   preflight(): { ok: true } | { ok: false; problem: PotPreflightProblem };
   /** The allowlist's answer on the exact request (`potExecCall` at POT_EXEC_GAS_CAP, then
    *  `allowedCall`): the call it accepted, or its refusal's code. Nothing reaches the chain before. */
@@ -293,9 +312,12 @@ async function actionChainFailure(cause: unknown, d: PotActionDeps): Promise<Pot
  *     predict (`notedPotChecked`, any letter case), and it is the card's pot, else `refused` with
  *     cause POT_ACTION_MOVED, before anything is read;
  *  1. the click's reads (`read_failed`, with the error as `cause`; a registry that could not be
- *     read too);
+ *     read too, but for the exits), asked with the birth's first key as the fallback for the exits
+ *     only (`potReadKey`);
  *  2. a registry key of the agent's own (`agent_wallet` for none, the zero address or the
- *     guardian's);
+ *     guardian's). Ruling R33: not for the exits, Stop the allowance and Take the money back,
+ *     whose pot is read against the birth's first key when the registry names none of the agent's
+ *     own; a pot that could not be read for either is `read_failed`;
  *  3. for a start again or a new key, the registry's key of the click is the one the card's panel
  *     named (`shownAgentWallet`, in any letter case), else `refused` with cause POT_ACTION_MOVED
  *     (Ruling R23): the guardian never signs the allowance over to a key they were not shown. The
@@ -310,7 +332,8 @@ async function actionChainFailure(cause: unknown, d: PotActionDeps): Promise<Pot
  *  9. the account connected now is the guardian's, else `refused` with
  *     `wallet_is_not_the_guardian`, and nothing is sent;
  * 10. the one transaction through the allowlist, its outcomes read as `runPotCreate` reads them.
- * The answer names the registry's key of the click: the pot is read back against it.
+ * The answer names the key the pot was read against in the click (the registry's, or for an exit
+ * the birth's first key): the pot is read back against it.
  */
 export async function runPotAction(
   action: PotSafeAction,
@@ -332,20 +355,25 @@ export async function runPotAction(
   const checked0 = notedPotChecked(p.addresses, p.guardian, p.noted);
   if (checked0 === null || !sameAddress(checked0, p.pot))
     return { ok: false, problem: "refused", cause: POT_ACTION_MOVED };
+  const exit = isPotExit(action);
+  const fallback = exit ? notedBirthKey(p.noted) : null;
   // 1.
   let fresh: PotActionRead;
   try {
-    fresh = await d.read();
+    fresh = await d.read(fallback);
   } catch (cause) {
     return d.alive() ? { ok: false, problem: "read_failed", cause } : LEFT_ACTION;
   }
   if (!d.alive()) return LEFT_ACTION;
   // 2.
   const wallet = fresh.agentWallet;
-  if (wallet === "unreadable") return { ok: false, problem: "read_failed" };
-  if (!agentsOwn(wallet, p.guardian)) return { ok: false, problem: "agent_wallet" };
-  const key = wallet;
-  if (fresh.raw === null || fresh.reading === null) return { ok: false, problem: "read_failed" };
+  if (!exit) {
+    if (wallet === "unreadable") return { ok: false, problem: "read_failed" };
+    if (!agentsOwn(wallet, p.guardian)) return { ok: false, problem: "agent_wallet" };
+  }
+  const key = potReadKey(wallet, p.guardian, fallback);
+  if (key === null || fresh.raw === null || fresh.reading === null)
+    return { ok: false, problem: "read_failed" };
   // 3.
   if ((action === "start_again" || action === "new_key") && !sameAddress(key, p.shownAgentWallet))
     return { ok: false, problem: "refused", cause: POT_ACTION_MOVED };

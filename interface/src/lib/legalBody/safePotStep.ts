@@ -377,6 +377,11 @@ export function notedPotChecked(
   return predicted;
 }
 
+/** The first key of a noted pot's birth details, when they read; else null. */
+export function notedBirthKey(noted: OrderPotView): Address | null {
+  return notedBirthOf(noted)?.agentWallet ?? null;
+}
+
 /** A registry answer that names an address. */
 const isAddressRead = (read: AgentWalletRead): read is Address =>
   typeof read === "string" && ADDRESS.test(read);
@@ -571,7 +576,9 @@ export function potReviewLines(plan: PotPlan): string[] {
  * Before any wallet prompt of a pot transaction, in this order: the page's own facts, an order
  * that is `linked`, not revoked and of this chain, whose guardian is the plan's and the signed-in
  * tenant's (`refused`); the connected account, the guardian's in any letter case
- * (`not_this_wallet`); the wallet on this chain (`wrong_network`).
+ * (`not_this_wallet`); the wallet on this chain (`wrong_network`). For the two exits (`exit`:
+ * Stop the allowance and Take the money back, Ruling R33) the order need not be linked and may be
+ * revoked, as the allowlist reads them: every other fact is checked the same.
  */
 export function potSendPreflight(p: {
   order: LegalBodyOrderView | null;
@@ -580,12 +587,12 @@ export function potSendPreflight(p: {
   walletChainId: number | undefined;
   chainId: number;
   guardian: Address;
+  exit?: boolean;
 }): { ok: true } | { ok: false; problem: "not_this_wallet" | "wrong_network" | "refused" } {
   const o = p.order;
   if (
     o === null ||
-    o.state !== "linked" ||
-    o.revoked !== false ||
+    (p.exit !== true && (o.state !== "linked" || o.revoked !== false)) ||
     o.chainId !== p.chainId ||
     !sameAddress(o.guardian, p.guardian) ||
     !sameAddress(p.tenant, p.guardian)

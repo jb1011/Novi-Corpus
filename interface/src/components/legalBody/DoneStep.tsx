@@ -17,7 +17,13 @@ import { isFormedCompany } from "@/lib/legalBody/flow";
 import { noticeSentence } from "@/lib/legalBody/notice";
 import { potAddresses } from "@/lib/legalBody/safePot";
 import { potCeilingCapFromGrant, potReading } from "@/lib/legalBody/safePotRules";
-import { potReadsAllowed, potRecordWallet, type PotCardShown } from "@/lib/legalBody/safePotRun";
+import {
+  potExitAt,
+  potExitOffers,
+  potReadsAllowed,
+  potRecordWallet,
+  type PotCardShown,
+} from "@/lib/legalBody/safePotRun";
 import { notedPotChecked, potCard } from "@/lib/legalBody/safePotStep";
 import { publicReadAllowed, publicRecordOf } from "@/lib/legalBody/standing";
 import { AgentWalletStep } from "./AgentWalletStep";
@@ -143,17 +149,21 @@ function WalletCard({ card, onOpen }: { card: DoneWalletCard; onOpen: () => void
  * beside it (`potReadsAllowed`): the grant from the server, and, for a noted pot, its raw facts
  * from the chain for the record's agent wallet. The noted pot itself (`GET /pot`) is read for
  * every order (Ruling R24): a pot the server says is on the record can always be taken off it, so
- * wherever the full card is not shown (the flag off, a revoked or unlinked order, another
- * deployment, a chain that could not be read, a record that names no wallet of the agent's own)
- * the page shows `PotTakeOffCard`, the pot's address and the take off, and nothing else of the
- * pot. Each is read once as the page shows it, and again after a transaction (`reread`). One lock
+ * wherever nothing else is shown the page shows `PotTakeOffCard`, the pot's address and the take
+ * off. Each is read once as the page shows it, and again after a transaction (`reread`). One lock
  * for the card (`usePotCardLock`): one action at a time (Ruling R25).
  *
  * Ruling R32: the noted pot is read on the chain, and acted on, ONLY at the address the browser
  * recomputes from its own birth details and the order's guardian (`notedPotChecked`), and only
  * when that is the address noted, in any letter case. Otherwise the page says the address is not
  * a pot only the guardian's wallet owns and offers no wallet action (no setup, no money, no Safe
- * action): only the take off, while it is on the record.
+ * action, no exit): only the take off, while it is on the record.
+ *
+ * Ruling R33: wherever the full card is not shown (`potExitAt`: the flag off, a revoked or
+ * unlinked order, a notice, another deployment on this chain, a record naming no wallet of the
+ * agent's own), the EXIT CARD reads the recomputed pot on the chain whatever the flag, and offers
+ * what `potExitOffers` gives: Stop the allowance, Take the money back, and the take off. Until it
+ * is read, or when it cannot be, or offers nothing, the take off stands alone as before.
  *
  * `potCard` decides: nothing; the card while a read is out; the offer, whose click opens the setup
  * step here, in place, where it stays from then on; or the pot's own card (`PotManage`): what the
@@ -191,15 +201,28 @@ function DonePot({
   const notYours = a !== null && served !== null && served !== undefined && verified === null;
   const noted: OrderPotView | null | undefined =
     served && verified !== null ? { ...served, address: verified } : served;
-  const rawPot = allowed && verified !== null ? verified : null;
-  const rawQuery = usePotRawQuery(config.chainId, rawPot, allowed ? wallet : null);
+  // Ruling R33: where the full card is not, the exit card reads the pot whatever the flag.
+  const exitAt = notYours
+    ? null
+    : potExitAt({
+        potOffered,
+        chainId: config.chainId,
+        order,
+        notice,
+        record,
+        recordRead: read !== undefined,
+        noted,
+      });
+  const rawPot = exitAt !== null ? exitAt.pot : allowed && verified !== null ? verified : null;
+  const rawKey = exitAt !== null ? exitAt.agentWallet : allowed ? wallet : null;
+  const rawQuery = usePotRawQuery(config.chainId, rawPot, rawKey);
   const [open, setOpen] = useState(false);
   const lock = usePotCardLock();
 
   const raw = rawPot !== null ? rawQuery.data : undefined;
   const reading =
-    raw !== undefined && a !== null && wallet !== null
-      ? potReading(raw, { addresses: a, guardian: order.guardian, agentWallet: wallet })
+    raw !== undefined && a !== null && rawKey !== null
+      ? potReading(raw, { addresses: a, guardian: order.guardian, agentWallet: rawKey })
       : null;
   const cap =
     grantQuery.data !== undefined
@@ -234,6 +257,33 @@ function DonePot({
     return (
       <PotTakeOffCard kit={kit} order={order} noted={served} lock={lock} onChanged={reread} notYours />
     );
+  // Ruling R33: the exit card, once the pot reads as the guardian's alone with something to offer.
+  if (exitAt !== null) {
+    const offers =
+      raw !== undefined && reading !== null && noted
+        ? potExitOffers(raw, reading, {
+            chainId: config.chainId,
+            guardian: order.guardian,
+            onRecord: noted.onRecord === true,
+          })
+        : null;
+    if (offers !== null && raw !== undefined && reading !== null && noted)
+      return (
+        <PotManage
+          kit={kit}
+          order={order}
+          noted={noted}
+          agentWallet={exitAt.agentWallet}
+          raw={raw}
+          reading={reading}
+          nowSeconds={Math.floor(rawQuery.dataUpdatedAt / 1000)}
+          lock={lock}
+          onChanged={reread}
+          exit={offers}
+        />
+      );
+    return takeOff;
+  }
   if (!allowed) return takeOff;
   // The record has been read and names no wallet of the agent's own, or the order is not one for
   // the pot: nothing of it here but the take off.

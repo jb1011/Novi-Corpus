@@ -38,8 +38,11 @@ import { walletKindOf, type WalletKind } from "./chain";
 import { LEGAL_BODY_COPY, fillCopy } from "./copy";
 import { sameAddress, type LegalBodyNotice } from "./flow";
 import { isRevert, registerSendFailure } from "./identity";
-import { POT_SETUP_GAS_CAP, potAddresses } from "./safePot";
+import { POT_SETUP_GAS_CAP, potAddresses, potStopArgs } from "./safePot";
+import type { PotRaw, PotReading } from "./safePotRules";
 import {
+  notedBirthKey,
+  notedPotChecked,
   potFormStart,
   potGasLimit,
   potPlan,
@@ -635,9 +638,11 @@ export function potFormBegin(p: {
 // The done page
 // ---------------------------------------------------------------------------------------------
 
-/** Whether the done page reads anything of the pot: only where `/config.legalBodies.pot` is true,
- *  on a chain in the pot's table, for a linked order that is not revoked, of this chain, with no
- *  notice beside it. Otherwise nothing of the pot is asked of the server or the chain. */
+/** Whether the done page reads the pot for its FULL card (the grant, and the noted pot's raw facts
+ *  for the record's agent wallet): only where `/config.legalBodies.pot` is true, on a chain in the
+ *  pot's table, for a linked order that is not revoked, of this chain, with no notice beside it.
+ *  Otherwise the full card reads nothing; the noted pot itself (`GET /pot`, Ruling R24) and the
+ *  exit card's chain reads (`potExitAt`, Ruling R33) are read apart. */
 export function potReadsAllowed(p: {
   potOffered: boolean;
   chainId: number;
@@ -665,6 +670,89 @@ export function potRecordWallet(
   const wallet: unknown = record?.agentWallet;
   if (!isAddress(wallet) || agentWalletOwed(wallet, guardian)) return null;
   return wallet;
+}
+
+/**
+ * Where the EXIT CARD reads the pot (Ruling R33), or null when it has no place: Stop the allowance
+ * and Take the money back stay reachable whatever happened to the legal body or the pot's flag.
+ * The exit card stands wherever the full card does not: the pot's flag off, an order not linked
+ * or revoked, a notice beside it (another deployment on this chain among them), or a record read
+ * that names no agent wallet of the agent's own. While the full card may still show (its reads
+ * allowed and the record not read yet), it has no place. It needs a noted pot, on the record or
+ * taken off it, whose address the browser recomputes from its own birth details (Ruling R32), of
+ * an order on the configured chain, which has a pot table. It reads the pot at that address,
+ * against the record's agent wallet when it names one of the agent's own, otherwise against the
+ * birth's first key: the reading is used only for whether the pot is the guardian's alone, its
+ * lists and its balance, which do not depend on the key. Its reads are the browser's own, whatever
+ * the flag: nothing of the server's pot doors but `GET /pot`, which takes no flag (Ruling R27).
+ */
+export function potExitAt(p: {
+  potOffered: boolean;
+  chainId: number;
+  order: LegalBodyOrderView | null;
+  notice: LegalBodyNotice | undefined;
+  record: LegalBodyStatementJson | null;
+  /** The record's read has answered (whatever it said). */
+  recordRead: boolean;
+  noted: OrderPotView | null | undefined;
+}): { pot: Address; agentWallet: Address } | null {
+  const o = p.order;
+  if (o === null || p.noted === null || p.noted === undefined) return null;
+  const a = potAddresses(p.chainId);
+  if (a === null || o.chainId !== p.chainId) return null;
+  const wallet = potRecordWallet(p.record, o.guardian);
+  const fullCard =
+    potReadsAllowed({ potOffered: p.potOffered, chainId: p.chainId, order: o, notice: p.notice }) &&
+    (!p.recordRead || wallet !== null);
+  if (fullCard) return null;
+  const pot = notedPotChecked(a, o.guardian, p.noted);
+  const birthKey = notedBirthKey(p.noted);
+  if (pot === null || birthKey === null) return null;
+  return { pot, agentWallet: wallet ?? birthKey };
+}
+
+/** What the exit card offers. */
+export type PotExitOffer = "stop" | "withdraw" | "take_off_record";
+
+/**
+ * What the exit card offers for the pot as read (`potExitAt`'s address and key), or null when it
+ * offers nothing: a pot that holds no pot's code or is not the guardian's alone shows no exit
+ * card. Otherwise, in this order: "Stop the allowance" while the raw read lists a delegate or the
+ * pot's module on (what `potStopArgs` has to stop); "Take the money back" while no module is on and
+ * the balance is above 0; "Take the pot off the public record" while it is on the record. Never a
+ * setup, money, a change or a restore.
+ */
+export function potExitOffers(
+  raw: PotRaw,
+  reading: PotReading,
+  p: { chainId: number; guardian: Address; onRecord: boolean },
+): PotExitOffer[] | null {
+  if (reading.state === "absent" || reading.state === "not_the_guardians") return null;
+  const a = potAddresses(p.chainId);
+  if (a === null) return null;
+  const offers: PotExitOffer[] = [];
+  let stoppable = false;
+  try {
+    stoppable =
+      potStopArgs(a, {
+        guardian: p.guardian,
+        delegates: raw.delegates.list,
+        modules: raw.modules.list,
+      }) !== null;
+  } catch {
+    stoppable = false;
+  }
+  if (stoppable) offers.push("stop");
+  const balanceWei: unknown = raw.balanceWei;
+  if (
+    Array.isArray(raw.modules.list) &&
+    raw.modules.list.length === 0 &&
+    typeof balanceWei === "bigint" &&
+    balanceWei > BigInt(0)
+  )
+    offers.push("withdraw");
+  if (p.onRecord === true) offers.push("take_off_record");
+  return offers.length === 0 ? null : offers;
 }
 
 /** The review's line for a wallet that takes no fee money, as this click read it: a delegated key

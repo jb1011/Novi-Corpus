@@ -24,7 +24,12 @@ import { sameAddress } from "@/lib/legalBody/flow";
 import { REGISTER_RECEIPT_TIMEOUT_MS } from "@/lib/legalBody/identity";
 import { stepLifetime } from "@/lib/legalBody/lifetime";
 import { pointerTxStage } from "@/lib/legalBody/pointer";
-import { POT_EXEC_GAS_CAP, potAddresses, type PotAddresses } from "@/lib/legalBody/safePot";
+import {
+  formatUsdcUnits,
+  POT_EXEC_GAS_CAP,
+  potAddresses,
+  type PotAddresses,
+} from "@/lib/legalBody/safePot";
 import {
   potCeilingCapFromGrant,
   potReading,
@@ -33,6 +38,7 @@ import {
   type PotReading,
 } from "@/lib/legalBody/safePotRules";
 import {
+  isPotExit,
   isPotSafeAction,
   isPotTransfer,
   potActionAfter,
@@ -41,6 +47,7 @@ import {
   potActionTakesCeiling,
   potCardLockCore,
   potCeilingCheck,
+  potReadKey,
   potRecordFailureView,
   runPotAction,
   type PotActionStage,
@@ -57,6 +64,7 @@ import {
   potSendPreflight,
   type PotAction,
 } from "@/lib/legalBody/safePotStep";
+import type { PotExitOffer } from "@/lib/legalBody/safePotRun";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
 import { PotMoney } from "./PotMoney";
 import {
@@ -114,6 +122,12 @@ const TITLES: Readonly<Record<PotSafeAction, string>> = {
  * Nothing is read or sent on mount but the grant (the done page's, from the cache), which caps the
  * ceiling fields. The ceilings typed live in this card's state only, never in a browser store. A
  * click's continuation stops after its next await once the card is gone.
+ *
+ * THE EXIT CARD (`exit`, Ruling R33): where the full card is not shown, the same card offers only
+ * what `potExitOffers` gives (Stop the allowance, Take the money back, and Take the pot off the
+ * public record), with the same lock, the same fresh reads in the click, and the same result and
+ * read-back as the full card. No grant is asked, no money, no change, no restore, no agent's
+ * panel. Its lines are the pot's address, its only owner and its balance, as read.
  */
 export function PotManage({
   kit,
@@ -125,6 +139,7 @@ export function PotManage({
   nowSeconds,
   lock,
   onChanged,
+  exit,
 }: {
   kit: LegalBodyStepKit;
   order: LegalBodyOrderView;
@@ -140,6 +155,8 @@ export function PotManage({
   lock: PotCardLock;
   /** Reads the noted pot, its reading and the record again. */
   onChanged: () => void;
+  /** The exit card's offers (`potExitOffers`): when given, the card offers these only. */
+  exit?: readonly PotExitOffer[];
 }) {
   const { config, tenant } = kit;
   const environment = config.environment;
@@ -151,8 +168,8 @@ export function PotManage({
   const writeAllowed = useAllowedWrite();
   // The connected account at the moment of asking, never the click's.
   const walletNow = useWalletNow();
-  // The done page's grant, from the cache: it caps the ceilings.
-  const grantQuery = useOrderGrantQuery(order.id, true);
+  // The done page's grant, from the cache: it caps the ceilings. The exit card sets none.
+  const grantQuery = useOrderGrantQuery(order.id, exit === undefined);
 
   // On screen from the effect below, gone at its cleanup.
   const [life] = useState(() => stepLifetime());
@@ -249,15 +266,17 @@ export function PotManage({
       };
       const result = await runPotAction(action, shown, {
         alive: () => life.alive(),
-        read: async () => {
+        // The pot is read against the registry's key, or for an exit against the birth's first
+        // key when the registry names none of the agent's own (Ruling R33).
+        read: async (fallback) => {
           const wallet = await readRegistry(client, agentId);
-          if (wallet === "none" || wallet === "unreadable")
-            return { agentWallet: wallet, raw: null, reading: null };
-          const fresh = await readPotRaw(client, a, { pot: noted.address, agentWallet: wallet });
+          const key = potReadKey(wallet, guardian, fallback);
+          if (key === null) return { agentWallet: wallet, raw: null, reading: null };
+          const fresh = await readPotRaw(client, a, { pot: noted.address, agentWallet: key });
           return {
             agentWallet: wallet,
             raw: fresh,
-            reading: potReading(fresh, { addresses: a, guardian, agentWallet: wallet }),
+            reading: potReading(fresh, { addresses: a, guardian, agentWallet: key }),
           };
         },
         preflight: () =>
@@ -268,6 +287,7 @@ export function PotManage({
             walletChainId,
             chainId: config.chainId,
             guardian,
+            exit: isPotExit(action),
           }),
         // The exact request the allowlist takes: a context it refuses reaches nothing.
         check: (ctx) => {
@@ -405,16 +425,26 @@ export function PotManage({
     onThisDeployment: order.chainId === config.chainId && sameAddress(order.factory, config.factory),
     nowSeconds,
   });
-  const actions = view.actions.filter(isPotSafeAction);
-  const transfers = view.actions.filter(isPotTransfer);
-  const recordAction = view.actions.find(isRecordAction) ?? null;
+  // The exit card offers its own few; the full card what the reading offers.
+  const offered: readonly PotAction[] = exit ?? view.actions;
+  const actions = offered.filter(isPotSafeAction);
+  const transfers = exit === undefined ? view.actions.filter(isPotTransfer) : [];
+  const recordAction = offered.find(isRecordAction) ?? null;
   // What the agent's key holds for its fees is said in the Send fee money panel, beside its
   // button, and not twice on the card.
   const feeShownBelow = transfers.includes("fee_money") ? potFeeLines(shownRaw) : [];
-  const frameLines = view.lines.filter((line) => !feeShownBelow.includes(line));
+  const frameLines =
+    exit === undefined
+      ? view.lines.filter((line) => !feeShownBelow.includes(line))
+      : [
+          fillCopy(POT.shownAddress, { address: noted.address }),
+          fillCopy(POT.shownOwner, { address: guardian }),
+          fillCopy(POT.shownBalance, { balance: formatUsdcUnits(shownRaw.balanceUnits) }),
+          ...(noted.onRecord ? [] : [POT.offRecord]),
+        ];
   const hint = cap === null || cap === "unreadable" ? null : potCeilingHint(cap);
   const commands =
-    shownReading.state === "ceiling_read" && a !== null
+    exit === undefined && shownReading.state === "ceiling_read" && a !== null
       ? potAgentCommands({
           addresses: a,
           pot: noted.address,
@@ -524,16 +554,18 @@ export function PotManage({
         />
       )}
       {actions.map(panel)}
-      <PotMoney
-        kit={kit}
-        order={order}
-        noted={noted}
-        agentWallet={shownWallet}
-        raw={shownRaw}
-        offered={transfers}
-        lock={lock}
-        onChanged={onChanged}
-      />
+      {exit === undefined && (
+        <PotMoney
+          kit={kit}
+          order={order}
+          noted={noted}
+          agentWallet={shownWallet}
+          raw={shownRaw}
+          offered={transfers}
+          lock={lock}
+          onChanged={onChanged}
+        />
+      )}
       {/* A new record action starts afresh: the declaration unticked, no refusal left over. */}
       <PotRecordAction
         key={recordAction ?? "none"}

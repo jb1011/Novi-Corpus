@@ -60,6 +60,7 @@ import {
 } from "@/lib/legalBody/safePot";
 import { potReading, type PotRaw, type PotReading } from "@/lib/legalBody/safePotRules";
 import {
+  notedBirthKey,
   notedPotAddress,
   notedPotChecked,
   POT_SERVER_CODES,
@@ -95,6 +96,8 @@ import {
   potFreshSalt,
   potNoteFailure,
   potPlanHolds,
+  potExitAt,
+  potExitOffers,
   potReadsAllowed,
   potRecordWallet,
   potReviewNote,
@@ -111,6 +114,8 @@ import {
   potActionFailureView,
   potCeilingCheck,
   potExecSimulationOk,
+  potReadKey,
+  isPotExit,
   isPotTransfer,
   potCardLockCore,
   potRecordFailureView,
@@ -2099,8 +2104,129 @@ describe("Ruling R32: the browser recomputes the noted pot's address from its ow
       expect(notedPotChecked(T, G, noted), what).toBeNull();
     // Another guardian's prediction is another address.
     expect(notedPotChecked(T, P, NOTED)).toBeNull();
+    expect(notedBirthKey(NOTED)).toBe(A);
+    expect(notedBirthKey({ ...NOTED, birth: null as unknown as OrderPotView["birth"] })).toBeNull();
   });
 
+  test("Ruling R33: the page's own checks let the exits through for an order that is not linked or is revoked; everything else is checked as before", () => {
+    const base = {
+      tenant: G,
+      connected: G,
+      walletChainId: CHAIN,
+      chainId: CHAIN,
+      guardian: G,
+    };
+    const fallen = [order({ revoked: true }), order({ state: "broken", brokenReason: "dissolved" }), order({ state: "superseded" })];
+    for (const o of fallen) {
+      expect(potSendPreflight({ ...base, order: o, exit: true })).toEqual({ ok: true });
+      expect(potSendPreflight({ ...base, order: o })).toEqual({ ok: false, problem: "refused" });
+    }
+    const revoked = order({ revoked: true });
+    expect(potSendPreflight({ ...base, order: null, exit: true })).toEqual({ ok: false, problem: "refused" });
+    expect(potSendPreflight({ ...base, order: { ...revoked, chainId: 1 }, exit: true })).toEqual({ ok: false, problem: "refused" });
+    expect(potSendPreflight({ ...base, order: { ...revoked, guardian: P }, exit: true })).toEqual({ ok: false, problem: "refused" });
+    expect(potSendPreflight({ ...base, tenant: P, order: revoked, exit: true })).toEqual({ ok: false, problem: "refused" });
+    expect(potSendPreflight({ ...base, connected: P, order: revoked, exit: true })).toEqual({ ok: false, problem: "not_this_wallet" });
+    expect(potSendPreflight({ ...base, walletChainId: 1, order: revoked, exit: true })).toEqual({ ok: false, problem: "wrong_network" });
+  });
+
+  test("potReadKey: the registry's key when it is the agent's own; otherwise the fallback, which only the exits give", () => {
+    expect(potReadKey(Q, G, A)).toBe(Q);
+    expect(potReadKey(Q, G, null)).toBe(Q);
+    for (const wallet of ["none", "unreadable", zeroAddress, G, G.toLowerCase()] as AgentWalletRead[]) {
+      expect(potReadKey(wallet, G, A), String(wallet)).toBe(A);
+      expect(potReadKey(wallet, G, null), String(wallet)).toBeNull();
+    }
+    expect(["change", "stop", "withdraw", "start_again", "new_key"].filter((a) => isPotExit(a as PotSafeAction))).toEqual([
+      "stop",
+      "withdraw",
+    ]);
+  });
+});
+
+describe("Ruling R33: the exit card, where the full card is not", () => {
+  /** The done page's facts: the pot offered, a linked order of this chain, no notice, a record
+   *  naming A, its read answered, and V3's note on the record. */
+  const at = (over: Partial<Parameters<typeof potExitAt>[0]> = {}) =>
+    potExitAt({
+      potOffered: true,
+      chainId: CHAIN,
+      order: order(),
+      notice: undefined,
+      record: record(A),
+      recordRead: true,
+      noted: NOTED,
+      ...over,
+    });
+
+  test("no place while the full card shows: the pot offered, a linked order of this chain, no notice, and a record naming the agent's own wallet, or not read yet", () => {
+    expect(at()).toBeNull();
+    expect(at({ record: null, recordRead: false })).toBeNull();
+  });
+
+  test("shown wherever the full card is not: the flag off, an order not linked or revoked, a notice, another deployment on this chain, a record naming no wallet of the agent's own", () => {
+    const forA = { pot: V3_POT, agentWallet: A };
+    const forBirth = { pot: V3_POT, agentWallet: A };
+    expect(at({ potOffered: false })).toEqual(forA);
+    expect(at({ potOffered: undefined as unknown as boolean })).toEqual(forA);
+    for (const o of [
+      order({ revoked: true }),
+      order({ state: "broken", brokenReason: "not_linked" }),
+      order({ state: "broken", brokenReason: "winding_down" }),
+      order({ state: "broken", brokenReason: "dissolved" }),
+      order({ state: "broken", brokenReason: "replaced" }),
+      order({ state: "superseded" }),
+      order({ state: "deployed" }),
+    ])
+      expect(at({ order: o }), `${o.state} ${String(o.brokenReason)} ${String(o.revoked)}`).toEqual(forA);
+    expect(at({ notice: { kind: "order_revoked" } })).toEqual(forA);
+    // Another deployment on this chain: the flow puts its notice beside it.
+    expect(at({ order: order({ factory: "0x00000000000000000000000000000000000fac70" }), notice: { kind: "other_deployment" } as LegalBodyNotice })).toEqual(forA);
+    // The record names none of the agent's own: the birth's first key is read against.
+    for (const named of [record(G), record(zeroAddress), record("0x1234"), null])
+      expect(at({ record: named }), JSON.stringify(named)).toEqual(forBirth);
+    // The flag off and the record naming another key of the agent's own: read against that one.
+    expect(at({ potOffered: false, record: record(Q) })).toEqual({ pot: V3_POT, agentWallet: Q });
+  });
+
+  test("for a pot on the record or taken off it, at the address its birth details predict (in any letter case), on the configured chain with a pot table; else no place", () => {
+    const off = { potOffered: false };
+    expect(at({ ...off, noted: { ...NOTED, onRecord: false } })).toEqual({ pot: V3_POT, agentWallet: A });
+    expect(at({ ...off, noted: { ...NOTED, address: V3_POT.toLowerCase() as Address } })).toEqual({ pot: V3_POT, agentWallet: A });
+    for (const [what, over] of [
+      ["no note", { noted: null }],
+      ["the note not read yet", { noted: undefined }],
+      ["an address its birth does not predict", { noted: { ...NOTED, address: SAFE_CREATED } }],
+      ["a birth that does not read", { noted: { ...NOTED, birth: { ...NOTED.birth, ceilingUnits: "x" } } }],
+      ["an order of another chain", { order: order({ chainId: 1 }) }],
+      ["a configured chain with no pot table", { chainId: 1, order: order({ chainId: 1 }) }],
+      ["no order", { order: null }],
+    ] as [string, Partial<Parameters<typeof potExitAt>[0]>][])
+      expect(at({ ...off, ...over }), what).toBeNull();
+  });
+
+  test("potExitOffers: the stop while a key or the module is listed, the take back with no module on and money in it, the take off while on the record; nothing for a pot that is not the guardian's alone or holds no pot's code", () => {
+    const offers = (raw: PotRaw, onRecord = true) =>
+      potExitOffers(raw, read(raw, A), { chainId: CHAIN, guardian: G, onRecord });
+    expect(offers(HEALTHY)).toEqual(["stop", "take_off_record"]);
+    expect(offers(HEALTHY, false)).toEqual(["stop"]);
+    expect(offers(NO_DELEGATE)).toEqual(["stop", "take_off_record"]);
+    // Switched off with disableModule alone: the key still listed, the stop takes it off.
+    expect(offers({ ...STOPPED, delegates: { list: [A], next: 0 } })).toEqual(["stop", "withdraw", "take_off_record"]);
+    expect(offers(STOPPED_3)).toEqual(["withdraw", "take_off_record"]);
+    expect(offers(STOPPED_3, false)).toEqual(["withdraw"]);
+    expect(offers(STOPPED_EMPTY)).toEqual(["take_off_record"]);
+    expect(offers(STOPPED_EMPTY, false)).toBeNull();
+    // A reading that is not the ceiling's still offers the exits: the key does not matter.
+    expect(offers({ ...HEALTHY, guard: P })).toEqual(["stop", "take_off_record"]);
+    expect(offers(FOR_P)).toEqual(["stop", "take_off_record"]);
+    // Not the guardian's alone, or no pot's code: nothing.
+    expect(offers({ ...HEALTHY, owners: [G, P] })).toBeNull();
+    expect(offers({ ...STOPPED_3, threshold: BigInt(2) })).toBeNull();
+    expect(offers({ ...HEALTHY, codeHash: null })).toBeNull();
+    // Another module alone: the stop has nothing of ours to switch off, and no take back while it is on.
+    expect(offers({ ...STOPPED_3, modules: { list: [OTHER_MODULE], next: SAFE_SENTINEL } })).toEqual(["take_off_record"]);
+  });
 });
 
 describe("runPotAction: one transaction on the same pot, from the click's own reads", () => {
@@ -2124,6 +2250,8 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     const calls: string[] = [];
     const checked: PotExecContext[] = [];
     const sent: PotExecContext[] = [];
+    /** The fallback key each read was asked with (Ruling R33). */
+    const fallbacks: (Address | null)[] = [];
     const yes: PotActionDeps = {
       alive: () => true,
       read: async () => f,
@@ -2143,9 +2271,10 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     const use = { ...yes, ...impl };
     const d: PotActionDeps = {
       alive: () => use.alive(),
-      read: () => {
+      read: (fallback) => {
         calls.push("read");
-        return use.read();
+        fallbacks.push(fallback);
+        return use.read(fallback);
       },
       preflight: () => {
         calls.push("preflight");
@@ -2178,7 +2307,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
         return use.send(ctx, gas);
       },
     };
-    return { d, calls, checked, sent };
+    return { d, calls, checked, sent, fallbacks };
   }
   const ALL = ["read", "preflight", "check", "simulate", "estimate", "account", "send 154680"];
   /** The step is gone after `n` asks of its lifetime. */
@@ -2256,6 +2385,47 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
       // What is sent names the recomputed address.
       expect(h.sent.map((c) => c.pot), action).toEqual([V3_POT]);
     }
+  });
+
+  test("Ruling R33: the stop and the take back go whatever the registry names, the pot read against the birth's first key; start again, a new key and the change still refuse", async () => {
+    /** The registry answering `registry`, the pot read against the birth's first key A. */
+    const exitFresh = (registry: AgentWalletRead, raw: PotRaw): Fresh => ({ agentWallet: registry, raw, reading: read(raw, A) });
+    for (const registry of ["none", "unreadable", zeroAddress, G, G.toLowerCase()] as AgentWalletRead[]) {
+      const stop = harness(exitFresh(registry, HEALTHY));
+      expect(await runPotAction("stop", args(undefined, A), stop.d), `stop, ${String(registry)}`).toEqual({
+        ok: true,
+        hash: HASH,
+        agentWallet: A,
+      });
+      expect(stop.calls).toEqual(ALL);
+      expect(stop.fallbacks).toEqual([A]);
+      expect(stop.sent).toEqual([{ kind: "stop", pot: V3_POT, guardian: G, delegates: [A], modules: [T.allowanceModule] }]);
+      const back = harness(exitFresh(registry, STOPPED_3));
+      expect(await runPotAction("withdraw", args(undefined, A), back.d), `withdraw, ${String(registry)}`).toMatchObject({
+        ok: true,
+        agentWallet: A,
+      });
+      expect(back.sent).toEqual([{ kind: "withdraw", pot: V3_POT, guardian: G, modules: [], balanceWei: WEI(USDC(3)) }]);
+      // Every other action refuses there, as before, and sends nothing.
+      for (const [action, raw, , ceiling] of GOES.filter(([a]) => !isPotExit(a))) {
+        const h = harness(exitFresh(registry, raw));
+        const out = await runPotAction(action, args(ceiling, A), h.d);
+        expect(out, `${action}, ${String(registry)}`).toMatchObject({
+          ok: false,
+          problem: registry === "unreadable" ? "read_failed" : "agent_wallet",
+        });
+        expect(h.fallbacks, action).toEqual([null]);
+        expect(h.sent, action).toEqual([]);
+      }
+    }
+    // A registry key of the agent's own: the pot is read against it, and the answer names it.
+    const own = harness(fresh(HEALTHY, Q));
+    expect(await runPotAction("stop", args(undefined, A), own.d)).toMatchObject({ ok: true, agentWallet: Q });
+    expect(own.fallbacks).toEqual([A]);
+    // A pot that could not be read for any key: read_failed, nothing sent.
+    const unread = harness(none("none"));
+    expect(await runPotAction("stop", args(), unread.d)).toEqual({ ok: false, problem: "read_failed" });
+    expect(unread.sent).toEqual([]);
   });
 
   test("a read that throws is read_failed and nothing else is called; a registry that cannot be read is read_failed too", async () => {
