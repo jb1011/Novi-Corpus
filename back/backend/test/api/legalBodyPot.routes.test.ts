@@ -280,20 +280,16 @@ describe("POST and GET /legal-body-orders/:id/pot", () => {
     expect((await call(app, "GET", potPath(row.legalBodyId), guardianToken)).status).toBe(404);
   });
 
-  test("while the pot's contracts are not verified both doors answer 409 pot_not_offered, before the token and any read, and answer again once they are", async () => {
+  test("while the pot's contracts are not verified the note door answers 409 pot_not_offered, before the token and any read, and answers again once they are", async () => {
     const row = linkedBody();
     const take = vi.fn(() => true);
     const findOwned = vi.spyOn(s.repo, "findOwned");
     const app = makeApp({ orders: { tenantBucket: () => ({ take }) } });
     offered = false;
-    for (const answer of [
-      await post(app, row.legalBodyId, V3_INPUT),
-      await read(app, row.legalBodyId),
-    ]) {
-      expect(answer).toMatchObject(refused(409, "pot_not_offered"));
-      // The sentence is fixed: no hash, no address, no reason of the check.
-      expect(answer.text).not.toMatch(/0x|mismatch|unreadable/i);
-    }
+    const answer = await post(app, row.legalBodyId, V3_INPUT);
+    expect(answer).toMatchObject(refused(409, "pot_not_offered"));
+    // The sentence is fixed: no hash, no address, no reason of the check.
+    expect(answer.text).not.toMatch(/0x|mismatch|unreadable/i);
     expect(take).not.toHaveBeenCalled();
     expect(findOwned).not.toHaveBeenCalled();
     expect(registry.getAgentWallet).not.toHaveBeenCalled();
@@ -303,6 +299,35 @@ describe("POST and GET /legal-body-orders/:id/pot", () => {
       status: 200,
       body: V3_VIEW,
     });
+  });
+
+  test("Ruling R27: while the pot's contracts are not verified the read answers the noted pot as before, reading no chain and no registry, so the guardian can always take it off the record", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    offered = false;
+    expect(await read(app, row.legalBodyId)).toMatchObject({ status: 200, body: { pot: null } });
+    offered = true;
+    await post(app, row.legalBodyId, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    offered = false;
+    expect(await read(app, row.legalBodyId)).toMatchObject({ status: 200, body: { pot: V3_VIEW } });
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // The real-human check still comes first, and one 404 for a body that is not the tenant's.
+    expect(await read(app, row.legalBodyId, await sessionOf(ANVIL_ACCOUNT_4))).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+    expect(await read(app, row.legalBodyId, await sessionOf(stranger))).toMatchObject(
+      refused(404, "not_found"),
+    );
+    expect(await read(app, `lb_${"0".repeat(36)}`)).toMatchObject(refused(404, "not_found"));
+    // The note door stays behind the flag.
+    expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject(
+      refused(409, "pot_not_offered"),
+    );
+    expect(rows()).toHaveLength(1);
   });
 });
 
@@ -412,8 +437,12 @@ describe("POST /legal-body-orders/:id/pot/off-record", () => {
       status: 403,
       body: { error: { code: "guardian_not_verified" } },
     });
-    // The note door and the read still answer pot_not_offered while it is off.
-    expect(await read(app, row.legalBodyId)).toMatchObject(refused(409, "pot_not_offered"));
+    // The note door still answers pot_not_offered while it is off; the read answers the pot, off
+    // the record (Ruling R27).
+    expect(await read(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { pot: { ...V3_VIEW, onRecord: false } },
+    });
     expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject(
       refused(409, "pot_not_offered"),
     );

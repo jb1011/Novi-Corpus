@@ -78,10 +78,12 @@ export type {
  * its allowance are untouched: Novi Corpus holds no key to them. The address stays the body's (an
  * address belongs to one legal body; one pot for life), and the note door puts it back.
  *
- * OFFERED ONLY WHILE VERIFIED (Rulings R1 and R11). The note door and the read answer
+ * OFFERED ONLY WHILE VERIFIED (Rulings R1 and R11). The note door and the agent's two tools answer
  * `pot_not_offered` while this process has not verified the code of the pot's seven contracts
  * (`potOffer.ts`), before anything is read: the flag is `offered`. Taking the pot off the record
- * takes no flag (Ruling R15 a): a guardian may always withdraw a claim.
+ * takes no flag (Ruling R15 a): a guardian may always withdraw a claim. Nor does the guardian's
+ * read of the body's notes (`orderPot`, Ruling R27): it reads no chain, and the guardian's page
+ * needs it to offer taking a pot on the record off it.
  *
  * IN THE PUBLIC RECORD (`potOfStatement`). Beside a signed statement, outside it and unsigned, the
  * lookups serve the pot on the record: its address, its birth details (anyone recomputes the
@@ -613,7 +615,8 @@ export function removePot(
  * The body's pot as its guardian's page reads it: one 404 for unknown and not yours (any state, a
  * read); no note: `{ pot: null }`; else the latest note's address, `onRecord` true when that note is
  * `declared`, and the birth details and time of the latest declared note of that address. No chain
- * read. While the pot is not offered: 409 `pot_not_offered`, before anything is read.
+ * read. Whatever the pot's flag (Ruling R27): it reads only the body's notes, and the guardian's
+ * page needs it to take a pot on the record off it, as the off-record door takes no flag either.
  */
 export function orderPot(
   deps: LegalBodyPotDeps,
@@ -624,14 +627,13 @@ export function orderPot(
   return { pot: owned.latest === undefined ? null : viewOf(owned.notes, owned.latest) };
 }
 
-/** `orderPot`'s reads, kept for the agent's tools: the flag first, one 404, the body's row and its
- *  notes. No chain read. */
+/** `orderPot`'s reads, kept for the agent's tools: one 404, the body's row and its notes. No
+ *  chain read, and no flag: the agent's tools check it first themselves (`notedPot`). */
 function ownedPot(
   deps: LegalBodyPotDeps,
   tenantId: string,
   legalBodyId: string,
 ): { row: LegalBodyRecord; notes: readonly PotNote[]; latest: PotNote | undefined } {
-  assertPotOffered(deps);
   const row = deps.bodies.findOwned(tenantId, legalBodyId);
   if (row === undefined) throw refusal("not_found", 404);
   const notes = deps.repo.list(row.legalBodyId);
@@ -1012,6 +1014,7 @@ const leftOf = (r: { ceilingUnits: bigint; spentUnits: bigint }): bigint =>
  *  `pot_not_offered` before anything is read; one 404 for unknown and not yours (one read of the
  *  row); no note: 409 `pot_not_declared`. The address is the latest note's, on the record or not. */
 function notedPot(deps: LegalBodyPotDeps, tenantId: string, legalBodyId: string): NotedPot {
+  assertPotOffered(deps);
   const { row, notes, latest } = ownedPot(deps, tenantId, legalBodyId);
   if (latest === undefined) throw refusal("pot_not_declared", 409);
   return { row, view: viewOf(notes, latest), declared: declaredNoteOf(notes, latest) };

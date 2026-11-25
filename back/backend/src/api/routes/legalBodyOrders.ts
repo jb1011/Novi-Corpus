@@ -98,9 +98,10 @@ import { assertRealHuman } from "./worldId";
  *    (`OrderPotView`). `GET /legal-body-orders/:id/pot` reads it: `{ pot }`, null before any note.
  *    `POST /legal-body-orders/:id/pot/off-record` takes it off the public record, the pot itself
  *    untouched: 200 with its view, `onRecord` false. All three mounted where the deployment wires
- *    the pot; while its contracts are not verified, the note and the read answer 409
- *    `pot_not_offered` before anything is read and without spending a token, and the pot is taken
- *    off the record all the same (Ruling R15 a: a guardian may always withdraw a claim).
+ *    the pot; while its contracts are not verified, the note answers 409 `pot_not_offered` before
+ *    anything is read and without spending a token, while the read answers the notes as before
+ *    (Ruling R27: it reads no chain) and the pot is taken off the record all the same (Ruling R15
+ *    a: a guardian may always withdraw a claim).
  *
  * Every rule lives in the domain (`legalBody/orders.ts`, `legalBody/grantDoors.ts`,
  * `legalBody/adoption.ts`, `legalBody/linkDoor.ts`, `legalBody/resolver.ts`,
@@ -111,9 +112,10 @@ import { assertRealHuman } from "./worldId";
  * included; the domain functions of the order door, the three grant doors, the two adoption doors,
  * the two link doors and the binding door (`readBinding`, which the `get_binding` tool calls too)
  * make that check first themselves.
- * The exceptions are the gas seed and the pot: while either is off, it answers before that check,
- * reading nothing and spending no token; on, `requestGasSeed` makes the check first, and the pot
- * doors make it right after the off check.
+ * The exceptions are the gas seed and the pot's note door: while either is off, it answers before
+ * that check, reading nothing and spending no token; on, `requestGasSeed` makes the check first,
+ * and the note door makes it right after the off check. The pot's read and its off-record door
+ * take no flag (Rulings R27 and R15 a) and make the check first.
  * Mounted under their own session protection, and only where the deployment wires the feature.
  *
  * An error a door did not choose never reaches the caller as it was thrown: anything but an
@@ -412,8 +414,10 @@ export function mountLegalBodyOrderRoutes(
       }),
     );
 
-  // The company's pot. While its contracts are not verified, the note and the read answer
-  // `pot_not_offered` first, reading nothing and spending no token. The note reads the registry
+  // The company's pot. While its contracts are not verified, the note answers `pot_not_offered`
+  // first, reading nothing and spending no token; the read answers the body's notes all the same
+  // (Ruling R27: no chain is read, and the guardian's page needs it to take a pot on the record off
+  // it), as the off-record door below takes no flag (Ruling R15 a). The note reads the registry
   // and the chain, so it takes a token as the treasury door does: after the real-human check and
   // before the order is read. A row of another factory or chain is read-only here, but for taking
   // its pot off the record. `declarePot` reads the order again and makes every other check
@@ -433,7 +437,6 @@ export function mountLegalBodyOrderRoutes(
     );
     app.get("/legal-body-orders/:id/pot", (c) =>
       door("pot_read", () => {
-        assertPotOffered(pot);
         const tenantId = realHuman(c.get("tenantId"));
         return c.json(orderPot(pot, tenantId, c.req.param("id")));
       }),

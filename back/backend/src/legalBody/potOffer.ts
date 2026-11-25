@@ -3,8 +3,11 @@ import { PotContractsNotVerifiedError } from "../adapters/arc/safePotChain";
 /**
  * WHETHER THIS PROCESS OFFERS THE COMPANY'S POT (Rulings R1 and R11): one live flag, set only when
  * the start-up check of the seven contracts the pot is built from resolves
- * (`assertPotContracts`). The flag decides both `/config.legalBodies.pot` and whether the pot
- * doors answer: they are mounted at boot and answer `pot_not_offered` while it is off.
+ * (`assertPotContracts`). The flag decides both `/config.legalBodies.pot` and whether the pot's
+ * note door and the agent's two pot tools answer: they are mounted at boot and answer
+ * `pot_not_offered` while it is off. The guardian's read of the body's notes and the off-record
+ * door take no flag (Rulings R27 and R15 a): neither reads a chain, and a pot on the record can
+ * always be taken off it.
  *
  * The check never stops the server: it is started, never awaited, so legal bodies, formation and
  * everything else boot and run in every outcome, and the pot alone stays off. ANY error turns the

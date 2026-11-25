@@ -163,8 +163,9 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // wording than the declaration of the pair this deployment serves.
   declaration_outdated:
     "This company was declared under another wording than the one this deployment serves, and a declaration is never rewritten: declare the company as a new one, then place the order on it.",
-  // The two pot doors, while this process has not verified the code of the pot's seven contracts
-  // (at start-up, or since a node could not be read): the reason stays in the boot log.
+  // The pot's note door and the agent's two pot tools, while this process has not verified the
+  // code of the pot's seven contracts (at start-up, or since a node could not be read): the reason
+  // stays in the boot log. The read of the body's notes and the off-record door take no flag.
   pot_not_offered: "The pot is not offered on this deployment just now.",
   // `POST /legal-body-orders/:id/pot`: details the door cannot take as they were sent.
   pot_invalid:

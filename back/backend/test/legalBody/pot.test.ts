@@ -404,21 +404,29 @@ describe("a pot noted", () => {
     expectNoChainRead();
   });
 
-  test("while the pot is not offered: pot_not_offered for both, before anything is read", async () => {
+  test("while the pot is not offered: the note is pot_not_offered before anything is read; the read answers the notes as before, with no chain read (Ruling R27)", async () => {
     const body = linked();
     offered = false;
     const findOwned = vi.spyOn(s.repo, "findOwned");
     expect(await refusalOf(() => declare(body, V3_INPUT))).toMatchObject(
       refused("pot_not_offered", 409),
     );
-    expect(await refusalOf(() => orderPot(deps(), G, body.legalBodyId))).toMatchObject(
-      refused("pot_not_offered", 409),
-    );
     expect(findOwned).not.toHaveBeenCalled();
+    expect(orderPot(deps(), G, body.legalBodyId)).toEqual({ pot: null });
     expect(rows()).toEqual([]);
     expectNoChainRead();
     offered = true;
     expect((await declare(body, V3_INPUT)).address).toBe(V3_ADDRESS);
+    registry.getAgentWallet.mockClear();
+    offered = false;
+    expect(orderPot(deps(), G, body.legalBodyId)).toEqual({
+      pot: { address: V3_ADDRESS, onRecord: true, declaredAt: NOW_S, birth: BIRTH_V3 },
+    });
+    // Still one 404 for a body that is not the tenant's, flag or not.
+    expect(await refusalOf(() => orderPot(deps(), P, body.legalBodyId))).toMatchObject(
+      refused("not_found", 404),
+    );
+    expectNoChainRead();
   });
 });
 
@@ -1092,8 +1100,12 @@ describe("taking the pot off the public record", () => {
     expect(eventActs(body)).toEqual(["pot_declared", "pot_removed"]);
     expect(removedLines()).toHaveLength(1);
     expectNoChainRead();
-    // The note door and the read still answer pot_not_offered while the flag is off.
-    expect(await refusalOf(() => orderPot(deps(), G, body.legalBodyId))).toMatchObject(
+    // The read answers the pot, off the record, while the flag is off (Ruling R27); the note door
+    // still answers pot_not_offered.
+    expect(orderPot(deps(), G, body.legalBodyId)).toEqual({
+      pot: { address: V3_ADDRESS, onRecord: false, declaredAt: NOW_S, birth: BIRTH_V3 },
+    });
+    expect(await refusalOf(() => declare(body, V3_INPUT))).toMatchObject(
       refused("pot_not_offered", 409),
     );
   });
