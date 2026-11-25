@@ -29,16 +29,20 @@ import {
   adoptionMessage,
   createCustomerCompany,
   createLegalBodyOrder,
+  declareOrderPot,
   getBinding,
   getLegalBodyAgreement,
   getLegalBodyByAgent,
   getLegalBodyOrder,
+  getOrderGrant,
+  getOrderPot,
   listLegalBodyOrders,
   refreshBinding,
   requestGasSeed,
   requestLinkMessage,
   requestStatementMessage,
   submitLink,
+  takePotOffRecord,
 } from "./legalBodyClient";
 import { ApiError } from "./types";
 import type {
@@ -265,6 +269,62 @@ export function useGasSeedMutation(id: string) {
   const token = useAuthToken();
   return useMutation({
     mutationFn: () => requestGasSeed(requireToken(token), id),
+  });
+}
+
+/* ── The company's pot ───────────────────────────────────────────────────────────────────── */
+
+/** The order's noted pot (`{ pot: null }` for none). Read once, and again only when a screen asks
+ *  after a transaction: never polled, never retried, never read again on focus, as the by-agent
+ *  record. */
+export function useOrderPotQuery(id: string | null | undefined, enabled: boolean) {
+  const token = useAuthToken();
+  return useQuery({
+    queryKey: apiKeys.legalBodyOrderPot(token ?? "", id ?? ""),
+    queryFn: () => getOrderPot(token!, id!),
+    enabled: enabled && !!token && !!id,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** The order's grant, which caps the pot's ceiling. The same frozen agreement for the life of the
+ *  order; a failure is shown with its retry, never retried by itself. */
+export function useOrderGrantQuery(id: string | null | undefined, enabled: boolean) {
+  const token = useAuthToken();
+  return useQuery({
+    queryKey: apiKeys.legalBodyOrderGrant(token ?? "", id ?? ""),
+    queryFn: () => getOrderGrant(token!, id!),
+    enabled: enabled && !!token && !!id,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** The guardian's note of the pot, before its setup transaction. The answer is the noted pot as the
+ *  server now holds it, so it becomes the pot query's data. */
+export function useDeclarePotMutation(id: string) {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof declareOrderPot>[2]) =>
+      declareOrderPot(requireToken(token), id, body),
+    onSuccess: (pot) => {
+      queryClient.setQueryData(apiKeys.legalBodyOrderPot(token ?? "", id), { pot });
+    },
+  });
+}
+
+/** The pot off the public record. The answer is the noted pot with `onRecord` false, so it becomes
+ *  the pot query's data. */
+export function useTakePotOffRecordMutation(id: string) {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useMutation({
+    mutationFn: () => takePotOffRecord(requireToken(token), id),
+    onSuccess: (pot) => {
+      queryClient.setQueryData(apiKeys.legalBodyOrderPot(token ?? "", id), { pot });
+    },
   });
 }
 

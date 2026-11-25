@@ -28,6 +28,23 @@ const VERIFIED_AS = "Verified human: {credential}";
 const OPERATOR_CHECKS =
   "A Novi Corpus operator checks the declaration against the registry and your document. This is done by a person; it is not instant.";
 
+/** The version of the pot's declaration the guardian ticks: the server stores it with the note and
+ *  takes no other (`back/backend/src/legalBody/pot.ts`, `POT_DECLARATION`). */
+export const POT_DECLARATION_VERSION = "pot-declaration-1";
+
+/* The pot's sentences that more than one of its problems or refusals say. */
+const POT_UNSUPPORTED = "The pot is not offered on this network.";
+const POT_AGENT_WALLET =
+  "The agent's wallet in the registry is not one a pot can use: it is unset, or it is your own wallet. Set your agent's wallet first.";
+const POT_NOT_THIS_WALLET =
+  "The wallet connected here is not this legal body's guardian wallet. Connect {address}.";
+const POT_WRONG_NETWORK = "Your wallet is on another network. Switch it to {network}.";
+const POT_BUILT_WRONG =
+  "This page built the transaction with values it does not take, so it will not send it. Nothing was sent.";
+/** One rule, two codes: the setup's and Send fee money's (Ruling R10). */
+const POT_FEE_PLAIN_KEY =
+  "Fee money goes only to a plain key, and your agent's wallet holds code, so nothing was sent to it.";
+
 export const LEGAL_BODY_COPY = {
   page: {
     title: "A legal body for your agent",
@@ -45,7 +62,7 @@ export const LEGAL_BODY_COPY = {
   rail: {
     heading: "A legal body for your agent",
     footer:
-      "Two signatures and one or two transactions from your wallet. Never an approval or a transfer.",
+      "Two signatures and one or two transactions from your wallet to get a legal body. Never an approval or a transfer.",
     /** Under the current phase; the done page has none. */
     inProgress: "In progress",
     labels: {
@@ -614,6 +631,260 @@ export const LEGAL_BODY_COPY = {
       chain_not_configured:
         "This site sends to {network} only, and this deployment names another chain, so the wallet cannot be written here. Nothing was sent.",
     },
+  },
+
+  /** The company's pot: a Safe the guardian owns alone, from which the agent's own key takes USDC
+   *  up to a ceiling in each fixed thirty-day period. Every sentence about the ceiling says "in
+   *  each thirty-day period"; "per thirty days" is kept for the grant's own amounts, which the
+   *  Charter counts back from each act. A stopped pot is said only as read: the agent's key cannot
+   *  take from it (Ruling R5). */
+  pot: {
+    cardTitle: "Give your agent an allowance",
+    cardLine:
+      "Keep the company's money in a pot that only your wallet owns. Your agent's key takes from it up to a ceiling in each thirty-day period.",
+    title: "The company's pot",
+    what: "The pot is a Safe wallet on {network}. Your wallet is its only owner. Your agent's key can take USDC from it up to the ceiling, and nothing more. Novi Corpus holds no key and no money.",
+    periods:
+      "The pot counts in fixed periods of thirty days, one after the other, from the minute it is created. What is not taken in a period is not carried over. Around the end of a period your agent's key can take the ceiling just before it ends and the ceiling again just after, so up to twice the ceiling within a few minutes.",
+    limits:
+      "The ceiling is one amount for each period. It does not look at who is paid, at the size of one payment or at the kind of act, and it does not cover money paid straight to your agent's key.",
+    keepLittle: "Keep in the pot only what your agent needs.",
+    noRecovery:
+      "If you lose this wallet, nobody can recover the money in the pot, Novi Corpus included.",
+    checking: "Reading the pot on the chain.",
+
+    /* The form. */
+    ceilingLabel: "Ceiling for each thirty-day period, in USDC",
+    ceilingMax:
+      "At most {amount} USDC: the total your agent's grant allows per thirty days for buying, paying and engaging contractors.",
+    ceilingNoGrant: "Choose the most your agent's key may take in each thirty-day period.",
+    grantNoSpending:
+      "Your agent's grant allows no buying, no paying and no engaging of contractors, so a pot has nothing to release.",
+    grantEnds:
+      "Your agent's grant ends on {date}. The pot does not stop by itself on that day: stop the allowance then.",
+    grantUnreadable:
+      "Your agent's grant could not be read just now, so the ceiling's limit cannot be shown.",
+    ceilingProblems: {
+      empty: "Give a ceiling.",
+      not_whole: "Write a whole number of USDC, with no decimals.",
+      zero: "The ceiling must be at least 1 USDC.",
+      too_large: "This is more than a pot takes.",
+      above_grant: "This is above the {amount} USDC your agent's grant allows per thirty days.",
+    },
+    fundLabel: "Put in the pot now, in USDC (optional)",
+    fundLine:
+      "You can add more later with Add money, or by sending USDC to the pot's address from any wallet.",
+    gasLabel: "Fee money for your agent's key, in USDC",
+    gasLine:
+      "Your agent's key pays a small network fee each time it takes from the pot, so it needs a little USDC of its own first. This amount goes straight to the key and is outside the ceiling.",
+    gasContract:
+      "Your agent's wallet is a contract wallet. It pays its fees its own way, so nothing is sent to it here. It must be able to call a contract itself to take from the pot.",
+    amountProblems: {
+      not_amount: "Write an amount in USDC, such as 25 or 0.5.",
+      too_precise: "USDC has six decimals at most.",
+      too_large: "This amount is too large.",
+      gas_too_large: "Fee money is at most 1 USDC. Money for the company goes in the pot.",
+      empty: "Give an amount.",
+    },
+
+    /* The review and the setup. */
+    review: "Review",
+    reviewTitle: "Check before you sign",
+    reviewOwner: "Only owner of the pot: {address} (your wallet)",
+    reviewAgent: "The key that may take from it: {address} (your agent's wallet in the registry)",
+    reviewCeiling:
+      "Ceiling: {amount} USDC in each thirty-day period. The first period starts when the pot is created.",
+    reviewAddress: "The pot's address will be {address}",
+    reviewTotal:
+      "Your wallet will ask you to send {total} USDC to a contract called Multicall3. In the same transaction it creates the pot, puts {fund} USDC in it and sends {gas} USDC to your agent's key. Nothing goes to Novi Corpus.",
+    reviewFundOnly:
+      "Your wallet will ask you to send {total} USDC to a contract called Multicall3. In the same transaction it creates the pot and puts the {total} USDC in it. Nothing goes to Novi Corpus.",
+    reviewGasOnly:
+      "Your wallet will ask you to send {total} USDC to a contract called Multicall3. In the same transaction it creates the pot and sends the {total} USDC to your agent's key. The pot starts empty. Nothing goes to Novi Corpus.",
+    reviewNoMoney:
+      "Your wallet will ask you to confirm a transaction that sends no money. It creates the pot.",
+    /** The tick box: the server's `POT_DECLARATION.text`, word for word. */
+    declaration:
+      "I declare this pot for the company: it holds the company's money, and its address, its ceiling, what was taken from it and what it holds will show in the public record.",
+    declarationNeeded: "Tick the declaration to go on.",
+    create: "Create the pot",
+    back: "Change something",
+    sending: "Waiting for your wallet.",
+    waiting: "Waiting for the pot to appear on the chain.",
+    waitingChange: "Waiting for the chain.",
+    created: "The pot exists. This is what the chain shows:",
+    done: "Done. This is what the chain shows now:",
+    /** A click's own problems, before or at the wallet. */
+    problems: {
+      unsupported: POT_UNSUPPORTED,
+      agent_wallet: POT_AGENT_WALLET,
+      pot_exists: "A pot already exists at this address. Nothing was sent.",
+      not_enough: "Your wallet holds {balance} USDC. This needs {total} USDC and a small fee.",
+      not_this_wallet: POT_NOT_THIS_WALLET,
+      wrong_network: POT_WRONG_NETWORK,
+      record_failed: "Novi Corpus could not note the pot's address, so nothing was sent. Try again.",
+      would_revert: "The chain would refuse this transaction, so nothing was sent.",
+      declined: "You declined in your wallet. Nothing was sent.",
+      reverted: "The transaction did not go through. Nothing changed and no money moved.",
+      no_receipt:
+        "No answer from the chain after three minutes. Check again before you start over: the transaction may have gone through.",
+      read_failed: "The chain could not be read just now. Nothing was changed.",
+      refused: "This transaction is not one this page may send, so nothing was sent.",
+      /** One pot for life: the noted address that never got code is set up again only as noted. */
+      noted_pot:
+        "A pot with a ceiling of {amount} USDC was noted for this legal body and is not on the chain yet. Keep that ceiling to create it: another ceiling would make a second pot. Nothing was sent.",
+    },
+    /** The allowlist's refusals of a pot call, before the wallet opened: one plain sentence for
+     *  each code it can give, never the code itself. */
+    refusals: {
+      bad_request:
+        "This page could not read the transaction it built, so it will not send it. Nothing was sent.",
+      wrong_chain:
+        "This page built the transaction for another chain than this deployment's, so it will not send it. Nothing was sent.",
+      pot_chain_unsupported: POT_UNSUPPORTED,
+      no_pot_context:
+        "This page built the transaction without the pot's facts read in this click, so it will not send it. Nothing was sent.",
+      no_order:
+        "This page built the transaction without this legal body's order, so it will not send it. Nothing was sent.",
+      order_on_another_deployment:
+        "This legal body belongs to another deployment, so this page sends nothing for its pot. Nothing was sent.",
+      order_not_linked:
+        "This legal body is not linked, or it was revoked, so this page sends nothing for its pot. Nothing was sent.",
+      guardian_is_not_the_orders:
+        "This page built the transaction for another guardian than this legal body's, so it will not send it. Nothing was sent.",
+      gas_out_of_bounds:
+        "The gas limit is not one this page sends for this transaction, so nothing was sent.",
+      not_multicall3:
+        "This page built the setup for another contract than Multicall3, so it will not send it. Nothing was sent.",
+      not_the_pinned_abi:
+        "This page built the transaction from another interface than the pot's, so it will not send it. Nothing was sent.",
+      value_mismatch:
+        "The amount the transaction would carry is not the sum of what goes in the pot and to your agent's key, so this page will not send it. Nothing was sent.",
+      setup_args:
+        "The setup is not the one this page rebuilt from your choices, so it will not send it. Nothing was sent.",
+      wallet_is_zero: POT_AGENT_WALLET,
+      wallet_is_guardian: POT_AGENT_WALLET,
+      ceiling_out_of_bounds:
+        "The ceiling must be a whole number of USDC from 1 to 3,000,000,000, so nothing was sent.",
+      fund_out_of_bounds:
+        "This amount for the pot is not one this page sends: at most 1,000,000,000 USDC, six decimals at most, and more than 0 when you add money. Nothing was sent.",
+      agent_gas_out_of_bounds:
+        "Fee money is at most 1 USDC, six decimals at most, and more than 0 when you send it alone. Nothing was sent.",
+      fee_money_needs_plain_key: POT_FEE_PLAIN_KEY,
+      fee_money_contract_wallet: POT_FEE_PLAIN_KEY,
+      salt_out_of_bounds: POT_BUILT_WRONG,
+      sends_value:
+        "This page built the transaction with a value attached where none belongs, so it will not send it. Nothing was sent.",
+      not_the_pot:
+        "This page built the transaction for another address than this legal body's pot, so it will not send it. Nothing was sent.",
+      exec_args:
+        "The transaction is not the one this page rebuilt for the pot, so it will not send it. Nothing was sent.",
+      nothing_to_stop:
+        "The allowance of this pot is already switched off, so there is nothing to stop. Nothing was sent.",
+      allowance_still_on:
+        "The allowance of this pot is still switched on. Stop it first, then take the money back. Nothing was sent.",
+      nothing_to_withdraw: "The pot holds nothing to take back. Nothing was sent.",
+      restore_other_module:
+        "This pot has another add-on switched on, so this page will not start it again. Nothing was sent.",
+      not_usdc:
+        "This page built the transfer for another token than USDC, so it will not send it. Nothing was sent.",
+      transfer_args:
+        "The transfer is not the one this page rebuilt from your amount, so it will not send it. Nothing was sent.",
+      chain_not_configured:
+        "This site sends to {network} only, and this deployment names another chain, so nothing was sent.",
+      wallet_on_another_chain: POT_WRONG_NETWORK,
+      wallet_is_not_the_guardian: POT_NOT_THIS_WALLET,
+    },
+    checkAgain: "Check again",
+
+    /* What the card shows of the pot, as read from the chain. */
+    shownAddress: "The pot's address: {address}",
+    shownOwner: "Only owner: {address}",
+    shownAgent: "May take from it: {address}",
+    shownCeiling: "Ceiling: {amount} USDC in each thirty-day period",
+    shownSpent:
+      "Taken in this period: {spent} USDC. {left} USDC left until {date}, when the next period starts.",
+    shownBalance: "In the pot: {balance} USDC",
+    shownFeeMoney: "Your agent's key holds {amount} USDC for network fees.",
+    feeMoneyLow:
+      "This is low. Each take costs the key a small fee in USDC, and the network refuses a take the key cannot pay for. Send it a little with Send fee money.",
+    stoppedLine: "The allowance of this pot is switched off: the agent's key cannot take from it.",
+    limitsNotRead:
+      "This pot is set up in a way this page does not read: {reason}. Its ceiling is not shown.",
+    limitReasons: {
+      other_module: "it has another add-on switched on",
+      guard_set: "it has a guard",
+      other_handler: "it has a fallback handler other than Safe's own",
+      usdc_approved: "it lets your agent's key spend its USDC directly, outside the ceiling",
+      other_delegate: "a key other than your agent's wallet may take from it",
+      other_token: "it has an allowance on something other than USDC",
+      other_period: "its period is not thirty days",
+    },
+    notYours: "The address noted for this legal body is not a pot that only your wallet owns.",
+    onePot:
+      "A legal body keeps one pot for its whole life. To give your agent an allowance again, use Start again on this pot.",
+
+    /* The guardian's actions on the pot. */
+    changeTitle: "Change the allowance",
+    changeLine:
+      "Sets a new ceiling from now on. The running period, and what was already taken in it, stay as they are.",
+    changeSend: "Set the new ceiling",
+    stopTitle: "Stop the allowance",
+    stopLine:
+      "Removes your agent's key from the pot and switches the allowance off, in one transaction. Your agent can take nothing after it. The money stays in the pot until you take it back.",
+    stopSend: "Stop the allowance",
+    withdrawTitle: "Take the money back",
+    withdrawLine: "Sends everything in the pot, {balance} USDC, to your wallet.",
+    withdrawSend: "Take {balance} USDC back",
+    startAgainTitle: "Start again",
+    startAgainLine:
+      "Puts your agent's key back on this pot with the ceiling you choose, in one transaction. A new thirty-day period starts now, with nothing taken yet.",
+    startAgainSend: "Start again",
+    newKeyTitle: "My agent has a new key",
+    newKeyLine:
+      "Your agent's wallet in the registry is now {address}. This takes the old key off the pot and lets the new one take from it, with the ceiling you choose, in one transaction. A new thirty-day period starts now for the new key.",
+    newKeySend: "Move the allowance to the new key",
+    addMoneyTitle: "Add money",
+    addMoneyLine: "Sends USDC from your wallet to the pot, {address}. Nothing goes to Novi Corpus.",
+    addMoneyLabel: "Amount, in USDC",
+    addMoneySend: "Add {amount} USDC",
+    feeMoneyTitle: "Send fee money",
+    feeMoneyLine:
+      "Sends a little USDC from your wallet to your agent's key, {address}, for its network fees. It is outside the ceiling. At most 1 USDC.",
+    feeMoneySend: "Send {amount} USDC",
+    offRecordTitle: "Take the pot off the public record",
+    offRecordLine:
+      "The record stops showing this pot beside the legal body. The pot, its money and its allowance stay as they are. A search by the pot's address still leads to the company, marked as a former pot.",
+    offRecordSend: "Take it off the record",
+    offRecord:
+      "This pot is off the public record. A search by its address still leads to the company, marked as a former pot.",
+    backOnTitle: "Put the pot back on the public record",
+    backOnSend: "Put it back on the record",
+
+    /* The agent's side. The commands are data the page fills in, shown in copy boxes. */
+    agentTitle: "For your agent",
+    agentLine:
+      "Your agent takes from the pot with its own key. Novi Corpus never holds that key and sends nothing for it.",
+    agentMcp:
+      "Over MCP: the tool get_pot reads what is left, and prepare_pot_take prepares a take for the agent's key to send.",
+    agentCommandIntro:
+      "Or, with Foundry where the agent runs, one command. PAYEE is who is paid. UNITS is the amount in millionths of a USDC: 1 USDC is 1000000.",
+    agentCommand:
+      'cast send {module} "executeAllowanceTransfer(address,address,address,uint96,address,uint96,address,bytes)" {pot} {token} PAYEE UNITS 0x0000000000000000000000000000000000000000 0 {agent} 0x --gas-limit 200000 --rpc-url {rpc} --account agent-key',
+    agentReadIntro: "To read what is left:",
+    agentRead:
+      'cast call {module} "getTokenAllowance(address,address,address)(uint256[5])" {pot} {agent} {token} --rpc-url {rpc}',
+    agentReadLine:
+      "The five numbers are the ceiling, what was taken in this period, the period in minutes, the minute the period started, and a counter.",
+
+    /* The public record's sentence, one per state the record serves beside a statement. */
+    recordCeiling:
+      "The guardian declared this pot for the company: {address}. The agent's key may take up to {amount} USDC from it in each thirty-day period; the current one ends on {ends}. It holds {balance} USDC. Read from the chain on {date}.",
+    recordStopped:
+      "The guardian declared this pot for the company: {address}. The agent's key cannot take from it: its allowance is switched off. It holds {balance} USDC. Read from the chain on {date}.",
+    recordNotRead:
+      "The guardian declared this pot for the company: {address}. Its limits were not read.",
+    recordUnavailable: "The company's pot could not be read just now.",
   },
 
   link: {

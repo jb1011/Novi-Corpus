@@ -12,6 +12,7 @@ import {
   CHECK_REASON_SENTENCES,
   LEGAL_BODY_COPY,
   PERSON_SENTENCES,
+  POT_DECLARATION_VERSION,
   fillCopy,
 } from "@/lib/legalBody/copy";
 import { closedSentence, noticeSentence } from "@/lib/legalBody/notice";
@@ -99,6 +100,11 @@ describe("the claims ceiling", () => {
     "autonomous legal person",
     "winds down",
     "wound down",
+    // The pot: no read proves more than that the agent's key cannot take (Ruling R5), and the
+    // ceiling is read from the chain, never claimed as held by anyone.
+    "no key may take",
+    "enforced",
+    "guaranteed",
   ])("no sentence says %j", (forbidden) => {
     for (const s of ALL) expect(s.toLowerCase()).not.toContain(forbidden);
   });
@@ -146,7 +152,7 @@ describe("the sentences carried verbatim", () => {
     ],
     [
       "the rail's footer",
-      "Two signatures and one or two transactions from your wallet. Never an approval or a transfer.",
+      "Two signatures and one or two transactions from your wallet to get a legal body. Never an approval or a transfer.",
     ],
   ])("%s", (_name, sentence) => {
     expect(ALL).toContain(sentence);
@@ -331,6 +337,422 @@ describe("the agent's wallet step", () => {
       "The registry names no wallet for this agent. It cannot act under its Charter until it has one.",
     ],
     ["account.walletOwed", LEGAL_BODY_COPY.account.walletOwed, "Agent's wallet not set"],
+  ])("%s, word for word", (_key, actual, expected) => {
+    expect(actual).toBe(expected);
+  });
+});
+
+describe("the company's pot", () => {
+  const POT = LEGAL_BODY_COPY.pot;
+  const section = stringsOf(POT);
+
+  test("the section is walked with the rest, and passes the same rules", () => {
+    expect(section.length).toBeGreaterThan(120);
+    for (const s of section) {
+      expect(ALL).toContain(s);
+      expect(s).not.toContain("—");
+      expect(s).not.toMatch(/\bfree\b/i);
+      expect(s).not.toMatch(/our agents/i);
+      expect(s).not.toMatch(/verified/i);
+      expect(s).not.toMatch(/\bNovi\b(?! Corpus)/);
+      expect(s).not.toMatch(/enforced|guarantee|no key may take/i);
+    }
+  });
+
+  test("'per thirty days' is said only of the grant's own amounts, never of the pot's ceiling", () => {
+    // The pot counts fixed periods: "in each thirty-day period". A grant's amounts are counted
+    // back from each act, so they keep "per thirty days".
+    const saying = ALL.filter((s) => /per thirty days/i.test(s));
+    expect(saying.sort()).toEqual([POT.ceilingMax, POT.ceilingProblems.above_grant].sort());
+    expect(section.filter((s) => /in each thirty-day period/.test(s)).length).toBeGreaterThan(4);
+  });
+
+  test("the pot's page says Novi Corpus holds no key and no money", () => {
+    expect(POT.what).toContain("Novi Corpus holds no key and no money");
+  });
+
+  test("the declaration's version is the one the server stores", () => {
+    expect(POT_DECLARATION_VERSION).toBe("pot-declaration-1");
+  });
+
+  test("the stopped pot says only what was read: the agent's key cannot take from it (Ruling R5)", () => {
+    expect(POT.stoppedLine).toBe(
+      "The allowance of this pot is switched off: the agent's key cannot take from it.",
+    );
+    expect(POT.recordStopped).toBe(
+      "The guardian declared this pot for the company: {address}. The agent's key cannot take from it: its allowance is switched off. It holds {balance} USDC. Read from the chain on {date}.",
+    );
+  });
+
+  test("the two codes of the fee money rule read the same sentence (Ruling R10)", () => {
+    expect(POT.refusals.fee_money_needs_plain_key).toBe(POT.refusals.fee_money_contract_wallet);
+  });
+
+  test.each([
+    ["cardTitle", POT.cardTitle, "Give your agent an allowance"],
+    [
+      "cardLine",
+      POT.cardLine,
+      "Keep the company's money in a pot that only your wallet owns. Your agent's key takes from it up to a ceiling in each thirty-day period.",
+    ],
+    ["title", POT.title, "The company's pot"],
+    [
+      "what",
+      POT.what,
+      "The pot is a Safe wallet on {network}. Your wallet is its only owner. Your agent's key can take USDC from it up to the ceiling, and nothing more. Novi Corpus holds no key and no money.",
+    ],
+    [
+      "periods",
+      POT.periods,
+      "The pot counts in fixed periods of thirty days, one after the other, from the minute it is created. What is not taken in a period is not carried over. Around the end of a period your agent's key can take the ceiling just before it ends and the ceiling again just after, so up to twice the ceiling within a few minutes.",
+    ],
+    [
+      "limits",
+      POT.limits,
+      "The ceiling is one amount for each period. It does not look at who is paid, at the size of one payment or at the kind of act, and it does not cover money paid straight to your agent's key.",
+    ],
+    ["keepLittle", POT.keepLittle, "Keep in the pot only what your agent needs."],
+    [
+      "noRecovery",
+      POT.noRecovery,
+      "If you lose this wallet, nobody can recover the money in the pot, Novi Corpus included.",
+    ],
+    ["checking", POT.checking, "Reading the pot on the chain."],
+    ["ceilingLabel", POT.ceilingLabel, "Ceiling for each thirty-day period, in USDC"],
+    [
+      "ceilingMax",
+      POT.ceilingMax,
+      "At most {amount} USDC: the total your agent's grant allows per thirty days for buying, paying and engaging contractors.",
+    ],
+    [
+      "ceilingNoGrant",
+      POT.ceilingNoGrant,
+      "Choose the most your agent's key may take in each thirty-day period.",
+    ],
+    [
+      "grantNoSpending",
+      POT.grantNoSpending,
+      "Your agent's grant allows no buying, no paying and no engaging of contractors, so a pot has nothing to release.",
+    ],
+    [
+      "grantEnds",
+      POT.grantEnds,
+      "Your agent's grant ends on {date}. The pot does not stop by itself on that day: stop the allowance then.",
+    ],
+    [
+      "grantUnreadable",
+      POT.grantUnreadable,
+      "Your agent's grant could not be read just now, so the ceiling's limit cannot be shown.",
+    ],
+    ["ceilingProblems.empty", POT.ceilingProblems.empty, "Give a ceiling."],
+    [
+      "ceilingProblems.not_whole",
+      POT.ceilingProblems.not_whole,
+      "Write a whole number of USDC, with no decimals.",
+    ],
+    ["ceilingProblems.zero", POT.ceilingProblems.zero, "The ceiling must be at least 1 USDC."],
+    ["ceilingProblems.too_large", POT.ceilingProblems.too_large, "This is more than a pot takes."],
+    [
+      "ceilingProblems.above_grant",
+      POT.ceilingProblems.above_grant,
+      "This is above the {amount} USDC your agent's grant allows per thirty days.",
+    ],
+    ["fundLabel", POT.fundLabel, "Put in the pot now, in USDC (optional)"],
+    [
+      "fundLine",
+      POT.fundLine,
+      "You can add more later with Add money, or by sending USDC to the pot's address from any wallet.",
+    ],
+    ["gasLabel", POT.gasLabel, "Fee money for your agent's key, in USDC"],
+    [
+      "gasLine",
+      POT.gasLine,
+      "Your agent's key pays a small network fee each time it takes from the pot, so it needs a little USDC of its own first. This amount goes straight to the key and is outside the ceiling.",
+    ],
+    [
+      "gasContract",
+      POT.gasContract,
+      "Your agent's wallet is a contract wallet. It pays its fees its own way, so nothing is sent to it here. It must be able to call a contract itself to take from the pot.",
+    ],
+    [
+      "amountProblems.not_amount",
+      POT.amountProblems.not_amount,
+      "Write an amount in USDC, such as 25 or 0.5.",
+    ],
+    ["amountProblems.too_precise", POT.amountProblems.too_precise, "USDC has six decimals at most."],
+    ["amountProblems.too_large", POT.amountProblems.too_large, "This amount is too large."],
+    [
+      "amountProblems.gas_too_large",
+      POT.amountProblems.gas_too_large,
+      "Fee money is at most 1 USDC. Money for the company goes in the pot.",
+    ],
+    ["amountProblems.empty", POT.amountProblems.empty, "Give an amount."],
+    ["review", POT.review, "Review"],
+    ["reviewTitle", POT.reviewTitle, "Check before you sign"],
+    ["reviewOwner", POT.reviewOwner, "Only owner of the pot: {address} (your wallet)"],
+    [
+      "reviewAgent",
+      POT.reviewAgent,
+      "The key that may take from it: {address} (your agent's wallet in the registry)",
+    ],
+    [
+      "reviewCeiling",
+      POT.reviewCeiling,
+      "Ceiling: {amount} USDC in each thirty-day period. The first period starts when the pot is created.",
+    ],
+    ["reviewAddress", POT.reviewAddress, "The pot's address will be {address}"],
+    [
+      "reviewTotal",
+      POT.reviewTotal,
+      "Your wallet will ask you to send {total} USDC to a contract called Multicall3. In the same transaction it creates the pot, puts {fund} USDC in it and sends {gas} USDC to your agent's key. Nothing goes to Novi Corpus.",
+    ],
+    [
+      "reviewFundOnly",
+      POT.reviewFundOnly,
+      "Your wallet will ask you to send {total} USDC to a contract called Multicall3. In the same transaction it creates the pot and puts the {total} USDC in it. Nothing goes to Novi Corpus.",
+    ],
+    [
+      "reviewGasOnly",
+      POT.reviewGasOnly,
+      "Your wallet will ask you to send {total} USDC to a contract called Multicall3. In the same transaction it creates the pot and sends the {total} USDC to your agent's key. The pot starts empty. Nothing goes to Novi Corpus.",
+    ],
+    [
+      "reviewNoMoney",
+      POT.reviewNoMoney,
+      "Your wallet will ask you to confirm a transaction that sends no money. It creates the pot.",
+    ],
+    [
+      "declaration",
+      POT.declaration,
+      "I declare this pot for the company: it holds the company's money, and its address, its ceiling, what was taken from it and what it holds will show in the public record.",
+    ],
+    ["declarationNeeded", POT.declarationNeeded, "Tick the declaration to go on."],
+    ["create", POT.create, "Create the pot"],
+    ["back", POT.back, "Change something"],
+    ["sending", POT.sending, "Waiting for your wallet."],
+    ["waiting", POT.waiting, "Waiting for the pot to appear on the chain."],
+    ["waitingChange", POT.waitingChange, "Waiting for the chain."],
+    ["created", POT.created, "The pot exists. This is what the chain shows:"],
+    ["done", POT.done, "Done. This is what the chain shows now:"],
+    ["problems.unsupported", POT.problems.unsupported, "The pot is not offered on this network."],
+    [
+      "problems.agent_wallet",
+      POT.problems.agent_wallet,
+      "The agent's wallet in the registry is not one a pot can use: it is unset, or it is your own wallet. Set your agent's wallet first.",
+    ],
+    [
+      "problems.pot_exists",
+      POT.problems.pot_exists,
+      "A pot already exists at this address. Nothing was sent.",
+    ],
+    [
+      "problems.not_enough",
+      POT.problems.not_enough,
+      "Your wallet holds {balance} USDC. This needs {total} USDC and a small fee.",
+    ],
+    [
+      "problems.not_this_wallet",
+      POT.problems.not_this_wallet,
+      "The wallet connected here is not this legal body's guardian wallet. Connect {address}.",
+    ],
+    [
+      "problems.wrong_network",
+      POT.problems.wrong_network,
+      "Your wallet is on another network. Switch it to {network}.",
+    ],
+    [
+      "problems.record_failed",
+      POT.problems.record_failed,
+      "Novi Corpus could not note the pot's address, so nothing was sent. Try again.",
+    ],
+    [
+      "problems.would_revert",
+      POT.problems.would_revert,
+      "The chain would refuse this transaction, so nothing was sent.",
+    ],
+    ["problems.declined", POT.problems.declined, "You declined in your wallet. Nothing was sent."],
+    [
+      "problems.reverted",
+      POT.problems.reverted,
+      "The transaction did not go through. Nothing changed and no money moved.",
+    ],
+    [
+      "problems.no_receipt",
+      POT.problems.no_receipt,
+      "No answer from the chain after three minutes. Check again before you start over: the transaction may have gone through.",
+    ],
+    [
+      "problems.read_failed",
+      POT.problems.read_failed,
+      "The chain could not be read just now. Nothing was changed.",
+    ],
+    [
+      "problems.refused",
+      POT.problems.refused,
+      "This transaction is not one this page may send, so nothing was sent.",
+    ],
+    ["checkAgain", POT.checkAgain, "Check again"],
+    ["shownAddress", POT.shownAddress, "The pot's address: {address}"],
+    ["shownOwner", POT.shownOwner, "Only owner: {address}"],
+    ["shownAgent", POT.shownAgent, "May take from it: {address}"],
+    ["shownCeiling", POT.shownCeiling, "Ceiling: {amount} USDC in each thirty-day period"],
+    [
+      "shownSpent",
+      POT.shownSpent,
+      "Taken in this period: {spent} USDC. {left} USDC left until {date}, when the next period starts.",
+    ],
+    ["shownBalance", POT.shownBalance, "In the pot: {balance} USDC"],
+    ["shownFeeMoney", POT.shownFeeMoney, "Your agent's key holds {amount} USDC for network fees."],
+    [
+      "feeMoneyLow",
+      POT.feeMoneyLow,
+      "This is low. Each take costs the key a small fee in USDC, and the network refuses a take the key cannot pay for. Send it a little with Send fee money.",
+    ],
+    [
+      "limitsNotRead",
+      POT.limitsNotRead,
+      "This pot is set up in a way this page does not read: {reason}. Its ceiling is not shown.",
+    ],
+    ["limitReasons.other_module", POT.limitReasons.other_module, "it has another add-on switched on"],
+    ["limitReasons.guard_set", POT.limitReasons.guard_set, "it has a guard"],
+    [
+      "limitReasons.other_handler",
+      POT.limitReasons.other_handler,
+      "it has a fallback handler other than Safe's own",
+    ],
+    [
+      "limitReasons.usdc_approved",
+      POT.limitReasons.usdc_approved,
+      "it lets your agent's key spend its USDC directly, outside the ceiling",
+    ],
+    [
+      "limitReasons.other_delegate",
+      POT.limitReasons.other_delegate,
+      "a key other than your agent's wallet may take from it",
+    ],
+    [
+      "limitReasons.other_token",
+      POT.limitReasons.other_token,
+      "it has an allowance on something other than USDC",
+    ],
+    ["limitReasons.other_period", POT.limitReasons.other_period, "its period is not thirty days"],
+    [
+      "notYours",
+      POT.notYours,
+      "The address noted for this legal body is not a pot that only your wallet owns.",
+    ],
+    [
+      "onePot",
+      POT.onePot,
+      "A legal body keeps one pot for its whole life. To give your agent an allowance again, use Start again on this pot.",
+    ],
+    ["changeTitle", POT.changeTitle, "Change the allowance"],
+    [
+      "changeLine",
+      POT.changeLine,
+      "Sets a new ceiling from now on. The running period, and what was already taken in it, stay as they are.",
+    ],
+    ["changeSend", POT.changeSend, "Set the new ceiling"],
+    ["stopTitle", POT.stopTitle, "Stop the allowance"],
+    [
+      "stopLine",
+      POT.stopLine,
+      "Removes your agent's key from the pot and switches the allowance off, in one transaction. Your agent can take nothing after it. The money stays in the pot until you take it back.",
+    ],
+    ["stopSend", POT.stopSend, "Stop the allowance"],
+    ["withdrawTitle", POT.withdrawTitle, "Take the money back"],
+    [
+      "withdrawLine",
+      POT.withdrawLine,
+      "Sends everything in the pot, {balance} USDC, to your wallet.",
+    ],
+    ["withdrawSend", POT.withdrawSend, "Take {balance} USDC back"],
+    ["startAgainTitle", POT.startAgainTitle, "Start again"],
+    [
+      "startAgainLine",
+      POT.startAgainLine,
+      "Puts your agent's key back on this pot with the ceiling you choose, in one transaction. A new thirty-day period starts now, with nothing taken yet.",
+    ],
+    ["startAgainSend", POT.startAgainSend, "Start again"],
+    ["newKeyTitle", POT.newKeyTitle, "My agent has a new key"],
+    [
+      "newKeyLine",
+      POT.newKeyLine,
+      "Your agent's wallet in the registry is now {address}. This takes the old key off the pot and lets the new one take from it, with the ceiling you choose, in one transaction. A new thirty-day period starts now for the new key.",
+    ],
+    ["newKeySend", POT.newKeySend, "Move the allowance to the new key"],
+    ["addMoneyTitle", POT.addMoneyTitle, "Add money"],
+    [
+      "addMoneyLine",
+      POT.addMoneyLine,
+      "Sends USDC from your wallet to the pot, {address}. Nothing goes to Novi Corpus.",
+    ],
+    ["addMoneyLabel", POT.addMoneyLabel, "Amount, in USDC"],
+    ["addMoneySend", POT.addMoneySend, "Add {amount} USDC"],
+    ["feeMoneyTitle", POT.feeMoneyTitle, "Send fee money"],
+    [
+      "feeMoneyLine",
+      POT.feeMoneyLine,
+      "Sends a little USDC from your wallet to your agent's key, {address}, for its network fees. It is outside the ceiling. At most 1 USDC.",
+    ],
+    ["feeMoneySend", POT.feeMoneySend, "Send {amount} USDC"],
+    ["offRecordTitle", POT.offRecordTitle, "Take the pot off the public record"],
+    [
+      "offRecordLine",
+      POT.offRecordLine,
+      "The record stops showing this pot beside the legal body. The pot, its money and its allowance stay as they are. A search by the pot's address still leads to the company, marked as a former pot.",
+    ],
+    ["offRecordSend", POT.offRecordSend, "Take it off the record"],
+    [
+      "offRecord",
+      POT.offRecord,
+      "This pot is off the public record. A search by its address still leads to the company, marked as a former pot.",
+    ],
+    ["backOnTitle", POT.backOnTitle, "Put the pot back on the public record"],
+    ["backOnSend", POT.backOnSend, "Put it back on the record"],
+    ["agentTitle", POT.agentTitle, "For your agent"],
+    [
+      "agentLine",
+      POT.agentLine,
+      "Your agent takes from the pot with its own key. Novi Corpus never holds that key and sends nothing for it.",
+    ],
+    [
+      "agentMcp",
+      POT.agentMcp,
+      "Over MCP: the tool get_pot reads what is left, and prepare_pot_take prepares a take for the agent's key to send.",
+    ],
+    [
+      "agentCommandIntro",
+      POT.agentCommandIntro,
+      "Or, with Foundry where the agent runs, one command. PAYEE is who is paid. UNITS is the amount in millionths of a USDC: 1 USDC is 1000000.",
+    ],
+    [
+      "agentCommand",
+      POT.agentCommand,
+      'cast send {module} "executeAllowanceTransfer(address,address,address,uint96,address,uint96,address,bytes)" {pot} {token} PAYEE UNITS 0x0000000000000000000000000000000000000000 0 {agent} 0x --gas-limit 200000 --rpc-url {rpc} --account agent-key',
+    ],
+    ["agentReadIntro", POT.agentReadIntro, "To read what is left:"],
+    [
+      "agentRead",
+      POT.agentRead,
+      'cast call {module} "getTokenAllowance(address,address,address)(uint256[5])" {pot} {agent} {token} --rpc-url {rpc}',
+    ],
+    [
+      "agentReadLine",
+      POT.agentReadLine,
+      "The five numbers are the ceiling, what was taken in this period, the period in minutes, the minute the period started, and a counter.",
+    ],
+    [
+      "recordCeiling",
+      POT.recordCeiling,
+      "The guardian declared this pot for the company: {address}. The agent's key may take up to {amount} USDC from it in each thirty-day period; the current one ends on {ends}. It holds {balance} USDC. Read from the chain on {date}.",
+    ],
+    [
+      "recordNotRead",
+      POT.recordNotRead,
+      "The guardian declared this pot for the company: {address}. Its limits were not read.",
+    ],
+    ["recordUnavailable", POT.recordUnavailable, "The company's pot could not be read just now."],
   ])("%s, word for word", (_key, actual, expected) => {
     expect(actual).toBe(expected);
   });
