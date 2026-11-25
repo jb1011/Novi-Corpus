@@ -18,14 +18,19 @@ import { noticeSentence } from "@/lib/legalBody/notice";
 import { potAddresses } from "@/lib/legalBody/safePot";
 import { potCeilingCapFromGrant, potReading } from "@/lib/legalBody/safePotRules";
 import { potReadsAllowed, potRecordWallet, type PotCardShown } from "@/lib/legalBody/safePotRun";
-import { potCard } from "@/lib/legalBody/safePotStep";
+import { notedPotChecked, potCard } from "@/lib/legalBody/safePotStep";
 import { publicReadAllowed, publicRecordOf } from "@/lib/legalBody/standing";
 import { AgentWalletStep } from "./AgentWalletStep";
 import { LegalBodyRecord } from "./LegalBodyRecord";
 import { PotManage, PotTakeOffCard, usePotCardLock } from "./PotManage";
 import { PotCardView } from "./PotPanels";
 import { PotStep } from "./PotStep";
-import type { CompanyView, LegalBodyByAgent, LegalBodyOrderView } from "@/lib/api/types";
+import type {
+  CompanyView,
+  LegalBodyByAgent,
+  LegalBodyOrderView,
+  OrderPotView,
+} from "@/lib/api/types";
 import type { LegalBodyStepKit } from "./LegalBodyFlow";
 
 const D = LEGAL_BODY_COPY.done;
@@ -144,6 +149,12 @@ function WalletCard({ card, onOpen }: { card: DoneWalletCard; onOpen: () => void
  * pot. Each is read once as the page shows it, and again after a transaction (`reread`). One lock
  * for the card (`usePotCardLock`): one action at a time (Ruling R25).
  *
+ * Ruling R32: the noted pot is read on the chain, and acted on, ONLY at the address the browser
+ * recomputes from its own birth details and the order's guardian (`notedPotChecked`), and only
+ * when that is the address noted, in any letter case. Otherwise the page says the address is not
+ * a pot only the guardian's wallet owns and offers no wallet action (no setup, no money, no Safe
+ * action): only the take off, while it is on the record.
+ *
  * `potCard` decides: nothing; the card while a read is out; the offer, whose click opens the setup
  * step here, in place, where it stays from then on; or the pot's own card (`PotManage`): what the
  * chain shows, and the guardian's actions on the same pot, each read again in its click. A read
@@ -172,13 +183,19 @@ function DonePot({
   const potQuery = useOrderPotQuery(order.id, true);
   const grantQuery = useOrderGrantQuery(order.id, allowed);
   // undefined while it is read, null for no note.
-  const noted = potQuery.data === undefined ? undefined : potQuery.data.pot;
-  const rawPot = allowed && noted ? noted.address : null;
+  const served = potQuery.data === undefined ? undefined : potQuery.data.pot;
+  const a = potAddresses(config.chainId);
+  // Ruling R32: the address the browser recomputes from the note's own birth details; the note is
+  // read, and acted on, only at it.
+  const verified = a !== null && served ? notedPotChecked(a, order.guardian, served) : null;
+  const notYours = a !== null && served !== null && served !== undefined && verified === null;
+  const noted: OrderPotView | null | undefined =
+    served && verified !== null ? { ...served, address: verified } : served;
+  const rawPot = allowed && verified !== null ? verified : null;
   const rawQuery = usePotRawQuery(config.chainId, rawPot, allowed ? wallet : null);
   const [open, setOpen] = useState(false);
   const lock = usePotCardLock();
 
-  const a = potAddresses(config.chainId);
   const raw = rawPot !== null ? rawQuery.data : undefined;
   const reading =
     raw !== undefined && a !== null && wallet !== null
@@ -212,6 +229,11 @@ function DonePot({
     noted && noted.onRecord === true && reading?.state !== "absent" ? (
       <PotTakeOffCard kit={kit} order={order} noted={noted} lock={lock} onChanged={reread} />
     ) : null;
+  // Ruling R32: a noted address its birth details do not predict: no wallet action of any kind.
+  if (notYours && served)
+    return (
+      <PotTakeOffCard kit={kit} order={order} noted={served} lock={lock} onChanged={reread} notYours />
+    );
   if (!allowed) return takeOff;
   // The record has been read and names no wallet of the agent's own, or the order is not one for
   // the pot: nothing of it here but the take off.

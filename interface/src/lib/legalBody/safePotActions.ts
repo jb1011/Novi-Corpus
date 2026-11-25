@@ -32,6 +32,7 @@ import {
   POT_TRANSFER_GAS_CAP,
   unitsToWei,
   USDC_UNIT,
+  type PotAddresses,
 } from "./safePot";
 import type { PotCeilingCap, PotRaw, PotReading } from "./safePotRules";
 import {
@@ -42,6 +43,7 @@ import {
   type PotPreflightProblem,
 } from "./safePotRun";
 import {
+  notedPotChecked,
   potCreatedView,
   potFeeLines,
   potFormCheck,
@@ -287,6 +289,9 @@ async function actionChainFailure(cause: unknown, d: PotActionDeps): Promise<Pot
 /**
  * One of the guardian's Safe actions, in this order, stopping at the first that fails, and asking
  * the card's lifetime after EVERY await and right before the send (`left`):
+ *  0. Ruling R32: the card's noted pot is at the address its own birth details and the guardian
+ *     predict (`notedPotChecked`, any letter case), and it is the card's pot, else `refused` with
+ *     cause POT_ACTION_MOVED, before anything is read;
  *  1. the click's reads (`read_failed`, with the error as `cause`; a registry that could not be
  *     read too);
  *  2. a registry key of the agent's own (`agent_wallet` for none, the zero address or the
@@ -316,9 +321,17 @@ export async function runPotAction(
      *  goes to, which the click's own read must name too. */
     shownAgentWallet: Address;
     newCeilingUnits?: bigint;
+    /** The pot's table on the configured chain. */
+    addresses: PotAddresses;
+    /** The card's noted pot (`GET /pot`'s answer the card was drawn with). */
+    noted: OrderPotView;
   },
   d: PotActionDeps,
 ): Promise<{ ok: true; hash: Hex; agentWallet: Address } | PotActionFailure> {
+  // 0.
+  const checked0 = notedPotChecked(p.addresses, p.guardian, p.noted);
+  if (checked0 === null || !sameAddress(checked0, p.pot))
+    return { ok: false, problem: "refused", cause: POT_ACTION_MOVED };
   // 1.
   let fresh: PotActionRead;
   try {
@@ -331,18 +344,16 @@ export async function runPotAction(
   const wallet = fresh.agentWallet;
   if (wallet === "unreadable") return { ok: false, problem: "read_failed" };
   if (!agentsOwn(wallet, p.guardian)) return { ok: false, problem: "agent_wallet" };
+  const key = wallet;
   if (fresh.raw === null || fresh.reading === null) return { ok: false, problem: "read_failed" };
   // 3.
-  if (
-    (action === "start_again" || action === "new_key") &&
-    !sameAddress(wallet, p.shownAgentWallet)
-  )
+  if ((action === "start_again" || action === "new_key") && !sameAddress(key, p.shownAgentWallet))
     return { ok: false, problem: "refused", cause: POT_ACTION_MOVED };
   // 4.
   const ctx = potActionContext(action, {
-    pot: p.pot,
+    pot: checked0,
     guardian: p.guardian,
-    agentWallet: wallet,
+    agentWallet: key,
     raw: fresh.raw,
     reading: fresh.reading,
     newCeilingUnits: p.newCeilingUnits,
@@ -388,7 +399,7 @@ export async function runPotAction(
     return { ok: false, problem: chainRefused(cause) ? "would_revert" : "refused", cause };
   }
   if (!sent.ok) return { ok: false, problem: "refused", cause: sent.problem };
-  return { ok: true, hash: sent.hash, agentWallet: wallet };
+  return { ok: true, hash: sent.hash, agentWallet: key };
 }
 
 /** A failed action's sentences (Task 10's), and whether the card reads the pot again: a click that
@@ -614,7 +625,11 @@ async function transferChainFailure(
 /**
  * One USDC transfer of the guardian's, in this order, stopping at the first that fails, and asking
  * the card's lifetime after EVERY await and right before the send (`left`):
- *  0. an amount that is a bigint above 0, else `refused` with nothing read;
+ *  0. an amount that is a bigint above 0, else `refused` with nothing read. Then Ruling R32, before
+ *     any chain read of the pot: for add money, `GET /pot` read now (`pot_unreadable` when it
+ *     fails) names a pot on the record at the address its own birth details and the guardian
+ *     predict (`notedPotChecked`), and it is the card's pot; for fee money, the card's noted pot is
+ *     at its predicted address and is the card's pot. Else `refused`, cause POT_ACTION_MOVED;
  *  1. the click's reads (`read_failed`, with the error as `cause`; a registry that could not be
  *     read too);
  *  2. a registry key of the agent's own (`agent_wallet` for none, the zero address or the
@@ -622,8 +637,7 @@ async function transferChainFailure(
  *  3. the kind's own rules, from THAT read (`refused`, cause POT_ACTION_MOVED, the card reads
  *     again, unless said otherwise):
  *     - add money: a pot that reads `ceiling_read` or `stopped` (so it holds the pot's code, is the
- *       guardian's alone, and after a changed-key setup the new key is set first); then `GET /pot`
- *       read now (`pot_unreadable` when it fails) names this pot, on the record. The context is
+ *       guardian's alone, and after a changed-key setup the new key is set first). The context is
  *       the noted pot and the amount;
  *     - fee money: the registry's key of the click is the one the card's panel named
  *       (`shownAgentWallet`, in any letter case; Ruling R23 applied to money: the guardian never
@@ -649,6 +663,10 @@ export async function runPotTransfer(
     /** The key the fee money panel names: the click's own read must name it too. */
     shownAgentWallet: Address;
     amountUnits: bigint;
+    /** The pot's table on the configured chain. */
+    addresses: PotAddresses;
+    /** The card's noted pot (`GET /pot`'s answer the card was drawn with). */
+    noted: OrderPotView;
   },
   d: PotTransferDeps,
 ): Promise<{ ok: true; hash: Hex; agentWallet: Address } | PotTransferFailure> {
@@ -656,6 +674,19 @@ export async function runPotTransfer(
   const amountUnits: unknown = p.amountUnits;
   if (typeof amountUnits !== "bigint" || amountUnits <= ZERO) return { ok: false, problem: "refused" };
   const totalWei = unitsToWei(amountUnits);
+  // Ruling R32: the pot's address is the one its birth details predict, before any read of it.
+  let noted: OrderPotView | null;
+  if (kind === "add_money") {
+    try {
+      noted = await d.readNoted();
+    } catch (cause) {
+      return d.alive() ? { ok: false, problem: "pot_unreadable", cause } : LEFT_TRANSFER;
+    }
+    if (!d.alive()) return LEFT_TRANSFER;
+    if (noted === null || noted.onRecord !== true) return MOVED;
+  } else noted = p.noted;
+  const predicted = notedPotChecked(p.addresses, p.guardian, noted);
+  if (predicted === null || !sameAddress(predicted, p.pot)) return MOVED;
   // 1.
   let fresh: PotTransferRead;
   try {
@@ -676,15 +707,7 @@ export async function runPotTransfer(
   let ctx: PotTransferContext;
   if (kind === "add_money") {
     if (reading.state !== "ceiling_read" && reading.state !== "stopped") return MOVED;
-    let noted: OrderPotView | null;
-    try {
-      noted = await d.readNoted();
-    } catch (cause) {
-      return d.alive() ? { ok: false, problem: "pot_unreadable", cause } : LEFT_TRANSFER;
-    }
-    if (!d.alive()) return LEFT_TRANSFER;
-    if (noted === null || !sameAddress(noted.address, p.pot) || noted.onRecord !== true) return MOVED;
-    ctx = { kind: "add_money", pot: p.pot, guardian: p.guardian, amountUnits };
+    ctx = { kind: "add_money", pot: predicted, guardian: p.guardian, amountUnits };
   } else {
     if (!sameAddress(wallet, p.shownAgentWallet)) return MOVED;
     if (raw.agentHasCode !== false)

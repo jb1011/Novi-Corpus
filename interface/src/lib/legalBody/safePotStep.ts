@@ -54,8 +54,10 @@ import {
   POT_FUND_MAX_UNITS,
   POT_PERIOD_MINUTES,
   potAddresses,
+  potInitializer,
   potSetupCalls,
   potStopArgs,
+  predictPotAddress,
   unitsToWei,
   USDC_UNIT,
   type PotAddresses,
@@ -318,7 +320,12 @@ export type PotProblem =
 type NotedBirth = { saltNonce: bigint; agentWallet: Address; ceilingUnits: bigint };
 
 function notedBirthOf(noted: OrderPotView): NotedBirth | null {
-  const birth: unknown = noted.birth;
+  return birthOf(noted.birth);
+}
+
+/** Birth details as numbers: a canonical salt number, a first key that is an address, and a
+ *  ceiling that is a whole number of USDC above 0; else null. */
+function birthOf(birth: unknown): NotedBirth | null {
   if (typeof birth !== "object" || birth === null) return null;
   const { saltNonce, agentWallet } = birth as Record<string, unknown>;
   const ceilingUnits = notedCeiling(birth as PotBirthNote);
@@ -326,6 +333,48 @@ function notedBirthOf(noted: OrderPotView): NotedBirth | null {
   if (typeof agentWallet !== "string" || !ADDRESS.test(agentWallet)) return null;
   if (ceilingUnits === null) return null;
   return { saltNonce: BigInt(saltNonce), agentWallet: agentWallet as Address, ceilingUnits };
+}
+
+/**
+ * The pot's address as the browser recomputes it (Ruling R32): from the birth details alone and
+ * the order's guardian, the Safe the guardian alone owns, set up for the birth's first key with
+ * the table's USDC, the birth's ceiling and the thirty-day period, at the birth's salt number.
+ * Null when the birth details do not read, or the table is not the pinned one. The reading rules
+ * are sound only for this address (its initializer fixes how the Safe was set up), so the page
+ * reads, and acts on, a noted pot only at this address: never at one the server named alone.
+ */
+export function notedPotAddress(a: PotAddresses, guardian: Address, birth: unknown): Address | null {
+  const b = birthOf(birth);
+  if (b === null) return null;
+  try {
+    return predictPotAddress(
+      a,
+      potInitializer(a, {
+        guardian,
+        agentWallet: b.agentWallet,
+        token: a.usdc,
+        ceilingUnits: b.ceilingUnits,
+        periodMinutes: POT_PERIOD_MINUTES,
+      }),
+      b.saltNonce,
+    );
+  } catch {
+    return null;
+  }
+}
+
+/** The noted pot's address when it is the one its own birth details and the guardian predict, in
+ *  any letter case (`notedPotAddress`), checksummed; null for no note, a birth that does not read,
+ *  or an address that is not the prediction. */
+export function notedPotChecked(
+  a: PotAddresses,
+  guardian: Address,
+  noted: OrderPotView | null | undefined,
+): Address | null {
+  if (noted === null || noted === undefined) return null;
+  const predicted = notedPotAddress(a, guardian, noted.birth);
+  if (predicted === null || !sameAddress(predicted, noted.address)) return null;
+  return predicted;
 }
 
 /** A registry answer that names an address. */

@@ -174,7 +174,16 @@ export function PotMoney({
     try {
       // The key the fee money panel names goes in only to be compared: the transfer is built from
       // the click's own read of the registry, and refused unless the two are the same.
-      const shown = { pot: noted.address, guardian, shownAgentWallet: shownWallet, amountUnits: amount.amountUnits };
+      // The noted pot goes in to be recomputed from its birth details before anything is read
+      // (Ruling R32): for Add money the server's answer read in the click, for fee money this one.
+      const shown = {
+        pot: noted.address,
+        guardian,
+        shownAgentWallet: shownWallet,
+        amountUnits: amount.amountUnits,
+        addresses: a,
+        noted,
+      };
       const result = await runPotTransfer(kind, shown, {
         alive: () => life.alive(),
         read: async () => {

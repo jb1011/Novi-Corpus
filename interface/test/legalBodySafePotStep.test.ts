@@ -18,6 +18,7 @@ import {
   ExecutionRevertedError,
   HttpRequestError,
   InsufficientFundsError,
+  decodeFunctionData,
   keccak256,
   size,
   zeroAddress,
@@ -44,6 +45,7 @@ import type { LegalBodyNotice } from "@/lib/legalBody/flow";
 import { formatDate } from "@/lib/format";
 import {
   allowanceModuleAbi,
+  erc20Abi,
   multicall3Abi,
   POT_EXEC_GAS_CAP,
   POT_FEE_LOW_WEI,
@@ -58,6 +60,8 @@ import {
 } from "@/lib/legalBody/safePot";
 import { potReading, type PotRaw, type PotReading } from "@/lib/legalBody/safePotRules";
 import {
+  notedPotAddress,
+  notedPotChecked,
   POT_SERVER_CODES,
   potAgentCommands,
   potCard,
@@ -2038,6 +2042,67 @@ describe("potExecSimulationOk: the simulated execTransaction answered true", () 
   });
 });
 
+describe("Ruling R32: the browser recomputes the noted pot's address from its own birth details", () => {
+  /** The real Safe of 24 Nov, as a note of it would read: born with a five-minute period. */
+  const REAL_NOTE: OrderPotView = {
+    address: SAFE_CREATED,
+    onRecord: true,
+    declaredAt: 1_764_000_000,
+    birth: { saltNonce: "72231338869903870587851170785833461215", agentWallet: A, ceilingUnits: "2000000" },
+  };
+
+  test("notedPotAddress: V3's birth and the guardian give V3's pot; the address moves with every detail and with the guardian", () => {
+    expect(notedPotAddress(T, G, NOTED.birth)).toBe(V3_POT);
+    expect(notedPotAddress(T, G.toLowerCase() as Address, { ...NOTED.birth, agentWallet: A.toLowerCase() })).toBe(V3_POT);
+    for (const [what, guardian, birth] of [
+      ["another salt", G, { ...NOTED.birth, saltNonce: "2" }],
+      ["another ceiling", G, { ...NOTED.birth, ceilingUnits: "60000000" }],
+      ["another first key", G, { ...NOTED.birth, agentWallet: P }],
+      ["another guardian", P, NOTED.birth],
+    ] as [string, Address, unknown][]) {
+      const other = notedPotAddress(T, guardian, birth);
+      expect(other, what).not.toBeNull();
+      expect(other, what).not.toBe(V3_POT);
+    }
+    // The real Safe was born with a five-minute period: no note of it recomputes to it.
+    expect(notedPotAddress(T, G, REAL_NOTE.birth)).not.toBe(SAFE_CREATED);
+  });
+
+  test("notedPotAddress: birth details that do not read give null, never a throw", () => {
+    for (const birth of [
+      null,
+      undefined,
+      "1",
+      {},
+      { ...NOTED.birth, saltNonce: "01" },
+      { ...NOTED.birth, saltNonce: 1 },
+      { ...NOTED.birth, agentWallet: "0x1234" },
+      { ...NOTED.birth, ceilingUnits: "0" },
+      { ...NOTED.birth, ceilingUnits: "50000001" },
+    ])
+      expect(notedPotAddress(T, G, birth), JSON.stringify(birth)).toBeNull();
+    // A table that is not the pinned one predicts nothing.
+    expect(notedPotAddress({ ...T, proxyFactory: OTHER_MODULE }, G, NOTED.birth)).toBeNull();
+  });
+
+  test("notedPotChecked: the prediction when the note's address is it, in any letter case; null for no note, another address or a birth that does not read", () => {
+    expect(notedPotChecked(T, G, NOTED)).toBe(V3_POT);
+    expect(notedPotChecked(T, G, { ...NOTED, address: V3_POT.toLowerCase() as Address })).toBe(V3_POT);
+    expect(notedPotChecked(T, G, { ...NOTED, address: `0x${V3_POT.slice(2).toUpperCase()}` as Address })).toBe(V3_POT);
+    for (const [what, noted] of [
+      ["no note", null],
+      ["not read yet", undefined],
+      ["another address", { ...NOTED, address: SAFE_CREATED }],
+      ["the real Safe's own note", REAL_NOTE],
+      ["a birth that does not read", { ...NOTED, birth: { ...NOTED.birth, saltNonce: "x" } }],
+    ] as [string, OrderPotView | null | undefined][])
+      expect(notedPotChecked(T, G, noted), what).toBeNull();
+    // Another guardian's prediction is another address.
+    expect(notedPotChecked(T, P, NOTED)).toBeNull();
+  });
+
+});
+
 describe("runPotAction: one transaction on the same pot, from the click's own reads", () => {
   type Fresh = Awaited<ReturnType<PotActionDeps["read"]>>;
   /** The click's read: the registry names `agentWallet`, and the pot is read for it. */
@@ -2045,11 +2110,13 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
   const none = (agentWallet: AgentWalletRead): Fresh => ({ agentWallet, raw: null, reading: null });
   /** What the card hands the runner: the pot, the guardian, the key its panel names (Ruling R23),
    *  and the ceiling typed. */
-  const args = (newCeilingUnits?: bigint, shownAgentWallet: Address = A) => ({
-    pot: SAFE_CREATED,
+  const args = (newCeilingUnits?: bigint, shownAgentWallet: Address = A, noted: OrderPotView = NOTED) => ({
+    pot: V3_POT,
     guardian: G,
     shownAgentWallet,
     newCeilingUnits,
+    addresses: T,
+    noted,
   });
   /** Hand-made dependencies that say yes, each recording its call; the allowlist is the real one,
    *  as the card's closure asks it. `impl` replaces any. */
@@ -2141,7 +2208,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
       expect(h.calls, action).toEqual(ALL);
       // What is sent is the context of the click's read, the one the allowlist accepted.
       const want = potActionContext(action, {
-        pot: SAFE_CREATED,
+        pot: V3_POT,
         guardian: G,
         newCeilingUnits: ceiling,
         agentWallet: f.agentWallet as Address,
@@ -2152,6 +2219,43 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
       expect(h.checked, action).toEqual([want]);
     }
     expect(potGasLimit(BigInt(118_984), POT_EXEC_GAS_CAP)).toBe(BigInt(154_680));
+  });
+
+  /** For each action, a pot its fresh read lets it go on: the raw read, the key, the ceiling. */
+  const GOES: [PotSafeAction, PotRaw, Address, bigint | undefined][] = [
+    ["change", HEALTHY, A, USDC(20)],
+    ["stop", HEALTHY, A, undefined],
+    ["withdraw", STOPPED_3, A, undefined],
+    ["start_again", STOPPED, A, USDC(50)],
+    ["new_key", FOR_P, P, USDC(50)],
+  ];
+
+  test("Ruling R32: a noted pot whose address is not what its birth details predict, or whose birth does not read, is refused for each action before anything is read; the right address goes, in any letter case", async () => {
+    const wrong: [string, OrderPotView, Address][] = [
+      ["another address", { ...NOTED, address: SAFE_CREATED }, SAFE_CREATED],
+      ["another salt", { ...NOTED, birth: { ...NOTED.birth, saltNonce: "2" } }, V3_POT],
+      ["another ceiling", { ...NOTED, birth: { ...NOTED.birth, ceilingUnits: "60000000" } }, V3_POT],
+      ["another first key", { ...NOTED, birth: { ...NOTED.birth, agentWallet: P } }, V3_POT],
+      ["a birth that does not read", { ...NOTED, birth: { ...NOTED.birth, saltNonce: "01" } }, V3_POT],
+      ["the card's pot not the noted one", NOTED, SAFE_CREATED],
+    ];
+    for (const [action, raw, wallet, ceiling] of GOES)
+      for (const [what, noted, pot] of wrong) {
+        const h = harness(fresh(raw, wallet));
+        expect(await runPotAction(action, { ...args(ceiling, wallet, noted), pot }, h.d), `${action}, ${what}`).toEqual({
+          ok: false,
+          problem: "refused",
+          cause: POT_ACTION_MOVED,
+        });
+        expect(h.calls, `${action}, ${what}`).toEqual([]);
+      }
+    for (const [action, raw, wallet, ceiling] of GOES) {
+      const h = harness(fresh(raw, wallet));
+      const lower = { ...NOTED, address: V3_POT.toLowerCase() as Address };
+      expect(await runPotAction(action, { ...args(ceiling, wallet, lower), pot: V3_POT.toLowerCase() as Address }, h.d), action).toMatchObject({ ok: true });
+      // What is sent names the recomputed address.
+      expect(h.sent.map((c) => c.pot), action).toEqual([V3_POT]);
+    }
   });
 
   test("a read that throws is read_failed and nothing else is called; a registry that cannot be read is read_failed too", async () => {
@@ -2233,7 +2337,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     expect(h.sent).toEqual([
       {
         kind: "restore",
-        pot: SAFE_CREATED,
+        pot: V3_POT,
         guardian: G,
         agentWallet: P,
         ceilingUnits: USDC(50),
@@ -2245,7 +2349,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     const again = harness(fresh(STOPPED, P));
     expect(await runPotAction("start_again", args(USDC(50), P), again.d)).toMatchObject({ ok: true, agentWallet: P });
     expect(again.sent).toEqual([
-      { kind: "restore", pot: SAFE_CREATED, guardian: G, agentWallet: P, ceilingUnits: USDC(50), delegates: [], modules: [], clearAllowance: false },
+      { kind: "restore", pot: V3_POT, guardian: G, agentWallet: P, ceilingUnits: USDC(50), delegates: [], modules: [], clearAllowance: false },
     ]);
   });
 
@@ -2254,7 +2358,7 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     const stop = harness(fresh(HEALTHY, Q));
     expect(await runPotAction("stop", args(undefined, A), stop.d)).toMatchObject({ ok: true });
     expect(stop.sent).toEqual([
-      { kind: "stop", pot: SAFE_CREATED, guardian: G, delegates: [A], modules: [T.allowanceModule] },
+      { kind: "stop", pot: V3_POT, guardian: G, delegates: [A], modules: [T.allowanceModule] },
     ]);
     const back = harness(fresh(STOPPED_3, Q));
     expect(await runPotAction("withdraw", args(undefined, A), back.d)).toMatchObject({ ok: true });
@@ -2525,20 +2629,19 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     guardianBalanceWei,
   });
   const none = (agentWallet: AgentWalletRead): Fresh => ({ agentWallet, raw: null, reading: null, guardianBalanceWei: BALANCE });
-  /** The real Safe as GET /pot serves it, on the record. */
-  const NOTED_SAFE: OrderPotView = {
-    address: SAFE_CREATED,
-    onRecord: true,
-    declaredAt: 1_764_000_000,
-    birth: { saltNonce: "72231338869903870587851170785833461215", agentWallet: A, ceilingUnits: "2000000" },
-  };
+  /** V3's pot as GET /pot serves it, on the record: an address the browser recomputes from its
+   *  birth details (Ruling R32). The real Safe of 24 Nov was born with a five-minute period, so no
+   *  note of it is ever read as a pot; V14's bytes stay pinned at the allowlist. */
+  const NOTED_SAFE: OrderPotView = NOTED;
   /** What the card hands the runner: the noted pot, the guardian, the key the fee money panel
    *  names, and the amount typed in units. */
-  const args = (amountUnits: bigint, shownAgentWallet: Address = A) => ({
-    pot: SAFE_CREATED,
+  const args = (amountUnits: bigint, shownAgentWallet: Address = A, noted: OrderPotView = NOTED) => ({
+    pot: V3_POT,
     guardian: G,
     shownAgentWallet,
     amountUnits,
+    addresses: T,
+    noted,
   });
   const ADD = BigInt(5_000_000);
   const FEE = BigInt(100_000);
@@ -2615,9 +2718,10 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     };
     return { d, calls, checked, sent, data };
   }
-  const ADD_ALL = ["read", "noted", "preflight", "check", "simulate", "estimate", "account", "send 64140"];
+  // Ruling R32: add money reads GET /pot first, and checks its address, before any read of the pot.
+  const ADD_ALL = ["noted", "read", "preflight", "check", "simulate", "estimate", "account", "send 64140"];
   const FEE_ALL = ["read", "preflight", "check", "simulate", "estimate", "account", "send 64140"];
-  const ADD_CTX: PotTransferContext = { kind: "add_money", pot: SAFE_CREATED, guardian: G, amountUnits: ADD };
+  const ADD_CTX: PotTransferContext = { kind: "add_money", pot: V3_POT, guardian: G, amountUnits: ADD };
   const FEE_CTX: PotTransferContext = { kind: "fee_money", guardian: G, agentWallet: A, agentHasCode: false, amountUnits: FEE };
   const goneAfter = (n: number) => {
     let asked = 0;
@@ -2642,31 +2746,68 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     expect(potGasLimit(ESTIMATE, POT_TRANSFER_GAS_CAP)).toBe(BigInt(64_140));
   });
 
-  test("each accepted context passes Task 4's allowlist with its vector's bytes: V14 (add money, 5 USDC to the real Safe) and V15 (fee money, 0.1 USDC to A)", async () => {
+  test("each accepted context passes Task 4's allowlist: add money is V14's transfer to V3's pot (V14 itself, to the real Safe, stays pinned at the allowlist), and V15 (fee money, 0.1 USDC to A) byte for byte", async () => {
     const add = harness(fresh(HEALTHY));
     await runPotTransfer("add_money", args(ADD), add.d);
     expect(add.data).toHaveLength(1);
     expect(size(add.data[0])).toBe(68);
-    expect(keccak256(add.data[0])).toBe("0x6269aa34f7e2541c8a744afcb67cfe5d56fe010b0019d20866a2d1ae6bd4e168");
+    expect(decodeFunctionData({ abi: erc20Abi, data: add.data[0] })).toEqual({
+      functionName: "transfer",
+      args: [V3_POT, ADD],
+    });
     const fee = harness(fresh(HEALTHY));
     await runPotTransfer("fee_money", args(FEE), fee.d);
     expect(size(fee.data[0])).toBe(68);
     expect(keccak256(fee.data[0])).toBe("0x81c73e55a126dfa49b01a558cb943527c09e803ac8ae17fa26f2b84a6532ab10");
   });
 
+  test("Ruling R32: add money checks the fresh GET /pot answer, fee money the card's note, against the address its own birth details predict, before any chain read; the right address goes, in any letter case", async () => {
+    const wrong: [string, OrderPotView][] = [
+      ["another address", { ...NOTED, address: SAFE_CREATED }],
+      ["another salt", { ...NOTED, birth: { ...NOTED.birth, saltNonce: "2" } }],
+      ["another ceiling", { ...NOTED, birth: { ...NOTED.birth, ceilingUnits: "60000000" } }],
+      ["another first key", { ...NOTED, birth: { ...NOTED.birth, agentWallet: P } }],
+      ["a birth that does not read", { ...NOTED, birth: null as unknown as OrderPotView["birth"] }],
+    ];
+    for (const [what, noted] of wrong) {
+      // Add money: the server's fresh answer is the one checked; the card's own note is right.
+      const add = harness(fresh(HEALTHY), { readNoted: async () => noted });
+      expect(await runPotTransfer("add_money", args(ADD), add.d), what).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
+      expect(add.calls, what).toEqual(["noted"]);
+      expect(add.sent, what).toEqual([]);
+      // Fee money: the card's note is checked, and nothing is read.
+      const fee = harness(fresh(HEALTHY));
+      expect(await runPotTransfer("fee_money", args(FEE, A, noted), fee.d), what).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
+      expect(fee.calls, what).toEqual([]);
+    }
+    // The card's pot not the noted one: both refuse.
+    const elsewhere = { ...args(ADD), pot: SAFE_CREATED };
+    expect(await runPotTransfer("add_money", elsewhere, harness(fresh(HEALTHY)).d)).toMatchObject({ cause: POT_ACTION_MOVED });
+    expect(await runPotTransfer("fee_money", { ...elsewhere, amountUnits: FEE }, harness(fresh(HEALTHY)).d)).toMatchObject({ cause: POT_ACTION_MOVED });
+    // Letter case is ignored; what is sent names the recomputed address.
+    const lower = { ...NOTED, address: V3_POT.toLowerCase() as Address };
+    const add = harness(fresh(HEALTHY), { readNoted: async () => lower });
+    expect(await runPotTransfer("add_money", { ...args(ADD), pot: V3_POT.toLowerCase() as Address }, add.d)).toMatchObject({ ok: true });
+    expect(add.sent).toEqual([ADD_CTX]);
+    const fee = harness(fresh(HEALTHY));
+    expect(await runPotTransfer("fee_money", args(FEE, A, lower), fee.d)).toMatchObject({ ok: true });
+  });
+
   test("a read that throws is read_failed and nothing else is called; a registry that cannot be read too; a registry naming the guardian, none or zero is agent_wallet", async () => {
     const error = offlineError();
     for (const kind of ["add_money", "fee_money"] as PotTransfer[]) {
+      // Add money has read GET /pot first (Ruling R32).
+      const reads = kind === "add_money" ? ["noted", "read"] : ["read"];
       const thrown = harness(fresh(HEALTHY), { read: async () => Promise.reject(error) });
       expect(await runPotTransfer(kind, args(ADD), thrown.d)).toEqual({ ok: false, problem: "read_failed", cause: error });
-      expect(thrown.calls).toEqual(["read"]);
+      expect(thrown.calls).toEqual(reads);
       const unread = harness(none("unreadable"));
       expect(await runPotTransfer(kind, args(FEE), unread.d)).toMatchObject({ ok: false, problem: "read_failed" });
-      expect(unread.calls).toEqual(["read"]);
+      expect(unread.calls).toEqual(reads);
       for (const f of [fresh(HEALTHY, G), fresh(HEALTHY, G.toLowerCase() as Address), none("none"), fresh(HEALTHY, zeroAddress)]) {
         const h = harness(f);
         expect(await runPotTransfer(kind, args(FEE), h.d), `${kind} ${String(f.agentWallet)}`).toEqual({ ok: false, problem: "agent_wallet" });
-        expect(h.calls).toEqual(["read"]);
+        expect(h.calls).toEqual(reads);
       }
     }
   });
@@ -2682,7 +2823,7 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     for (const [what, f] of cases) {
       const h = harness(f);
       expect(await runPotTransfer("add_money", args(ADD), h.d), what).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
-      expect(h.calls, what).toEqual(["read"]);
+      expect(h.calls, what).toEqual(["noted", "read"]);
       expect(h.sent, what).toEqual([]);
     }
     expect(potTransferFailureView({ ok: false, problem: "refused", cause: POT_ACTION_MOVED }, { environment: "sandbox", guardian: G })).toEqual({
@@ -2695,23 +2836,24 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
 
   test("add money only to the noted pot, on the record, read fresh in the click: another address, off the record or no note is refused; a failed read is pot_unreadable", async () => {
     for (const [what, noted] of [
-      ["another address noted", { ...NOTED_SAFE, address: V3_POT }],
+      ["another address noted", { ...NOTED_SAFE, address: SAFE_CREATED }],
       ["off the record", { ...NOTED_SAFE, onRecord: false }],
       ["no note", null],
     ] as [string, OrderPotView | null][]) {
       const h = harness(fresh(HEALTHY), { readNoted: async () => noted });
       expect(await runPotTransfer("add_money", args(ADD), h.d), what).toEqual({ ok: false, problem: "refused", cause: POT_ACTION_MOVED });
-      expect(h.calls, what).toEqual(["read", "noted"]);
+      // Refused on the server's answer alone: the pot is not read (Ruling R32).
+      expect(h.calls, what).toEqual(["noted"]);
     }
     const server = new ApiError(503, { code: "chain_unavailable", message: "x" });
     const failed = harness(fresh(HEALTHY), { readNoted: async () => Promise.reject(server) });
     expect(await runPotTransfer("add_money", args(ADD), failed.d)).toEqual({ ok: false, problem: "pot_unreadable", cause: server });
-    expect(failed.calls).toEqual(["read", "noted"]);
+    expect(failed.calls).toEqual(["noted"]);
     expect(potTransferFailureView({ ok: false, problem: "pot_unreadable", cause: server }, { environment: "sandbox", guardian: G }).lines).toEqual([
       P_.problems.pot_unreadable,
     ]);
     // The same address in another letter case is the noted pot.
-    const lower = harness(fresh(HEALTHY), { readNoted: async () => ({ ...NOTED_SAFE, address: SAFE_CREATED.toLowerCase() as Address }) });
+    const lower = harness(fresh(HEALTHY), { readNoted: async () => ({ ...NOTED_SAFE, address: V3_POT.toLowerCase() as Address }) });
     expect((await runPotTransfer("add_money", args(ADD), lower.d)).ok).toBe(true);
     // Fee money does not ask the record.
     const fee = harness(fresh(HEALTHY), { readNoted: async () => null });
@@ -2750,7 +2892,7 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     const under = WEI(ADD) - BigInt(1);
     const add = harness(fresh(HEALTHY, A, under));
     expect(await runPotTransfer("add_money", args(ADD), add.d)).toEqual({ ok: false, problem: "not_enough", balanceWei: under, totalWei: WEI(ADD) });
-    expect(add.calls).toEqual(["read", "noted"]);
+    expect(add.calls).toEqual(["noted", "read"]);
     const feeUnder = WEI(FEE) - BigInt(1);
     const fee = harness(fresh(HEALTHY, A, feeUnder));
     expect(await runPotTransfer("fee_money", args(FEE), fee.d)).toMatchObject({ ok: false, problem: "not_enough", totalWei: WEI(FEE) });
@@ -2779,7 +2921,7 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     const rich = WEI(USDC(2_000_000_000));
     const add = harness(fresh(HEALTHY, A, rich));
     expect(await runPotTransfer("add_money", args(USDC(1_000_000_000) + BigInt(1)), add.d)).toEqual({ ok: false, problem: "refused", cause: "fund_out_of_bounds" });
-    expect(add.calls).toEqual(["read", "noted", "preflight", "check"]);
+    expect(add.calls).toEqual(["noted", "read", "preflight", "check"]);
     const fee = harness(fresh(HEALTHY));
     expect(await runPotTransfer("fee_money", args(USDC(1) + BigInt(1)), fee.d)).toEqual({ ok: false, problem: "refused", cause: "agent_gas_out_of_bounds" });
     expect(fee.calls).toEqual(["read", "preflight", "check"]);
@@ -2808,7 +2950,7 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     ] as Partial<PotTransferDeps>[]) {
       const h = harness(fresh(HEALTHY), impl);
       expect(await runPotTransfer("add_money", args(ADD), h.d)).toMatchObject({ ok: false, problem: "would_revert" });
-      expect(h.calls).toEqual(["read", "noted", "preflight", "check", "simulate", "estimate"]);
+      expect(h.calls).toEqual(["noted", "read", "preflight", "check", "simulate", "estimate"]);
     }
     const atCap = harness(fresh(HEALTHY), { estimate: async () => POT_TRANSFER_GAS_CAP });
     expect((await runPotTransfer("add_money", args(ADD), atCap.d)).ok).toBe(true);
@@ -2831,12 +2973,13 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
   });
 
   test("the step's lifetime is asked after every await and right before the send: a person who left gets no wallet prompt", async () => {
+    // Add money reads GET /pot first (Ruling R32), then the chain.
     const addCases: [number, string[]][] = [
-      [0, ["read"]],
-      [1, ["read", "noted"]],
-      [2, ["read", "noted", "preflight", "check", "simulate"]],
-      [3, ["read", "noted", "preflight", "check", "simulate", "estimate"]],
-      [4, ["read", "noted", "preflight", "check", "simulate", "estimate", "account"]],
+      [0, ["noted"]],
+      [1, ["noted", "read"]],
+      [2, ["noted", "read", "preflight", "check", "simulate"]],
+      [3, ["noted", "read", "preflight", "check", "simulate", "estimate"]],
+      [4, ["noted", "read", "preflight", "check", "simulate", "estimate", "account"]],
     ];
     for (const [n, upTo] of addCases) {
       const h = harness(fresh(HEALTHY), { alive: goneAfter(n) });
@@ -2856,8 +2999,8 @@ describe("runPotTransfer: one USDC transfer, from the click's own reads", () => 
     }
     // A read, a note or a simulation that threw while the person left is not said either.
     for (const impl of [
-      { alive: goneAfter(0), read: async () => Promise.reject(offlineError()) },
-      { alive: goneAfter(1), readNoted: async () => Promise.reject(offlineError()) },
+      { alive: goneAfter(0), readNoted: async () => Promise.reject(offlineError()) },
+      { alive: goneAfter(1), read: async () => Promise.reject(offlineError()) },
       { alive: goneAfter(2), simulate: async () => Promise.reject(callRevertError()) },
       { alive: goneAfter(2), simulate: async () => Promise.reject(moneyShortError()) },
     ] as Partial<PotTransferDeps>[]) {

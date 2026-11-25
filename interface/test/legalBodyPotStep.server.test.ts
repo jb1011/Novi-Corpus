@@ -173,6 +173,8 @@ const A = "0x2dDcf8da463526614b9FA5E87Db259a3Bf06667C" as const;
 const P = "0xE886e729CC5C43bE28642827C4e72e660A83C7E8" as const;
 /** V3 with salt nonce 1: G, A, USDC, 50 USDC in each thirty-day period. */
 const V3_POT = "0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D" as const;
+/** The Safe the real run created: an address V3's birth details do not predict. */
+const SAFE_CREATED = "0x0bbBa174c1D6b6Edd2F1A86ff5af435B645b77EF" as const;
 const CHAIN = 5042002;
 const AGENT_ID = "897126";
 const NOW_S = Math.floor(Date.parse("2026-11-20T12:00:00Z") / 1000);
@@ -532,6 +534,39 @@ describe("the done page's pot card", () => {
       // Off the record: nothing to take off.
       calls.pot = { pot: { ...NOTED, onRecord: false } };
       expect(text(done(kit()))).not.toContain(POT.offRecordTitle);
+    });
+
+    test("Ruling R32: a noted address its own birth details do not predict, or a birth that does not read: the pot is never read, the card says so, and offers only the take off", () => {
+      calls.raw = HEALTHY;
+      for (const [what, noted] of [
+        ["another address", { ...NOTED, address: SAFE_CREATED }],
+        ["another salt", { ...NOTED, birth: { ...NOTED.birth, saltNonce: "2" } }],
+        ["a birth that does not read", { ...NOTED, birth: { ...NOTED.birth, ceilingUnits: "lots" } }],
+      ] as [string, OrderPotView][])
+        for (const k of [kit(), kit({ pot: false }), kit({}, { revoked: true })]) {
+          calls.pot = { pot: noted };
+          calls.rawQueries = [];
+          const m = done(k);
+          const t = text(m);
+          expect(t, what).toContain(POT.notYours);
+          expect(t, what).toContain(fillCopy(POT.shownAddress, { address: noted.address }));
+          expect(button(m, POT.offRecordSend), what).not.toBeNull();
+          for (const s of [...OTHERS, POT.withdrawTitle]) expect(t, `${what}: ${s}`).not.toContain(s);
+          expect(calls.rawQueries.filter((q) => q.pot !== null), what).toEqual([]);
+          // Off the record: the sentence, and nothing to press.
+          calls.pot = { pot: { ...noted, onRecord: false } };
+          const off = done(k);
+          expect(text(off), what).toContain(POT.notYours);
+          expect(buttons(off).filter((b) => b.words.includes(POT.offRecordSend))).toEqual([]);
+        }
+      // The noted address in another letter case is the pot: the full card, read at the checksummed address.
+      calls.pot = { pot: { ...NOTED, address: V3_POT.toLowerCase() } };
+      calls.rawQueries = [];
+      const full = text(done(kit()));
+      expect(full).toContain(POT.changeTitle);
+      expect(full).not.toContain(POT.notYours);
+      expect(calls.rawQueries.filter((q) => q.pot !== null)).toEqual([{ pot: V3_POT, agentWallet: A }]);
+      nothingSent();
     });
 
     test("the full card keeps its own take off, once; a noted pot that never got code offers the setup, not a take off", () => {

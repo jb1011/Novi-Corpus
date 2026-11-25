@@ -237,7 +237,16 @@ export function PotManage({
     try {
       // The key the panel names goes in only to be compared: the restore is built from the
       // click's own read of the registry, and refused unless the two are the same (Ruling R23).
-      const shown = { pot: noted.address, guardian, shownAgentWallet: shownWallet, newCeilingUnits };
+      // The noted pot goes in to be recomputed from its birth details before anything is read
+      // (Ruling R32).
+      const shown = {
+        pot: noted.address,
+        guardian,
+        shownAgentWallet: shownWallet,
+        newCeilingUnits,
+        addresses: a,
+        noted,
+      };
       const result = await runPotAction(action, shown, {
         alive: () => life.alive(),
         read: async () => {
@@ -669,7 +678,10 @@ export function usePotCardLock(): PotCardLock {
  * the pot's flag, the order's state (revoked, not linked) or its deployment, and whatever the
  * chain could be read for: the done page then shows at least this card, the pot's address and
  * "Take the pot off the public record" (the server's off-record door takes all of them). Nothing
- * else of the pot is offered here: no wallet, no chain, no put back.
+ * else of the pot is offered here: no wallet, no chain, no put back. With `notYours` (Ruling R32:
+ * the noted address is not the one its birth details predict, or they do not read) it says first
+ * that the address is not a pot only the guardian's wallet owns; the take off stays, the
+ * guardian's way to withdraw a claim that looks wrong.
  */
 export function PotTakeOffCard({
   kit,
@@ -677,22 +689,25 @@ export function PotTakeOffCard({
   noted,
   lock,
   onChanged,
+  notYours = false,
 }: {
   kit: LegalBodyStepKit;
   order: LegalBodyOrderView;
-  /** The noted pot, on the record. */
+  /** The noted pot. */
   noted: OrderPotView;
   lock: PotCardLock;
   /** Reads the noted pot and the record again. */
   onChanged: () => void;
+  notYours?: boolean;
 }) {
+  const address = fillCopy(POT.shownAddress, { address: noted.address });
   return (
-    <PotManageFrame lines={[fillCopy(POT.shownAddress, { address: noted.address })]}>
+    <PotManageFrame lines={notYours ? [POT.notYours, address] : [address]}>
       <PotRecordAction
         kit={kit}
         order={order}
         noted={noted}
-        action="take_off_record"
+        action={noted.onRecord ? "take_off_record" : null}
         lock={lock}
         onChanged={onChanged}
       />
