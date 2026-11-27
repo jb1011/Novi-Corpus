@@ -12,7 +12,7 @@
  * record what they were asked. G, A and V3 are the real run's public addresses and vector; every
  * other address is a placeholder.
  */
-import { createElement, Fragment } from "react";
+import { createElement, Fragment, isValidElement, type ReactNode } from "react";
 import { renderToString } from "react-dom/server";
 import { beforeEach, describe, expect, test, vi } from "vitest";
 import type { LegalBodyConfig, LegalBodyOrderView, OrderPotView } from "@/lib/api/types";
@@ -209,8 +209,8 @@ const derive = (order: LegalBodyOrderView): LegalBodyDerivation =>
     agentWallet: null,
   });
 
-/** The screen the flow's switch draws for `order`, through the derivation, as markup. */
-function screen(order: LegalBodyOrderView): { derivation: LegalBodyDerivation; markup: string } {
+/** What the flow's switch is called with for `order`, through the derivation. */
+function screenInput(order: LegalBodyOrderView): { derivation: LegalBodyDerivation; input: LegalBodyPhaseScreenInput } {
   const derivation = derive(order);
   const kit = {
     config,
@@ -251,6 +251,12 @@ function screen(order: LegalBodyOrderView): { derivation: LegalBodyDerivation; m
     noteIdentity: vi.fn(),
     sendBack: vi.fn(async () => {}),
   };
+  return { derivation, input };
+}
+
+/** The screen the flow's switch draws for `order`, through the derivation, as markup. */
+function screen(order: LegalBodyOrderView): { derivation: LegalBodyDerivation; markup: string } {
+  const { derivation, input } = screenInput(order);
   return { derivation, markup: renderToString(createElement(Fragment, null, legalBodyPhaseScreen(input))) };
 }
 
@@ -345,6 +351,24 @@ describe("Ruling R37: the exit card under the screens a fallen legal body lands 
     expect(button(wrong, POT.offRecordSend)).not.toBeNull();
     expect(button(wrong, POT.stopSend)).toBeNull();
     expect(calls.rawQueries.filter((q) => q.pot !== null)).toEqual([]);
+  });
+
+  test("siblings never share a key: on the pointer screen the step and the pot carry different keys, and the closed screen's pot carries the prefixed key too", () => {
+    /** The React keys of the switch's children, in order: the screen is one fragment of two. */
+    const keys = (node: ReactNode): (string | null)[] => {
+      if (!isValidElement<{ children?: ReactNode }>(node) || node.type !== Fragment) return [];
+      const children = node.props.children;
+      return (Array.isArray(children) ? children : [children]).map((c) => (isValidElement(c) ? c.key : null));
+    };
+    calls.pot = { pot: NOTED };
+    calls.raw = HEALTHY;
+    for (const [what, order, phase] of FALLEN) {
+      const { derivation, input } = screenInput(order);
+      expect(derivation.phase, what).toBe(phase);
+      const k = keys(legalBodyPhaseScreen(input));
+      expect(k, what).toEqual(phase === "pointer" ? [order.id, `pot:${order.id}`] : [null, `pot:${order.id}`]);
+      expect(new Set(k).size, what).toBe(2);
+    }
   });
 
   test("an order of another chain than the configured one: its closed notice, and nothing of the pot is asked", () => {

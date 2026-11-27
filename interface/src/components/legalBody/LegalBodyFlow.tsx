@@ -730,7 +730,7 @@ export function legalBodyPhaseScreen(input: LegalBodyPhaseScreenInput): ReactNod
             sentence={closedSentence(derivation.notice, config.environment)}
             onWayOut={startAnother}
           />
-          <PotBesideTheFlow key={kit.orderId ?? "none"} kit={kit} />
+          <PotBesideTheFlow key={"pot:" + (kit.orderId ?? "none")} kit={kit} />
         </>
       );
     case "payment":
@@ -842,7 +842,7 @@ export function legalBodyPhaseScreen(input: LegalBodyPhaseScreenInput): ReactNod
           ) : (
             <PointerStep key={kit.orderId ?? "none"} kit={kit} />
           )}
-          <PotBesideTheFlow key={kit.orderId ?? "none"} kit={kit} />
+          <PotBesideTheFlow key={"pot:" + (kit.orderId ?? "none")} kit={kit} />
         </>
       );
     case "done":
