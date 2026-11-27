@@ -1035,7 +1035,7 @@ describe("two concurrent valid requests at maxOpenPerTenant - 1 create exactly o
       code: "customer_company_cap",
       status: 409,
     });
-    expect(companies.countCustomerOpenByTenant(owner.address)).toBe(3);
+    expect(companies.countCustomerOpenByTenant(owner.address, APPROVED.version)).toBe(3);
     expect(rows("companies")).toBe(3);
     expect(rows("company_declarations")).toBe(3);
   });
@@ -1064,7 +1064,7 @@ test("the sixth creation in 24 hours is refused, abandoned ones included; a day 
     ids.push((await createCustomerCompany(d, owner.address, body)).companyId);
   }
   for (const id of ids.slice(0, 3)) abandonCustomerCompany(d, owner.address, id);
-  expect(companies.countCustomerOpenByTenant(owner.address)).toBe(2);
+  expect(companies.countCustomerOpenByTenant(owner.address, APPROVED.version)).toBe(2);
 
   const sixth = await signed({ ...TYPED, filingNumber: "TEST-0006" });
   expect(await refusalOf(createCustomerCompany(d, owner.address, sixth))).toMatchObject({
@@ -1118,7 +1118,7 @@ describe("abandoning a customer company", () => {
       humanNullifier: OWNER_NULLIFIER,
     });
     expect(store.countCompaniesForNullifier(OWNER_NULLIFIER, ACTION)).toBe(0);
-    expect(companies.countCustomerOpenByTenant(owner.address)).toBe(0);
+    expect(companies.countCustomerOpenByTenant(owner.address, APPROVED.version)).toBe(0);
     expect((await createCustomerCompany(d, owner.address, next)).created).toBe(true);
   });
 
@@ -1243,8 +1243,8 @@ describe("the counts behind the caps", () => {
     companyRow({ status: "abandoned" });
     companyRow({ provider: FORMATION_PROVIDER, status: "ready" });
     companyRow({ tenantId: second.address, status: "ready" });
-    expect(companies.countCustomerOpenByTenant(owner.address)).toBe(2);
-    expect(companies.countCustomerOpenByTenant(second.address)).toBe(1);
+    expect(companies.countCustomerOpenByTenant(owner.address, APPROVED.version)).toBe(2);
+    expect(companies.countCustomerOpenByTenant(second.address, APPROVED.version)).toBe(1);
   });
 
   test("hasLiveOrSettledPayment: a quoted, settling, settled or refunded payment, never an expired or failed one", () => {

@@ -160,6 +160,14 @@ export interface LegalTextSet {
   readonly productionNeeds: readonly ProductionNeed[];
 }
 
+/** Whether the pair `set` takes an order on a declaration made under `wordingVersion`: the version
+ *  is the one of the pair's declaration. It says nothing else of the company. The order door and
+ *  the company view read this rule here; the cap on a tenant's open declared companies applies it
+ *  in its count (`countCustomerOpenByTenant`). */
+export function declarationAccepted(set: LegalTextSet, wordingVersion: string): boolean {
+  return wordingVersion === set.declaration.version;
+}
+
 /** The October agreement and the October statement: the pair a deployment serves when it names none. */
 export function octoberLegalTexts(): LegalTextSet {
   return Object.freeze({
