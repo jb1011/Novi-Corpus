@@ -15,6 +15,7 @@ import type { GasSeedDeps } from "../legalBody/gasSeed";
 import { DEFAULT_LINK_TTL_SECONDS, MAX_SERVED_LINK_TTL_SECONDS } from "../legalBody/link";
 import { MIN_SERVED_LINK_TTL_SECONDS } from "../legalBody/linkDoor";
 import type { LegalBodyOrderDeps } from "../legalBody/orders";
+import type { LegalBodyPotDeps } from "../legalBody/pot";
 import type { LegalBodyStatementDeps } from "../legalBody/statements";
 import type { LegalTextSet } from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
@@ -128,6 +129,16 @@ export interface ApiDeps extends EntityViewDeps {
    * and every such block is null.
    */
   legalBodyTreasury?: LegalBodyTreasuryDeps;
+  /**
+   * The company's pot: the guardian's notes of a linked body's pot, the registry and the chain a
+   * note is checked against, and whether this process offers the pot now (its seven contracts'
+   * code verified, `potOffer.ts`). Its doors (the note, its read, and taking it off the record) are
+   * mounted beside the order doors, and only with them; they answer `pot_not_offered` while it is
+   * not offered. Absent (a chain with no pot table), the doors are a 404.
+   * `/config.legalBodies.pot` is whether they answer. The agent's two MCP tools (`get_pot`,
+   * `prepare_pot_take`) run over the same object, under the same flag.
+   */
+  legalBodyPot?: LegalBodyPotDeps;
   webOrigin: string;
   nonceStore: import("../auth/nonceStore").NonceStore;
   /**
@@ -457,6 +468,11 @@ export type LegalBodyConfig =
        */
       identityCheckAutomatic: boolean;
       /**
+       * The company's pot is offered: its doors are mounted and this process has verified the code
+       * of its seven contracts. The web app offers nothing of the pot unless this is true.
+       */
+      pot: boolean;
+      /**
        * Whether the web app shows the door that forms a company through doola: `offered`;
        * `cap_reached`, when the deployment has taken all the formed companies it takes and every
        * other gate holds; `hidden` otherwise. See `formedDoorOf`.
@@ -521,6 +537,7 @@ export function legalBodyConfigOf(
     | "legalBodyStatements"
     | "legalBodyGasSeed"
     | "identityCheck"
+    | "legalBodyPot"
   > &
     FormedDoorDeps,
 ): LegalBodyConfig {
@@ -538,6 +555,8 @@ export function legalBodyConfigOf(
     paymentRequired: deps.customerCompanies?.paymentRequired ?? false,
     identityRequired: orders.environment === "production",
     identityCheckAutomatic: deps.identityCheck !== undefined,
+    // Read on every answer: the flag turns on once the check resolves, and never before.
+    pot: deps.legalBodyPot?.offered() === true,
     formedDoor: formedDoorOf(deps, orders.environment, orders.texts),
     filingWorkingDays: deps.formation?.filingWorkingDays ?? DEFAULT_FORMATION_FILING_WORKING_DAYS,
     linkTtl: {
@@ -751,6 +770,7 @@ export function buildApiApp(deps: ApiDeps) {
       deps.legalBodyOrders,
       deps.legalBodyGasSeed,
       deps.legalBodyTreasury,
+      deps.legalBodyPot,
     );
   }
   // After the `/companies/*` requireAuth line above, so both document routes inherit auth.

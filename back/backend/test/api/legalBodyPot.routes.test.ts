@@ -1,0 +1,517 @@
+/**
+ * The company's pot on REST: `POST /legal-body-orders/:id/pot`, the guardian's note of the pot's
+ * address with its birth details and declaration, before the setup transaction; and
+ * `GET /legal-body-orders/:id/pot`, the note as the guardian's page reads it; and
+ * `POST /legal-body-orders/:id/pot/off-record`, the guardian's note that takes the pot off the
+ * public record, the pot itself untouched. Mounted beside the
+ * order doors only where the deployment wires the pot, and answering only while the pot's seven
+ * contracts are verified (Rulings R1 and R11).
+ *
+ * The doors over a real in-memory database, a fake registry and a fake chain port, on a fixed
+ * clock. G, A and P are the real run's public addresses, never a key, and V3 the pinned vector;
+ * every other key is one of anvil's published test accounts, every other address a placeholder.
+ */
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import type { Address } from "viem";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { type ApiDeps, buildApiApp } from "../../src/api/app";
+import { SqliteJobRepository } from "../../src/jobs/jobRepository";
+import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
+import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
+import { migrate, openDatabase } from "../../src/persistence/db";
+import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
+import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
+import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
+import {
+  ANVIL_ACCOUNT_3,
+  ANVIL_ACCOUNT_4,
+  CHAIN_ID,
+  recordHuman,
+} from "../helpers/customerCompanyFixtures";
+import {
+  JWT_SECRET,
+  type LegalBodyStores,
+  OTHER_FACTORY,
+  answerOf,
+  call,
+  legalBodyOrderDeps,
+  openLegalBodyStores,
+  sessionOf,
+} from "../helpers/legalBodyFixtures";
+import {
+  A,
+  G,
+  V3_ADDRESS,
+  V3_INPUT,
+  fakePotChain,
+  fakeRegistry,
+  potBody,
+  potDeps,
+} from "../helpers/potFixtures";
+
+/** The clock: 2026-11-24T12:00:00Z. */
+const NOW_MS = Date.parse("2026-11-24T12:00:00.000Z");
+const NOW_S = NOW_MS / 1000;
+
+/** anvil's published accounts #3 and #4: a stranger with a verified human, and a tenant with
+ *  none, never real wallets. */
+const stranger = ANVIL_ACCOUNT_3;
+
+const potPath = (id: string) => `/legal-body-orders/${id}/pot`;
+
+let s: LegalBodyStores;
+let registry: ReturnType<typeof fakeRegistry>;
+let chain: ReturnType<typeof fakePotChain>;
+let offered: boolean;
+/** G's session: G is the real run's guardian, whose key no test holds, so its token is signed
+ *  directly over its address. */
+let guardianToken: string;
+
+beforeEach(async () => {
+  const db = openDatabase(":memory:");
+  migrate(db);
+  s = openLegalBodyStores(db);
+  registry = fakeRegistry();
+  chain = fakePotChain();
+  offered = true;
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  recordHuman(s.store, stranger.address, "pot-stranger", NOW_MS - 60_000);
+  guardianToken = await sessionOf({ address: G } as never);
+});
+afterEach(() => {
+  vi.restoreAllMocks();
+  s.db.close();
+});
+
+/** The API over this test's database: the order doors (with `orders` over their defaults), and
+ *  the pot's deps unless `pot` is false. */
+function makeApp(o: { orders?: Partial<LegalBodyOrderDeps>; pot?: boolean } = {}) {
+  const requests = new SqliteFormationRepository(s.db);
+  const deps: Partial<ApiDeps> = {
+    webOrigin: "*",
+    jwtSecret: JWT_SECRET,
+    chainId: CHAIN_ID,
+    now: () => NOW_MS,
+    repo: new SqliteEntityRepository(s.db),
+    companies: s.companies,
+    docStore: s.docStore,
+    formationSteps: (id: string) => requests.stepsOf(id),
+    customerFacts: { declarations: s.declarations, checks: s.checks },
+    legalBodyOrders: legalBodyOrderDeps(s, { now: () => NOW_MS, ...o.orders }),
+    legalBodyPot:
+      o.pot === false
+        ? undefined
+        : potDeps(s, {
+            registry: { getAgentWallet: registry.getAgentWallet },
+            chain: chain.port,
+            now: () => NOW_MS,
+            offered: () => offered,
+          }),
+    apiKeys: new SqliteApiKeyStore(s.db),
+    passkeys: new SqlitePasskeyStore(s.db),
+    jobs: new SqliteJobRepository(s.db),
+    runner: {} as never,
+    platformManagerAddress: "0x000000000000000000000000000000000000000A",
+    walletProviderDefault: "turnkey",
+    circleCustodyAvailable: false,
+    fullProductAvailable: true,
+    turnkeyCustodyAvailable: true,
+  };
+  return buildApiApp(deps as ApiDeps);
+}
+type App = ReturnType<typeof makeApp>;
+
+/** A linked body of G whose agent's wallet the registry names as A. */
+function linkedBody(): LegalBodyRecord {
+  const row = potBody(s, { nowMs: NOW_MS });
+  registry.wallets.set(row.agentId as string, A);
+  return row;
+}
+
+const post = async (app: App, id: string, body: unknown, token = guardianToken) =>
+  answerOf(await call(app, "POST", potPath(id), token, body as object));
+const read = async (app: App, id: string, token = guardianToken) =>
+  answerOf(await call(app, "GET", potPath(id), token));
+
+const rows = () => s.db.prepare("SELECT * FROM pot_declarations").all();
+
+/** A REST refusal: the house envelope, with the code's fixed sentence. */
+const refused = (status: number, code: string) => ({
+  status,
+  body: { error: { code, message: LEGAL_BODY_SENTENCES[code] } },
+});
+
+const V3_VIEW = {
+  address: V3_ADDRESS,
+  onRecord: true,
+  declaredAt: NOW_S,
+  birth: { saltNonce: "1", agentWallet: A, ceilingUnits: "50000000" },
+};
+
+describe("POST and GET /legal-body-orders/:id/pot", () => {
+  test("the note: 200 with the view, and the read answers the same; before it, { pot: null }", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    expect(await read(app, row.legalBodyId)).toEqual({
+      status: 200,
+      body: { pot: null },
+      text: JSON.stringify({ pot: null }),
+    });
+    const noted = await post(app, row.legalBodyId, V3_INPUT);
+    expect(noted).toMatchObject({ status: 200, body: V3_VIEW });
+    expect(await read(app, row.legalBodyId)).toMatchObject({ status: 200, body: { pot: V3_VIEW } });
+    expect(rows()).toHaveLength(1);
+  });
+
+  test("the refusals: 400 pot_invalid, 400 pot_declaration_required, 409 pot_address_mismatch, each with its sentence and nothing else", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    expect(
+      await post(app, row.legalBodyId, { ...V3_INPUT, ceilingUnits: "2500000" }),
+    ).toMatchObject(refused(400, "pot_invalid"));
+    expect(
+      await post(app, row.legalBodyId, { ...V3_INPUT, declarationVersion: "pot-declaration-0" }),
+    ).toMatchObject(refused(400, "pot_declaration_required"));
+    const mismatch = await post(app, row.legalBodyId, { ...V3_INPUT, saltNonce: "2" });
+    expect(mismatch).toMatchObject(refused(409, "pot_address_mismatch"));
+    // The answer names no address and no hash.
+    expect(Object.keys(mismatch.body.error).sort()).toEqual(["code", "message"]);
+    expect(mismatch.text).not.toMatch(/0x/i);
+    expect(rows()).toEqual([]);
+  });
+
+  test("a body that is not linked: 409 order_closed; a row of another factory: 409 other_deployment; neither reads the chain", async () => {
+    const app = makeApp();
+    const deployed = potBody(s, { nowMs: NOW_MS, state: "deployed" });
+    expect(await post(app, deployed.legalBodyId, V3_INPUT)).toMatchObject(
+      refused(409, "order_closed"),
+    );
+    const row = linkedBody();
+    const elsewhere = makeApp({
+      orders: { deployment: { chainId: CHAIN_ID, factory: OTHER_FACTORY } },
+    });
+    expect(await post(elsewhere, row.legalBodyId, V3_INPUT)).toMatchObject(
+      refused(409, "other_deployment"),
+    );
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+  });
+
+  test("another tenant's body and an unknown id: one 404 on both doors", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    const token = await sessionOf(stranger);
+    for (const id of [row.legalBodyId, `lb_${"0".repeat(36)}`]) {
+      expect(await post(app, id, V3_INPUT, token), id).toMatchObject(refused(404, "not_found"));
+      expect(await read(app, id, token), id).toMatchObject(refused(404, "not_found"));
+    }
+  });
+
+  test("the throttle: an empty tenant bucket is 429 rate_limited, with no read of the order, the registry or the chain, and nothing stored", async () => {
+    const row = linkedBody();
+    const findOwned = vi.spyOn(s.repo, "findOwned");
+    const app = makeApp({ orders: { tenantBucket: () => ({ take: () => false }) } });
+    expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject(refused(429, "rate_limited"));
+    expect(findOwned).not.toHaveBeenCalled();
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+  });
+
+  test("the token is taken after the real-human check and before the order is read: a probe of an unknown id spends one", async () => {
+    const row = linkedBody();
+    let tokens = 1;
+    const take = vi.fn(() => tokens-- > 0);
+    const app = makeApp({ orders: { tenantBucket: () => ({ take }) } });
+    // A tenant with no verification is refused first, and spends nothing.
+    const unverified = await sessionOf(ANVIL_ACCOUNT_4);
+    expect(await post(app, row.legalBodyId, V3_INPUT, unverified)).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+    expect(take).not.toHaveBeenCalled();
+    expect(await post(app, `lb_${"0".repeat(36)}`, V3_INPUT)).toMatchObject(
+      refused(404, "not_found"),
+    );
+    expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject(refused(429, "rate_limited"));
+    expect(take).toHaveBeenCalledTimes(2);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+  });
+
+  test("the read takes no token and checks the real human first", async () => {
+    const row = linkedBody();
+    const take = vi.fn(() => false);
+    const app = makeApp({ orders: { tenantBucket: () => ({ take }) } });
+    expect(await read(app, row.legalBodyId)).toMatchObject({ status: 200, body: { pot: null } });
+    expect(take).not.toHaveBeenCalled();
+    const unverified = await sessionOf(ANVIL_ACCOUNT_4);
+    expect(await read(app, row.legalBodyId, unverified)).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+  });
+
+  test("no session: 401; a body that is not JSON: 400; one over 8 KiB: 413", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    expect((await call(app, "POST", potPath(row.legalBodyId), undefined, V3_INPUT)).status).toBe(
+      401,
+    );
+    expect((await call(app, "GET", potPath(row.legalBodyId), undefined)).status).toBe(401);
+    expect(
+      await answerOf(await call(app, "POST", potPath(row.legalBodyId), guardianToken, "{not json")),
+    ).toMatchObject({ status: 400, body: { error: { code: "validation_error" } } });
+    expect(
+      await post(app, row.legalBodyId, { ...V3_INPUT, saltNonce: "1".repeat(9_000) }),
+    ).toMatchObject(refused(413, "payload_too_large"));
+    expect(rows()).toEqual([]);
+  });
+
+  test("without the pot's deps neither door is mounted: 404", async () => {
+    const row = linkedBody();
+    const app = makeApp({ pot: false });
+    expect(
+      (await call(app, "POST", potPath(row.legalBodyId), guardianToken, V3_INPUT)).status,
+    ).toBe(404);
+    expect((await call(app, "GET", potPath(row.legalBodyId), guardianToken)).status).toBe(404);
+  });
+
+  test("while the pot's contracts are not verified the note door answers 409 pot_not_offered, before the token and any read, and answers again once they are", async () => {
+    const row = linkedBody();
+    const take = vi.fn(() => true);
+    const findOwned = vi.spyOn(s.repo, "findOwned");
+    const app = makeApp({ orders: { tenantBucket: () => ({ take }) } });
+    offered = false;
+    const answer = await post(app, row.legalBodyId, V3_INPUT);
+    expect(answer).toMatchObject(refused(409, "pot_not_offered"));
+    // The sentence is fixed: no hash, no address, no reason of the check.
+    expect(answer.text).not.toMatch(/0x|mismatch|unreadable/i);
+    expect(take).not.toHaveBeenCalled();
+    expect(findOwned).not.toHaveBeenCalled();
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(rows()).toEqual([]);
+    offered = true;
+    expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject({
+      status: 200,
+      body: V3_VIEW,
+    });
+  });
+
+  test("Ruling R27: while the pot's contracts are not verified the read answers the noted pot as before, reading no chain and no registry, so the guardian can always take it off the record", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    offered = false;
+    expect(await read(app, row.legalBodyId)).toMatchObject({ status: 200, body: { pot: null } });
+    offered = true;
+    await post(app, row.legalBodyId, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    offered = false;
+    expect(await read(app, row.legalBodyId)).toMatchObject({ status: 200, body: { pot: V3_VIEW } });
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // The real-human check still comes first, and one 404 for a body that is not the tenant's.
+    expect(await read(app, row.legalBodyId, await sessionOf(ANVIL_ACCOUNT_4))).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+    expect(await read(app, row.legalBodyId, await sessionOf(stranger))).toMatchObject(
+      refused(404, "not_found"),
+    );
+    expect(await read(app, `lb_${"0".repeat(36)}`)).toMatchObject(refused(404, "not_found"));
+    // The note door stays behind the flag.
+    expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject(
+      refused(409, "pot_not_offered"),
+    );
+    expect(rows()).toHaveLength(1);
+  });
+});
+
+describe("POST /legal-body-orders/:id/pot/off-record", () => {
+  const offRecordPath = (id: string) => `${potPath(id)}/off-record`;
+  const takeOff = async (app: App, id: string, token = guardianToken, body?: string | object) =>
+    answerOf(await call(app, "POST", offRecordPath(id), token, body));
+  const acts = () =>
+    (
+      s.db.prepare("SELECT act FROM pot_declarations ORDER BY declared_at").all() as {
+        act: string;
+      }[]
+    ).map((r) => r.act);
+
+  test("takes the pot off: 200 with the view, onRecord false, and the read answers the same; no body is read", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    // Whatever is posted, even a body that is not JSON, is not read.
+    const off = await takeOff(app, row.legalBodyId, guardianToken, "{not json");
+    expect(off).toMatchObject({ status: 200, body: { ...V3_VIEW, onRecord: false } });
+    expect(await read(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { pot: { ...V3_VIEW, onRecord: false } },
+    });
+    expect(acts()).toEqual(["declared", "removed"]);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+  });
+
+  test("409 pot_not_on_record with no note and for a second removal, with its sentence and nothing else", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    const none = await takeOff(app, row.legalBodyId);
+    expect(none).toMatchObject(refused(409, "pot_not_on_record"));
+    expect(Object.keys(none.body.error).sort()).toEqual(["code", "message"]);
+    expect(none.text).not.toMatch(/0x/i);
+    expect(rows()).toEqual([]);
+    await post(app, row.legalBodyId, V3_INPUT);
+    expect((await takeOff(app, row.legalBodyId)).status).toBe(200);
+    const again = await takeOff(app, row.legalBodyId);
+    expect(again).toMatchObject(refused(409, "pot_not_on_record"));
+    expect(again.text).not.toMatch(/0x/i);
+    expect(acts()).toEqual(["declared", "removed"]);
+  });
+
+  test("another tenant's body and an unknown id: one 404, and nothing is written", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    const token = await sessionOf(stranger);
+    for (const id of [row.legalBodyId, `lb_${"0".repeat(36)}`])
+      expect(await takeOff(app, id, token), id).toMatchObject(refused(404, "not_found"));
+    expect(acts()).toEqual(["declared"]);
+  });
+
+  test("takes no token, reads no chain, and checks the real human first", async () => {
+    const row = linkedBody();
+    const take = vi.fn(() => true);
+    const app = makeApp({ orders: { tenantBucket: () => ({ take }) } });
+    await post(app, row.legalBodyId, V3_INPUT);
+    take.mockClear();
+    take.mockImplementation(() => false);
+    const unverified = await sessionOf(ANVIL_ACCOUNT_4);
+    expect(await takeOff(app, row.legalBodyId, unverified)).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+    expect(acts()).toEqual(["declared"]);
+    // An empty bucket does not stop it: the door takes no token.
+    expect(await takeOff(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { onRecord: false },
+    });
+    expect(take).not.toHaveBeenCalled();
+  });
+
+  test("no session: 401; a body over 8 KiB: 413; nothing is written", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    expect((await call(app, "POST", offRecordPath(row.legalBodyId), undefined)).status).toBe(401);
+    expect(
+      await takeOff(app, row.legalBodyId, guardianToken, { padding: "x".repeat(9_000) }),
+    ).toMatchObject(refused(413, "payload_too_large"));
+    expect(acts()).toEqual(["declared"]);
+  });
+
+  test("while the pot's contracts are not verified it is taken off all the same, with no chain read: a guardian may always withdraw a claim (Ruling R15 a)", async () => {
+    const row = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    registry.getAgentWallet.mockClear();
+    offered = false;
+    expect(await takeOff(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { ...V3_VIEW, onRecord: false },
+    });
+    expect(acts()).toEqual(["declared", "removed"]);
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(chain.port.codeHash).not.toHaveBeenCalled();
+    expect(chain.port.readPot).not.toHaveBeenCalled();
+    // The real-human check still comes first, flag or not.
+    expect(await takeOff(app, row.legalBodyId, await sessionOf(ANVIL_ACCOUNT_4))).toMatchObject({
+      status: 403,
+      body: { error: { code: "guardian_not_verified" } },
+    });
+    // The note door still answers pot_not_offered while it is off; the read answers the pot, off
+    // the record (Ruling R27).
+    expect(await read(app, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { pot: { ...V3_VIEW, onRecord: false } },
+    });
+    expect(await post(app, row.legalBodyId, V3_INPUT)).toMatchObject(
+      refused(409, "pot_not_offered"),
+    );
+    expect(acts()).toEqual(["declared", "removed"]);
+  });
+
+  test("a row of another factory is taken off all the same: a guardian may always withdraw a claim", async () => {
+    const row = linkedBody();
+    await post(makeApp(), row.legalBodyId, V3_INPUT);
+    const elsewhere = makeApp({
+      orders: { deployment: { chainId: CHAIN_ID, factory: OTHER_FACTORY } },
+    });
+    expect(await takeOff(elsewhere, row.legalBodyId)).toMatchObject({
+      status: 200,
+      body: { address: V3_ADDRESS, onRecord: false },
+    });
+    expect(acts()).toEqual(["declared", "removed"]);
+  });
+
+  test("without the pot's deps the door is not mounted: 404", async () => {
+    const row = linkedBody();
+    const app = makeApp({ pot: false });
+    expect((await call(app, "POST", offRecordPath(row.legalBodyId), guardianToken)).status).toBe(
+      404,
+    );
+  });
+
+  test("taken off, the address is still the body's: another body's note door is pot_taken, and this body's puts it back", async () => {
+    const row = linkedBody();
+    const other = linkedBody();
+    const app = makeApp();
+    await post(app, row.legalBodyId, V3_INPUT);
+    expect((await takeOff(app, row.legalBodyId)).status).toBe(200);
+    expect(await post(app, other.legalBodyId, V3_INPUT)).toMatchObject(refused(409, "pot_taken"));
+    const back = await post(app, row.legalBodyId, V3_INPUT);
+    expect(back).toMatchObject({ status: 200, body: { address: V3_ADDRESS, onRecord: true } });
+    expect(acts()).toEqual(["declared", "removed", "declared"]);
+  });
+});
+
+/**
+ * The composition root boots against a chain and has no injectable seam, so this reads the file,
+ * as the treasury's composition guard does: the pot's start-up check is started, never awaited, so
+ * the server boots in every outcome; its flag is what the pot's deps answer; the deps exist only
+ * where the order doors' do and the chain has a pot table; and they are handed to the API after the
+ * treasury's, the check's retry stopped at shutdown.
+ */
+test("the composition root starts the pot's check without waiting for it, and wires the pot's deps over its flag", () => {
+  const main = readFileSync(join(import.meta.dirname, "..", "..", "src", "api", "main.ts"), "utf8");
+  expect(main).not.toMatch(/await\s+assertPotContracts/);
+  expect(main).toMatch(/^ {2}const potTable = potAddresses\(cfg\.chainId\);$/m);
+  const gateAt = main.indexOf("const potGate");
+  expect(gateAt, "the pot's gate was not found").toBeGreaterThan(0);
+  const gate = main.slice(gateAt, main.indexOf(": undefined;", gateAt));
+  expect(gate).toMatch(/legalBodyOrders && potTable/);
+  expect(gate).toMatch(/startPotContractsGate\(\{/);
+  expect(gate).toMatch(/check: \(\) => assertPotContracts\(publicClient, potTable\)/);
+  const potAt = main.indexOf("const legalBodyPot");
+  expect(potAt, "the pot's deps were not found").toBeGreaterThan(gateAt);
+  const built = main.slice(potAt, main.indexOf(": undefined;", potAt));
+  expect(built).toMatch(/legalBodyOrders && potTable && potGate/);
+  expect(built).toMatch(/repo: new SqliteLegalBodyPotRepository\(db\)/);
+  expect(built).toMatch(/registry: arc,/);
+  expect(built).toMatch(/bodies: legalBodyOrders\.repo,/);
+  expect(built).toMatch(/chain: new SafePotChain\(\{ publicClient, addresses: potTable \}\)/);
+  expect(built).toMatch(/chainId: cfg\.chainId,/);
+  expect(built).toMatch(/grants: legalBodyOrders\.grants,/);
+  expect(built).toMatch(/docStore,/);
+  expect(built).toMatch(/offered: potGate\.offered,/);
+  expect(main).toMatch(/^ {4}legalBodyTreasury,\n(?: {4}\/\/.*\n)* {4}legalBodyPot,$/m);
+  expect(main).toMatch(/\.\.\.\(potGate \? \[potGate\] : \[\]\)/);
+});

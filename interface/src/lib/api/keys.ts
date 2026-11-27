@@ -52,6 +52,15 @@ export const apiKeys = {
     [...apiKeys.all, "legalBodyAgreement", token, id] as const,
   legalBodyBinding: (token: string, id: string) =>
     [...apiKeys.all, "legalBodyBinding", token, id] as const,
+  /** The order's noted pot and its grant: token-scoped like the order they belong to. */
+  legalBodyOrderPot: (token: string, id: string) =>
+    [...apiKeys.all, "legalBodyOrderPot", token, id] as const,
+  legalBodyOrderGrant: (token: string, id: string) =>
+    [...apiKeys.all, "legalBodyOrderGrant", token, id] as const,
+  /** PUBLIC, with no token: a pot's raw facts as one block answered them, the same for everyone.
+   *  Keyed by the chain and the two addresses, lowercased: one pot and one key, one cache entry. */
+  potRaw: (chainId: number, pot: string, agentWallet: string) =>
+    [...apiKeys.all, "potRaw", chainId, pot.toLowerCase(), agentWallet.toLowerCase()] as const,
   /** PUBLIC and token-free: `GET /legal-bodies/by-agent/:agentId` answers everyone the same. The
    *  agent id is a decimal string as served, so one identity has one spelling. */
   legalBodyByAgent: (agentId: string) => [...apiKeys.all, "legalBodyByAgent", agentId] as const,

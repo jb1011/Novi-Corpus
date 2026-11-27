@@ -24,6 +24,8 @@ import type {
   LinkMessageResult,
   LinkRefusal,
   LinkTypedDataWire,
+  OrderGrantView,
+  OrderPotView,
   StatementMessageAnswer,
   TransparencyView,
 } from "@/lib/api/types";
@@ -190,6 +192,37 @@ const LINK_MESSAGE_ANSWER = {
   deadline: 1_760_522_400,
 } as unknown as LinkMessageResult;
 
+/** The pot of V3 with salt 1, as the note door answers it. */
+const POT_VIEW: OrderPotView = {
+  address: "0x4A13bC20E8596009CA37B897Aaf654C5e0b8e87D",
+  onRecord: true,
+  declaredAt: 1_764_000_000,
+  birth: {
+    saltNonce: "1",
+    agentWallet: "0x2dDcf8da463526614b9FA5E87Db259a3Bf06667C",
+    ceilingUnits: "50000000",
+  },
+};
+const POT_NOTE = {
+  address: POT_VIEW.address,
+  saltNonce: "1",
+  ceilingUnits: "50000000",
+  agentWallet: POT_VIEW.birth.agentWallet,
+  declarationVersion: "pot-declaration-1",
+};
+const GRANT: OrderGrantView = {
+  grant: {
+    choices: {
+      acts: {
+        buy: { allowed: true, perAct: 50, per30Days: 200, above: "not_allowed" },
+        pay: { allowed: false },
+        engageContractor: { allowed: true, perAct: 100, per30Days: 150, above: "guardian_signature" },
+      },
+      endsOn: null,
+    },
+  },
+};
+
 type Calls = Awaited<ReturnType<typeof load>>["calls"];
 
 /** One row per authenticated door: what is called, what must leave, and what comes back. */
@@ -335,6 +368,44 @@ const DOORS: DoorCase[] = [
     body: undefined,
     answer: () => json(200, { status: "sent", txHash: TX_HASH }),
     result: { status: "sent", txHash: TX_HASH },
+  },
+  {
+    name: "getOrderPot",
+    call: (c) => c.getOrderPot(TOKEN, "ord_1"),
+    method: "GET",
+    path: "/legal-body-orders/ord_1/pot",
+    body: undefined,
+    answer: () => json(200, { pot: POT_VIEW }),
+    result: { pot: POT_VIEW },
+  },
+  {
+    name: "declareOrderPot, the five fields and no other",
+    // A field the caller adds never leaves: the door takes these five and no other.
+    call: (c) =>
+      c.declareOrderPot(TOKEN, "ord_1", { ...POT_NOTE, extra: "x" } as typeof POT_NOTE),
+    method: "POST",
+    path: "/legal-body-orders/ord_1/pot",
+    body: POT_NOTE,
+    answer: () => json(200, POT_VIEW),
+    result: POT_VIEW,
+  },
+  {
+    name: "takePotOffRecord",
+    call: (c) => c.takePotOffRecord(TOKEN, "ord_1"),
+    method: "POST",
+    path: "/legal-body-orders/ord_1/pot/off-record",
+    body: undefined,
+    answer: () => json(200, { ...POT_VIEW, onRecord: false }),
+    result: { ...POT_VIEW, onRecord: false },
+  },
+  {
+    name: "getOrderGrant",
+    call: (c) => c.getOrderGrant(TOKEN, "ord_1"),
+    method: "GET",
+    path: "/legal-body-orders/ord_1/grant",
+    body: undefined,
+    answer: () => json(200, GRANT),
+    result: GRANT,
   },
 ];
 
@@ -567,6 +638,8 @@ describe("the query keys", () => {
       (t: string) => apiKeys.legalBodyOrder(t, "ord_1"),
       (t: string) => apiKeys.legalBodyAgreement(t, "ord_1"),
       (t: string) => apiKeys.legalBodyBinding(t, "ord_1"),
+      (t: string) => apiKeys.legalBodyOrderPot(t, "ord_1"),
+      (t: string) => apiKeys.legalBodyOrderGrant(t, "ord_1"),
     ];
     for (const key of keys) {
       expect(key("token-a")).toContain("token-a");
@@ -582,6 +655,8 @@ describe("the query keys", () => {
       apiKeys.legalBodyOrder(TOKEN, "ord_1"),
       apiKeys.legalBodyAgreement(TOKEN, "ord_1"),
       apiKeys.legalBodyBinding(TOKEN, "ord_1"),
+      apiKeys.legalBodyOrderPot(TOKEN, "ord_1"),
+      apiKeys.legalBodyOrderGrant(TOKEN, "ord_1"),
       apiKeys.legalBodyByAgent(AGENT),
       apiKeys.transparency(),
     ].map((k) => k[1]);

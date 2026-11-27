@@ -18,6 +18,7 @@ import { request, throwIfNotOk } from "./client";
 import { API_URL, PUBLIC_API_ORIGIN } from "./config";
 import { fetchWithTimeout, readJsonBounded, TIMEOUT_CODE } from "./timeout";
 import type {
+  Address,
   BindingView,
   AdoptionMessageResult,
   AdoptionResult,
@@ -31,6 +32,8 @@ import type {
   LinkRefusal,
   LinkSubmitAnswer,
   LinkTypedDataWire,
+  OrderGrantView,
+  OrderPotView,
   PublicRefusal,
   StatementMessageAnswer,
 } from "./types";
@@ -169,6 +172,49 @@ export function refreshBinding(token: string, id: string): Promise<BindingView> 
  *  body. */
 export function requestGasSeed(token: string, id: string): Promise<{ status: "sent"; txHash: Hex }> {
   return request(`${orderPath(id)}/gas-seed`, { method: "POST", token });
+}
+
+/* ── The company's pot ───────────────────────────────────────────────────────────────────── */
+
+/** `GET /legal-body-orders/:id/pot`: the body's noted pot, or none. The server reads no chain. */
+export function getOrderPot(token: string, id: string): Promise<{ pot: OrderPotView | null }> {
+  return request(`${orderPath(id)}/pot`, { token });
+}
+
+/** `POST /legal-body-orders/:id/pot`: the guardian notes the pot before its setup transaction.
+ *  The door takes these five fields and no other, so exactly these five leave. A repeat of the
+ *  same note answers the same view. */
+export function declareOrderPot(
+  token: string,
+  id: string,
+  body: {
+    address: Address;
+    saltNonce: string;
+    ceilingUnits: string;
+    agentWallet: Address;
+    declarationVersion: string;
+  },
+): Promise<OrderPotView> {
+  const sent = {
+    address: body.address,
+    saltNonce: body.saltNonce,
+    ceilingUnits: body.ceilingUnits,
+    agentWallet: body.agentWallet,
+    declarationVersion: body.declarationVersion,
+  };
+  return request(`${orderPath(id)}/pot`, { method: "POST", token, body: sent });
+}
+
+/** `POST /legal-body-orders/:id/pot/off-record`: the pot off the public record; the pot itself,
+ *  its money and its allowance are untouched. Reads no body. */
+export function takePotOffRecord(token: string, id: string): Promise<OrderPotView> {
+  return request(`${orderPath(id)}/pot/off-record`, { method: "POST", token });
+}
+
+/** `GET /legal-body-orders/:id/grant`: the order's grant as its frozen agreement states it, or
+ *  none. */
+export function getOrderGrant(token: string, id: string): Promise<OrderGrantView> {
+  return request(`${orderPath(id)}/grant`, { token });
 }
 
 /** A public read: the answer as served, or why it could not be made. There is no third case, and

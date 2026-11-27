@@ -81,11 +81,19 @@ async function requireFreePort(port: number): Promise<void> {
  * transactions that raised it no longer exist anywhere, so the floor is not a claim on anything and
  * the node is the only authority. Resetting here covers every anvil-based file at once, which is
  * why it lives in the spawner rather than in each `beforeAll`.
+ *
+ * `opts.forkUrl`: the chain forks that node (`--fork-url`), at its latest block; nothing else
+ * changes. Without it, a fresh empty chain, as every caller had before.
  */
-export async function startAnvil(port = 8545): Promise<AnvilHandle> {
+export async function startAnvil(
+  port = 8545,
+  opts: { forkUrl?: string } = {},
+): Promise<AnvilHandle> {
   await requireFreePort(port);
+  const args = ["--port", String(port), "--silent"];
+  if (opts.forkUrl !== undefined) args.push("--fork-url", opts.forkUrl);
   return new Promise((resolvePromise, reject) => {
-    const proc: ChildProcess = spawn("anvil", ["--port", String(port), "--silent"], {
+    const proc: ChildProcess = spawn("anvil", args, {
       stdio: ["ignore", "pipe", "pipe"],
     });
     const rpcUrl = `http://127.0.0.1:${port}`;

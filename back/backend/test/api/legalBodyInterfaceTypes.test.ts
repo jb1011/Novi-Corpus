@@ -30,6 +30,14 @@ import type { FilingStatus } from "../../src/legalBody/filings";
 import { LINK_FIELDS } from "../../src/legalBody/link";
 import type { LinkMessageResult } from "../../src/legalBody/linkDoor";
 import type { LegalBodyOrderView } from "../../src/legalBody/orders";
+import {
+  type OrderPotView,
+  POT_DECLARATION,
+  type PotBirth,
+  type PotBirthNote,
+  type PotBlock,
+} from "../../src/legalBody/pot";
+import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import type { Standing } from "../../src/legalBody/standing";
 import type { TransparencyLegalBody } from "../../src/legalBody/statements";
 import type { CheckReasonCode } from "../../src/persistence/companyCheckRepository";
@@ -39,18 +47,11 @@ import type {
   LapseReason,
 } from "../../src/persistence/legalBodyRepository";
 
-const INTERFACE_TYPES = join(
-  import.meta.dirname,
-  "..",
-  "..",
-  "..",
-  "..",
-  "interface",
-  "src",
-  "lib",
-  "api",
-  "types.ts",
-);
+const INTERFACE_SRC = join(import.meta.dirname, "..", "..", "..", "..", "interface", "src", "lib");
+const INTERFACE_TYPES = join(INTERFACE_SRC, "api", "types.ts");
+/** The website's copy, and the pot screens' view model. */
+const INTERFACE_COPY = join(INTERFACE_SRC, "legalBody", "copy.ts");
+const INTERFACE_POT_STEP = join(INTERFACE_SRC, "legalBody", "safePotStep.ts");
 
 // ---------------------------------------------------------------------------------------------
 // This backend's unions, each written out once.
@@ -108,6 +109,14 @@ const FILING_STATUSES: Record<FilingStatus, true> = {
   filed: true,
   past_due_unverified: true,
   unverified: true,
+};
+
+const POT_BLOCK_STATES: Record<PotBlock["state"], true> = {
+  ceiling_read: true,
+  stopped: true,
+  limits_not_read: true,
+  former: true,
+  unavailable: true,
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -169,6 +178,7 @@ const LEGAL_BODY_CONFIG_KEYS: Record<keyof AvailableLegalBodyConfig, true> = {
   paymentRequired: true,
   identityRequired: true,
   identityCheckAutomatic: true,
+  pot: true,
   formedDoor: true,
   filingWorkingDays: true,
   linkTtl: true,
@@ -198,6 +208,33 @@ const LINK_MESSAGE_RESULT_KEYS: Record<keyof LinkMessageResult, true> = {
   deadline: true,
 };
 
+const POT_BIRTH_NOTE_KEYS: Record<keyof PotBirthNote, true> = {
+  saltNonce: true,
+  agentWallet: true,
+  ceilingUnits: true,
+};
+
+const ORDER_POT_VIEW_KEYS: Record<keyof OrderPotView, true> = {
+  address: true,
+  onRecord: true,
+  declaredAt: true,
+  birth: true,
+};
+
+const POT_BIRTH_KEYS: Record<keyof PotBirth, true> = {
+  guardian: true,
+  agentWallet: true,
+  token: true,
+  ceilingUnits: true,
+  periodMinutes: true,
+  saltNonce: true,
+  proxyFactory: true,
+  singleton: true,
+  fallbackHandler: true,
+  multiSendCallOnly: true,
+  allowanceModule: true,
+};
+
 const TRANSPARENCY_LEGAL_BODY_KEYS: Record<keyof TransparencyLegalBody, true> = {
   agentId: true,
   publicId: true,
@@ -219,11 +256,11 @@ const TRANSPARENCY_LEGAL_BODY_KEYS: Record<keyof TransparencyLegalBody, true> = 
 // ---------------------------------------------------------------------------------------------
 
 /** The text between `export const NAME = [` and the `] as const` that closes it. */
-function interfaceListBody(name: string): string {
-  const source = readFileSync(INTERFACE_TYPES, "utf8");
+function interfaceListBody(name: string, file: string = INTERFACE_TYPES): string {
+  const source = readFileSync(file, "utf8");
   const opening = `export const ${name} = [`;
   const start = source.indexOf(opening);
-  expect(start, `${name} must exist in ${INTERFACE_TYPES}`).toBeGreaterThan(-1);
+  expect(start, `${name} must exist in ${file}`).toBeGreaterThan(-1);
   expect(source.indexOf(opening, start + 1), `${name} must be declared once`).toBe(-1);
   const end = source.indexOf("] as const", start);
   expect(end, `${name} must close with "] as const"`).toBeGreaterThan(start);
@@ -231,8 +268,8 @@ function interfaceListBody(name: string): string {
 }
 
 /** The quoted words of an interface list, in their order. */
-function interfaceList(name: string): string[] {
-  return [...interfaceListBody(name).matchAll(/"([A-Za-z0-9_]+)"/g)].map((m) => m[1] ?? "");
+function interfaceList(name: string, file: string = INTERFACE_TYPES): string[] {
+  return [...interfaceListBody(name, file).matchAll(/"([A-Za-z0-9_]+)"/g)].map((m) => m[1] ?? "");
 }
 
 /** The `{ name, type }` entries of an interface list, in their order. */
@@ -261,6 +298,7 @@ describe("each union the interface copies has exactly this backend's members", (
     ["BROKEN_REASONS", BROKEN_REASONS],
     ["STANDINGS", STANDINGS],
     ["FILING_STATUSES", FILING_STATUSES],
+    ["POT_BLOCK_STATES", POT_BLOCK_STATES],
   ];
   test.each(unions)("%s", (list, backend) => {
     expect(sorted(interfaceList(list))).toEqual(sorted(Object.keys(backend)));
@@ -276,6 +314,9 @@ describe("each view the interface copies has exactly this backend's keys", () =>
     ["LEGAL_BODY_AGREEMENT_KEYS", LEGAL_BODY_AGREEMENT_KEYS],
     ["LINK_MESSAGE_RESULT_KEYS", LINK_MESSAGE_RESULT_KEYS],
     ["TRANSPARENCY_LEGAL_BODY_KEYS", TRANSPARENCY_LEGAL_BODY_KEYS],
+    ["POT_BIRTH_NOTE_KEYS", POT_BIRTH_NOTE_KEYS],
+    ["ORDER_POT_VIEW_KEYS", ORDER_POT_VIEW_KEYS],
+    ["POT_BIRTH_KEYS", POT_BIRTH_KEYS],
   ];
   test.each(views)("%s", (list, backend) => {
     expect(sorted(interfaceList(list))).toEqual(sorted(Object.keys(backend)));
@@ -294,4 +335,27 @@ test("the interface's adoption fields are this backend's, by name and type, in o
   expect(interfaceFields("ADOPTION_FIELDS")).toEqual(
     ADOPTION_FIELDS.map(({ name, type }) => ({ name, type })),
   );
+});
+
+/**
+ * The guardian ticks the pot's declaration on the website's review screen, and the server stores
+ * its version: the website's copy must hold the same words and the same version, word for word.
+ */
+test("the website's copy holds POT_DECLARATION's text and version, word for word (interface/src/lib/legalBody/copy.ts)", () => {
+  const source = readFileSync(INTERFACE_COPY, "utf8");
+  const version = /export const POT_DECLARATION_VERSION = "([^"]*)";/.exec(source);
+  expect(version?.[1], "POT_DECLARATION_VERSION must be exported by the copy").toBe(
+    POT_DECLARATION.version,
+  );
+  // The pot section's tick box: the one `declaration:` key whose sentence starts "I declare".
+  const declarations = [...source.matchAll(/declaration:\s*"(I declare[^"]*)"/g)].map((m) => m[1]);
+  expect(declarations).toEqual([POT_DECLARATION.text]);
+});
+
+test("every server code the website's pot screens choose a next step for is one this backend answers", () => {
+  // The website shows the sentence the server served; the code only decides the next step, so a
+  // code it knows that the server never answers is a branch that never runs.
+  const codes = interfaceList("POT_SERVER_CODES", INTERFACE_POT_STEP);
+  expect(codes.length).toBeGreaterThan(0);
+  for (const code of codes) expect(Object.keys(LEGAL_BODY_SENTENCES), code).toContain(code);
 });

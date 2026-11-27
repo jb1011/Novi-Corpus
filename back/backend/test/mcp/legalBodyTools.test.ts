@@ -12,7 +12,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { type Address, type Hex, getAddress } from "viem";
+import { type Address, type Hex, getAddress, zeroAddress } from "viem";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
   type CreateOutcome,
@@ -23,12 +23,14 @@ import { type ApiDeps, buildApiApp } from "../../src/api/app";
 import { signSession } from "../../src/auth/session";
 import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
+import { type LegalBodyPotDeps, potForAgent, prepareTake } from "../../src/legalBody/pot";
 import { LEGAL_BODY_SENTENCES } from "../../src/legalBody/sentences";
 import { REAL_HUMAN_CHECK_CODES } from "../../src/mcp/server";
 import { type Capability, SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { migrate, openDatabase } from "../../src/persistence/db";
 import { SqliteEntityRepository } from "../../src/persistence/entityRepository";
 import { SqliteFormationRepository } from "../../src/persistence/formationRepository";
+import { SqliteLegalBodyPotRepository } from "../../src/persistence/legalBodyPotRepository";
 import type { LegalBodyRecord } from "../../src/persistence/legalBodyRepository";
 import { SqlitePasskeyStore } from "../../src/persistence/passkeyStore";
 import {
@@ -62,6 +64,19 @@ import {
   sessionOf,
   signedLink,
 } from "../helpers/legalBodyFixtures";
+import {
+  A,
+  G,
+  HEALTHY,
+  P,
+  REAL_STOPPED,
+  V3_ADDRESS,
+  fakePotChain,
+  fakeRegistry,
+  notePot,
+  potBody,
+  potDeps,
+} from "../helpers/potFixtures";
 import { startMcpTestClient } from "./helpers";
 
 /** anvil's published accounts #2, #3 and #4: test keys, never real wallets. The guardian and a
@@ -82,13 +97,18 @@ const messagePath = (id: string) => `/legal-body-orders/${id}/link-message`;
 const linkPath = (id: string) => `/legal-body-orders/${id}/link`;
 const bindingPath = (id: string) => `/legal-body-orders/${id}/binding`;
 
-/** One database and what runs over it: the stores, a fake chain, the API and its MCP endpoint. */
+/** One database and what runs over it: the stores, a fake chain, the API and its MCP endpoint, and
+ *  the pot's deps where the world wires the pot. */
 interface World {
   db: Database.Database;
   s: LegalBodyStores;
   chain: FakeLinkChainMembers;
   app: ReturnType<typeof buildApiApp>;
+  pot?: LegalBodyPotDeps;
 }
+
+/** What a world needs to wire the pot: its deps over the world's own stores. */
+type PotOf = (s: LegalBodyStores) => LegalBodyPotDeps;
 
 let opened: Database.Database[];
 /** Every console line written in the test: the ops lines among them. */
@@ -113,12 +133,13 @@ afterEach(() => {
 function worldOver(
   db: Database.Database,
   docStore: MemoryDocumentStore | undefined,
-  opts: { feature?: boolean; over?: Partial<LegalBodyOrderDeps> } = {},
+  opts: { feature?: boolean; over?: Partial<LegalBodyOrderDeps>; pot?: PotOf } = {},
 ): World {
   opened.push(db);
   const s = openLegalBodyStores(db, docStore);
   const chain = fakeLinkChainMembers();
   const requests = new SqliteFormationRepository(db);
+  const pot = opts.pot?.(s);
   const deps: Partial<ApiDeps> = {
     webOrigin: "*",
     jwtSecret: JWT_SECRET,
@@ -136,6 +157,7 @@ function worldOver(
       opts.feature === false
         ? undefined
         : legalBodyOrderDeps(s, { chain: asChainPort(chain), ...opts.over }),
+    legalBodyPot: pot,
     apiKeys: new SqliteApiKeyStore(db),
     passkeys: new SqlitePasskeyStore(db),
     jobs: new SqliteJobRepository(db),
@@ -146,12 +168,14 @@ function worldOver(
     fullProductAvailable: true,
     turnkeyCustodyAvailable: true,
   };
-  return { db, s, chain, app: buildApiApp(deps as ApiDeps) };
+  return { db, s, chain, app: buildApiApp(deps as ApiDeps), pot };
 }
 
 /** A fresh database where the guardian and the stranger are verified humans and #4 holds a
  *  waiver. */
-function world(opts: { feature?: boolean; over?: Partial<LegalBodyOrderDeps> } = {}): World {
+function world(
+  opts: { feature?: boolean; over?: Partial<LegalBodyOrderDeps>; pot?: PotOf } = {},
+): World {
   const db = openDatabase(":memory:");
   migrate(db);
   const w = worldOver(db, undefined, opts);
@@ -750,5 +774,315 @@ describe("what an answer may carry", () => {
     expect(inputs("get_link_message")).toEqual(["agentId", "orderId", "ttlSeconds"]);
     expect(inputs("submit_link")).toEqual(["message", "orderId", "signature"]);
     expect(inputs("get_binding")).toEqual(["orderId"]);
+  });
+});
+
+// ── The pot's two tools ─────────────────────────────────────────────────────────────────────
+
+describe("the pot's two tools: get_pot and prepare_pot_take", () => {
+  const POT_TOOLS = ["get_pot", "prepare_pot_take"];
+  const MODULE: Address = "0xAA46724893dedD72658219405185Fb0Fc91e091C";
+  let registry: ReturnType<typeof fakeRegistry>;
+  let potChain: ReturnType<typeof fakePotChain>;
+  let offered: boolean;
+  beforeEach(() => {
+    registry = fakeRegistry();
+    potChain = fakePotChain();
+    offered = true;
+  });
+
+  const potOf: PotOf = (s) =>
+    potDeps(s, {
+      registry: { getAgentWallet: registry.getAgentWallet },
+      chain: potChain.port,
+      now: () => Date.now(),
+      offered: () => offered,
+    });
+  const potWorld = (over: Partial<LegalBodyOrderDeps> = {}) => world({ over, pot: potOf });
+  const potIn = (w: World): LegalBodyPotDeps => {
+    if (w.pot === undefined) throw new Error("this world does not wire the pot");
+    return w.pot;
+  };
+
+  /** A linked body of G (the real run's guardian) whose registry names A, with V3 noted for it an
+   *  hour ago, reading the proof's HEALTHY: a ceiling of 50 USDC, 10 taken. */
+  function withPot(w: World): LegalBodyRecord {
+    const row = potBody(w.s);
+    registry.wallets.set(row.agentId as string, A);
+    notePot(new SqliteLegalBodyPotRepository(w.db), row, {
+      at: Math.floor(Date.now() / 1000) - 3_600,
+    });
+    potChain.port.readPot.mockResolvedValue(HEALTHY);
+    return row;
+  }
+  /** A refusal as a tool answers it: the code and its fixed sentence. */
+  const answerFor = (code: string) => {
+    const body = { code, message: S[code] };
+    return { isError: true, text: JSON.stringify(body), body };
+  };
+  /** Each pot tool with arguments that name `orderId`. */
+  const potCalls = (orderId: string): [string, Record<string, unknown>][] => [
+    ["get_pot", { orderId }],
+    ["prepare_pot_take", { orderId, to: P, amountUnits: "1000000" }],
+  ];
+  function expectNoPotRead(): void {
+    expect(registry.getAgentWallet).not.toHaveBeenCalled();
+    expect(potChain.port.readPot).not.toHaveBeenCalled();
+    expect(potChain.port.codeHash).not.toHaveBeenCalled();
+  }
+  /** Everything a pot tool could write: the rows, the events and the pot's notes. */
+  const potSnapshot = (w: World) => ({
+    ...snapshot(w),
+    notes: w.db.prepare("SELECT * FROM pot_declarations ORDER BY legal_body_id, declared_at").all(),
+  });
+
+  test("the two tools are listed only where the pot is wired, beside the order tools", async () => {
+    const names = async (w: World) =>
+      (await toolsOf(w, keyOf(w, guardian.address))).map((t) => t.name);
+    const without = await names(world());
+    for (const name of POT_TOOLS) expect(without).not.toContain(name);
+    expect((await names(potWorld())).sort()).toEqual([...without, ...POT_TOOLS].sort());
+    // Without the order flow, neither: the pot's tools act on an order.
+    const noOrders = await names(world({ feature: false, pot: potOf }));
+    for (const name of [...POT_TOOLS, ...LEGAL_BODY_TOOLS]) expect(noOrders).not.toContain(name);
+  });
+
+  test("get_pot answers what potForAgent reads and prepare_pot_take the take prepareTake prepares, for the key's tenant, and neither writes anything", async () => {
+    const w = potWorld();
+    const row = withPot(w);
+    const key = keyOf(w, G, { capability: "read" });
+    const before = potSnapshot(w);
+
+    const got = await callTool(w, key, "get_pot", { orderId: row.legalBodyId });
+    expect(got.isError).toBe(false);
+    expect(got.body).toEqual(await potForAgent(potIn(w), G, row.legalBodyId));
+    expect(got.body).toMatchObject({
+      pot: V3_ADDRESS,
+      onRecord: true,
+      agentWallet: A,
+      module: MODULE,
+      state: "ceiling_read",
+      ceilingUnits: "50000000",
+      spentUnits: "10000000",
+      leftUnits: "40000000",
+      balanceUnits: "190000000",
+      agentKeyBalanceWei: "100000000000000000",
+    });
+
+    const input = { to: P, amountUnits: "1000000" };
+    const prepared = await callTool(w, key, "prepare_pot_take", {
+      orderId: row.legalBodyId,
+      ...input,
+    });
+    expect(prepared.isError).toBe(false);
+    expect(prepared.body).toEqual(await prepareTake(potIn(w), G, row.legalBodyId, input));
+    expect(prepared.body).toMatchObject({
+      from: A,
+      to: MODULE,
+      value: "0",
+      gas: "200000",
+      leftAfterUnits: "39000000",
+      how: S.pot_take_how,
+      warning: null,
+    });
+    expect(potSnapshot(w)).toEqual(before);
+
+    // A stopped pot reads stopped, with its balance and no amount of the ceiling.
+    potChain.port.readPot.mockResolvedValue(REAL_STOPPED);
+    const stopped = await callTool(w, key, "get_pot", { orderId: row.legalBodyId });
+    expect(stopped.body).toMatchObject({ state: "stopped", balanceUnits: "0" });
+    expect(stopped.body).not.toHaveProperty("leftUnits");
+  });
+
+  test("a refusal carries its code and its fixed sentence: pot_not_declared, pot_take_invalid, pot_take_over_ceiling, pot_take_over_balance, pot_not_readable", async () => {
+    const w = potWorld();
+    const key = keyOf(w, G);
+    const bare = potBody(w.s);
+    registry.wallets.set(bare.agentId as string, A);
+    for (const [name, args] of potCalls(bare.legalBodyId))
+      expect(await callTool(w, key, name, args), name).toEqual(answerFor("pot_not_declared"));
+
+    const row = withPot(w);
+    const take = (args: Record<string, unknown>) =>
+      callTool(w, key, "prepare_pot_take", { orderId: row.legalBodyId, ...args });
+    for (const args of [
+      { to: P, amountUnits: "1.5" },
+      { to: P, amountUnits: 1_000_000 },
+      { to: P },
+      { to: zeroAddress, amountUnits: "1" },
+    ])
+      expect(await take(args), JSON.stringify(args)).toEqual(answerFor("pot_take_invalid"));
+    expect(await take({ to: P, amountUnits: "40000001" })).toEqual(
+      answerFor("pot_take_over_ceiling"),
+    );
+    potChain.port.readPot.mockResolvedValue({ ...HEALTHY, balanceUnits: 1n });
+    expect(await take({ to: P, amountUnits: "2" })).toEqual(answerFor("pot_take_over_balance"));
+    potChain.port.readPot.mockResolvedValue(REAL_STOPPED);
+    expect(await take({ to: P, amountUnits: "1" })).toEqual(answerFor("pot_not_readable"));
+    // A payee that would lose the money, and a body that is not in force: refused before any read.
+    potChain.port.readPot.mockClear();
+    registry.getAgentWallet.mockClear();
+    expect(await take({ to: V3_ADDRESS, amountUnits: "1" })).toEqual(
+      answerFor("pot_take_bad_payee"),
+    );
+    w.s.repo.recordEvent(row.legalBodyId, "revoked", "operator:ops.example", null, {
+      reason: "Recorded for a test.",
+    });
+    expect(await take({ to: P, amountUnits: "1" })).toEqual(
+      answerFor("pot_take_body_not_in_force"),
+    );
+    expectNoPotRead();
+    // The read still answers for the revoked body.
+    expect((await callTool(w, key, "get_pot", { orderId: row.legalBodyId })).body).toMatchObject({
+      state: "stopped",
+    });
+  });
+
+  test("while the pot is not offered, both answer pot_not_offered before the real-human check, the token and any read", async () => {
+    const bucket = vi.fn(() => ({ take: () => true }));
+    const w = potWorld({ tenantBucket: bucket });
+    const row = withPot(w);
+    const key = keyOf(w, G);
+    offered = false;
+    const human = vi.spyOn(w.s.store, "findByTenant");
+    for (const [name, args] of potCalls(row.legalBodyId))
+      expect(await callTool(w, key, name, args), name).toEqual(answerFor("pot_not_offered"));
+    expect(human).not.toHaveBeenCalled();
+    expect(bucket).not.toHaveBeenCalled();
+    expectNoPotRead();
+
+    offered = true;
+    expect((await callTool(w, key, "get_pot", { orderId: row.legalBodyId })).isError).toBe(false);
+    expect(human).toHaveBeenCalled();
+    expect(bucket).toHaveBeenCalledTimes(1);
+  });
+
+  test("a key that is not tenant-wide is denied as get_binding denies it, before anything is read; a read key may use both", async () => {
+    const w = potWorld();
+    const row = withPot(w);
+    const scoped = keyOf(w, G, { entityId: "agent-0001" });
+    const before = potSnapshot(w);
+    const calls: [string, Record<string, unknown>][] = [
+      ...potCalls(row.legalBodyId),
+      ["get_binding", { orderId: row.legalBodyId }],
+    ];
+    for (const [name, args] of calls)
+      expect(await callTool(w, scoped, name, args), name).toEqual({
+        isError: true,
+        text: "not authorized",
+        body: null,
+      });
+    expectNoPotRead();
+    expect(potSnapshot(w)).toEqual(before);
+
+    const read = keyOf(w, G, { capability: "read" });
+    for (const [name, args] of potCalls(row.legalBodyId))
+      expect((await callTool(w, read, name, args)).isError, name).toBe(false);
+  });
+
+  test("the doors' rules hold: a waiver tenant is refused as the pot's read door refuses it, another tenant gets not_found, and an empty bucket rate_limited, each before any read", async () => {
+    const bucket = { take: vi.fn(() => true) };
+    const w = potWorld({ tenantBucket: () => bucket });
+    const row = withPot(w);
+
+    const viaDoor = await answerOf(
+      await call(
+        w.app,
+        "GET",
+        `/legal-body-orders/${row.legalBodyId}/pot`,
+        await sessionOf(waived),
+      ),
+    );
+    expect(viaDoor).toMatchObject({
+      status: 403,
+      body: { error: { code: "waiver_not_accepted" } },
+    });
+    const waiver = { code: "waiver_not_accepted", message: viaDoor.body.error.message };
+    for (const [name, args] of potCalls(row.legalBodyId))
+      expect(await callTool(w, keyOf(w, waived.address), name, args), name).toEqual({
+        isError: true,
+        text: JSON.stringify(waiver),
+        body: waiver,
+      });
+
+    for (const [name, args] of potCalls(row.legalBodyId))
+      expect(
+        await callTool(w, keyOf(w, stranger.address), name, { ...args, tenantId: G }),
+        name,
+      ).toEqual(answerFor("not_found"));
+    expectNoPotRead();
+
+    bucket.take.mockReturnValue(false);
+    for (const [name, args] of potCalls(row.legalBodyId))
+      expect(await callTool(w, keyOf(w, G), name, args), name).toEqual(answerFor("rate_limited"));
+    expectNoPotRead();
+  });
+
+  test("a chain failure answers chain_unavailable and its sentence, with no upstream text in the answer or the log", async () => {
+    const w = potWorld();
+    const row = withPot(w);
+    const key = keyOf(w, G);
+    for (const [name, args] of potCalls(row.legalBodyId)) {
+      registry.getAgentWallet.mockRejectedValueOnce(new TransportFailure());
+      lines.length = 0;
+      expect(await callTool(w, key, name, args), name).toEqual(answerFor("chain_unavailable"));
+      expect(lines.join("\n"), name).not.toContain(NODE_HOST);
+      expect(opsLines(), name).toEqual([
+        expect.objectContaining({
+          opslog: "legal_body_chain_unavailable",
+          orderId: row.legalBodyId,
+          stage: "pot_agent_wallet",
+          errorName: "HttpRequestError",
+        }),
+      ]);
+    }
+  });
+
+  test("the descriptions say the agent's own key sends the take itself, with no signature added, and pays a small fee in USDC; they count fixed thirty-day periods and claim nothing more; each tool takes exactly its inputs", async () => {
+    const w = potWorld();
+    const tools = await toolsOf(w, keyOf(w, G));
+    const byName = new Map(tools.map((t) => [t.name, t]));
+    const getPot = byName.get("get_pot")?.description ?? "";
+    const prepare = byName.get("prepare_pot_take")?.description ?? "";
+
+    for (const sentence of [
+      "Read the company's pot of an order's legal body: the Safe its guardian created in the web app, whether the guardian's note puts it on the public record (onRecord), the ceiling the agent's own key may take in each thirty-day period, what was taken in the current period, what is left, when the period ends, what the pot holds, and what the agent's key holds for fees.",
+      "The periods are fixed, one after the other.",
+      "Amounts are in millionths of a USDC, as decimal strings: 1 USDC is 1000000.",
+      "It reads the chain and writes nothing.",
+      "No tool creates a pot.",
+      "agentKeyBalanceWei is null when it was not read: when no pot's code is at the pot's address, nothing past the code is read.",
+    ])
+      expect(getPot).toContain(sentence);
+    // The stopped state in the record's own words.
+    expect(getPot.toLowerCase()).toContain(
+      "the agent's key cannot take from it: its allowance is switched off.",
+    );
+    for (const sentence of [
+      "Prepare a take from the company's pot, for the agent's own key to send.",
+      "to is who is paid: the agent's own address or a payee.",
+      "amountUnits is the amount in millionths of a USDC, as a decimal string.",
+      "The answer is one transaction: send it from the agent's wallet exactly as given (from, to, value 0, data, gas), and add no signature: the feature takes the sender as the signer.",
+      "The agent's key pays a small fee in USDC.",
+      "A take above what is left in the current period, or above what the pot holds, is refused here before anything is sent.",
+      "This server holds no key and no money, and sends nothing.",
+      "It is never the pot itself, the USDC token's contract or the allowance feature's contract.",
+      "No take is prepared for a legal body that is not in force.",
+    ])
+      expect(prepare).toContain(sentence);
+    for (const [name, description] of [
+      ["get_pot", getPot],
+      ["prepare_pot_take", prepare],
+    ] as const) {
+      expect(description, name).not.toMatch(
+        /enforced|guarantee|per thirty days|no key may take|free\b|our agents|—/i,
+      );
+      expect(description, name).not.toMatch(/0x/);
+    }
+
+    const inputs = (name: string) =>
+      Object.keys(byName.get(name)?.inputSchema.properties ?? {}).sort();
+    expect(inputs("get_pot")).toEqual(["orderId"]);
+    expect(inputs("prepare_pot_take")).toEqual(["amountUnits", "orderId", "to"]);
   });
 });

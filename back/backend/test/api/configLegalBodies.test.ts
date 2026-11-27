@@ -34,6 +34,7 @@ import { SqliteJobRepository } from "../../src/jobs/jobRepository";
 import type { CustomerCompanyDeps } from "../../src/legalBody/customerCompany";
 import type { GasSeedDeps } from "../../src/legalBody/gasSeed";
 import type { LegalBodyOrderDeps } from "../../src/legalBody/orders";
+import type { LegalBodyPotDeps } from "../../src/legalBody/pot";
 import type { LegalBodyStatementDeps } from "../../src/legalBody/statements";
 import { SqliteApiKeyStore } from "../../src/persistence/apiKeyStore";
 import { SqliteDocumentIndexRepository } from "../../src/persistence/documentIndexRepository";
@@ -72,6 +73,7 @@ import {
   readyCompany,
   statementDeps,
 } from "../helpers/legalBodyStatementFixtures";
+import { potDeps } from "../helpers/potFixtures";
 
 /** anvil's published account #3: a test key, never a real wallet. */
 const owner = ANVIL_ACCOUNT_3;
@@ -183,11 +185,26 @@ function identityCheck(environment: "sandbox" | "production" = "sandbox"): Ident
   };
 }
 
+/** The pot's deps, offered while `offered` answers true. `/config` reads only whether they are
+ *  wired and offered, so the registry and the chain throw. */
+function pot(offered: () => boolean = () => true): LegalBodyPotDeps {
+  const never = (member: string) => async () => {
+    throw new Error(`the pot was asked for ${member}`);
+  };
+  return potDeps(s, {
+    registry: { getAgentWallet: never("getAgentWallet") },
+    chain: { readPot: never("readPot"), codeHash: never("codeHash") },
+    now: () => Date.now(),
+    offered,
+  });
+}
+
 interface AppOptions {
   legalBodyOrders?: LegalBodyOrderDeps;
   customerCompanies?: CustomerCompanyDeps;
   legalBodyStatements?: LegalBodyStatementDeps;
   legalBodyGasSeed?: GasSeedDeps;
+  legalBodyPot?: LegalBodyPotDeps;
   identityCheck?: IdentitySessionDeps;
   stripeIdentity?: StripeIdentityWebhookDeps;
   now?: () => number;
@@ -211,6 +228,7 @@ function makeApp(o: AppOptions = {}) {
     customerCompanies: o.customerCompanies && { ...o.customerCompanies, documents, docStore },
     legalBodyOrders: o.legalBodyOrders,
     legalBodyGasSeed: o.legalBodyGasSeed,
+    legalBodyPot: o.legalBodyPot,
     legalBodyStatements: o.legalBodyStatements,
     identityCheck: o.identityCheck,
     stripeIdentity: o.stripeIdentity,
@@ -257,6 +275,7 @@ describe("/config.legalBodies", () => {
       paymentRequired: false,
       identityRequired: false,
       identityCheckAutomatic: false,
+      pot: false,
       // No doola on this deployment: no formed door, and the waiting screen's default.
       formedDoor: "hidden",
       filingWorkingDays: 5,
@@ -362,13 +381,45 @@ describe("/config.legalBodies", () => {
     );
   });
 
-  test("the offered answer has exactly the fourteen keys of its type, and the link window exactly three", async () => {
+  test("pot is true where the pot's deps are wired and its contracts verified, false otherwise, and nothing else changes", async () => {
+    const orders = orderDeps();
+    let verified = false;
+    const wiredPot = pot(() => verified);
+    const without = (await configOf({ legalBodyOrders: orders })).body.legalBodies;
+    expect(without.pot).toBe(false);
+    // Wired, its contracts not verified (yet, or ever): not offered.
+    const off = (await configOf({ legalBodyOrders: orders, legalBodyPot: wiredPot })).body
+      .legalBodies;
+    expect(off.pot).toBe(false);
+    expect(off).toEqual(without);
+    // The flag turns on: the same deps, the next answer offers it.
+    verified = true;
+    const on = (await configOf({ legalBodyOrders: orders, legalBodyPot: wiredPot })).body
+      .legalBodies;
+    expect(on.pot).toBe(true);
+    expect({ ...on, pot: false }).toEqual(without);
+    // One app, read twice around the flag: /config follows it live.
+    const app = makeApp({ legalBodyOrders: orders, legalBodyPot: wiredPot });
+    const pot1 = (await answerOf(await app.request("/config", { method: "GET" }))).body.legalBodies
+      .pot;
+    verified = false;
+    const pot2 = (await answerOf(await app.request("/config", { method: "GET" }))).body.legalBodies
+      .pot;
+    expect([pot1, pot2]).toEqual([true, false]);
+    // Without the order doors there is no legal-body answer to carry it.
+    expect((await configOf({ legalBodyPot: pot() })).body.legalBodies).toEqual({
+      available: false,
+    });
+  });
+
+  test("the offered answer has exactly the fifteen keys of its type, and the link window exactly three", async () => {
     const orders = orderDeps();
     const { body } = await configOf({
       legalBodyOrders: orders,
       customerCompanies: customerCompanyDeps(s, () => Date.now()),
       legalBodyStatements: statementDeps(s, new FakeStatementChain()),
       legalBodyGasSeed: gasSeed(orders, 1n),
+      legalBodyPot: pot(),
       identityCheck: identityCheck(),
     });
     const keys = Object.keys(body.legalBodies).sort();
@@ -385,12 +436,13 @@ describe("/config.legalBodies", () => {
         paymentRequired: true,
         identityRequired: true,
         identityCheckAutomatic: true,
+        pot: true,
         formedDoor: true,
         filingWorkingDays: true,
         linkTtl: true,
       }),
     );
-    expect(keys).toHaveLength(14);
+    expect(keys).toHaveLength(15);
     expect(Object.keys(body.legalBodies.linkTtl).sort()).toEqual(
       keysOf<OfferedConfig["linkTtl"]>({ min: true, max: true, default: true }),
     );
@@ -423,6 +475,7 @@ describe("/config.legalBodies", () => {
       customerCompanies: customerCompanyDeps(s, () => Date.now()),
       legalBodyStatements: statementDeps(s, new FakeStatementChain()),
       legalBodyGasSeed: gasSeed(orders, 1n),
+      legalBodyPot: pot(),
       identityCheck: identityCheck(),
     };
     const { body } = await configOf(wired);
@@ -545,6 +598,7 @@ describe("each named answer carries exactly the keys of its type", () => {
           checkedAt: true,
           statement: true,
           treasury: true,
+          pot: true,
         }),
       );
     });
@@ -562,6 +616,7 @@ describe("each named answer carries exactly the keys of its type", () => {
         guardianIdentityVerified: true,
         statement: true,
         treasury: true,
+        pot: true,
       });
       const sandbox = await byAgent("42");
       expect(sandbox.statement).not.toBeNull();

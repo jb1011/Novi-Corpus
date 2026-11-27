@@ -163,6 +163,67 @@ export const LEGAL_BODY_SENTENCES: Readonly<Record<string, string>> = Object.fre
   // wording than the declaration of the pair this deployment serves.
   declaration_outdated:
     "This company was declared under another wording than the one this deployment serves, and a declaration is never rewritten: declare the company as a new one, then place the order on it.",
+  // The pot's note door and the agent's two pot tools, while this process has not verified the
+  // code of the pot's seven contracts (at start-up, or since a node could not be read): the reason
+  // stays in the boot log. The read of the body's notes and the off-record door take no flag.
+  pot_not_offered: "The pot is not offered on this deployment just now.",
+  // `POST /legal-body-orders/:id/pot`: details the door cannot take as they were sent.
+  pot_invalid:
+    "The pot's details are not ones the record takes: its address, its salt number, its first ceiling, its first key and the declaration's version, as the page sends them.",
+  // …a declaration of another version than the one the server stores, or none.
+  pot_declaration_required:
+    "A pot is noted only with the guardian's declaration, in the version the page shows. Nothing was noted.",
+  // …a deployment on a chain with no pot table.
+  pot_chain_unsupported: "The pot is not offered on this deployment's chain.",
+  // …a ceiling above the sum of the grant's thirty-day amounts for buying, paying and engaging
+  // contractors, where the order has a grant (Ruling R12).
+  ceiling_above_grant:
+    "The pot's ceiling in each thirty-day period cannot be above the total your agent's grant allows for buying, paying and engaging contractors. Nothing was noted.",
+  // …a grant that allows none of the three.
+  grant_allows_no_spending:
+    "Your agent's grant allows no buying, no paying and no engaging of contractors, so a pot would have nothing to release in each thirty-day period. Nothing was noted.",
+  // …an address that is not the one the server recomputes from the birth details, or a first key
+  // that is not the wallet the registry names as the agent's.
+  pot_address_mismatch:
+    "This address is not the one a pot with your wallet as only owner, this agent's wallet as only key and this ceiling would have. Nothing was noted.",
+  // …a body one of whose noted pots holds code, for any other address (one pot for life).
+  pot_exists:
+    "This legal body already has its pot, and a legal body keeps one pot for its whole life. Nothing was noted.",
+  // …an address another legal body has noted, of any guardian (Ruling R13).
+  pot_taken:
+    "This pot is already noted for another legal body, and a pot belongs to one legal body only. Nothing was noted.",
+  // …a new address while the body's latest declared note is of another address that holds no
+  // code yet (Ruling R22).
+  pot_pending:
+    "This legal body already has a pot being set up. Finish that one: it is created at the address already noted.",
+  // `POST /legal-body-orders/:id/pot/off-record`, for a body with no note, or whose latest note
+  // already took the pot off the record.
+  pot_not_on_record: "This legal body's pot is not on the public record, so nothing was taken off.",
+  // The agent's two pot tools (`get_pot`, `prepare_pot_take`), for a body with no note.
+  pot_not_declared: "No pot is noted for this legal body: its guardian creates one in the web app.",
+  // `prepare_pot_take`, for a pot whose reading is not `ceiling_read`.
+  pot_not_readable:
+    "The pot's ceiling cannot be read from the chain as it stands, so no take was prepared: the guardian checks the pot in the web app.",
+  // …a payee or an amount the tool cannot take as they were sent.
+  pot_take_invalid:
+    "A take names who is paid, as an address that is not zero, and an amount above zero in millionths of a USDC, as a decimal string.",
+  // …an amount above the ceiling less what was taken in the current period.
+  pot_take_over_ceiling:
+    "This take is above what is left of the ceiling in the current thirty-day period. Nothing was prepared.",
+  // …an amount above what the pot holds.
+  pot_take_over_balance: "This take is above what the pot holds. Nothing was prepared.",
+  // …a body that is not linked, or that the operator revoked (Ruling R17).
+  pot_take_body_not_in_force:
+    "This legal body is not in force, so no take is prepared for its agent.",
+  // …a payee that is the pot itself, the token's contract or the AllowanceModule.
+  pot_take_bad_payee:
+    "A take cannot pay the pot itself, the token's own contract or the allowance feature's contract. Nothing was prepared.",
+  // Not refusals: the two sentences a prepared take carries, how to send it and, when the agent's
+  // key holds under the low fee-money mark, the warning.
+  pot_take_how:
+    "Send this transaction from the agent's own key, exactly as given, with no signature added. The key pays the network fee in USDC.",
+  pot_take_low_fee_money:
+    "The agent's key holds very little USDC for fees, so the network may refuse this transaction: send the key a little USDC first.",
 });
 
 /** The fixed sentence of `code`. A code with no sentence is a bug in the caller, and throws. */

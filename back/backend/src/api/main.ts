@@ -22,6 +22,7 @@ import {
   walletClientForKey,
 } from "../adapters/arc/clients";
 import { LegalBodyChain } from "../adapters/arc/legalBodyChain";
+import { SafePotChain, assertPotContracts } from "../adapters/arc/safePotChain";
 import { readUsdcDomain } from "../adapters/arc/usdcToken";
 import { assertNoWildcardHolder, wildcardLedgerLogLine } from "../adapters/arc/wildcardLedger";
 import { withCircleRateLimit } from "../adapters/circle/circleRateLimit";
@@ -64,6 +65,9 @@ import { buildJobDeps } from "../jobs/composition";
 import { expireStaleCustomerCompanies } from "../legalBody/customerCompany";
 import { expireEvidenceBytes } from "../legalBody/evidence";
 import type { GasSeedDeps } from "../legalBody/gasSeed";
+import type { LegalBodyPotDeps } from "../legalBody/pot";
+import { startPotContractsGate } from "../legalBody/potOffer";
+import { potAddresses } from "../legalBody/safePot";
 import type { LegalBodyStatementDeps } from "../legalBody/statements";
 import {
   HOUSEKEEPING_BATCH,
@@ -108,6 +112,7 @@ import { SqliteFormationPartyRepository } from "../persistence/formationPartyRep
 import { SqliteFormationPaymentRepository } from "../persistence/formationPaymentRepository";
 import { SqliteFormationRepository } from "../persistence/formationRepository";
 import { SqliteLegalBodyAdoptionRepository } from "../persistence/legalBodyAdoptionRepository";
+import { SqliteLegalBodyPotRepository } from "../persistence/legalBodyPotRepository";
 import { SqliteLegalBodyRepository } from "../persistence/legalBodyRepository";
 import { SqliteLegalBodyStatementRepository } from "../persistence/legalBodyStatementRepository";
 import { SqliteLegalBodyTreasuryRepository } from "../persistence/legalBodyTreasuryRepository";
@@ -781,6 +786,44 @@ async function main() {
     ? { repo: new SqliteLegalBodyTreasuryRepository(db), registry: arc }
     : undefined;
 
+  /**
+   * THE COMPANY'S POT, wherever the order doors are and this chain has the pot's table (Arc
+   * mainnet and testnet). Its doors are mounted at boot, and answer only once this process has
+   * verified the code of the seven contracts the pot is built from: the start-up check is STARTED
+   * here and never awaited (Rulings R1 and R11), so the server boots and runs in every outcome of
+   * it. Its flag (`potGate.offered`) decides both `/config.legalBodies.pot` and whether the doors
+   * answer. A check that could not read the node is tried again once a minute; a mismatch leaves
+   * the pot off until a restart; the reason is in the boot log only.
+   *
+   * The notes are written over the db handle the legal-body store writes through (a note and its
+   * event are one transaction of that store); the agent's key is read from the registry through
+   * this process's `ArcAdapter` (`getAgentWallet` on `cfg.identityRegistry`, as the treasury of
+   * record reads it); the code of a noted address through the public client; the grant that caps
+   * the ceiling from the orders' grants and the agreements' store.
+   */
+  const potTable = potAddresses(cfg.chainId);
+  const potGate =
+    legalBodyOrders && potTable
+      ? startPotContractsGate({
+          check: () => assertPotContracts(publicClient, potTable),
+          chainId: cfg.chainId,
+        })
+      : undefined;
+  const legalBodyPot: LegalBodyPotDeps | undefined =
+    legalBodyOrders && potTable && potGate
+      ? {
+          repo: new SqliteLegalBodyPotRepository(db),
+          registry: arc,
+          bodies: legalBodyOrders.repo,
+          chain: new SafePotChain({ publicClient, addresses: potTable }),
+          chainId: cfg.chainId,
+          now: Date.now,
+          grants: legalBodyOrders.grants,
+          docStore,
+          offered: potGate.offered,
+        }
+      : undefined;
+
   // Whether a company stands behind an open legal body created on this chain by `factory`, and by
   // no other: read for a sandbox company's abandon only. A missing store keeps every company, as
   // `hasOpenLegalBody` below does.
@@ -1344,6 +1387,9 @@ async function main() {
     legalBodyStatements,
     // The treasury of record: its door beside the order doors, its record read by the lookups.
     legalBodyTreasury,
+    // The company's pot: its two doors beside the order doors, answering once its contracts are
+    // verified.
+    legalBodyPot,
     // The inbound receiver (design §6). Present only with credentials: a box that cannot verify a
     // signature has no business owning the URL.
     doola:
@@ -1525,6 +1571,8 @@ async function main() {
       sweepers: [
         ...(legalBodySweeper ? [legalBodySweeper] : []),
         ...(scheduler ? [scheduler] : []),
+        // The pot check's retry, which never holds the process open, stops with them.
+        ...(potGate ? [potGate] : []),
       ],
       // Both receivers' acked work: doola's and the identity check's, under one bound.
       tasks: settledAll([doolaTasks, identityTasks]),

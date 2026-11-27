@@ -15,10 +15,13 @@
  */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
-import { useConnection, useWriteContract } from "wagmi";
+import { useConfig, usePublicClient, useWriteContract } from "wagmi";
+import { getConnection } from "wagmi/actions";
 import { arcTestnet } from "@/lib/chain";
 import { sendAllowedCall, type CallContext, type WriteRequest } from "@/lib/legalBody/chain";
 import { orderPollInterval, retryRead } from "@/lib/legalBody/polling";
+import { potAddresses } from "@/lib/legalBody/safePot";
+import { readPotRaw } from "@/lib/legalBody/safePotRules";
 import { getTransparency } from "./client";
 import { useAuthToken, usePublicConfigQuery } from "./hooks";
 import { apiKeys } from "./keys";
@@ -29,24 +32,30 @@ import {
   adoptionMessage,
   createCustomerCompany,
   createLegalBodyOrder,
+  declareOrderPot,
   getBinding,
   getLegalBodyAgreement,
   getLegalBodyByAgent,
   getLegalBodyOrder,
+  getOrderGrant,
+  getOrderPot,
   listLegalBodyOrders,
   refreshBinding,
   requestGasSeed,
   requestLinkMessage,
   requestStatementMessage,
   submitLink,
+  takePotOffRecord,
 } from "./legalBodyClient";
 import { ApiError } from "./types";
 import type {
+  Address,
   CustomerCompanyInput,
   CustomerStatementInput,
   Hex,
   LegalBodyConfig,
   LinkTypedDataWire,
+  OrderPotView,
 } from "./types";
 
 /** The token a mutation sends, or a refusal before any request: the flow signs in first. */
@@ -268,6 +277,102 @@ export function useGasSeedMutation(id: string) {
   });
 }
 
+/* ── The company's pot ───────────────────────────────────────────────────────────────────── */
+
+/** The order's noted pot (`{ pot: null }` for none). Read once, and again only when a screen asks
+ *  after a transaction: never polled, never retried, never read again on focus, as the by-agent
+ *  record. */
+export function useOrderPotQuery(id: string | null | undefined, enabled: boolean) {
+  const token = useAuthToken();
+  return useQuery({
+    queryKey: apiKeys.legalBodyOrderPot(token ?? "", id ?? ""),
+    queryFn: () => getOrderPot(token!, id!),
+    enabled: enabled && !!token && !!id,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** The order's grant, which caps the pot's ceiling. The same frozen agreement for the life of the
+ *  order; a failure is shown with its retry, never retried by itself. */
+export function useOrderGrantQuery(id: string | null | undefined, enabled: boolean) {
+  const token = useAuthToken();
+  return useQuery({
+    queryKey: apiKeys.legalBodyOrderGrant(token ?? "", id ?? ""),
+    queryFn: () => getOrderGrant(token!, id!),
+    enabled: enabled && !!token && !!id,
+    retry: false,
+    refetchOnWindowFocus: false,
+  });
+}
+
+/** `GET /pot` read now, a click's own read: a request made in the click, never the cached answer
+ *  (a stale "no note" is the one way left to plan a pot at another address). Its answer becomes the
+ *  pot query's data, so the card reads what the click read. A failure throws, a missing session
+ *  as a 401 before any request. */
+export function useReadOrderPotNow(id: string) {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useCallback(async (): Promise<OrderPotView | null> => {
+    const t = requireToken(token);
+    const answer = await getOrderPot(t, id);
+    queryClient.setQueryData(apiKeys.legalBodyOrderPot(t, id), answer);
+    return answer.pot;
+  }, [queryClient, token, id]);
+}
+
+/**
+ * A pot's raw facts, as one block answered them (`readPotRaw`), through the public client of
+ * `chainId`: the noted pot read for the record's agent wallet. One query keyed by the chain and
+ * the two addresses; nothing is read until both are given and the chain has the pot's table. Read
+ * once as the done page shows it, and again only when a screen asks after a transaction: never
+ * retried, never polled, never read again on focus or on reconnect. A failed read is the query's
+ * error, never an answer.
+ */
+export function usePotRawQuery(chainId: number, pot: Address | null, agentWallet: Address | null) {
+  const client = usePublicClient({ chainId });
+  const addresses = potAddresses(chainId);
+  return useQuery({
+    queryKey: apiKeys.potRaw(chainId, pot ?? "", agentWallet ?? ""),
+    queryFn: () => {
+      if (!client || addresses === null || pot === null || agentWallet === null)
+        throw new Error("no pot to read");
+      return readPotRaw(client, addresses, { pot, agentWallet });
+    },
+    enabled: !!client && addresses !== null && pot !== null && agentWallet !== null,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
+
+/** The guardian's note of the pot, before its setup transaction. The answer is the noted pot as the
+ *  server now holds it, so it becomes the pot query's data. */
+export function useDeclarePotMutation(id: string) {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useMutation({
+    mutationFn: (body: Parameters<typeof declareOrderPot>[2]) =>
+      declareOrderPot(requireToken(token), id, body),
+    onSuccess: (pot) => {
+      queryClient.setQueryData(apiKeys.legalBodyOrderPot(token ?? "", id), { pot });
+    },
+  });
+}
+
+/** The pot off the public record. The answer is the noted pot with `onRecord` false, so it becomes
+ *  the pot query's data. */
+export function useTakePotOffRecordMutation(id: string) {
+  const queryClient = useQueryClient();
+  const token = useAuthToken();
+  return useMutation({
+    mutationFn: () => takePotOffRecord(requireToken(token), id),
+    onSuccess: (pot) => {
+      queryClient.setQueryData(apiKeys.legalBodyOrderPot(token ?? "", id), { pot });
+    },
+  });
+}
+
 /* ── Public reads ────────────────────────────────────────────────────────────────────────── */
 
 /**
@@ -306,30 +411,49 @@ const CONFIGURED_CHAIN_IDS: readonly number[] = [arcTestnet.id];
  * The one way the flow asks a wallet to write: `sendAllowedCall`, so the allowlist and the chain
  * checks come first, then one `writeContract` of the request it checked.
  *
- * The wallet's chain is `useConnection().chainId`, never `useChainId()`. wagmi's store adopts a
- * connection's chain only when that chain is configured, so with `[arcTestnet]` alone
- * `useChainId()` reports Arc testnet whatever network the wallet sits on: the
- * `wallet_on_another_chain` sentence would never show, and wagmi would refuse the send itself with
- * its own error instead. The connection's chain tracks the wallet.
+ * The wallet's chain is the connection's (`getConnection(config).chainId`, the chain wagmi's
+ * `useConnection` reports), never `useChainId()`. wagmi's store adopts a connection's
+ * chain only when that chain is configured, so with `[arcTestnet]` alone `useChainId()` reports
+ * Arc testnet whatever network the wallet sits on: the `wallet_on_another_chain` sentence would
+ * never show, and wagmi would refuse the send itself with its own error instead. The connection's
+ * chain tracks the wallet. The connected account is read from the same connection: a pot call is
+ * sent only from the order's guardian's own account.
+ *
+ * Both are read AT THE SEND, from wagmi's store, never from the render that made this function: a
+ * click's continuation calls it after its own awaits, and an account switched meanwhile is the one
+ * the wallet would send from, so it is the one the allowlist checks.
  *
  * The cast is the only one of the flow: wagmi resolves the `register` overloads from literal
  * argument tuples, and the request here carries the arguments the allowlist checked as a wide
  * array.
  */
 export function useAllowedWrite() {
+  const config = useConfig();
   const { writeContractAsync } = useWriteContract();
-  const { chainId } = useConnection();
   const writeContract = useCallback(
     (req: WriteRequest) => writeContractAsync(req as Parameters<typeof writeContractAsync>[0]),
     [writeContractAsync],
   );
   return useCallback(
-    (req: WriteRequest, ctx: CallContext) =>
-      sendAllowedCall(req, ctx, {
+    (req: WriteRequest, ctx: CallContext) => {
+      const { address, chainId } = getConnection(config);
+      return sendAllowedCall(req, ctx, {
         walletChainId: chainId,
+        walletAddress: address,
         configuredChainIds: CONFIGURED_CHAIN_IDS,
         writeContract,
-      }),
-    [chainId, writeContract],
+      });
+    },
+    [config, writeContract],
   );
+}
+
+/** The wallet's account and chain at the moment of asking, from wagmi's store: never those of the
+ *  render that made the function. A click's continuation asks it after its own awaits. */
+export function useWalletNow() {
+  const config = useConfig();
+  return useCallback((): { address: Address | null; chainId: number | undefined } => {
+    const { address, chainId } = getConnection(config);
+    return { address: address ?? null, chainId };
+  }, [config]);
 }

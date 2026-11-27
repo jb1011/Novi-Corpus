@@ -4,7 +4,7 @@ import { type Address, type Hex, hexToString } from "viem";
 import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import { toJobView } from "../api/jobViews";
-import { assertGuardianAllowed } from "../api/routes/worldId";
+import { assertGuardianAllowed, assertRealHuman } from "../api/routes/worldId";
 import {
   type EntityViewDeps,
   listCompanyViews,
@@ -44,6 +44,8 @@ import {
   linkMessage,
   submitLinkAndCreate,
 } from "../legalBody/linkDoor";
+import { takeDoorTokens } from "../legalBody/orders";
+import { assertPotOffered, potForAgent, prepareTake } from "../legalBody/pot";
 import { LEGAL_BODY_SENTENCES, refusedLinkSentence, sentenceFor } from "../legalBody/sentences";
 import { opsLog } from "../observability/opsLog";
 import type { EntityPaymentService } from "../payments/entityPayment";
@@ -147,6 +149,10 @@ export interface McpToolDeps extends EntityViewDeps {
   /** The legal-body order flow: the SAME object the order doors are mounted with, present only
    *  where the feature is on. Absent, the flow's three tools are not registered at all. */
   legalBodyOrders?: import("../api/app").ApiDeps["legalBodyOrders"];
+  /** The company's pot: the SAME object the pot doors are mounted with, present only where the
+   *  deployment wires the pot. Absent, or without the order flow, the pot's two tools are not
+   *  registered at all; while the pot is not offered, they answer `pot_not_offered`. */
+  legalBodyPot?: import("../api/app").ApiDeps["legalBodyPot"];
   /** Injectable clock (ms) for tests; defaults to Date.now. */
   now?: () => number;
 }
@@ -195,6 +201,7 @@ export const MCP_TOOL_DEP_KEYS = [
   "hedera",
   "legalBody",
   "legalBodyOrders",
+  "legalBodyPot",
   "now",
   // The `EntityViewDeps` half — inherited, and listed here too because this list is about what
   // the TRANSPORT copies, and a view dep that reached REST and not MCP is the bug that started
@@ -490,6 +497,39 @@ const GET_BINDING_DESCRIPTION = [
   `The intent holds no calldata: the identity's owner encodes the pointer itself, and writes it in the identity's metadata under the key "${LEGAL_BODY_POINTER_KEY}".`,
   "The intent is null when there is nothing to write: a draft, a body still being created, an order closed without a body, a linked body, or a body winding down or dissolved.",
   "pointerSeenAt is when the pointer was seen, in unix seconds; nextCheckAt is when the platform next reads the chain for this order, in unix milliseconds.",
+].join(" ");
+
+/**
+ * THE POT'S TWO TOOLS' DESCRIPTIONS. The guardian creates and runs the company's pot in the web
+ * app, and no tool creates one. The agent's own key sends a take itself, with no signature added:
+ * this server prepares the transaction, and holds no key, signs nothing and sends nothing.
+ */
+const GET_POT_DESCRIPTION = [
+  "Read the company's pot of an order's legal body: the Safe its guardian created in the web app, whether the guardian's note puts it on the public record (onRecord), the ceiling the agent's own key may take in each thirty-day period, what was taken in the current period, what is left, when the period ends, what the pot holds, and what the agent's key holds for fees.",
+  "orderId is the order of that legal body, placed by your tenant in the browser.",
+  "The periods are fixed, one after the other.",
+  "Amounts are in millionths of a USDC, as decimal strings: 1 USDC is 1000000.",
+  "periodEndsAt is in unix seconds, and agentKeyBalanceWei, the key's fee money, in wei of the chain's native balance: 1 USDC is 1000000000000000000 wei.",
+  "agentKeyBalanceWei is null when it was not read: when no pot's code is at the pot's address, nothing past the code is read.",
+  "state is ceiling_read when the ceiling was read from the chain: only then are the ceiling's amounts given, and only then does prepare_pot_take prepare a take.",
+  "When it is stopped, the agent's key cannot take from it: its allowance is switched off.",
+  "limits_not_read means the pot holds something the reading does not read past, or names another key than the agent's wallet; absent, that no pot is at its address yet; not_the_guardians, that what is there is not a pot of the guardian's alone.",
+  "It reads the chain and writes nothing.",
+  "No tool creates a pot.",
+].join(" ");
+
+const PREPARE_POT_TAKE_DESCRIPTION = [
+  "Prepare a take from the company's pot, for the agent's own key to send.",
+  "orderId is the order of the pot's legal body, as for get_pot.",
+  "to is who is paid: the agent's own address or a payee.",
+  "It is never the pot itself, the USDC token's contract or the allowance feature's contract.",
+  "amountUnits is the amount in millionths of a USDC, as a decimal string.",
+  "No take is prepared for a legal body that is not in force.",
+  "The answer is one transaction: send it from the agent's wallet exactly as given (from, to, value 0, data, gas), and add no signature: the feature takes the sender as the signer.",
+  "The agent's key pays a small fee in USDC.",
+  "So it needs a little USDC of its own: under 0.01 USDC, the answer carries a warning.",
+  "A take above what is left in the current period, or above what the pot holds, is refused here before anything is sent.",
+  "This server holds no key and no money, and sends nothing.",
 ].join(" ");
 
 /** Build a fresh, tenant-scoped MCP server. scope is closed over — never taken from a tool arg. */
@@ -1926,6 +1966,11 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
   // The arguments a domain rule judges are declared `unknown`, as the door reads its body: each
   // is refused by its own rule, with its own code, rather than by the schema with the schema's
   // text. Every throw is answered by `legalBodyToolRefusal`.
+  //
+  // Where the deployment wires the company's pot, two more, for the agent's own key: what is left
+  // of the pot's ceiling (`get_pot`), and a take for that key to send itself (`prepare_pot_take`),
+  // over the SAME deps the pot doors are mounted with. Both read the chain and write nothing; they
+  // never sign or send.
   if (deps.legalBodyOrders) {
     const orders = deps.legalBodyOrders;
     // A key's tenant is the session address the key was minted for.
@@ -2023,6 +2068,68 @@ export function buildMcpServer(scope: VerifiedKey, deps: McpToolDeps): McpServer
         }
       },
     );
+
+    if (deps.legalBodyPot) {
+      const pot = deps.legalBodyPot;
+      /**
+       * What a pot door checks before its domain function, in the doors' order: while the pot is
+       * not offered, `pot_not_offered` before anything is read and without spending a token; then
+       * the real human (never a waiver); then the tenant's bucket and the doors' budget, as every
+       * tool that reads the chain takes them.
+       */
+      const potDoor = (): void => {
+        assertPotOffered(pot);
+        assertRealHuman(orders.world, tenant, orders.environment);
+        takeDoorTokens(orders, tenant);
+      };
+
+      server.registerTool(
+        "get_pot",
+        {
+          title: "Read the company's pot",
+          description: GET_POT_DESCRIPTION,
+          inputSchema: { orderId: z.string() },
+        },
+        async ({ orderId }) => {
+          const denied = requireReadTenantWide(scope);
+          if (denied) return denied;
+          try {
+            potDoor();
+            return json(await potForAgent(pot, tenant, orderId));
+          } catch (err) {
+            return legalBodyToolRefusal("get_pot", err);
+          }
+        },
+      );
+
+      server.registerTool(
+        "prepare_pot_take",
+        {
+          title: "Prepare a take from the company's pot",
+          description: PREPARE_POT_TAKE_DESCRIPTION,
+          inputSchema: {
+            orderId: z.string(),
+            to: z
+              .unknown()
+              .describe("Required: who is paid, as an address: the agent's own or a payee's."),
+            amountUnits: z
+              .unknown()
+              .describe("Required: the amount in millionths of a USDC, as a decimal string."),
+          },
+        },
+        async ({ orderId, to, amountUnits }) => {
+          const denied = requireReadTenantWide(scope);
+          if (denied) return denied;
+          try {
+            potDoor();
+            // Prepared only: the agent's own key sends it, and this server sends nothing.
+            return json(await prepareTake(pot, tenant, orderId, { to, amountUnits }));
+          } catch (err) {
+            return legalBodyToolRefusal("prepare_pot_take", err);
+          }
+        },
+      );
+    }
   }
 
   return server;

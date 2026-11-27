@@ -5,7 +5,9 @@
  * lets vitest accept the file.
  *
  * Each `@ts-expect-error` is a shape wagmi must refuse. If one of them stops being an error, `tsc`
- * fails on the unused directive, and the shape has to be looked at again.
+ * fails on the unused directive, and the shape has to be looked at again. A directive only proves
+ * that its line has some error: where the comment names one cause, the line pins every other field
+ * as a literal, and the line after it, with the named field replaced, compiles.
  */
 import { expect, test } from "vitest";
 import type { UseSignTypedDataReturnType, UseWriteContractReturnType } from "wagmi";
@@ -14,10 +16,23 @@ import {
   identityRegistryAbi,
   pointerCall,
   POINTER_KEY,
+  potExecCall,
+  potSetupCall,
+  potTransferCall,
   registerCall,
   type CallContext,
   type WriteRequest,
 } from "@/lib/legalBody/chain";
+import {
+  erc20Abi,
+  multicall3Abi,
+  POT_PERIOD_MINUTES,
+  potAddresses,
+  potChangeArgs,
+  potSetupCalls,
+  safeAbi,
+  type PotAddresses,
+} from "@/lib/legalBody/safePot";
 import {
   LINK_FIELDS,
   type LegalBodyOrderView,
@@ -37,6 +52,11 @@ const FACTORY = "0x069f4ADEabcBEd3ffFe2cB6Aaf9e7a66E8731456" as const;
 const BODY = "0x5969B48ff7A3a4c6689366a9a6D7AA24b0C4b5EE" as const;
 const CHAIN = 5042002;
 const config: CallContext["config"] = { chainId: CHAIN, identityRegistry: REGISTRY, factory: FACTORY };
+/** The real run's guardian, agent's key and Safe, and the pot's contracts on Arc testnet. */
+const G = "0x15D4EE6F84b6bf8ceE5A24cCb19FDF8257c22b0A" as const;
+const A = "0x2dDcf8da463526614b9FA5E87Db259a3Bf06667C" as const;
+const POT = "0x0bbBa174c1D6b6Edd2F1A86ff5af435B645b77EF" as const;
+const T = potAddresses(CHAIN) as PotAddresses;
 
 export async function typeLevel() {
   // The two register overloads and the pointer, their arguments written out as literal tuples.
@@ -57,14 +77,100 @@ export async function typeLevel() {
   });
 
   // The flow's own request, handed over as built: its `args` is wide, so wagmi cannot pick an
-  // overload from it. It reaches the wallet through one adapter, never directly.
+  // overload from it, and its `value` is a bigint, which a nonpayable function does not take. (Its
+  // `abi`, the union of the flow's pinned ABIs, is no error by itself: see the setup below.) It
+  // reaches the wallet through one adapter, never directly.
   const r: WriteRequest = registerCall(config, null);
-  // @ts-expect-error the wide `args: readonly unknown[]` satisfies no `register` overload
+  // @ts-expect-error as built: the wide `args`, and a value `register` does not take
   await write(r);
+  // With the ABI, the name and an absent value written as literals, only the wide `args` is left.
+  // @ts-expect-error the wide `args: readonly unknown[]` satisfies no `register` overload
+  await write({ ...r, abi: identityRegistryAbi, functionName: "register", value: undefined });
+  await write({ ...r, abi: identityRegistryAbi, functionName: "register", value: undefined, args: [] });
   const p = pointerCall(config, order);
   if ("ok" in p) return;
-  // @ts-expect-error the wide `args` does not satisfy `setMetadata`'s tuple either
+  // @ts-expect-error as built, nor `setMetadata`
   await write(p);
+
+  // The pot's setup and an action of the guardian's, as wagmi takes them: both functions are
+  // payable, the setup's value is the sum of its inner amounts, and the ten arguments of
+  // `execTransaction` are the builders' own tuple.
+  const pot = {
+    guardian: G,
+    agentWallet: A,
+    token: T.usdc,
+    ceilingUnits: BigInt(50_000_000),
+    periodMinutes: POT_PERIOD_MINUTES,
+  };
+  const s = potSetupCalls(T, { ...pot, saltNonce: BigInt(1), fundWei: BigInt(0), agentGasWei: BigInt(0) });
+  await write({
+    abi: multicall3Abi,
+    address: T.multicall3,
+    functionName: "aggregate3Value",
+    args: [s.calls],
+    value: s.value,
+    chainId: CHAIN,
+    gas: BigInt(650_000),
+  });
+  await write({
+    abi: safeAbi,
+    address: POT,
+    functionName: "execTransaction",
+    args: potChangeArgs(T, pot),
+    chainId: CHAIN,
+    gas: BigInt(200_000),
+  });
+  // The flow's own pot requests carry the wide `args` too: through the one adapter only. Both
+  // functions are payable, so a bigint `value` is no error of theirs.
+  const setup = potSetupCall(
+    config,
+    { kind: "setup", guardian: G, agentWallet: A, agentWalletKind: "key", ceilingUnits: BigInt(50_000_000), saltNonce: BigInt(1), fundWei: BigInt(0), agentGasWei: BigInt(0) },
+    BigInt(650_000),
+  );
+  if ("ok" in setup) return;
+  // @ts-expect-error as built: the wide `args` satisfies no `aggregate3Value` tuple
+  await write(setup);
+  // The `abi` union alone is taken: with the builder's tuple in place of `args`, the request as
+  // built compiles, so the error above is the `args`.
+  await write({ ...setup, functionName: "aggregate3Value", args: [s.calls] });
+  // And with the pinned ABI and the name written as literals, only the wide `args` is left: the
+  // same request with the builder's own tuple in its place compiles.
+  // @ts-expect-error the wide `args: readonly unknown[]` satisfies no `aggregate3Value` tuple
+  await write({ ...setup, abi: multicall3Abi, functionName: "aggregate3Value" });
+  await write({ ...setup, abi: multicall3Abi, functionName: "aggregate3Value", args: [s.calls] });
+  const change = potExecCall(
+    config,
+    { kind: "change", pot: POT, guardian: G, agentWallet: A, ceilingUnits: BigInt(20_000_000) },
+    BigInt(200_000),
+  );
+  if ("ok" in change) return;
+  // @ts-expect-error as built, nor `execTransaction`
+  await write(change);
+  // @ts-expect-error the wide `args` satisfies no tuple of the ten values of `execTransaction`
+  await write({ ...change, abi: safeAbi, functionName: "execTransaction" });
+  await write({ ...change, abi: safeAbi, functionName: "execTransaction", args: potChangeArgs(T, pot) });
+
+  // A USDC transfer as wagmi takes it: `transfer` is nonpayable, so it takes no value.
+  await write({
+    abi: erc20Abi,
+    address: T.usdc,
+    functionName: "transfer",
+    args: [POT, BigInt(5_000_000)],
+    chainId: CHAIN,
+    gas: BigInt(65_000),
+  });
+  const add = potTransferCall(
+    config,
+    { kind: "add_money", pot: POT, guardian: G, amountUnits: BigInt(5_000_000) },
+    BigInt(65_000),
+  );
+  if ("ok" in add) return;
+  // @ts-expect-error as built: the wide `args`, and a value `transfer` does not take
+  await write(add);
+  // With the ABI, the name and an absent value written as literals, only the wide `args` is left.
+  // @ts-expect-error the wide `args` satisfies no `transfer` tuple
+  await write({ ...add, abi: erc20Abi, functionName: "transfer", value: undefined });
+  await write({ ...add, abi: erc20Abi, functionName: "transfer", value: undefined, args: [POT, BigInt(5_000_000)] });
 
   // Typed data in viem's own form: every uint256 a bigint, `EIP712Domain` left to viem.
   await sign({

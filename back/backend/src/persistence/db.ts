@@ -1744,6 +1744,95 @@ const TREASURY_DECLARATIONS_DDL = `
   END;
 `;
 
+/** A whole number written in canonical decimal, of at most 78 digits (the width of a uint256): the
+ *  agentId's own spelling rule (`sqlIsAgentId`), for the pot's salt number and its ceiling. */
+const sqlIsCanonicalDecimal = (column: string) => sqlIsAgentId(column);
+
+/**
+ * THE COMPANY'S POT (see `legalBodyPotRepository.ts`): what the guardian of a legal body noted
+ * about the company's pot, one row per note, append-only. A `declared` row notes the pot's address
+ * with the birth details the server recomputed it from (the salt number, the agent's key it was
+ * set up for, its first ceiling) and the version of the declaration the guardian ticked; a
+ * `removed` row takes the pot of that address off the public record and holds none of the four.
+ * It is the pot's whole history: the body's latest row, by `declared_at`, says what is on the
+ * record; earlier `declared` rows are former pots.
+ *
+ * Its own table, outside `LEGAL_BODIES_DDL`, for the reasons the statement log is (see
+ * `STATEMENT_LOG_DDL`): the legal-body schema step never sees it, `migrate` creates it once
+ * `legal_bodies` exists, and its foreign key holds in place every body it has a row for. Named off
+ * the `legal_bod` prefix for the same reason, so a listing of the legal-body tables by that prefix
+ * still finds exactly them.
+ *
+ * WITHOUT ROWID: the primary key is the row's only identity, so no INSERT can name a rowid and
+ * REPLACE a stored row through it. The triggers refuse an UPDATE, a DELETE, and an INSERT that is
+ * not after the body's latest note, which also refuses one over an existing key: so a REPLACE
+ * never reaches its conflict resolution, and the rows of a body are in the order they were made.
+ *
+ * ONE LEGAL BODY PER ADDRESS (Ruling R29). A last trigger refuses a `declared` row of an address,
+ * compared in lower case, that another body has a `declared` row of: a second line behind the
+ * note door, which checks the same inside its own write (`legalBody/pot.ts`). A body's own
+ * address noted again (a put-back, a repeated note) is not refused. `IF NOT EXISTS`, like the
+ * others: a database made before it gains it at the next boot, and the rows it already holds are
+ * left as they are.
+ *
+ * The shapes. The address and the first key are `0x` and 40 hex digits, never the zero address in
+ * any casing. The salt number and the ceiling are whole numbers in canonical decimal, of at most
+ * 78 digits; a ceiling is never 0. The declaration's version is 1 to 40 characters. `declared_at`
+ * is unix SECONDS. Only the guardian notes. The index finds the bodies that declared an address.
+ */
+const POT_DECLARATIONS_DDL = `
+  CREATE TABLE IF NOT EXISTS pot_declarations (
+    legal_body_id       TEXT NOT NULL REFERENCES legal_bodies(legal_body_id),
+    act                 TEXT NOT NULL CHECK (act IN ('declared', 'removed')),
+    address             TEXT NOT NULL CHECK (${sqlIsAddress("address")}
+      AND lower(address) <> '0x0000000000000000000000000000000000000000'),
+    salt_nonce          TEXT CHECK (salt_nonce IS NULL OR (${sqlIsCanonicalDecimal("salt_nonce")})),
+    birth_agent_wallet  TEXT CHECK (birth_agent_wallet IS NULL OR (${sqlIsAddress("birth_agent_wallet")}
+      AND lower(birth_agent_wallet) <> '0x0000000000000000000000000000000000000000')),
+    birth_ceiling_units TEXT CHECK (birth_ceiling_units IS NULL
+      OR (${sqlIsCanonicalDecimal("birth_ceiling_units")} AND birth_ceiling_units <> '0')),
+    declaration_version TEXT CHECK (declaration_version IS NULL
+      OR (typeof(declaration_version) = 'text' AND length(declaration_version) BETWEEN 1 AND 40)),
+    declared_by         TEXT NOT NULL DEFAULT 'guardian' CHECK (declared_by = 'guardian'),
+    declared_at         INTEGER NOT NULL CHECK (${sqlIsSeconds("declared_at")}),
+    created_at          TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (legal_body_id, declared_at),
+    CHECK ((act = 'declared' AND salt_nonce IS NOT NULL AND birth_agent_wallet IS NOT NULL
+             AND birth_ceiling_units IS NOT NULL AND declaration_version IS NOT NULL)
+        OR (act = 'removed' AND salt_nonce IS NULL AND birth_agent_wallet IS NULL
+             AND birth_ceiling_units IS NULL AND declaration_version IS NULL))
+  ) WITHOUT ROWID;
+  CREATE INDEX IF NOT EXISTS idx_pot_declarations_declared_address
+    ON pot_declarations(address, declared_at) WHERE act = 'declared';
+
+  CREATE TRIGGER IF NOT EXISTS trg_pot_declarations_no_update
+  BEFORE UPDATE ON pot_declarations
+  BEGIN
+    SELECT RAISE(ABORT, 'pot_declarations is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_pot_declarations_no_delete
+  BEFORE DELETE ON pot_declarations
+  BEGIN
+    SELECT RAISE(ABORT, 'pot_declarations is append-only');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_pot_declarations_in_order
+  BEFORE INSERT ON pot_declarations FOR EACH ROW
+  WHEN NEW.declared_at <= (SELECT MAX(declared_at) FROM pot_declarations
+                            WHERE legal_body_id = NEW.legal_body_id)
+  BEGIN
+    SELECT RAISE(ABORT, 'pot_declarations is append-only: a note comes after the body''s latest, in order');
+  END;
+  CREATE TRIGGER IF NOT EXISTS trg_pot_declarations_one_body
+  BEFORE INSERT ON pot_declarations FOR EACH ROW
+  WHEN NEW.act = 'declared' AND EXISTS (SELECT 1 FROM pot_declarations
+                                         WHERE act = 'declared'
+                                           AND lower(address) = lower(NEW.address)
+                                           AND legal_body_id <> NEW.legal_body_id)
+  BEGIN
+    SELECT RAISE(ABORT, 'pot_declarations: an address belongs to one legal body');
+  END;
+`;
+
 /** Create tables if absent. Idempotent. */
 export function migrate(db: Database.Database): void {
   db.exec(`
@@ -2628,6 +2717,8 @@ export function migrate(db: Database.Database): void {
     }).immediate();
   // The treasury of record references `legal_bodies` too, and stands outside that step likewise.
   db.exec(TREASURY_DECLARATIONS_DDL);
+  // …and so do the notes of the company's pot.
+  db.exec(POT_DECLARATIONS_DDL);
 
   // Founding 5 applications. Additive and independent of formation: a row is a person who asked
   // to be considered, not a company. Nothing here mints an invite or waives a filing fee. It lives

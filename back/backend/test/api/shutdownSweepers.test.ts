@@ -143,8 +143,9 @@ test("the composition root builds the legal-body sweeper only with the feature, 
   expect(startAt, "the legal-body sweeper's start not found").toBeGreaterThan(serveAt);
   expect(main).not.toMatch(/await\s+legalBodySweeper/);
 
-  // The scheduler (src/scheduler) is stopped beside it, from the same list.
+  // The scheduler (src/scheduler) is stopped beside it, from the same list, and so is the retry of
+  // the pot's start-up check.
   expect(main).toMatch(
-    /installShutdownHandlers\(\{\n\s+sweeper: formationSweeper,\n\s+sweepers: \[\n\s+\.\.\.\(legalBodySweeper \? \[legalBodySweeper\] : \[\]\),\n\s+\.\.\.\(scheduler \? \[scheduler\] : \[\]\),\n\s+\],/,
+    /installShutdownHandlers\(\{\n\s+sweeper: formationSweeper,\n\s+sweepers: \[\n\s+\.\.\.\(legalBodySweeper \? \[legalBodySweeper\] : \[\]\),\n\s+\.\.\.\(scheduler \? \[scheduler\] : \[\]\),\n(?:\s+\/\/.*\n)*\s+\.\.\.\(potGate \? \[potGate\] : \[\]\),\n\s+\],/,
   );
 });

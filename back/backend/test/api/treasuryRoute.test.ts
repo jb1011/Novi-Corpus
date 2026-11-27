@@ -446,7 +446,7 @@ describe("the lookups serve the block beside the signed statement, unsigned", ()
     const app = makeApp();
     const before = await lookup(app, byAgent);
     expect(before.treasury).toBeNull();
-    expect(Object.keys(before).slice(-2)).toEqual(["statement", "treasury"]);
+    expect(Object.keys(before).slice(-3)).toEqual(["statement", "treasury", "pot"]);
 
     const declared = await declareOver(app, row.legalBodyId, {
       address: WALLET,
@@ -460,7 +460,7 @@ describe("the lookups serve the block beside the signed statement, unsigned", ()
     const after = await lookup(app, byAgent);
     expect(after.treasury).toEqual(declared.body);
     expect(after.treasury.checkedByNovi).toBe(false);
-    expect(Object.keys(after).slice(-2)).toEqual(["statement", "treasury"]);
+    expect(Object.keys(after).slice(-3)).toEqual(["statement", "treasury", "pot"]);
     // The signed statement: exactly what the service signs at this instant, its 33 fields, and
     // nothing of the declaration in it.
     const direct = await statementForAgent(statementDeps(s, chain, { now: () => clock }), "42");
@@ -474,7 +474,7 @@ describe("the lookups serve the block beside the signed statement, unsigned", ()
     // By address: the wallet the statements logged for the agent.
     const byWallet = await lookup(app, byAddress(WALLET));
     expect(byWallet).toMatchObject({ legalBody: true, agentId: "42", treasury: declared.body });
-    expect(Object.keys(byWallet).slice(-2)).toEqual(["statement", "treasury"]);
+    expect(Object.keys(byWallet).slice(-3)).toEqual(["statement", "treasury", "pot"]);
   });
 
   test("Ruling 3: a wallet changed on chain after the declaration is served as null, and the block again once the wallet matches; the rows are untouched", async () => {

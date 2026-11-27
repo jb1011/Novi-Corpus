@@ -4,6 +4,7 @@ import { AmberPill, Button, Card, SectionTitle, cx } from "@/components/onboardi
 import type { PublicRead } from "@/lib/api/legalBodyClient";
 import type { BindingState, LegalBodyByAgent } from "@/lib/api/types";
 import { LEGAL_BODY_COPY } from "@/lib/legalBody/copy";
+import { potRecordSentence } from "@/lib/legalBody/safePotStep";
 import { legalBodyRecordView, type StandingPresentation } from "@/lib/legalBody/standing";
 
 const D = LEGAL_BODY_COPY.done;
@@ -13,6 +14,13 @@ function guardianIdentitySentence(read: PublicRead<LegalBodyByAgent> | null): st
   if (read.body.guardianIdentityVerified === true) return D.identityVerified;
   if (read.body.guardianIdentityVerified === false) return D.identityDue;
   return null;
+}
+
+/** The company's pot as the record serves it beside the statement (`potRecordSentence`), or null:
+ *  no block, or one with no sentence. */
+function potSentence(read: PublicRead<LegalBodyByAgent> | null): string | null {
+  if (read?.kind !== "answer" || read.body.legalBody !== true) return null;
+  return potRecordSentence(read.body.pot);
 }
 
 /** The standing's tones. There is no green: `active` takes the accent. */
@@ -81,6 +89,7 @@ export function LegalBodyRecord({
   const view = legalBodyRecordView({ read, orderState, environment, paymentRequired });
   const { standing, facts, links, check } = view;
   const identityLine = guardianIdentitySentence(read);
+  const potLine = potSentence(read);
 
   return (
     <div className="flex flex-col gap-6">
@@ -125,6 +134,9 @@ export function LegalBodyRecord({
               </div>
             ))}
           </dl>
+          {potLine && (
+            <p className="mt-4 break-words text-[13px] leading-[1.6] text-muted">{potLine}</p>
+          )}
         </Card>
       )}
 

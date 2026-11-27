@@ -63,6 +63,10 @@ vi.mock("@/lib/api/legalBodyHooks", async (importOriginal) => ({
     calls.allowedWrites += 1;
     throw new Error("not in this test");
   },
+  // The done page reads the noted pot for every order (Ruling R24): none here.
+  useOrderPotQuery: () => ({ data: { pot: null }, isError: false, isFetching: false, refetch: async () => ({}) }),
+  useOrderGrantQuery: () => ({ data: undefined, isError: false, isFetching: false, refetch: async () => ({}) }),
+  usePotRawQuery: () => ({ data: undefined, isError: false, isFetching: false, dataUpdatedAt: 0, refetch: async () => ({}) }),
 }));
 
 vi.mock("wagmi", async (importOriginal) => {

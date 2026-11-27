@@ -1,3 +1,6 @@
+// A type only: the pot's reading rules keep the one definition of a grant's spending kind.
+import type { GrantSpend } from "@/lib/legalBody/safePotRules";
+
 /**
  * The formation lifecycle, as the backend derives it — ONE definition for this package.
  *
@@ -1258,6 +1261,10 @@ export type LegalBodyConfig =
        *  leaving the record to an operator. Absent from a backend before the automatic identity
        *  check, read as false. */
       identityCheckAutomatic?: boolean;
+      /** The company's pot is offered: its doors are mounted and the server has verified the code
+       *  of its seven contracts. The web app offers nothing of the pot unless this is true. Absent
+       *  from a backend before the pot, read as false. */
+      pot?: boolean;
       /** Whether to show the door that forms a company through doola: `cap_reached` when every
        *  gate holds but the deployment has taken all the formed companies it takes. Absent from a
        *  backend before F-A-1, read as "hidden". */
@@ -1281,6 +1288,7 @@ export const LEGAL_BODY_CONFIG_KEYS = [
   "paymentRequired",
   "identityRequired",
   "identityCheckAutomatic",
+  "pot",
   "formedDoor",
   "filingWorkingDays",
   "linkTtl",
@@ -1632,6 +1640,9 @@ export type LegalBodyByAgent =
       statement: null;
       /** Production only, beside the statement, unsigned. Absent on sandbox. */
       guardianIdentityVerified?: boolean;
+      /** The company's pot on the record, beside the statement, unsigned. Absent from a backend
+       *  before the pot; null for no pot on the record. */
+      pot?: PotBlock | null;
     }
   | {
       agentId: string;
@@ -1644,7 +1655,147 @@ export type LegalBodyByAgent =
       statement: SignedStatementJson;
       /** Production only, beside the statement, unsigned. Absent on sandbox. */
       guardianIdentityVerified?: boolean;
+      /** The company's pot on the record, beside the statement, unsigned. Absent from a backend
+       *  before the pot; null for no pot on the record. */
+      pot?: PotBlock | null;
     };
+
+// ---------------------------------------------------------------------------------------------
+// The company's pot: a Safe the guardian owns alone, from which the agent's own key takes USDC up
+// to a ceiling in each fixed thirty-day period. Units are USDC's 6 decimals as decimal strings;
+// times are unix seconds.
+// ---------------------------------------------------------------------------------------------
+
+/** What the guardian's note keeps of the pot's birth: the salt number, the agent's key it was set
+ *  up for (its first delegate, checksummed) and the first ceiling in units, both in canonical
+ *  decimal. */
+export type PotBirthNote = { saltNonce: string; agentWallet: Address; ceilingUnits: string };
+export const POT_BIRTH_NOTE_KEYS = [
+  "saltNonce",
+  "agentWallet",
+  "ceilingUnits",
+] as const satisfies readonly (keyof PotBirthNote)[];
+
+/** `GET /legal-body-orders/:id/pot` and the two pot writes: the address of the body's latest note,
+ *  whether that note puts it on the public record, and the time and birth details of its latest
+ *  declaration. */
+export type OrderPotView = {
+  address: Address;
+  onRecord: boolean;
+  /** Unix seconds: the latest declaration of this address. */
+  declaredAt: number;
+  birth: PotBirthNote;
+};
+export const ORDER_POT_VIEW_KEYS = [
+  "address",
+  "onRecord",
+  "declaredAt",
+  "birth",
+] as const satisfies readonly (keyof OrderPotView)[];
+
+/** What anyone needs to recompute the pot's address and see how it was born: the guardian (the
+ *  Safe's only owner), the agent's key it was set up for, the token, the first ceiling, the period
+ *  in minutes, the salt number, and the five contracts the setup names. */
+export type PotBirth = {
+  guardian: Address;
+  agentWallet: Address;
+  token: Address;
+  ceilingUnits: string;
+  periodMinutes: 43200;
+  saltNonce: string;
+  proxyFactory: Address;
+  singleton: Address;
+  fallbackHandler: Address;
+  multiSendCallOnly: Address;
+  allowanceModule: Address;
+};
+export const POT_BIRTH_KEYS = [
+  "guardian",
+  "agentWallet",
+  "token",
+  "ceilingUnits",
+  "periodMinutes",
+  "saltNonce",
+  "proxyFactory",
+  "singleton",
+  "fallbackHandler",
+  "multiSendCallOnly",
+  "allowanceModule",
+] as const satisfies readonly (keyof PotBirth)[];
+
+/**
+ * The pot on the record, served beside a signed statement, outside it and unsigned. What was read
+ * from the chain was read at the statement's own block (`readAtBlock`, issued at `readAt`).
+ *  - `ceiling_read`: the agent's key may take up to `ceilingUnits` in each thirty-day period;
+ *    `spentUnits` were taken in the current one, which ends at `periodEndsAt`;
+ *  - `stopped`: the agent's key cannot take from it, its allowance is switched off;
+ *  - `limits_not_read`: named, with no limits: something the reading rules do not read past, or
+ *    a deployment that has not verified the pot's contracts just now;
+ *  - `former`: a pot the body declared before, served only by a lookup by its own address;
+ *  - `unavailable`: the chain could not be read just now. No claim at all.
+ */
+export type PotBlock =
+  | {
+      state: "ceiling_read";
+      address: Address;
+      token: Address;
+      ceilingUnits: string;
+      periodMinutes: 43200;
+      spentUnits: string;
+      periodEndsAt: number;
+      balanceUnits: string;
+      readAtBlock: string;
+      readAt: number;
+      declaredBy: "guardian";
+      declaredAt: number;
+      birth: PotBirth;
+    }
+  | {
+      state: "stopped";
+      address: Address;
+      balanceUnits: string;
+      readAtBlock: string;
+      readAt: number;
+      declaredBy: "guardian";
+      declaredAt: number;
+      birth: PotBirth;
+    }
+  | {
+      state: "limits_not_read";
+      address: Address;
+      readAtBlock: string;
+      readAt: number;
+      declaredBy: "guardian";
+      declaredAt: number;
+      birth: PotBirth;
+    }
+  | {
+      state: "former";
+      address: Address;
+      declaredBy: "guardian";
+      declaredAt: number;
+      endedAt: number;
+      birth: PotBirth;
+    }
+  | { state: "unavailable" };
+export const POT_BLOCK_STATES = [
+  "ceiling_read",
+  "stopped",
+  "limits_not_read",
+  "former",
+  "unavailable",
+] as const satisfies readonly PotBlock["state"][];
+
+/** `GET /legal-body-orders/:id/grant`, as far as the pot reads it: the three spending kinds and
+ *  the grant's last day. Null for an order whose agreement takes no grant. */
+export type OrderGrantView = {
+  grant: {
+    choices: {
+      acts: { buy: GrantSpend; pay: GrantSpend; engageContractor: GrantSpend };
+      endsOn: string | null;
+    };
+  } | null;
+};
 
 /** The public routes' flat refusal: `error` is a STRING here, not the house error envelope. */
 export type PublicRefusal = {
@@ -1695,4 +1846,8 @@ export type LegalBodyKeyListsAreExhaustive = [
   Exhaustive<Exclude<keyof LegalBodyAgreement, (typeof LEGAL_BODY_AGREEMENT_KEYS)[number]>>,
   Exhaustive<Exclude<keyof LinkMessageResult, (typeof LINK_MESSAGE_RESULT_KEYS)[number]>>,
   Exhaustive<Exclude<keyof TransparencyLegalBody, (typeof TRANSPARENCY_LEGAL_BODY_KEYS)[number]>>,
+  Exhaustive<Exclude<keyof PotBirthNote, (typeof POT_BIRTH_NOTE_KEYS)[number]>>,
+  Exhaustive<Exclude<keyof OrderPotView, (typeof ORDER_POT_VIEW_KEYS)[number]>>,
+  Exhaustive<Exclude<keyof PotBirth, (typeof POT_BIRTH_KEYS)[number]>>,
+  Exhaustive<Exclude<PotBlock["state"], (typeof POT_BLOCK_STATES)[number]>>,
 ];
