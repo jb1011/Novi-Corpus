@@ -405,6 +405,26 @@ describe("the pot's card, as the chain shows the pot", () => {
     expect(button(m, POT.startAgainSend)).not.toBeNull();
   });
 
+  test("Ruling R33: limits not read with the add-on off and money in it (here a guard): the full card shows Take the money back with the balance; no money in, no start again, no stop", () => {
+    const guarded: PotRaw = { ...STOPPED, guard: P };
+    expect(potReading(guarded, { addresses: T, guardian: G, agentWallet: A })).toMatchObject({
+      state: "limits_not_read",
+      problem: "guard_set",
+    });
+    const m = manage(guarded);
+    const t = text(m);
+    expect(t).toContain(fillCopy(POT.limitsNotRead, { reason: POT.limitReasons.guard_set }));
+    expect(t).toContain(POT.withdrawTitle);
+    expect(t).toContain(fillCopy(POT.withdrawLine, { balance: "190" }));
+    const send = button(m, fillCopy(POT.withdrawSend, { balance: "190" }));
+    expect(send).not.toBeNull();
+    expect(isDisabled(send)).toBe(false);
+    for (const s of [POT.addMoneyTitle, POT.feeMoneyTitle, POT.startAgainTitle, POT.changeTitle, POT.newKeyTitle, POT.agentTitle])
+      expect(t, s).not.toContain(s);
+    expect(button(m, POT.stopSend)).toBeNull();
+    nothingSent();
+  });
+
   test("other_delegate with a new key in the registry: My agent has a new key, naming it, and the stop; no change, no add money", () => {
     const m = manage(HEALTHY, P);
     const t = text(m);

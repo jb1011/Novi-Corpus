@@ -58,7 +58,12 @@ import {
   safeAbi,
   type PotAddresses,
 } from "@/lib/legalBody/safePot";
-import { potReading, type PotRaw, type PotReading } from "@/lib/legalBody/safePotRules";
+import {
+  potReading,
+  type PotLimitsProblem,
+  type PotRaw,
+  type PotReading,
+} from "@/lib/legalBody/safePotRules";
 import {
   notedBirthKey,
   notedPotAddress,
@@ -182,6 +187,14 @@ const STOPPED: PotRaw = {
   delegates: { list: [], next: 0 },
   allowance: [ZERO, ZERO, ZERO, ZERO, BigInt(3)],
 };
+/** Ruling R33's corner: the add-on off, no key, 190 USDC in it, and one more thing the rules do
+ *  not read past (a direct USDC approval to the agent's key, a guard, another fallback handler),
+ *  so the pot reads `limits_not_read`, and still does after a stop. Inventions on the real Safe. */
+const OFF_NOT_READ: [PotLimitsProblem, PotRaw][] = [
+  ["usdc_approved", { ...STOPPED, usdcAllowanceToAgent: USDC(5) }],
+  ["guard_set", { ...STOPPED, guard: P }],
+  ["other_handler", { ...STOPPED, fallbackHandler: P }],
+];
 const read = (raw: PotRaw, agentWallet: Address = A): PotReading =>
   potReading(raw, { addresses: T, guardian: G, agentWallet });
 
@@ -896,6 +909,28 @@ describe("what the card says of a reading, and what it offers", () => {
     expect(theirs.actions).toEqual(["take_off_record"]);
     expect(theirs.lines).toContain(P_.notYours);
     for (const line of theirs.lines) expect(line).not.toMatch(/Ceiling|In the pot/);
+  });
+
+  test("Ruling R33 on the full card: the add-on off, no key and money, read limits_not_read for a direct approval, a guard or another handler, offers Take the money back and no money in; empty, no take back; the add-on on, the stop and no take back; the exit card says the same", () => {
+    const exitOffers = (raw: PotRaw) => potExitOffers(raw, read(raw), { chainId: CHAIN, guardian: G, onRecord: true });
+    for (const [problem, raw] of OFF_NOT_READ) {
+      expect(read(raw), problem).toEqual({ state: "limits_not_read", problem, balanceUnits: USDC(190) });
+      const v = view(raw);
+      expect(v.actions, problem).toEqual(["withdraw", "take_off_record"]);
+      expect(v.actions, problem).not.toContain("add_money");
+      expect(v.lines, problem).toContain(fillCopy(P_.limitsNotRead, { reason: P_.limitReasons[problem] }));
+      expect(v.lines, problem).toContain(fillCopy(P_.shownBalance, { balance: "190" }));
+      expect(exitOffers(raw), problem).toEqual(["withdraw", "take_off_record"]);
+      // Nothing in it: nothing to take back.
+      const empty: PotRaw = { ...raw, balanceUnits: ZERO, balanceWei: ZERO };
+      expect(view(empty).actions, `${problem}, empty`).toEqual(["take_off_record"]);
+      expect(exitOffers(empty), `${problem}, empty`).toEqual(["take_off_record"]);
+      // The add-on on: the stop first, and no take back while it is on.
+      const moduleOn: PotRaw = { ...raw, modules: { list: [T.allowanceModule], next: SAFE_SENTINEL } };
+      expect(read(moduleOn), `${problem}, add-on on`).toMatchObject({ state: "limits_not_read", problem });
+      expect(view(moduleOn).actions, `${problem}, add-on on`).toEqual(["stop", "take_off_record"]);
+      expect(exitOffers(moduleOn), `${problem}, add-on on`).toEqual(["stop", "take_off_record"]);
+    }
   });
 
   test("potReadingView: off the record, put_back in place of take_off_record, and the offRecord line; never put_back for another deployment's order", () => {
@@ -2455,6 +2490,25 @@ describe("runPotAction: one transaction on the same pot, from the click's own re
     expect(unread.sent).toEqual([]);
   });
 
+  test("Ruling R33 on the full card: Take the money back from a pot read limits_not_read with the add-on off reaches the send, with the whole balance the click read", async () => {
+    for (const [problem, raw] of OFF_NOT_READ) {
+      // The click reads 3 USDC, whatever the card was drawn with.
+      const click: PotRaw = { ...raw, balanceUnits: USDC(3), balanceWei: WEI(USDC(3)) };
+      expect(read(click), problem).toMatchObject({ state: "limits_not_read", problem });
+      const h = harness(fresh(click));
+      expect(await runPotAction("withdraw", args(undefined, A), h.d), problem).toEqual({
+        ok: true,
+        hash: HASH,
+        agentWallet: A,
+        pot: V3_POT,
+      });
+      expect(h.calls, problem).toEqual(ALL);
+      const want: PotExecContext = { kind: "withdraw", pot: V3_POT, guardian: G, modules: [], balanceWei: WEI(USDC(3)) };
+      expect(h.checked, problem).toEqual([want]);
+      expect(h.sent, problem).toEqual([want]);
+    }
+  });
+
   test("a read that throws is read_failed and nothing else is called; a registry that cannot be read is read_failed too", async () => {
     const error = offlineError();
     const thrown = harness(fresh(HEALTHY), { read: async () => Promise.reject(error) });
@@ -2717,7 +2771,7 @@ describe("the actions' sentences, the ceiling field, and what the card shows aft
     }
   });
 
-  test("potActionDoneView: a change or a restore is done only when the chain reads its ceiling; a stop or a take back once the allowance reads switched off", () => {
+  test("potActionDoneView: a change or a restore is done only when the chain reads its ceiling; a stop once the allowance reads switched off; a take back once the stopped pot holds 0", () => {
     expect(potActionDoneView("change", read(HEALTHY), USDC(50), A)).toEqual(potCreatedView(read(HEALTHY), USDC(50)));
     expect(potActionDoneView("change", read(HEALTHY), USDC(50), A).ok).toBe(true);
     expect(potActionDoneView("change", read(HEALTHY), USDC(20), A).ok).toBe(false);
@@ -2744,6 +2798,31 @@ describe("the actions' sentences, the ceiling field, and what the card shows aft
       lines: [P_.stoppedLine, fillCopy(P_.shownBalance, { balance: "0" })],
     });
     expect(potActionDoneView("withdraw", read({ ...HEALTHY, owners: [P] }), null, A)).toEqual({ ok: false, lines: [P_.notYours] });
+  });
+
+  test("Ruling R33: a take back is done once the pot reads as the guardian's alone with no ceiling (stopped or limits_not_read) and holds 0; one that still holds money is not, and a stop keeps its rule", () => {
+    for (const [problem, raw] of OFF_NOT_READ) {
+      const emptied: PotRaw = { ...raw, balanceUnits: ZERO, balanceWei: ZERO };
+      const reason = fillCopy(P_.limitsNotRead, { reason: P_.limitReasons[problem] });
+      expect(potActionDoneView("withdraw", read(emptied), null, A), problem).toEqual({
+        ok: true,
+        lines: [reason, fillCopy(P_.shownBalance, { balance: "0" })],
+      });
+      expect(potActionDoneView("withdraw", read(raw), null, A), problem).toEqual({
+        ok: false,
+        lines: [reason, fillCopy(P_.shownBalance, { balance: "190" })],
+      });
+      // The stop's rule is kept: done only once the pot reads stopped.
+      expect(potActionDoneView("stop", read(emptied), null, A).ok, problem).toBe(false);
+    }
+    // A stopped pot that still holds money after a take back is not done; emptied, it is.
+    expect(potActionDoneView("withdraw", read(STOPPED_3), null, A)).toEqual({
+      ok: false,
+      lines: [P_.stoppedLine, fillCopy(P_.shownBalance, { balance: "3" })],
+    });
+    expect(potActionDoneView("withdraw", read(STOPPED_EMPTY), null, A).ok).toBe(true);
+    // The add-on on again with nothing in it: a ceiling read is never a take back's done.
+    expect(potActionDoneView("withdraw", read({ ...HEALTHY, balanceUnits: ZERO, balanceWei: ZERO }), null, A).ok).toBe(false);
   });
 
   test("potActionAfter: onePot under the stop's result, and nothing under the others'", () => {

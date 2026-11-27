@@ -813,7 +813,9 @@ function stoppable(a: PotAddresses | null, guardian: Address, raw: PotRaw): bool
  *    code;
  *  - limits_not_read: with `other_delegate` and the registry's `agentWallet` (never the guardian's)
  *    not among a complete list of the pot's keys, new_key and stop; otherwise stop when there is
- *    something to stop. No money: after a changed-key setup, the new key is set first;
+ *    something to stop; withdraw once no add-on is on and the pot holds money (Ruling R33: the
+ *    same rule as stopped's, and the exit card's). No add_money and no fee_money: after a
+ *    changed-key setup, the new key is set first;
  *  - not_the_guardians: take_off_record only, while it is on the record;
  *  - absent: nothing (the card offers the setup).
  * The lines: the address and the only owner; for ceiling_read the key, the ceiling, what is left
@@ -888,6 +890,10 @@ export function potReadingView(
         !raw.delegates.list.some((d) => sameAddress(d, p.agentWallet));
       if (newKey) actions.push("new_key", "stop");
       else if (stoppable(a, p.guardian, raw)) actions.push("stop");
+      // Ruling R33, one rule on both cards: the take back while no add-on is on and the pot holds
+      // money, as for a stopped pot. A guard, another handler or a direct approval keeps this
+      // reading after the stop, and the take back is the way out of it.
+      if (raw.modules.list.length === 0 && raw.balanceWei > ZERO) actions.push("withdraw");
       break;
     }
     case "not_the_guardians":

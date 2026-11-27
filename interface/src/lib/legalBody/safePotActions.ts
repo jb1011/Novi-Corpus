@@ -496,10 +496,11 @@ export type PotActionStage = PotCardStage<PotSafeAction>;
 /**
  * After an action's receipt, the pot read again (against `agentWallet`, the registry's key of the
  * click) in its own sentences: a change, a start again or a new key is done (`ok`) only when it
- * reads `ceiling_read` with the ceiling asked (`potCreatedView`); a stop or a take back once it
- * reads `stopped`. A start again or a new key that is done names the key that may take now (the
- * click's, which Ruling R23 makes the one the card named). Anything else is the warning's own
- * lines, and the card claims nothing more.
+ * reads `ceiling_read` with the ceiling asked (`potCreatedView`); a stop once it reads `stopped`;
+ * a take back once the pot reads as the guardian's alone with no ceiling (`stopped` or
+ * `limits_not_read`: Ruling R33, the take back is offered on both) and holds 0. A start again or
+ * a new key that is done names the key that may take now (the click's, which Ruling R23 makes the
+ * one the card named). Anything else is the warning's own lines, and the card claims nothing more.
  */
 export function potActionDoneView(
   action: PotSafeAction,
@@ -507,6 +508,12 @@ export function potActionDoneView(
   ceilingUnits: bigint | null,
   agentWallet: Address,
 ): { ok: boolean; lines: string[] } {
+  if (action === "withdraw") {
+    const emptied =
+      (reading.state === "stopped" || reading.state === "limits_not_read") &&
+      reading.balanceUnits === ZERO;
+    return { ok: emptied, lines: potCreatedView(reading, ZERO).lines };
+  }
   if (!potActionTakesCeiling(action))
     return { ok: reading.state === "stopped", lines: potCreatedView(reading, ZERO).lines };
   if (ceilingUnits === null) return { ok: false, lines: potCreatedView(reading, ZERO).lines };
