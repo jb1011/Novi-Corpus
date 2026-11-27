@@ -31,7 +31,7 @@ import { grantOfNewOrder } from "./orderGrant";
 import { CUSTOMER_PROVIDER, companySourceOf } from "./provider";
 import { refusal } from "./sentences";
 import type { AgreementFields } from "./texts/operatingAgreement";
-import type { LegalTextSet } from "./texts/sets";
+import { type LegalTextSet, declarationAccepted } from "./texts/sets";
 
 /**
  * LEGAL-BODY ORDERS: what a guardian orders, and the rules every door of the flow shares.
@@ -387,7 +387,7 @@ export function createOrder(
   //     refused here. A customer's company with no declaration names nothing: step 4 refuses it.
   const declared =
     owned.provider === CUSTOMER_PROVIDER ? deps.declarations.find(companyId) : undefined;
-  if (declared !== undefined && declared.wordingVersion !== deps.texts.declaration.version)
+  if (declared !== undefined && !declarationAccepted(deps.texts, declared.wordingVersion))
     throw refusal("declaration_outdated", 409);
 
   // 3b. Any value under the key counts as given, `null` included: an agreement that takes no grant

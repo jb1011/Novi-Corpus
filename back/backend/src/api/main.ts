@@ -80,6 +80,7 @@ import {
   assertContractFactsProvable,
   assertProductionNeedsBuilt,
   assertSetUsable,
+  declarationAccepted,
   legalTextsOf,
 } from "../legalBody/texts/sets";
 import type { LegalBodyTreasuryDeps } from "../legalBody/treasury";
@@ -975,6 +976,9 @@ async function main() {
     customerFacts: {
       declarations: companyDeclarations,
       checks: companyChecks,
+      // The rule of the pair served, so a view says whether a declaration takes an order here.
+      declarationAccepted: (wordingVersion: string) =>
+        declarationAccepted(legalTexts, wordingVersion),
       // The one fact that is NOT wired whatever the configuration: whether one of the company's
       // legal bodies is linked, which the payment doors require before they quote or settle a
       // customer company. Only where the legal-body feature is on; absent, they never do.

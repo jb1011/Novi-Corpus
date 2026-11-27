@@ -119,6 +119,7 @@ AgentBook registration and the legal-body check built for ETHOnline 2026.
 | [runbooks/agentbook-registration.md](./runbooks/agentbook-registration.md) | Runbook | 2026-09-18 | Registering an agent in AgentBook. |
 | [runbooks/legal-body-check.md](./runbooks/legal-body-check.md) | Runbook | 2026-10-09 | Running the legal-body check. |
 | [runbooks/world-sandbox-testing.md](./runbooks/world-sandbox-testing.md) | Runbook | 2026-09-18 | Testing guardian flows in World's sandbox. |
+| [runbooks/local-chain.md](./runbooks/local-chain.md) | Runbook | 2026-11-17 | A local chain for the legal-body screens: a fork of Arc testnet, the Minimal Novi contracts and an API serving the Legal Body Charter. |
 
 ## Hedera rail
 
