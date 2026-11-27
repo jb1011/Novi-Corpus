@@ -224,6 +224,10 @@ switched on or off. The boot log says which:
   pot stays off until a restart, with no retry: it is a bug or an environment fault, never a verdict on the
   contracts. Investigate first.
 
+In short: a node that cannot be read is tried again once a minute and the pot comes back by itself; a contract that
+does not match keeps the pot off until a restart. Nothing alerts: the boot log line is the only sign (a node that
+cannot be read writes one at each try).
+
 While the pot is off: `/config.legalBodies.pot` is `false` and the website offers no pot and no action on one, apart
 from the exit card below; the note door
 and the agent's two MCP tools answer 409 `pot_not_offered`; the guardian's read of the body's notes
@@ -255,7 +259,10 @@ pay the guardian's own wallet, so the legal body's page keeps them whatever happ
 broken, winding down, dissolved, replaced, superseded), whatever the registry now names as the agent's wallet (none,
 the zero address, the guardian's, a new key) and whatever the pot's switch says. A body still on the done page with
 its full card (the switch on, linked, not revoked, no notice, a record naming a wallet of the agent's own) has "Stop
-the allowance" there, and "Take the money back" once it is stopped. Everywhere else the page shows the exit card:
+the allowance" there, and "Take the money back" while no module is on and the pot holds money: once it is stopped, and
+also for a pot whose limits cannot be read with its module off and money in it (a guard, another fallback handler or
+a direct USDC approval to the agent's key keeps that reading after the stop). Both cards follow that one rule.
+Everywhere else the page shows the exit card:
 on the done page in place of the full card, and under the closed notice (another deployment on the same chain,
 replaced, superseded) or under the pointer step (its pointer cleared) that a fallen body lands on, where no public
 record is read and the pot is read against the note's first key. "My agents" lists no row for a replaced or
@@ -269,7 +276,9 @@ website's allowlist takes the two exits for any order of this chain with the sam
 factory; every other pot call still needs a linked, not revoked order of this deployment. A noted address the browser
 does not recompute shows "The address noted for this legal body is not a pot that only your wallet owns." and offers
 no wallet action at all, only the take off while it is on the record, whose line says only that the record stops
-showing the address and that nothing on the chain changes.
+showing the address and that nothing on the chain changes. The take off shows wherever the server says the pot is on
+the record and the full card is not shown, except for a noted pot that was never created: nothing of it is on the
+record.
 
 **A guardian who declined the setup in the wallet.** The note is written before the wallet opens, so a guardian who
 declined (or whose setup was dropped) keeps the noted pot, its address and its first ceiling: the page then asks for
