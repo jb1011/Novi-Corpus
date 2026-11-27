@@ -277,8 +277,8 @@ factory; every other pot call still needs a linked, not revoked order of this de
 does not recompute shows "The address noted for this legal body is not a pot that only your wallet owns." and offers
 no wallet action at all, only the take off while it is on the record, whose line says only that the record stops
 showing the address and that nothing on the chain changes. The take off shows wherever the server says the pot is on
-the record and the full card is not shown, except for a noted pot that was never created: nothing of it is on the
-record.
+the record and the full card is not shown, except for a noted pot the page has read on the chain and found never
+created: nothing of it is on the record.
 
 **A guardian who declined the setup in the wallet.** The note is written before the wallet opens, so a guardian who
 declined (or whose setup was dropped) keeps the noted pot, its address and its first ceiling: the page then asks for
